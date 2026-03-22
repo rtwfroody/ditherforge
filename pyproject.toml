@@ -1,0 +1,27 @@
+[project]
+name = "text2filament"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Tim Newsome", email = "tim@casualhacker.net" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "colorspacious>=1.1.2",
+    "numpy>=2.4.3",
+    "pillow>=12.1.1",
+    "trimesh[easy]>=4.11.4",
+]
+
+[project.scripts]
+text2filament = "text2filament:main"
+
+[build-system]
+requires = ["uv_build>=0.10.3,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.408",
+]
