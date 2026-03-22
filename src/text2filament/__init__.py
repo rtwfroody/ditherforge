@@ -1,6 +1,11 @@
 import argparse
-import sys
+
 from .loader import load_glb
+from .subdivide import subdivide
+from .sample import sample_face_colors
+from .palette import parse_palette, assign_palette
+from .export_3mf import export_3mf
+from .preview import export_preview
 
 
 def main() -> None:
@@ -29,13 +34,19 @@ def main() -> None:
         help="Color distance metric (default: cielab)",
     )
     parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Export a colored PLY alongside the 3MF for visual inspection",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print face count per material and mesh info",
     )
     args = parser.parse_args()
 
-    palette = [c.strip() for c in args.palette.split(",")]
+    palette_hex = [c.strip() for c in args.palette.split(",")]
+    palette_rgb = parse_palette(palette_hex)
 
     print(f"Loading {args.input}...")
     model = load_glb(args.input)
@@ -44,7 +55,28 @@ def main() -> None:
         f"{len(model.mesh.faces)} faces, "
         f"texture {model.texture.size[0]}x{model.texture.size[1]} {model.texture.mode}"
     )
-    print(f"  Palette: {palette}")
-    print(f"  Resolution: {args.resolution}mm")
-    print("(Pipeline not yet implemented)")
-    sys.exit(0)
+
+    print(f"Subdividing to {args.resolution}mm max edge length...")
+    model = subdivide(model, args.resolution)
+    print(f"  {len(model.mesh.vertices)} vertices, {len(model.mesh.faces)} faces after subdivision")
+
+    print("Sampling texture colors...")
+    face_colors = sample_face_colors(model)
+
+    print("Matching palette...")
+    assignments = assign_palette(face_colors, palette_rgb, args.color_space)
+
+    if args.stats:
+        print("  Face counts per material:")
+        for i, hex_color in enumerate(palette_hex):
+            count = int((assignments == i).sum())
+            print(f"    [{i}] {hex_color}: {count} faces")
+
+    if args.preview:
+        preview_path = args.output.replace(".3mf", "_preview.ply")
+        print(f"Writing preview to {preview_path}...")
+        export_preview(model, assignments, palette_rgb, preview_path)
+
+    print(f"Exporting {args.output}...")
+    export_3mf(model, assignments, args.output)
+    print("Done.")

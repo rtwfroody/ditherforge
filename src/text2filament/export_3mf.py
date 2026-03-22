@@ -1,0 +1,127 @@
+"""Export a mesh with per-face material assignments as a 3MF file (OrcaSlicer/BambuStudio format)."""
+
+import uuid
+import zipfile
+
+import numpy as np
+
+from .loader import LoadedModel
+
+# paint_color encoding: hex(filament_index << 2), where filament_index is 1-based.
+# Single whole-triangle assignment — no sub-triangle subdivision.
+# e.g. filament 1 → "4", filament 2 → "8", filament 3 → "C", filament 4 → "10", ...
+def _paint_color(palette_index: int) -> str:
+    return format((palette_index + 1) << 2, "X")
+
+
+_CONTENT_TYPES = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>"""
+
+_RELS = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>"""
+
+
+def export_3mf(
+    model: LoadedModel,
+    assignments: np.ndarray,   # (F,) int — palette index per face
+    output_path: str,
+) -> None:
+    outer_uuid   = str(uuid.uuid4())
+    mesh_uuid    = str(uuid.uuid4())
+    inst_uuid    = str(uuid.uuid4())
+    build_uuid   = str(uuid.uuid4())
+
+    object_rels = f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>"""
+
+    main_model = f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" \
+xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" \
+unit="millimeter" xml:lang="en-US" requiredextensions="p">
+ <resources>
+  <object id="2" p:UUID="{outer_uuid}" type="model">
+   <components>
+    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="{mesh_uuid}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+   </components>
+  </object>
+ </resources>
+ <build p:UUID="{build_uuid}">
+  <item objectid="2" p:UUID="{inst_uuid}" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+ </build>
+</model>"""
+
+    object_model = _build_object_model(model, assignments)
+
+    model_settings = _build_model_settings(len(model.mesh.faces))
+
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as z:
+        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("_rels/.rels", _RELS)
+        z.writestr("3D/3dmodel.model", main_model)
+        z.writestr("3D/_rels/3dmodel.model.rels", object_rels)
+        z.writestr("3D/Objects/object_1.model", object_model)
+        z.writestr("Metadata/model_settings.config", model_settings)
+
+
+def _build_object_model(model: LoadedModel, assignments: np.ndarray) -> str:
+    obj_uuid = str(uuid.uuid4())
+    vertices = model.mesh.vertices
+    faces = model.mesh.faces
+
+    lines: list[str] = []
+    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+    lines.append(
+        '<model unit="millimeter" xml:lang="en-US"'
+        ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+        ' xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"'
+        ' requiredextensions="p">'
+    )
+    lines.append(" <resources>")
+    lines.append(f'  <object id="1" p:UUID="{obj_uuid}" type="model">')
+    lines.append("   <mesh>")
+
+    lines.append("    <vertices>")
+    for x, y, z in vertices:
+        lines.append(f'     <vertex x="{x:.6f}" y="{y:.6f}" z="{z:.6f}"/>')
+    lines.append("    </vertices>")
+
+    lines.append("    <triangles>")
+    for (v1, v2, v3), mat in zip(faces, assignments):
+        pc = _paint_color(int(mat))
+        lines.append(f'     <triangle v1="{v1}" v2="{v2}" v3="{v3}" paint_color="{pc}"/>')
+    lines.append("    </triangles>")
+
+    lines.append("   </mesh>")
+    lines.append("  </object>")
+    lines.append(" </resources>")
+    lines.append(" <build/>")
+    lines.append("</model>")
+
+    return "\n".join(lines)
+
+
+def _build_model_settings(face_count: int) -> str:
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="2">
+    <metadata key="name" value="text2filament_output"/>
+    <metadata key="extruder" value="1"/>
+    <metadata face_count="{face_count}"/>
+    <part id="1" subtype="normal_part">
+      <metadata key="name" value="text2filament_output"/>
+      <metadata key="extruder" value="1"/>
+    </part>
+  </object>
+</config>"""
