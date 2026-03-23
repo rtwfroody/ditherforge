@@ -1,5 +1,6 @@
 """Export a mesh with per-face material assignments as a 3MF file (OrcaSlicer/BambuStudio format)."""
 
+import json
 import uuid
 import zipfile
 
@@ -44,6 +45,7 @@ def export_3mf(
     model: LoadedModel,
     assignments: np.ndarray,   # (F,) int — palette index per face
     output_path: str,
+    palette_rgb: "np.ndarray | None" = None,  # (P, 3) uint8 — for filament colors in project settings
 ) -> None:
     outer_uuid   = str(uuid.uuid4())
     mesh_uuid    = str(uuid.uuid4())
@@ -74,7 +76,6 @@ unit="millimeter" xml:lang="en-US" requiredextensions="p">
 </model>"""
 
     object_model = _build_object_model(model, assignments)
-
     model_settings = _build_model_settings(len(model.mesh.faces))
 
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as z:
@@ -84,6 +85,9 @@ unit="millimeter" xml:lang="en-US" requiredextensions="p">
         z.writestr("3D/_rels/3dmodel.model.rels", object_rels)
         z.writestr("3D/Objects/object_1.model", object_model)
         z.writestr("Metadata/model_settings.config", model_settings)
+        if palette_rgb is not None:
+            z.writestr("Metadata/project_settings.config",
+                       _build_project_settings(palette_rgb))
 
 
 def _build_object_model(model: LoadedModel, assignments: np.ndarray) -> str:
@@ -123,6 +127,15 @@ def _build_object_model(model: LoadedModel, assignments: np.ndarray) -> str:
     lines.append("</model>")
 
     return "\n".join(lines)
+
+
+def _build_project_settings(palette_rgb: np.ndarray) -> str:
+    """Minimal project_settings.config with filament colors so slicers load them on open."""
+    hex_colors = [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in palette_rgb]
+    return json.dumps({
+        "filament_colour": hex_colors,
+        "filament_type": ["PLA"] * len(hex_colors),
+    }, indent=2)
 
 
 def _build_model_settings(face_count: int) -> str:

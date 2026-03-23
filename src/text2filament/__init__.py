@@ -127,7 +127,7 @@ def main() -> None:
 
     print(f"Exporting {args.output}...")
     if output_ext == ".3mf":
-        export_3mf(model, assignments, args.output)
+        export_3mf(model, assignments, args.output, palette_rgb=palette_rgb)
     else:
         export_obj(model, assignments, palette_rgb, args.output)
     print("Done.")
