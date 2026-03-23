@@ -40,6 +40,13 @@ def main() -> None:
         default="m",
         help="Unit of GLB coordinates (default: m). Converted to mm on load.",
     )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help="Additional scale multiplier applied after --glb-unit conversion (default: 1.0)",
+    )
     parser.add_argument("--output", default="output.3mf",
                         help="Output file (.obj or .3mf, default: output.3mf)")
     parser.add_argument(
@@ -67,7 +74,7 @@ def main() -> None:
         print(f"Error: output must be .obj or .3mf, got {output_ext!r}")
         raise SystemExit(1)
 
-    scale = {"m": 1000.0, "dm": 100.0, "cm": 10.0, "mm": 1.0}[args.glb_unit]
+    scale = {"m": 1000.0, "dm": 100.0, "cm": 10.0, "mm": 1.0}[args.glb_unit] * args.scale
     print(f"Loading {args.input}...")
     model = load_glb(args.input, scale=scale)
     extent = model.mesh.vertices.max(axis=0) - model.mesh.vertices.min(axis=0)
@@ -75,7 +82,7 @@ def main() -> None:
         f"  {len(model.mesh.vertices)} vertices, "
         f"{len(model.mesh.faces)} faces, "
         f"texture {model.texture.size[0]}x{model.texture.size[1]} {model.texture.mode}, "
-        f"extent {extent[0]:.3g} x {extent[1]:.3g} x {extent[2]:.3g}"
+        f"extent {extent[0]:.1f} x {extent[1]:.1f} x {extent[2]:.1f} mm"
     )
 
     if args.auto_palette:
