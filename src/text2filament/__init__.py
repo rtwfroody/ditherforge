@@ -1,10 +1,12 @@
 import argparse
+import os
 
 from .loader import load_glb
 from .subdivide import subdivide
 from .sample import sample_face_colors
 from .palette import parse_palette, assign_palette
 from .export_3mf import export_3mf, MAX_FILAMENTS
+from .export_obj import export_obj
 from .preview import export_preview
 
 
@@ -26,7 +28,8 @@ def main() -> None:
         metavar="UNITS",
         help="Target max edge length in model units (default: 0.025)",
     )
-    parser.add_argument("--output", required=True, help="Output .3mf file")
+    parser.add_argument("--output", default="output.obj",
+                        help="Output file (.obj or .3mf, default: output.obj)")
     parser.add_argument(
         "--color-space",
         choices=["cielab", "rgb"],
@@ -45,9 +48,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    output_ext = os.path.splitext(args.output)[1].lower()
+    if output_ext not in (".obj", ".3mf"):
+        print(f"Error: output must be .obj or .3mf, got {output_ext!r}")
+        raise SystemExit(1)
+
     palette_hex = [c.strip() for c in args.palette.split(",")]
-    if len(palette_hex) > MAX_FILAMENTS:
-        print(f"Error: palette has {len(palette_hex)} colors but max supported is {MAX_FILAMENTS}")
+    if output_ext == ".3mf" and len(palette_hex) > MAX_FILAMENTS:
+        print(f"Error: 3MF palette has {len(palette_hex)} colors but max supported is {MAX_FILAMENTS}")
         raise SystemExit(1)
     palette_rgb = parse_palette(palette_hex)
 
@@ -83,5 +91,8 @@ def main() -> None:
         export_preview(model, assignments, palette_rgb, preview_path)
 
     print(f"Exporting {args.output}...")
-    export_3mf(model, assignments, args.output)
+    if output_ext == ".3mf":
+        export_3mf(model, assignments, args.output)
+    else:
+        export_obj(model, assignments, palette_hex, args.output)
     print("Done.")
