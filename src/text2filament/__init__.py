@@ -3,7 +3,7 @@ import os
 
 from .loader import load_glb
 from .subdivide import subdivide
-from .sample import sample_face_colors
+from .sample import sample_face_colors, sample_face_indices
 from .palette import parse_palette, assign_palette
 from .export_3mf import export_3mf, MAX_FILAMENTS
 from .export_obj import export_obj
@@ -35,6 +35,11 @@ def main() -> None:
         choices=["cielab", "rgb"],
         default="cielab",
         help="Color distance metric (default: cielab)",
+    )
+    parser.add_argument(
+        "--dither",
+        action="store_true",
+        help="Apply Floyd-Steinberg dithering in texture space before palette assignment",
     )
     parser.add_argument(
         "--preview",
@@ -73,11 +78,14 @@ def main() -> None:
     model = subdivide(model, args.resolution)
     print(f"  {len(model.mesh.vertices)} vertices, {len(model.mesh.faces)} faces after subdivision")
 
-    print("Sampling texture colors...")
-    face_colors = sample_face_colors(model)
-
-    print("Matching palette...")
-    assignments = assign_palette(face_colors, palette_rgb, args.color_space)
+    if args.dither:
+        print("Sampling texture colors (Floyd-Steinberg dither)...")
+        assignments = sample_face_indices(model, palette_rgb)
+    else:
+        print("Sampling texture colors...")
+        face_colors = sample_face_colors(model)
+        print("Matching palette...")
+        assignments = assign_palette(face_colors, palette_rgb, args.color_space)
 
     if args.stats:
         print("  Face counts per material:")

@@ -1,6 +1,7 @@
 """Sample texture color at the centroid UV of each mesh face."""
 
 import numpy as np
+from PIL import Image
 
 from .loader import LoadedModel
 
@@ -49,3 +50,36 @@ def sample_face_colors(model: LoadedModel) -> np.ndarray:
           +      fx  *      fy  * p11
 
     return np.clip(np.round(color), 0, 255).astype(np.uint8)
+
+
+def sample_face_indices(model: LoadedModel, palette_rgb: np.ndarray) -> np.ndarray:
+    """
+    Dither the texture to the palette using Floyd-Steinberg, then sample the
+    palette index at each face's centroid UV (nearest-neighbor).
+    Returns (F,) int32 array of palette indices.
+    """
+    texture_rgb = model.texture.convert("RGB")
+
+    # Build a 1-pixel palette image with our colors
+    palette_img = Image.new("P", (1, 1))
+    flat: list[int] = []
+    for r, g, b in palette_rgb:
+        flat.extend([int(r), int(g), int(b)])
+    flat.extend([0] * (768 - len(flat)))  # Pillow requires 256-entry palette
+    palette_img.putpalette(flat)
+
+    # Quantize with Floyd-Steinberg dithering
+    dithered = texture_rgb.quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
+    dithered_array = np.array(dithered, dtype=np.int32)  # (H, W) palette indices
+
+    H, W = dithered_array.shape
+
+    # Sample palette index at face centroid (nearest-neighbor)
+    face_uvs = model.uvs[model.mesh.faces]        # (F, 3, 2)
+    centroid_uvs = face_uvs.mean(axis=1)          # (F, 2)
+    centroid_uvs = np.clip(centroid_uvs, 0.0, 1.0)
+
+    px = np.clip(np.round(centroid_uvs[:, 0] * (W - 1)).astype(np.int32), 0, W - 1)
+    py = np.clip(np.round((1.0 - centroid_uvs[:, 1]) * (H - 1)).astype(np.int32), 0, H - 1)
+
+    return dithered_array[py, px]
