@@ -95,11 +95,14 @@ func run() error {
 
 	// Subdivide.
 	resolution := args.Resolution
-	var subdivided *loader.LoadedModel
+	var roots []*subdivide.Node
+	var subdivVerts [][3]float32
+	var subdivUVs [][2]float32
+	var leafModel *loader.LoadedModel
 	for {
 		fmt.Printf("Subdividing to %.4g mm max edge length...\n", resolution)
 		var tooMany *subdivide.TooManyVerticesError
-		subdivided, err = subdivide.Subdivide(model, resolution, 1_000_000)
+		roots, subdivVerts, subdivUVs, err = subdivide.Subdivide(model, resolution, 1_000_000)
 		if errors.As(err, &tooMany) {
 			resolution *= 1.5
 			fmt.Fprintf(os.Stderr, "  Would exceed 1,000,000 vertices; retrying with resolution %.4g mm...\n", resolution)
@@ -108,22 +111,21 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("subdivision: %w", err)
 		}
-		fmt.Printf("  %d vertices, %d faces after subdivision\n", len(subdivided.Vertices), len(subdivided.Faces))
+		leafModel = subdivide.Leaves(roots, subdivVerts, subdivUVs, model)
+		fmt.Printf("  %d vertices, %d faces after subdivision\n", len(leafModel.Vertices), len(leafModel.Faces))
 		break
 	}
-	model = subdivided
 
 	// Sample and assign palette.
 	var assignments []int32
 	if !args.NoDither {
 		fmt.Println("Sampling texture colors (Floyd-Steinberg dither)...")
-		assignments = sample.SampleFaceIndices(model, paletteRGB)
+		assignments = sample.SampleFaceIndices(leafModel, paletteRGB)
 	} else {
 		fmt.Println("Sampling texture colors...")
-		faceColors := sample.SampleFaceColors(model)
+		faceColors := sample.SampleFaceColors(leafModel)
 		fmt.Println("Matching palette...")
 		if args.ColorSpace == "rgb" {
-			// RGB assignment: use inline Euclidean distance in RGB space.
 			assignments = assignRGB(faceColors, paletteRGB)
 		} else {
 			assignments = palette.AssignPalette(faceColors, paletteRGB)
@@ -131,13 +133,22 @@ func run() error {
 	}
 
 	// Override no-texture faces to palette[0].
-	if model.NoTextureMask != nil {
-		for i, noTex := range model.NoTextureMask {
+	if leafModel.NoTextureMask != nil {
+		for i, noTex := range leafModel.NoTextureMask {
 			if noTex {
 				assignments[i] = 0
 			}
 		}
 	}
+
+	// Merge: collapse subtrees where all leaves share one color back to the
+	// ancestor face, reducing output triangle count.
+	fmt.Println("Merging uniform regions...")
+	mergedFaces := subdivide.Merge(roots, assignments)
+	model, assignments = subdivide.BuildModel(mergedFaces, subdivVerts, subdivUVs, model)
+	before, after := len(leafModel.Faces), len(model.Faces)
+	pct := 100.0 * float64(before-after) / float64(before)
+	fmt.Printf("  %d faces after merge (reduced from %d, %.1f%% smaller)\n", after, before, pct)
 
 	if args.Stats {
 		fmt.Println("  Face counts per material:")

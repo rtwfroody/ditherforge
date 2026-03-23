@@ -1,6 +1,12 @@
 // Package subdivide implements adaptive mesh subdivision using longest-edge
 // bisection: only the longest edge of each too-long face is split per
 // iteration, avoiding unnecessary refinement of short edges.
+//
+// Subdivision returns a tree of Nodes (one root per original face). Leaf
+// nodes are the final subdivided faces; internal nodes are faces that were
+// split. After color assignment on the leaves, Merge collapses any subtree
+// whose leaves all share the same color back into its root face, reducing
+// output triangle count.
 package subdivide
 
 import (
@@ -22,6 +28,23 @@ func (e *TooManyVerticesError) Error() string {
 	return fmt.Sprintf("estimated %d vertices would exceed budget", e.Estimated)
 }
 
+// Node represents one face at some level of the subdivision tree.
+// If Children is nil, this is a leaf (a final subdivided face).
+// If Children is non-nil, this face was split; its children tile the same area.
+type Node struct {
+	Face     [3]uint32
+	TexIdx   int32
+	Children []*Node
+}
+
+// FaceColor pairs a face with its assigned palette color index, for use after
+// Merge collapses uniform subtrees.
+type FaceColor struct {
+	Face   [3]uint32
+	TexIdx int32
+	Color  int32
+}
+
 func makeEdge(a, b uint32) [2]uint32 {
 	if a < b {
 		return [2]uint32{a, b}
@@ -37,25 +60,35 @@ func edgeLen(verts [][3]float32, a, b uint32) float32 {
 }
 
 // Subdivide adaptively subdivides the mesh until no edge exceeds maxEdgeMM,
-// using longest-edge bisection. Returns a new LoadedModel with textures
-// passed through unchanged.
-func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*loader.LoadedModel, error) {
-	verts := append([][3]float32(nil), model.Vertices...)
-	faces := append([][3]uint32(nil), model.Faces...)
-	uvs := append([][2]float32(nil), model.UVs...)
-	faceTex := append([]int32(nil), model.FaceTextureIdx...)
+// using longest-edge bisection. Returns a tree of Nodes (one root per original
+// face), plus the shared vertex and UV arrays. The tree is used by Leaves (to
+// build a flat model for color sampling) and Merge (to collapse uniform
+// subtrees after color assignment).
+func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
+	roots []*Node,
+	verts [][3]float32,
+	uvs [][2]float32,
+	err error,
+) {
+	verts = append([][3]float32(nil), model.Vertices...)
+	uvs = append([][2]float32(nil), model.UVs...)
 
-	// Stash done faces across iterations (those with all edges ≤ maxEdgeMM).
-	// T-junctions at stash boundaries are acceptable for our use case.
-	var doneVerts [][3]float32
-	var doneUVs [][2]float32
-	var doneFaces [][3]uint32
-	var doneFaceTex []int32
+	// Create one root node per original face.
+	roots = make([]*Node, len(model.Faces))
+	for i, f := range model.Faces {
+		roots[i] = &Node{Face: f, TexIdx: model.FaceTextureIdx[i]}
+	}
+
+	// Working set: current nodes and their corresponding face/tex data.
+	// Initially the entire mesh; shrinks as faces become "done".
+	currentNodes := make([]*Node, len(roots))
+	copy(currentNodes, roots)
+	faces := append([][3]uint32(nil), model.Faces...)
+	faceTex := append([]int32(nil), model.FaceTextureIdx...)
 
 	for iter := 0; iter <= MaxIter; iter++ {
 		// Partition faces into ok (all edges short) and too-long.
-		var okFaces [][3]uint32
-		var okFaceTex []int32
+		var longNodes []*Node
 		var longFaces [][3]uint32
 		var longFaceTex []int32
 
@@ -64,24 +97,11 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*
 				edgeLen(verts, face[1], face[2]) > maxEdgeMM ||
 				edgeLen(verts, face[2], face[0]) > maxEdgeMM
 			if tooLong {
+				longNodes = append(longNodes, currentNodes[fi])
 				longFaces = append(longFaces, face)
 				longFaceTex = append(longFaceTex, faceTex[fi])
-			} else {
-				okFaces = append(okFaces, face)
-				okFaceTex = append(okFaceTex, faceTex[fi])
 			}
-		}
-
-		// Compact and stash done faces.
-		if len(okFaces) > 0 {
-			b := compactBatch(verts, uvs, okFaces, okFaceTex)
-			doneVerts = append(doneVerts, b.verts...)
-			doneUVs = append(doneUVs, b.uvs...)
-			offset := uint32(len(doneVerts) - len(b.verts))
-			for _, f := range b.faces {
-				doneFaces = append(doneFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
-			}
-			doneFaceTex = append(doneFaceTex, b.faceTex...)
+			// ok faces: their nodes are already leaves (no Children), nothing to do.
 		}
 
 		if len(longFaces) == 0 {
@@ -108,9 +128,9 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*
 		}
 
 		// Budget check: each marked edge produces exactly one new vertex.
-		estimated := len(doneVerts) + len(verts) + len(markedEdges)
+		estimated := len(verts) + len(markedEdges)
 		if estimated > maxVertices {
-			return nil, &TooManyVerticesError{Estimated: estimated}
+			return nil, nil, nil, &TooManyVerticesError{Estimated: estimated}
 		}
 
 		// Create midpoint vertices for each marked edge.
@@ -130,13 +150,22 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*
 			})
 		}
 
-		// Rebuild the too-long faces. Each face is split based on how many
-		// of its edges were marked (1→2 tris, 2→3 tris, 3→4 tris).
+		// Rebuild too-long faces into children and link them to the tree.
+		newNodes := make([]*Node, 0, len(longFaces)*2)
 		newFaces := make([][3]uint32, 0, len(longFaces)*2)
 		newFaceTex := make([]int32, 0, len(longFaceTex)*2)
 
+		addChild := func(parent *Node, face [3]uint32, tex int32) {
+			child := &Node{Face: face, TexIdx: tex}
+			parent.Children = append(parent.Children, child)
+			newNodes = append(newNodes, child)
+			newFaces = append(newFaces, face)
+			newFaceTex = append(newFaceTex, tex)
+		}
+
 		for fi, face := range longFaces {
 			tex := longFaceTex[fi]
+			parent := longNodes[fi]
 			edges := [3][2]uint32{
 				makeEdge(face[0], face[1]),
 				makeEdge(face[1], face[2]),
@@ -154,112 +183,145 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*
 
 			switch splitCount {
 			case 1:
-				// Bisect: split into 2 triangles along the marked edge.
 				for e := 0; e < 3; e++ {
 					if splitMask[e] {
 						va, vb, vc := face[e], face[(e+1)%3], face[(e+2)%3]
 						mid := edgeToMid[edges[e]]
-						newFaces = append(newFaces,
-							[3]uint32{va, mid, vc},
-							[3]uint32{mid, vb, vc},
-						)
-						newFaceTex = append(newFaceTex, tex, tex)
+						addChild(parent, [3]uint32{va, mid, vc}, tex)
+						addChild(parent, [3]uint32{mid, vb, vc}, tex)
 						break
 					}
 				}
 
 			case 2:
-				// Split into 3 triangles. Find the one unsplit edge.
 				for e := 0; e < 3; e++ {
 					if !splitMask[e] {
-						// e is unsplit; (e+1)%3 and (e+2)%3 are split.
 						va := face[e]
 						vb := face[(e+1)%3]
 						vc := face[(e+2)%3]
-						m1 := edgeToMid[edges[(e+1)%3]] // midpoint of vb–vc
-						m2 := edgeToMid[edges[(e+2)%3]] // midpoint of vc–va
-						newFaces = append(newFaces,
-							[3]uint32{va, vb, m1},
-							[3]uint32{va, m1, m2},
-							[3]uint32{m1, vc, m2},
-						)
-						newFaceTex = append(newFaceTex, tex, tex, tex)
+						m1 := edgeToMid[edges[(e+1)%3]]
+						m2 := edgeToMid[edges[(e+2)%3]]
+						addChild(parent, [3]uint32{va, vb, m1}, tex)
+						addChild(parent, [3]uint32{va, m1, m2}, tex)
+						addChild(parent, [3]uint32{m1, vc, m2}, tex)
 						break
 					}
 				}
 
 			case 3:
-				// All edges marked: standard midpoint subdivision into 4 triangles.
 				m01 := edgeToMid[edges[0]]
 				m12 := edgeToMid[edges[1]]
 				m20 := edgeToMid[edges[2]]
-				newFaces = append(newFaces,
-					[3]uint32{face[0], m01, m20},
-					[3]uint32{m01, face[1], m12},
-					[3]uint32{m20, m12, face[2]},
-					[3]uint32{m01, m12, m20},
-				)
-				newFaceTex = append(newFaceTex, tex, tex, tex, tex)
+				addChild(parent, [3]uint32{face[0], m01, m20}, tex)
+				addChild(parent, [3]uint32{m01, face[1], m12}, tex)
+				addChild(parent, [3]uint32{m20, m12, face[2]}, tex)
+				addChild(parent, [3]uint32{m01, m12, m20}, tex)
 			}
 		}
 
 		faces = newFaces
 		faceTex = newFaceTex
+		currentNodes = newNodes
 	}
 
-	// Assemble final mesh: done batches + remaining (all-ok) faces.
-	finalVerts := doneVerts
-	finalUVs := doneUVs
-	finalFaces := doneFaces
-	finalFaceTex := doneFaceTex
-
-	// Append the last working-set faces (compacted).
-	if len(faces) > 0 {
-		b := compactBatch(verts, uvs, faces, faceTex)
-		offset := uint32(len(finalVerts))
-		finalVerts = append(finalVerts, b.verts...)
-		finalUVs = append(finalUVs, b.uvs...)
-		for _, f := range b.faces {
-			finalFaces = append(finalFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
-		}
-		finalFaceTex = append(finalFaceTex, b.faceTex...)
-	}
-
-	nTex := len(model.Textures)
-	var noTextureMask []bool
-	if model.NoTextureMask != nil {
-		noTextureMask = make([]bool, len(finalFaceTex))
-		for i, ti := range finalFaceTex {
-			if ti >= int32(nTex) {
-				noTextureMask[i] = true
-			}
-		}
-	}
-
-	return &loader.LoadedModel{
-		Vertices:       finalVerts,
-		Faces:          finalFaces,
-		UVs:            finalUVs,
-		Textures:       model.Textures,
-		FaceTextureIdx: finalFaceTex,
-		NoTextureMask:  noTextureMask,
-	}, nil
+	return roots, verts, uvs, nil
 }
 
-// batchData holds one compacted batch of mesh data.
-type batchData struct {
-	verts   [][3]float32
-	faces   [][3]uint32
-	uvs     [][2]float32
-	faceTex []int32
+// Leaves flattens all leaf nodes of the subdivision tree into a LoadedModel
+// suitable for color sampling. Vertices are compacted (only referenced ones
+// are kept).
+func Leaves(roots []*Node, verts [][3]float32, uvs [][2]float32, model *loader.LoadedModel) *loader.LoadedModel {
+	var faces [][3]uint32
+	var texIdxs []int32
+
+	var collect func(*Node)
+	collect = func(n *Node) {
+		if len(n.Children) == 0 {
+			faces = append(faces, n.Face)
+			texIdxs = append(texIdxs, n.TexIdx)
+			return
+		}
+		for _, c := range n.Children {
+			collect(c)
+		}
+	}
+	for _, r := range roots {
+		collect(r)
+	}
+
+	return compactModel(verts, uvs, faces, texIdxs, model)
 }
 
-func compactBatch(
+// Merge performs a bottom-up pass over the subdivision tree. For each internal
+// node whose entire subtree maps to a single palette color, the subtree is
+// collapsed to that one face. Returns a flat list of (face, color) pairs
+// representing the minimal triangle set that preserves color fidelity.
+//
+// leafColors must be in the same DFS leaf order as produced by Leaves.
+func Merge(roots []*Node, leafColors []int32) []FaceColor {
+	idx := 0
+	var result []FaceColor
+	for _, r := range roots {
+		collectNode(r, leafColors, &idx, &result)
+	}
+	return result
+}
+
+// collectNode collects faces from n's subtree into result.
+// If all faces in the subtree share one color, they are replaced by n's single
+// face. Returns the uniform color (or -1 if mixed).
+func collectNode(n *Node, leafColors []int32, idx *int, result *[]FaceColor) int32 {
+	if len(n.Children) == 0 {
+		c := leafColors[*idx]
+		*idx++
+		*result = append(*result, FaceColor{n.Face, n.TexIdx, c})
+		return c
+	}
+
+	startLen := len(*result)
+	uniform := int32(-2) // -2 = not yet seen
+
+	for _, child := range n.Children {
+		c := collectNode(child, leafColors, idx, result)
+		if uniform == -2 {
+			uniform = c
+		} else if c == -1 || c != uniform {
+			uniform = -1 // mixed
+		}
+	}
+
+	if uniform >= 0 {
+		// All leaves share the same color: collapse to this node's face.
+		*result = (*result)[:startLen]
+		*result = append(*result, FaceColor{n.Face, n.TexIdx, uniform})
+	}
+
+	return uniform
+}
+
+// BuildModel constructs a LoadedModel from a merged face list. Vertices are
+// compacted to only those referenced by the merged faces.
+func BuildModel(mergedFaces []FaceColor, verts [][3]float32, uvs [][2]float32, model *loader.LoadedModel) (*loader.LoadedModel, []int32) {
+	faces := make([][3]uint32, len(mergedFaces))
+	texIdxs := make([]int32, len(mergedFaces))
+	colors := make([]int32, len(mergedFaces))
+	for i, mf := range mergedFaces {
+		faces[i] = mf.Face
+		texIdxs[i] = mf.TexIdx
+		colors[i] = mf.Color
+	}
+	return compactModel(verts, uvs, faces, texIdxs, model), colors
+}
+
+// compactModel builds a LoadedModel from a face list, compacting vertices to
+// only those referenced by the faces.
+func compactModel(
 	verts [][3]float32,
 	uvs [][2]float32,
 	faces [][3]uint32,
-	faceTex []int32,
-) batchData {
+	texIdxs []int32,
+	model *loader.LoadedModel,
+) *loader.LoadedModel {
 	seen := map[uint32]uint32{}
 	var newVerts [][3]float32
 	var newUVs [][2]float32
@@ -280,10 +342,23 @@ func compactBatch(
 		newFaces[fi] = [3]uint32{remap(f[0]), remap(f[1]), remap(f[2])}
 	}
 
-	return batchData{
-		verts:   newVerts,
-		faces:   newFaces,
-		uvs:     newUVs,
-		faceTex: faceTex,
+	nTex := len(model.Textures)
+	var noTextureMask []bool
+	if model.NoTextureMask != nil {
+		noTextureMask = make([]bool, len(texIdxs))
+		for i, ti := range texIdxs {
+			if ti >= int32(nTex) {
+				noTextureMask[i] = true
+			}
+		}
+	}
+
+	return &loader.LoadedModel{
+		Vertices:       newVerts,
+		Faces:          newFaces,
+		UVs:            newUVs,
+		Textures:       model.Textures,
+		FaceTextureIdx: texIdxs,
+		NoTextureMask:  noTextureMask,
 	}
 }
