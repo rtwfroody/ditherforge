@@ -36,11 +36,10 @@ def main() -> None:
         help="Target max edge length in mm after scaling (default: 0.5)",
     )
     parser.add_argument(
-        "--scale",
-        type=float,
-        default=1000.0,
-        metavar="FACTOR",
-        help="Multiply GLB coordinates by this factor to convert to mm (default: 1000, i.e. GLTF meters → mm)",
+        "--glb-unit",
+        choices=["m", "dm", "cm", "mm"],
+        default="m",
+        help="Unit of GLB coordinates (default: m). Converted to mm on load.",
     )
     parser.add_argument("--output", default="output.obj",
                         help="Output file (.obj or .3mf, default: output.obj)")
@@ -77,8 +76,9 @@ def main() -> None:
         print(f"Error: output must be .obj or .3mf, got {output_ext!r}")
         raise SystemExit(1)
 
+    scale = {"m": 1000.0, "dm": 100.0, "cm": 10.0, "mm": 1.0}[args.glb_unit]
     print(f"Loading {args.input}...")
-    model = load_glb(args.input, scale=args.scale)
+    model = load_glb(args.input, scale=scale)
     extent = model.mesh.vertices.max(axis=0) - model.mesh.vertices.min(axis=0)
     print(
         f"  {len(model.mesh.vertices)} vertices, "
