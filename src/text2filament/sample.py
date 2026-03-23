@@ -52,7 +52,8 @@ def sample_face_colors(model: LoadedModel) -> np.ndarray:
     return np.clip(np.round(color), 0, 255).astype(np.uint8)
 
 
-def sample_face_indices(model: LoadedModel, palette_rgb: np.ndarray) -> np.ndarray:
+def sample_face_indices(model: LoadedModel, palette_rgb: np.ndarray,
+                        save_path: "str | None" = None) -> np.ndarray:
     """
     Dither the texture to the palette using Floyd-Steinberg, then sample the
     palette index at each face's centroid UV (nearest-neighbor).
@@ -70,6 +71,8 @@ def sample_face_indices(model: LoadedModel, palette_rgb: np.ndarray) -> np.ndarr
 
     # Quantize with Floyd-Steinberg dithering
     dithered = texture_rgb.quantize(palette=palette_img, dither=Image.Dither.FLOYDSTEINBERG)
+    if save_path is not None:
+        dithered.convert("RGB").save(save_path)
     dithered_array = np.array(dithered, dtype=np.int32)  # (H, W) palette indices
 
     H, W = dithered_array.shape

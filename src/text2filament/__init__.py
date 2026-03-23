@@ -42,6 +42,11 @@ def main() -> None:
         help="Apply Floyd-Steinberg dithering in texture space before palette assignment",
     )
     parser.add_argument(
+        "--debug-textures",
+        action="store_true",
+        help="Save the original and dithered textures as PNGs next to the output file",
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         help="Export a colored PLY alongside the 3MF for visual inspection",
@@ -74,13 +79,23 @@ def main() -> None:
         f"extent {extent[0]:.3g} x {extent[1]:.3g} x {extent[2]:.3g}"
     )
 
+    base = os.path.splitext(args.output)[0]
+
+    if args.debug_textures:
+        tex_path = base + "_texture.png"
+        model.texture.save(tex_path)
+        print(f"  Saved original texture → {tex_path}")
+
     print(f"Subdividing to {args.resolution:.4g} max edge length...")
     model = subdivide(model, args.resolution)
     print(f"  {len(model.mesh.vertices)} vertices, {len(model.mesh.faces)} faces after subdivision")
 
     if args.dither:
         print("Sampling texture colors (Floyd-Steinberg dither)...")
-        assignments = sample_face_indices(model, palette_rgb)
+        dithered_path = (base + "_dithered.png") if args.debug_textures else None
+        assignments = sample_face_indices(model, palette_rgb, save_path=dithered_path)
+        if dithered_path:
+            print(f"  Saved dithered texture → {dithered_path}")
     else:
         print("Sampling texture colors...")
         face_colors = sample_face_colors(model)
