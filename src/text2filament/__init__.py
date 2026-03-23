@@ -103,9 +103,18 @@ def main() -> None:
             tex.save(tex_path)
             print(f"  Saved original texture → {tex_path}")
 
-    print(f"Subdividing to {args.resolution:.4g} max edge length...")
-    model = subdivide(model, args.resolution)
-    print(f"  {len(model.mesh.vertices)} vertices, {len(model.mesh.faces)} faces after subdivision")
+    MAX_VERTICES = 1_000_000
+    resolution = args.resolution
+    while True:
+        print(f"Subdividing to {resolution:.4g} max edge length...")
+        subdivided = subdivide(model, resolution)
+        n_verts = len(subdivided.mesh.vertices)
+        print(f"  {n_verts} vertices, {len(subdivided.mesh.faces)} faces after subdivision")
+        if n_verts <= MAX_VERTICES:
+            model = subdivided
+            break
+        resolution *= 1.5
+        print(f"  Exceeded {MAX_VERTICES:,} vertices; retrying with resolution {resolution:.4g}...")
 
     if args.dither:
         print("Sampling texture colors (Floyd-Steinberg dither)...")
