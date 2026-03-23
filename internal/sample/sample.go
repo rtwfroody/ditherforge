@@ -18,7 +18,7 @@ func bilinearSample(img image.Image, u, v float32) [3]float32 {
 	H := float32(bounds.Max.Y - bounds.Min.Y)
 
 	px := u * (W - 1)
-	py := (1.0 - v) * (H - 1)
+	py := v * (H - 1)
 
 	x0 := int(math.Floor(float64(px)))
 	y0 := int(math.Floor(float64(py)))
