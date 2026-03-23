@@ -18,8 +18,8 @@ def main() -> None:
     parser.add_argument("input", help="Input .glb file")
     parser.add_argument(
         "--palette",
-        default="#FFFFFF,#FF0000,#00FF00",
-        help='Comma-separated hex colors, max 3 (default: white,red,green)',
+        default="white,red,green,blue",
+        help='Comma-separated colors — CSS names or hex, max 3 for .3mf (default: white,red,green,blue)',
     )
     parser.add_argument(
         "--resolution",
@@ -94,5 +94,5 @@ def main() -> None:
     if output_ext == ".3mf":
         export_3mf(model, assignments, args.output)
     else:
-        export_obj(model, assignments, palette_hex, args.output)
+        export_obj(model, assignments, palette_rgb, args.output)
     print("Done.")

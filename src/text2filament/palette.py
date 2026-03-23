@@ -2,19 +2,22 @@
 
 import numpy as np
 from colorspacious import cspace_convert
+from PIL import ImageColor
 
 
-def parse_palette(hex_colors: list[str]) -> np.ndarray:
-    """Parse a list of hex color strings into an (P, 3) uint8 RGB array."""
+def parse_palette(colors: list[str]) -> np.ndarray:
+    """
+    Parse a list of color strings into an (P, 3) uint8 RGB array.
+    Accepts CSS named colors (e.g. 'red', 'darkblue') and hex strings (e.g. '#FF0000').
+    """
     result = []
-    for h in hex_colors:
-        h = h.strip().lstrip("#")
-        if len(h) != 6:
-            raise ValueError(f"Invalid hex color: #{h!r} — expected 6 hex digits")
-        r = int(h[0:2], 16)
-        g = int(h[2:4], 16)
-        b = int(h[4:6], 16)
-        result.append([r, g, b])
+    for c in colors:
+        c = c.strip()
+        try:
+            rgb = ImageColor.getrgb(c)[:3]  # drop alpha if present
+        except (ValueError, AttributeError):
+            raise ValueError(f"Unknown color {c!r} — use a CSS name (e.g. 'red') or hex (e.g. '#FF0000')")
+        result.append(list(rgb))
     return np.array(result, dtype=np.uint8)
 
 

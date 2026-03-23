@@ -9,26 +9,22 @@ from .loader import LoadedModel
 def export_obj(
     model: LoadedModel,
     assignments: np.ndarray,   # (F,) int — palette index per face
-    palette_hex: list[str],    # ["#RRGGBB", ...]
+    palette_rgb: np.ndarray,   # (P, 3) uint8
     output_path: str,
 ) -> None:
     base = os.path.splitext(output_path)[0]
     mtl_path = base + ".mtl"
     mtl_name = os.path.basename(mtl_path)
 
-    _write_mtl(mtl_path, palette_hex)
+    _write_mtl(mtl_path, palette_rgb)
     _write_obj(output_path, mtl_name, model, assignments)
 
 
-def _write_mtl(path: str, palette_hex: list[str]) -> None:
+def _write_mtl(path: str, palette_rgb: np.ndarray) -> None:
     lines: list[str] = []
-    for i, h in enumerate(palette_hex):
-        h = h.strip().lstrip("#")
-        r = int(h[0:2], 16) / 255
-        g = int(h[2:4], 16) / 255
-        b = int(h[4:6], 16) / 255
+    for i, (r, g, b) in enumerate(palette_rgb):
         lines.append(f"newmtl mat_{i}")
-        lines.append(f"Kd {r:.6f} {g:.6f} {b:.6f}")
+        lines.append(f"Kd {r/255:.6f} {g/255:.6f} {b/255:.6f}")
         lines.append("Ka 0 0 0")
         lines.append("Ks 0 0 0")
         lines.append("d 1.0")
