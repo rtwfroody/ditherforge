@@ -10,7 +10,7 @@ import (
 	"github.com/rtwfroody/text2filament/internal/loader"
 )
 
-const MaxIter = 12
+const MaxIter = 32
 
 // TooManyVerticesError is returned when the estimated vertex count would
 // exceed the caller's budget.
@@ -88,7 +88,8 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*
 			break
 		}
 		if iter >= MaxIter {
-			return nil, fmt.Errorf("subdivision did not converge after %d iterations; try a larger --resolution value", MaxIter)
+			fmt.Printf("  Warning: subdivision did not fully converge after %d iterations; some faces may be coarser than requested.\n", MaxIter)
+			break
 		}
 
 		// Mark only the longest edge of each too-long face.
