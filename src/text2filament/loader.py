@@ -43,6 +43,14 @@ def load_glb(path: str) -> LoadedModel:
         raise ValueError(f"Model has no UV coordinates: {path}")
 
     uvs = np.array(mesh.visual.uv, dtype=np.float32)
+
+    # GLB uses a right-handed Y-up coordinate system; 3D printing slicers expect
+    # Z-up.  Rotate +90° around X to convert: (x, y, z) → (x, -z, y).
+    verts = mesh.vertices.copy()
+    verts[:, 1], verts[:, 2] = -mesh.vertices[:, 2].copy(), mesh.vertices[:, 1].copy()
+    mesh = trimesh.Trimesh(vertices=verts, faces=mesh.faces,
+                           visual=mesh.visual, process=False)
+
     return LoadedModel(mesh=mesh, uvs=uvs, textures=textures,
                        face_texture_idx=face_texture_idx, no_texture_mask=no_texture_mask)
 
