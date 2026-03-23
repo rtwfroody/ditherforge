@@ -166,11 +166,33 @@ func mortonCode(u, v uint32) uint32 {
 	return spreadBits(u) | (spreadBits(v) << 1)
 }
 
+// faceArea computes the area of a triangle given its three 3D vertex positions.
+func faceArea(v0, v1, v2 [3]float32) float32 {
+	ax := v1[0] - v0[0]
+	ay := v1[1] - v0[1]
+	az := v1[2] - v0[2]
+	bx := v2[0] - v0[0]
+	by := v2[1] - v0[1]
+	bz := v2[2] - v0[2]
+	cx := ay*bz - az*by
+	cy := az*bx - ax*bz
+	cz := ax*by - ay*bx
+	return 0.5 * float32(math.Sqrt(float64(cx*cx+cy*cy+cz*cz)))
+}
+
 // SampleFaceIndices performs face-level Floyd-Steinberg error diffusion with
 // Morton-code spatial ordering to assign each face to a palette color.
+// Error propagation is area-weighted: large-face errors are attenuated before
+// being applied to smaller faces, preventing color bleeding at scale transitions.
 func SampleFaceIndices(model *loader.LoadedModel, palette [][3]uint8) []int32 {
 	F := len(model.Faces)
 	faceColors := SampleFaceColors(model)
+
+	// Precompute face areas for area-weighted error propagation.
+	areas := make([]float32, F)
+	for fi, face := range model.Faces {
+		areas[fi] = faceArea(model.Vertices[face[0]], model.Vertices[face[1]], model.Vertices[face[2]])
+	}
 
 	// Compute centroid UVs for Morton ordering.
 	centroidUVs := make([][2]float32, F)
@@ -229,7 +251,7 @@ func SampleFaceIndices(model *loader.LoadedModel, palette [][3]uint8) []int32 {
 	assignmentsSorted := make([]int32, F)
 	var errR, errG, errB float32
 
-	for _, origIdx := range order {
+	for i, origIdx := range order {
 		fc := faceColors[origIdx]
 		cr := clampF(float32(fc[0])+errR, 0, 255)
 		cg := clampF(float32(fc[1])+errG, 0, 255)
@@ -253,10 +275,30 @@ func SampleFaceIndices(model *loader.LoadedModel, palette [][3]uint8) []int32 {
 		sortedPos := invOrder[origIdx]
 		assignmentsSorted[sortedPos] = int32(bestIdx)
 
-		// Carry full error to next face.
-		errR = cr - paletteF[bestIdx][0]
-		errG = cg - paletteF[bestIdx][1]
-		errB = cb - paletteF[bestIdx][2]
+		// Compute quantization error.
+		eR := cr - paletteF[bestIdx][0]
+		eG := cg - paletteF[bestIdx][1]
+		eB := cb - paletteF[bestIdx][2]
+
+		// Area-weighted error propagation: attenuate error when transitioning
+		// from a large face to a smaller one so that one big face's rounding
+		// error doesn't overwhelm many tiny faces.
+		curArea := areas[origIdx]
+		if i+1 < len(order) {
+			nextArea := areas[order[i+1]]
+			if nextArea > 0 && curArea > 0 {
+				scale := curArea / nextArea
+				if scale > 1 {
+					scale = 1
+				}
+				eR *= scale
+				eG *= scale
+				eB *= scale
+			}
+		}
+		errR = eR
+		errG = eG
+		errB = eB
 	}
 
 	// Unmap back to original face order.
