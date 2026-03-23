@@ -50,6 +50,8 @@ def _write_obj(
     lines: list[str] = []
     lines.append(f"mtllib {mtl_name}")
     lines.append("")
+    lines.append("o mesh")
+    lines.append("")
 
     for x, y, z in vertices:
         lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")

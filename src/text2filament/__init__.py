@@ -87,6 +87,9 @@ def main() -> None:
         print("Matching palette...")
         assignments = assign_palette(face_colors, palette_rgb, args.color_space)
 
+    if model.no_texture_mask is not None:
+        assignments[model.no_texture_mask] = 0
+
     if args.stats:
         print("  Face counts per material:")
         for i, hex_color in enumerate(palette_hex):
