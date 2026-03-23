@@ -1,5 +1,6 @@
-// Package subdivide implements adaptive midpoint mesh subdivision with UV and
-// face-texture-index interpolation.
+// Package subdivide implements adaptive mesh subdivision using longest-edge
+// bisection: only the longest edge of each too-long face is split per
+// iteration, avoiding unnecessary refinement of short edges.
 package subdivide
 
 import (
@@ -10,177 +11,217 @@ import (
 )
 
 const MaxIter = 12
-const MaxVertices = 1_000_000
 
 // TooManyVerticesError is returned when the estimated vertex count would
-// exceed MaxVertices.
+// exceed the caller's budget.
 type TooManyVerticesError struct {
 	Estimated int
 }
 
 func (e *TooManyVerticesError) Error() string {
-	return fmt.Sprintf("estimated %d vertices would exceed budget of %d", e.Estimated, MaxVertices)
+	return fmt.Sprintf("estimated %d vertices would exceed budget", e.Estimated)
 }
 
-// edgeKey returns a canonical edge key (smaller index first).
-func edgeKey(a, b uint32) [2]uint32 {
+func makeEdge(a, b uint32) [2]uint32 {
 	if a < b {
 		return [2]uint32{a, b}
 	}
 	return [2]uint32{b, a}
 }
 
-// Subdivide adaptively subdivides the mesh until no edge exceeds maxEdgeMM.
-// Returns a new LoadedModel (textures passed through unchanged).
-func Subdivide(model *loader.LoadedModel, maxEdgeMM float32) (*loader.LoadedModel, error) {
-	currentVerts := make([][3]float32, len(model.Vertices))
-	copy(currentVerts, model.Vertices)
+func edgeLen(verts [][3]float32, a, b uint32) float32 {
+	dx := verts[a][0] - verts[b][0]
+	dy := verts[a][1] - verts[b][1]
+	dz := verts[a][2] - verts[b][2]
+	return float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
+}
 
-	currentFaces := make([][3]uint32, len(model.Faces))
-	copy(currentFaces, model.Faces)
+// Subdivide adaptively subdivides the mesh until no edge exceeds maxEdgeMM,
+// using longest-edge bisection. Returns a new LoadedModel with textures
+// passed through unchanged.
+func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (*loader.LoadedModel, error) {
+	verts := append([][3]float32(nil), model.Vertices...)
+	faces := append([][3]uint32(nil), model.Faces...)
+	uvs := append([][2]float32(nil), model.UVs...)
+	faceTex := append([]int32(nil), model.FaceTextureIdx...)
 
-	currentUVs := make([][2]float32, len(model.UVs))
-	copy(currentUVs, model.UVs)
-
-	currentFaceTex := make([]int32, len(model.FaceTextureIdx))
-	copy(currentFaceTex, model.FaceTextureIdx)
-
-	// Stash completed faces across iterations.
-	var done []batchData
+	// Stash done faces across iterations (those with all edges ≤ maxEdgeMM).
+	// T-junctions at stash boundaries are acceptable for our use case.
+	var doneVerts [][3]float32
+	var doneUVs [][2]float32
+	var doneFaces [][3]uint32
+	var doneFaceTex []int32
 
 	for iter := 0; iter <= MaxIter; iter++ {
-		// Determine which faces have edges that are too long.
-		tooLongMask := make([]bool, len(currentFaces))
-		anyTooLong := false
-		for fi, face := range currentFaces {
-			v0 := currentVerts[face[0]]
-			v1 := currentVerts[face[1]]
-			v2 := currentVerts[face[2]]
-			if edgeLen(v0, v1) > maxEdgeMM ||
-				edgeLen(v1, v2) > maxEdgeMM ||
-				edgeLen(v2, v0) > maxEdgeMM {
-				tooLongMask[fi] = true
-				anyTooLong = true
-			}
-		}
-
-		// Partition into ok and too-long.
+		// Partition faces into ok (all edges short) and too-long.
 		var okFaces [][3]uint32
 		var okFaceTex []int32
 		var longFaces [][3]uint32
 		var longFaceTex []int32
-		for fi, face := range currentFaces {
-			if tooLongMask[fi] {
+
+		for fi, face := range faces {
+			tooLong := edgeLen(verts, face[0], face[1]) > maxEdgeMM ||
+				edgeLen(verts, face[1], face[2]) > maxEdgeMM ||
+				edgeLen(verts, face[2], face[0]) > maxEdgeMM
+			if tooLong {
 				longFaces = append(longFaces, face)
-				longFaceTex = append(longFaceTex, currentFaceTex[fi])
+				longFaceTex = append(longFaceTex, faceTex[fi])
 			} else {
 				okFaces = append(okFaces, face)
-				okFaceTex = append(okFaceTex, currentFaceTex[fi])
+				okFaceTex = append(okFaceTex, faceTex[fi])
 			}
 		}
 
-		// Compact ok faces into a batch (remap vertices).
+		// Compact and stash done faces.
 		if len(okFaces) > 0 {
-			b := compactBatch(currentVerts, currentUVs, okFaces, okFaceTex)
-			done = append(done, b)
+			b := compactBatch(verts, uvs, okFaces, okFaceTex)
+			doneVerts = append(doneVerts, b.verts...)
+			doneUVs = append(doneUVs, b.uvs...)
+			offset := uint32(len(doneVerts) - len(b.verts))
+			for _, f := range b.faces {
+				doneFaces = append(doneFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
+			}
+			doneFaceTex = append(doneFaceTex, b.faceTex...)
 		}
 
-		if !anyTooLong {
+		if len(longFaces) == 0 {
 			break
 		}
-
 		if iter >= MaxIter {
 			return nil, fmt.Errorf("subdivision did not converge after %d iterations; try a larger --resolution value", MaxIter)
 		}
 
-		// Estimate vertex count after this pass.
-		doneCount := 0
-		for _, b := range done {
-			doneCount += len(b.verts)
+		// Mark only the longest edge of each too-long face.
+		markedEdges := make(map[[2]uint32]bool, len(longFaces))
+		for _, face := range longFaces {
+			var bestLen float32
+			var bestEdge [2]uint32
+			for e := 0; e < 3; e++ {
+				a, b := face[e], face[(e+1)%3]
+				if l := edgeLen(verts, a, b); l > bestLen {
+					bestLen = l
+					bestEdge = makeEdge(a, b)
+				}
+			}
+			markedEdges[bestEdge] = true
 		}
-		estimated := doneCount + len(currentVerts) + 2*len(longFaces)
-		if estimated > MaxVertices {
+
+		// Budget check: each marked edge produces exactly one new vertex.
+		estimated := len(doneVerts) + len(verts) + len(markedEdges)
+		if estimated > maxVertices {
 			return nil, &TooManyVerticesError{Estimated: estimated}
 		}
 
-		// Subdivide the too-long faces.
-		midpointMap := map[[2]uint32]uint32{}
-		newVerts := make([][3]float32, len(currentVerts))
-		copy(newVerts, currentVerts)
-		newUVs := make([][2]float32, len(currentUVs))
-		copy(newUVs, currentUVs)
-
-		getMidpoint := func(a, b uint32) uint32 {
-			key := edgeKey(a, b)
-			if mid, ok := midpointMap[key]; ok {
-				return mid
-			}
-			mid := uint32(len(newVerts))
-			va, vb := currentVerts[a], currentVerts[b]
-			ua, ub := currentUVs[a], currentUVs[b]
-			newVerts = append(newVerts, [3]float32{
-				(va[0] + vb[0]) * 0.5,
-				(va[1] + vb[1]) * 0.5,
-				(va[2] + vb[2]) * 0.5,
+		// Create midpoint vertices for each marked edge.
+		edgeToMid := make(map[[2]uint32]uint32, len(markedEdges))
+		for e := range markedEdges {
+			mid := uint32(len(verts))
+			edgeToMid[e] = mid
+			a, b := e[0], e[1]
+			verts = append(verts, [3]float32{
+				(verts[a][0] + verts[b][0]) * 0.5,
+				(verts[a][1] + verts[b][1]) * 0.5,
+				(verts[a][2] + verts[b][2]) * 0.5,
 			})
-			newUVs = append(newUVs, [2]float32{
-				(ua[0] + ub[0]) * 0.5,
-				(ua[1] + ub[1]) * 0.5,
+			uvs = append(uvs, [2]float32{
+				(uvs[a][0] + uvs[b][0]) * 0.5,
+				(uvs[a][1] + uvs[b][1]) * 0.5,
 			})
-			midpointMap[key] = mid
-			return mid
 		}
 
-		var newFaces [][3]uint32
-		var newFaceTex []int32
+		// Rebuild the too-long faces. Each face is split based on how many
+		// of its edges were marked (1→2 tris, 2→3 tris, 3→4 tris).
+		newFaces := make([][3]uint32, 0, len(longFaces)*2)
+		newFaceTex := make([]int32, 0, len(longFaceTex)*2)
+
 		for fi, face := range longFaces {
-			v0, v1, v2 := face[0], face[1], face[2]
-			m01 := getMidpoint(v0, v1)
-			m12 := getMidpoint(v1, v2)
-			m20 := getMidpoint(v2, v0)
 			tex := longFaceTex[fi]
-			// 4 sub-faces
-			newFaces = append(newFaces,
-				[3]uint32{v0, m01, m20},
-				[3]uint32{v1, m12, m01},
-				[3]uint32{v2, m20, m12},
-				[3]uint32{m01, m12, m20},
-			)
-			newFaceTex = append(newFaceTex, tex, tex, tex, tex)
+			edges := [3][2]uint32{
+				makeEdge(face[0], face[1]),
+				makeEdge(face[1], face[2]),
+				makeEdge(face[2], face[0]),
+			}
+
+			var splitMask [3]bool
+			splitCount := 0
+			for e := 0; e < 3; e++ {
+				if markedEdges[edges[e]] {
+					splitMask[e] = true
+					splitCount++
+				}
+			}
+
+			switch splitCount {
+			case 1:
+				// Bisect: split into 2 triangles along the marked edge.
+				for e := 0; e < 3; e++ {
+					if splitMask[e] {
+						va, vb, vc := face[e], face[(e+1)%3], face[(e+2)%3]
+						mid := edgeToMid[edges[e]]
+						newFaces = append(newFaces,
+							[3]uint32{va, mid, vc},
+							[3]uint32{mid, vb, vc},
+						)
+						newFaceTex = append(newFaceTex, tex, tex)
+						break
+					}
+				}
+
+			case 2:
+				// Split into 3 triangles. Find the one unsplit edge.
+				for e := 0; e < 3; e++ {
+					if !splitMask[e] {
+						// e is unsplit; (e+1)%3 and (e+2)%3 are split.
+						va := face[e]
+						vb := face[(e+1)%3]
+						vc := face[(e+2)%3]
+						m1 := edgeToMid[edges[(e+1)%3]] // midpoint of vb–vc
+						m2 := edgeToMid[edges[(e+2)%3]] // midpoint of vc–va
+						newFaces = append(newFaces,
+							[3]uint32{va, vb, m1},
+							[3]uint32{va, m1, m2},
+							[3]uint32{m1, vc, m2},
+						)
+						newFaceTex = append(newFaceTex, tex, tex, tex)
+						break
+					}
+				}
+
+			case 3:
+				// All edges marked: standard midpoint subdivision into 4 triangles.
+				m01 := edgeToMid[edges[0]]
+				m12 := edgeToMid[edges[1]]
+				m20 := edgeToMid[edges[2]]
+				newFaces = append(newFaces,
+					[3]uint32{face[0], m01, m20},
+					[3]uint32{m01, face[1], m12},
+					[3]uint32{m20, m12, face[2]},
+					[3]uint32{m01, m12, m20},
+				)
+				newFaceTex = append(newFaceTex, tex, tex, tex, tex)
+			}
 		}
 
-		currentVerts = newVerts
-		currentUVs = newUVs
-		currentFaces = newFaces
-		currentFaceTex = newFaceTex
+		faces = newFaces
+		faceTex = newFaceTex
 	}
 
-	// Concatenate all batches with vertex offsets.
-	totalVerts := 0
-	totalFaces := 0
-	for _, b := range done {
-		totalVerts += len(b.verts)
-		totalFaces += len(b.faces)
-	}
+	// Assemble final mesh: done batches + remaining (all-ok) faces.
+	finalVerts := doneVerts
+	finalUVs := doneUVs
+	finalFaces := doneFaces
+	finalFaceTex := doneFaceTex
 
-	finalVerts := make([][3]float32, 0, totalVerts)
-	finalUVs := make([][2]float32, 0, totalVerts)
-	finalFaces := make([][3]uint32, 0, totalFaces)
-	finalFaceTex := make([]int32, 0, totalFaces)
-
-	offset := uint32(0)
-	for _, b := range done {
+	// Append the last working-set faces (compacted).
+	if len(faces) > 0 {
+		b := compactBatch(verts, uvs, faces, faceTex)
+		offset := uint32(len(finalVerts))
 		finalVerts = append(finalVerts, b.verts...)
 		finalUVs = append(finalUVs, b.uvs...)
 		for _, f := range b.faces {
-			finalFaces = append(finalFaces, [3]uint32{
-				f[0] + offset,
-				f[1] + offset,
-				f[2] + offset,
-			})
+			finalFaces = append(finalFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
 		}
 		finalFaceTex = append(finalFaceTex, b.faceTex...)
-		offset += uint32(len(b.verts))
 	}
 
 	nTex := len(model.Textures)
@@ -204,13 +245,6 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32) (*loader.LoadedMode
 	}, nil
 }
 
-func edgeLen(a, b [3]float32) float32 {
-	dx := a[0] - b[0]
-	dy := a[1] - b[1]
-	dz := a[2] - b[2]
-	return float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
-}
-
 // batchData holds one compacted batch of mesh data.
 type batchData struct {
 	verts   [][3]float32
@@ -225,11 +259,6 @@ func compactBatch(
 	faces [][3]uint32,
 	faceTex []int32,
 ) batchData {
-	if len(faces) == 0 {
-		return batchData{}
-	}
-
-	// Collect unique vertex indices in order of first appearance.
 	seen := map[uint32]uint32{}
 	var newVerts [][3]float32
 	var newUVs [][2]float32

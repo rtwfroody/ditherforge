@@ -99,7 +99,7 @@ func run() error {
 	for {
 		fmt.Printf("Subdividing to %.4g mm max edge length...\n", resolution)
 		var tooMany *subdivide.TooManyVerticesError
-		subdivided, err = subdivide.Subdivide(model, resolution)
+		subdivided, err = subdivide.Subdivide(model, resolution, 1_000_000)
 		if errors.As(err, &tooMany) {
 			resolution *= 1.5
 			fmt.Fprintf(os.Stderr, "  Would exceed 1,000,000 vertices; retrying with resolution %.4g mm...\n", resolution)
