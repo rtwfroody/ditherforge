@@ -4,7 +4,7 @@ from .loader import load_glb
 from .subdivide import subdivide
 from .sample import sample_face_colors
 from .palette import parse_palette, assign_palette
-from .export_3mf import export_3mf
+from .export_3mf import export_3mf, MAX_FILAMENTS
 from .preview import export_preview
 
 
@@ -16,8 +16,8 @@ def main() -> None:
     parser.add_argument("input", help="Input .glb file")
     parser.add_argument(
         "--palette",
-        default="#FF0000,#00FF00,#0000FF,#FFFFFF",
-        help='Comma-separated hex colors (default: red,green,blue,white)',
+        default="#FFFFFF,#FF0000,#00FF00",
+        help='Comma-separated hex colors, max 3 (default: white,red,green)',
     )
     parser.add_argument(
         "--resolution",
@@ -46,6 +46,9 @@ def main() -> None:
     args = parser.parse_args()
 
     palette_hex = [c.strip() for c in args.palette.split(",")]
+    if len(palette_hex) > MAX_FILAMENTS:
+        print(f"Error: palette has {len(palette_hex)} colors but max supported is {MAX_FILAMENTS}")
+        raise SystemExit(1)
     palette_rgb = parse_palette(palette_hex)
 
     print(f"Loading {args.input}...")

@@ -7,11 +7,17 @@ import numpy as np
 
 from .loader import LoadedModel
 
-# paint_color encoding: hex(filament_index << 2), where filament_index is 1-based.
-# Single whole-triangle assignment — no sub-triangle subdivision.
-# e.g. filament 1 → "4", filament 2 → "8", filament 3 → "C", filament 4 → "10", ...
+MAX_FILAMENTS = 3  # BambuStudio/OrcaSlicer leaf-node encoding fits filament index in 2 bits
+
+# paint_color encoding: hex((filament_index) << 2), 1-based, single nibble.
+# Filament 1 → "4", filament 2 → "8", filament 3 → "C".
+# Filament 4+ would require "10", "14", … which OrcaSlicer parses nibble-by-nibble
+# and misinterprets — so we hard-limit to 3 filaments until we know the right encoding.
 def _paint_color(palette_index: int) -> str:
-    return format((palette_index + 1) << 2, "X")
+    filament = palette_index + 1
+    value = filament << 2
+    assert value <= 0xF, f"palette_index {palette_index} exceeds max filaments ({MAX_FILAMENTS})"
+    return format(value, "X")
 
 
 _CONTENT_TYPES = """\
@@ -84,9 +90,11 @@ def _build_object_model(model: LoadedModel, assignments: np.ndarray) -> str:
     lines.append(
         '<model unit="millimeter" xml:lang="en-US"'
         ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+        ' xmlns:BambuStudio="http://schemas.bambulab.com/package/2021"'
         ' xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"'
         ' requiredextensions="p">'
     )
+    lines.append(' <metadata name="BambuStudio:3mfVersion">1</metadata>')
     lines.append(" <resources>")
     lines.append(f'  <object id="1" p:UUID="{obj_uuid}" type="model">')
     lines.append("   <mesh>")
