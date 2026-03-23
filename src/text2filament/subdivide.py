@@ -9,10 +9,16 @@ from .loader import LoadedModel
 MAX_ITER = 12
 
 
-def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
+class TooManyVerticesError(Exception):
+    pass
+
+
+def subdivide(model: LoadedModel, max_edge_mm: float,
+              max_vertices: int = 1_000_000) -> LoadedModel:
     """
     Subdivide mesh faces until no edge exceeds max_edge_mm.
     UV coordinates and face_texture_idx are interpolated at each new midpoint vertex.
+    Raises TooManyVerticesError if the vertex budget would be exceeded.
     Returns a new LoadedModel (textures are passed through unchanged).
     """
     current_verts = np.array(model.mesh.vertices, dtype=np.float64)
@@ -58,6 +64,16 @@ def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
             raise RuntimeError(
                 f"Subdivision did not converge after {MAX_ITER} iterations. "
                 "Try a larger --resolution value."
+            )
+
+        # Estimate vertices after this pass: existing vertices plus ~1.5 new
+        # midpoints per face (3 edges per face, most shared between 2 faces).
+        done_count = sum(len(v) for v in done_verts)
+        estimated_total = done_count + len(current_verts) + 2 * int(too_long.sum())
+        if estimated_total > max_vertices:
+            raise TooManyVerticesError(
+                f"Estimated {estimated_total:,} vertices would exceed budget of "
+                f"{max_vertices:,}"
             )
 
         # vertex_attributes kwarg guarantees a 3-tuple return; trimesh's overloads don't reflect this

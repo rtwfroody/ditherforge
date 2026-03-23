@@ -30,7 +30,7 @@ class LoadedModel:
         return self.textures[0]
 
 
-def load_glb(path: str) -> LoadedModel:
+def load_glb(path: str, scale: float = 1000.0) -> LoadedModel:
     scene_or_mesh = trimesh.load(path, process=False)
 
     mesh, textures, face_texture_idx, no_texture_mask = _extract_mesh_and_texture(scene_or_mesh)
@@ -46,9 +46,12 @@ def load_glb(path: str) -> LoadedModel:
 
     # GLB uses a right-handed Y-up coordinate system; 3D printing slicers expect
     # Z-up.  Rotate +90° around X to convert: (x, y, z) → (x, -z, y).
-    verts = mesh.vertices.copy()
-    verts[:, 1], verts[:, 2] = -mesh.vertices[:, 2].copy(), mesh.vertices[:, 1].copy()
-    mesh = trimesh.Trimesh(vertices=verts, faces=mesh.faces,
+    # Also apply scale factor (default 1000 converts GLTF meters → mm).
+    verts = mesh.vertices * scale
+    new_verts = verts.copy()
+    new_verts[:, 1] = -verts[:, 2]
+    new_verts[:, 2] = verts[:, 1]
+    mesh = trimesh.Trimesh(vertices=new_verts, faces=mesh.faces,
                            visual=mesh.visual, process=False)
 
     return LoadedModel(mesh=mesh, uvs=uvs, textures=textures,

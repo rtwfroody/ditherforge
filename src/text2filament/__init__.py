@@ -2,7 +2,7 @@ import argparse
 import os
 
 from .loader import load_glb
-from .subdivide import subdivide
+from .subdivide import subdivide, TooManyVerticesError
 from .sample import sample_face_colors, sample_face_indices
 from .palette import parse_palette, assign_palette, compute_palette
 from .export_3mf import export_3mf, MAX_FILAMENTS
@@ -31,9 +31,16 @@ def main() -> None:
     parser.add_argument(
         "--resolution",
         type=float,
-        default=0.025,
-        metavar="UNITS",
-        help="Target max edge length in model units (default: 0.025)",
+        default=0.5,
+        metavar="MM",
+        help="Target max edge length in mm after scaling (default: 0.5)",
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1000.0,
+        metavar="FACTOR",
+        help="Multiply GLB coordinates by this factor to convert to mm (default: 1000, i.e. GLTF meters → mm)",
     )
     parser.add_argument("--output", default="output.obj",
                         help="Output file (.obj or .3mf, default: output.obj)")
@@ -71,7 +78,7 @@ def main() -> None:
         raise SystemExit(1)
 
     print(f"Loading {args.input}...")
-    model = load_glb(args.input)
+    model = load_glb(args.input, scale=args.scale)
     extent = model.mesh.vertices.max(axis=0) - model.mesh.vertices.min(axis=0)
     print(
         f"  {len(model.mesh.vertices)} vertices, "
@@ -106,15 +113,16 @@ def main() -> None:
     MAX_VERTICES = 1_000_000
     resolution = args.resolution
     while True:
-        print(f"Subdividing to {resolution:.4g} max edge length...")
-        subdivided = subdivide(model, resolution)
-        n_verts = len(subdivided.mesh.vertices)
-        print(f"  {n_verts} vertices, {len(subdivided.mesh.faces)} faces after subdivision")
-        if n_verts <= MAX_VERTICES:
-            model = subdivided
-            break
-        resolution *= 1.5
-        print(f"  Exceeded {MAX_VERTICES:,} vertices; retrying with resolution {resolution:.4g}...")
+        print(f"Subdividing to {resolution:.4g} mm max edge length...")
+        try:
+            subdivided = subdivide(model, resolution, max_vertices=MAX_VERTICES)
+        except TooManyVerticesError:
+            resolution *= 1.5
+            print(f"  Would exceed {MAX_VERTICES:,} vertices; retrying with resolution {resolution:.4g} mm...")
+            continue
+        model = subdivided
+        print(f"  {len(model.mesh.vertices):,} vertices, {len(model.mesh.faces):,} faces after subdivision")
+        break
 
     if args.dither:
         print("Sampling texture colors (Floyd-Steinberg dither)...")
