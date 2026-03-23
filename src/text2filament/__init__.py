@@ -50,10 +50,12 @@ def main() -> None:
         help="Color distance metric (default: cielab)",
     )
     parser.add_argument(
-        "--dither",
-        action="store_true",
-        help="Apply Floyd-Steinberg dithering in texture space before palette assignment",
+        "--no-dither",
+        dest="dither",
+        action="store_false",
+        help="Disable Floyd-Steinberg dithering (dithering is on by default)",
     )
+    parser.set_defaults(dither=True)
     parser.add_argument(
         "--debug-textures",
         action="store_true",
