@@ -62,22 +62,15 @@ func transformPoint(m mat4, p [3]float32) [3]float32 {
 	}
 }
 
-// isIdentityMatrix checks if a [16]float64 is the identity matrix.
 var identityMatrix64 = [16]float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
-var emptyMatrix64 = [16]float64{}
 
 // nodeMatrix builds the local transform matrix for a GLTF node.
 func nodeMatrix(node *gltf.Node) mat4 {
-	// Use MatrixOrDefault which handles the empty matrix case.
-	m := node.MatrixOrDefault()
-
-	// Check if it's an explicit non-identity matrix (i.e. not just default from TRS=zero).
-	// The GLTF spec says Matrix and TRS are mutually exclusive.
-	// node.MatrixOrDefault() returns identity if Matrix is zero (empty).
-	// If Matrix was explicitly set to something meaningful, use it.
-	// We detect "explicitly set" by checking if the raw Matrix != emptyMatrix.
-	if node.Matrix != emptyMatrix64 {
-		return mat4(m)
+	// GLTF spec: Matrix and TRS are mutually exclusive.
+	// qmuntal/gltf defaults Matrix to identity when not explicitly set.
+	// If Matrix is non-identity, use it directly. Otherwise compose from TRS.
+	if node.Matrix != identityMatrix64 {
+		return mat4(node.Matrix)
 	}
 
 	// Compose from TRS.
