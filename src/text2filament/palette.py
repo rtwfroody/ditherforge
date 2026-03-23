@@ -2,7 +2,7 @@
 
 import numpy as np
 from colorspacious import cspace_convert
-from PIL import ImageColor
+from PIL import Image, ImageColor
 
 
 def parse_palette(colors: list[str]) -> np.ndarray:
@@ -19,6 +19,33 @@ def parse_palette(colors: list[str]) -> np.ndarray:
             raise ValueError(f"Unknown color {c!r} — use a CSS name (e.g. 'red') or hex (e.g. '#FF0000')")
         result.append(list(rgb))
     return np.array(result, dtype=np.uint8)
+
+
+def compute_palette(texture: Image.Image, n: int, seed: int = 0) -> np.ndarray:
+    """
+    Find n dominant colors in the texture using k-means in CIELAB space.
+    Returns (n, 3) uint8 RGB array, sorted by CIELAB lightness descending.
+    """
+    from scipy.cluster.vq import kmeans  # type: ignore[import-untyped]
+
+    pixels = np.array(texture.convert("RGB")).reshape(-1, 3).astype(np.float32)
+
+    # Subsample for speed — 20k pixels is plenty for k-means
+    rng = np.random.default_rng(seed)
+    if len(pixels) > 20_000:
+        pixels = pixels[rng.choice(len(pixels), 20_000, replace=False)]
+
+    pixels_lab = cspace_convert(pixels, "sRGB255", "CIELab").astype(np.float32)
+
+    np.random.seed(seed)  # scipy.cluster.vq uses the global numpy RNG
+    centroids_lab, _ = kmeans(pixels_lab, n)
+
+    centroids_rgb = cspace_convert(centroids_lab, "CIELab", "sRGB255")
+    centroids_rgb = np.clip(np.round(centroids_rgb), 0, 255).astype(np.uint8)
+
+    # Sort by lightness descending (lightest first — usually the background)
+    order = np.argsort(centroids_lab[:, 0])[::-1]
+    return centroids_rgb[order]
 
 
 def assign_palette(

@@ -4,7 +4,7 @@ import os
 from .loader import load_glb
 from .subdivide import subdivide
 from .sample import sample_face_colors, sample_face_indices
-from .palette import parse_palette, assign_palette
+from .palette import parse_palette, assign_palette, compute_palette
 from .export_3mf import export_3mf, MAX_FILAMENTS
 from .export_obj import export_obj
 from .preview import export_preview
@@ -16,10 +16,17 @@ def main() -> None:
         description="Convert a textured GLB model to a multi-material 3MF file.",
     )
     parser.add_argument("input", help="Input .glb file")
-    parser.add_argument(
+    palette_group = parser.add_mutually_exclusive_group()
+    palette_group.add_argument(
         "--palette",
         default="white,red,green,blue",
-        help='Comma-separated colors — CSS names or hex, max 3 for .3mf (default: white,red,green,blue)',
+        help='Comma-separated colors — CSS names or hex (default: white,red,green,blue)',
+    )
+    palette_group.add_argument(
+        "--auto-palette",
+        type=int,
+        metavar="N",
+        help="Compute N dominant colors from the texture via k-means (mutually exclusive with --palette)",
     )
     parser.add_argument(
         "--resolution",
@@ -63,12 +70,6 @@ def main() -> None:
         print(f"Error: output must be .obj or .3mf, got {output_ext!r}")
         raise SystemExit(1)
 
-    palette_hex = [c.strip() for c in args.palette.split(",")]
-    if output_ext == ".3mf" and len(palette_hex) > MAX_FILAMENTS:
-        print(f"Error: 3MF palette has {len(palette_hex)} colors but max supported is {MAX_FILAMENTS}")
-        raise SystemExit(1)
-    palette_rgb = parse_palette(palette_hex)
-
     print(f"Loading {args.input}...")
     model = load_glb(args.input)
     extent = model.mesh.vertices.max(axis=0) - model.mesh.vertices.min(axis=0)
@@ -78,6 +79,20 @@ def main() -> None:
         f"texture {model.texture.size[0]}x{model.texture.size[1]} {model.texture.mode}, "
         f"extent {extent[0]:.3g} x {extent[1]:.3g} x {extent[2]:.3g}"
     )
+
+    if args.auto_palette:
+        n = args.auto_palette
+        print(f"Computing {n}-color palette from texture...")
+        palette_rgb = compute_palette(model.texture, n)
+        hex_strs = [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in palette_rgb]
+        print(f"  Palette: {','.join(hex_strs)}")
+    else:
+        palette_hex = [c.strip() for c in args.palette.split(",")]
+        palette_rgb = parse_palette(palette_hex)
+
+    if output_ext == ".3mf" and len(palette_rgb) > MAX_FILAMENTS:
+        print(f"Error: 3MF palette has {len(palette_rgb)} colors but max supported is {MAX_FILAMENTS}")
+        raise SystemExit(1)
 
     base = os.path.splitext(args.output)[0]
 
@@ -107,7 +122,8 @@ def main() -> None:
 
     if args.stats:
         print("  Face counts per material:")
-        for i, hex_color in enumerate(palette_hex):
+        for i, (r, g, b) in enumerate(palette_rgb):
+            hex_color = f"#{r:02X}{g:02X}{b:02X}"
             count = int((assignments == i).sum())
             print(f"    [{i}] {hex_color}: {count} faces")
 
