@@ -41,8 +41,8 @@ def main() -> None:
         default="m",
         help="Unit of GLB coordinates (default: m). Converted to mm on load.",
     )
-    parser.add_argument("--output", default="output.obj",
-                        help="Output file (.obj or .3mf, default: output.obj)")
+    parser.add_argument("--output", default="output.3mf",
+                        help="Output file (.obj or .3mf, default: output.3mf)")
     parser.add_argument(
         "--color-space",
         choices=["cielab", "rgb"],
