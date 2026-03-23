@@ -40,20 +40,33 @@ def _extract_mesh_and_texture(scene_or_mesh) -> tuple[trimesh.Trimesh, Image.Ima
     if not isinstance(scene_or_mesh, trimesh.Scene):
         raise ValueError(f"Unexpected trimesh type: {type(scene_or_mesh)}")
 
-    meshes = [g for g in scene_or_mesh.geometry.values()
-              if isinstance(g, trimesh.Trimesh)]
-    if not meshes:
+    # Build a list of (transform, geometry) pairs using original objects for
+    # texture identity comparison (copy() would change id()).
+    geom_pairs: list[tuple[np.ndarray, trimesh.Trimesh]] = []
+    for frame in scene_or_mesh.graph.nodes_geometry:
+        transform, geom_name = scene_or_mesh.graph[frame]
+        geom = scene_or_mesh.geometry[geom_name]
+        if isinstance(geom, trimesh.Trimesh):
+            geom_pairs.append((transform, geom))
+
+    if not geom_pairs:
         raise ValueError("GLB contains no triangle meshes")
 
-    textures = [_get_texture(m) for m in meshes]
-
-    # All meshes must share the same texture
+    textures = [_get_texture(g) for _, g in geom_pairs]
     unique = {id(t): t for t in textures}
     if len(unique) > 1:
         raise ValueError(
             f"GLB contains {len(unique)} different textures; "
             "only models with a single shared texture are supported."
         )
+
+    # Apply each node's world transform so scene-level scaling is baked in.
+    # apply_transform only affects vertex positions; UV coordinates are unaffected.
+    meshes = []
+    for transform, geom in geom_pairs:
+        m = geom.copy()
+        m.apply_transform(transform)
+        meshes.append(m)
 
     texture = next(iter(unique.values()))
 
@@ -63,6 +76,7 @@ def _extract_mesh_and_texture(scene_or_mesh) -> tuple[trimesh.Trimesh, Image.Ima
     # Concatenate all meshes (they share one texture, so UVs remain valid)
     combined = trimesh.util.concatenate(meshes)
     return combined, texture
+
 
 
 def _get_texture(mesh: trimesh.Trimesh) -> Image.Image:

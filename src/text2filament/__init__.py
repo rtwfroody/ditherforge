@@ -16,15 +16,15 @@ def main() -> None:
     parser.add_argument("input", help="Input .glb file")
     parser.add_argument(
         "--palette",
-        required=True,
-        help='Comma-separated hex colors, e.g. "#FFFFFF,#000000,#CC0000"',
+        default="#FF0000,#00FF00,#0000FF,#FFFFFF",
+        help='Comma-separated hex colors (default: red,green,blue,white)',
     )
     parser.add_argument(
         "--resolution",
         type=float,
-        default=1.0,
-        metavar="MM",
-        help="Target max edge length in mm (default: 1.0)",
+        default=0.025,
+        metavar="UNITS",
+        help="Target max edge length in model units (default: 0.025)",
     )
     parser.add_argument("--output", required=True, help="Output .3mf file")
     parser.add_argument(
@@ -50,13 +50,15 @@ def main() -> None:
 
     print(f"Loading {args.input}...")
     model = load_glb(args.input)
+    extent = model.mesh.vertices.max(axis=0) - model.mesh.vertices.min(axis=0)
     print(
         f"  {len(model.mesh.vertices)} vertices, "
         f"{len(model.mesh.faces)} faces, "
-        f"texture {model.texture.size[0]}x{model.texture.size[1]} {model.texture.mode}"
+        f"texture {model.texture.size[0]}x{model.texture.size[1]} {model.texture.mode}, "
+        f"extent {extent[0]:.3g} x {extent[1]:.3g} x {extent[2]:.3g}"
     )
 
-    print(f"Subdividing to {args.resolution}mm max edge length...")
+    print(f"Subdividing to {args.resolution:.4g} max edge length...")
     model = subdivide(model, args.resolution)
     print(f"  {len(model.mesh.vertices)} vertices, {len(model.mesh.faces)} faces after subdivision")
 
