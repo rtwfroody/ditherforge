@@ -8,22 +8,32 @@ from PIL import Image
 
 
 class LoadedModel:
-    def __init__(self, mesh: trimesh.Trimesh, uvs: np.ndarray, texture: Image.Image,
+    def __init__(self, mesh: trimesh.Trimesh, uvs: np.ndarray,
+                 textures: "list[Image.Image]",
+                 face_texture_idx: np.ndarray,
                  no_texture_mask: "np.ndarray | None" = None):
         # mesh: Trimesh with vertices and faces
         # uvs: (N, 2) float array, one UV per vertex (aligned to mesh.vertices)
-        # texture: PIL Image
-        # no_texture_mask: (F,) bool array; True = face had no texture, assign palette[0]
+        # textures: list of PIL Images, one per texture group
+        # face_texture_idx: (F,) int32 — index into textures for each face;
+        #                   len(textures) is used as sentinel for texture-less faces
+        # no_texture_mask: (F,) bool or None; True = face had no texture, assign palette[0]
         self.mesh = mesh
         self.uvs = uvs
-        self.texture = texture
+        self.textures = textures
+        self.face_texture_idx = face_texture_idx
         self.no_texture_mask = no_texture_mask
+
+    @property
+    def texture(self) -> Image.Image:
+        """Primary (first) texture, for single-texture backward compatibility."""
+        return self.textures[0]
 
 
 def load_glb(path: str) -> LoadedModel:
     scene_or_mesh = trimesh.load(path, process=False)
 
-    mesh, texture, no_texture_mask = _extract_mesh_and_texture(scene_or_mesh)
+    mesh, textures, face_texture_idx, no_texture_mask = _extract_mesh_and_texture(scene_or_mesh)
 
     if not isinstance(mesh.visual, trimesh.visual.TextureVisuals):
         assert mesh.visual is not None, "Mesh has no visual data"
@@ -33,19 +43,21 @@ def load_glb(path: str) -> LoadedModel:
         raise ValueError(f"Model has no UV coordinates: {path}")
 
     uvs = np.array(mesh.visual.uv, dtype=np.float32)
-    return LoadedModel(mesh=mesh, uvs=uvs, texture=texture, no_texture_mask=no_texture_mask)
+    return LoadedModel(mesh=mesh, uvs=uvs, textures=textures,
+                       face_texture_idx=face_texture_idx, no_texture_mask=no_texture_mask)
 
 
-def _extract_mesh_and_texture(scene_or_mesh) -> "tuple[trimesh.Trimesh, Image.Image, np.ndarray | None]":
+def _extract_mesh_and_texture(
+    scene_or_mesh,
+) -> "tuple[trimesh.Trimesh, list[Image.Image], np.ndarray, np.ndarray | None]":
     if isinstance(scene_or_mesh, trimesh.Trimesh):
         texture = _get_texture(scene_or_mesh)
-        return scene_or_mesh, texture, None
+        face_texture_idx = np.zeros(len(scene_or_mesh.faces), dtype=np.int32)
+        return scene_or_mesh, [texture], face_texture_idx, None
 
     if not isinstance(scene_or_mesh, trimesh.Scene):
         raise ValueError(f"Unexpected trimesh type: {type(scene_or_mesh)}")
 
-    # Build a list of (transform, geometry) pairs using original objects for
-    # texture identity comparison (copy() would change id()).
     geom_pairs: list[tuple[np.ndarray, trimesh.Trimesh]] = []
     for frame in scene_or_mesh.graph.nodes_geometry:
         transform, geom_name = scene_or_mesh.graph[frame]
@@ -72,24 +84,28 @@ def _extract_mesh_and_texture(scene_or_mesh) -> "tuple[trimesh.Trimesh, Image.Im
         print(f"  Warning: {len(untextured)} geometry/ies have no texture; "
               "their faces will use palette index 0.", file=sys.stderr)
 
-    unique = {id(tex): tex for _, _, tex in textured}
-    if len(unique) > 1:
-        raise ValueError(
-            f"GLB contains {len(unique)} different textures; "
-            "only models with a single shared texture are supported."
-        )
-    texture = next(iter(unique.values()))
+    # Build ordered texture list (unique, in order of first appearance).
+    seen: dict[int, int] = {}  # id(tex) → index
+    tex_list: list[Image.Image] = []
+    for _, _, tex in textured:
+        if id(tex) not in seen:
+            seen[id(tex)] = len(tex_list)
+            tex_list.append(tex)
 
-    # Build combined mesh by manually concatenating vertices, faces, and UVs.
-    # This avoids trimesh visual-type compatibility issues when mixing textured
-    # and texture-less meshes.
+    if len(tex_list) > 1:
+        print(f"  {len(tex_list)} textures found; sampling each geometry from its own texture.")
+
+    # N_tex is used as sentinel for texture-less faces in face_texture_idx.
+    N_tex = len(tex_list)
+
+    # Build the combined mesh by manually concatenating vertices, faces, and UVs.
     all_verts: list[np.ndarray] = []
     all_faces: list[np.ndarray] = []
     all_uvs: list[np.ndarray] = []
-    mask_parts: list[np.ndarray] = []
+    tex_idx_parts: list[np.ndarray] = []
     offset = 0
 
-    def _append(m: trimesh.Trimesh, is_textured: bool) -> None:
+    def _append(m: trimesh.Trimesh, tex_idx: int, is_textured: bool) -> None:
         nonlocal offset
         verts = np.array(m.vertices, dtype=np.float64)
         faces = np.array(m.faces, dtype=np.int64) + offset
@@ -98,38 +114,42 @@ def _extract_mesh_and_texture(scene_or_mesh) -> "tuple[trimesh.Trimesh, Image.Im
             vis = trimesh.visual.TextureVisuals()
         elif not isinstance(vis, trimesh.visual.TextureVisuals):
             vis = vis.to_texture()
-        if is_textured and vis.uv is not None:
-            uvs = np.array(vis.uv, dtype=np.float32)
-        else:
-            uvs = np.zeros((len(verts), 2), dtype=np.float32)
+        uvs = (np.array(vis.uv, dtype=np.float32)
+               if is_textured and vis.uv is not None
+               else np.zeros((len(verts), 2), dtype=np.float32))
         all_verts.append(verts)
         all_faces.append(faces)
         all_uvs.append(uvs)
-        mask_parts.append(np.full(len(faces), not is_textured, dtype=bool))
+        # Sentinel N_tex marks texture-less faces so subdivide can track them.
+        sentinel = tex_idx if is_textured else N_tex
+        tex_idx_parts.append(np.full(len(faces), sentinel, dtype=np.int32))
         offset += len(verts)
 
-    for transform, geom, _ in textured:
+    for transform, geom, tex in textured:
         m = geom.copy()
         m.apply_transform(transform)
-        _append(m, is_textured=True)
+        _append(m, seen[id(tex)], is_textured=True)
 
     for transform, geom in untextured:
         m = geom.copy()
         m.apply_transform(transform)
-        _append(m, is_textured=False)
+        _append(m, 0, is_textured=False)
 
     combined_verts = np.concatenate(all_verts, axis=0)
     combined_faces = np.concatenate(all_faces, axis=0)
     combined_uvs = np.concatenate(all_uvs, axis=0)
-    no_texture_mask = np.concatenate(mask_parts)
+    face_texture_idx = np.concatenate(tex_idx_parts)
 
     material = textured[0][1].visual.material  # type: ignore[union-attr]
     visual = trimesh.visual.TextureVisuals(uv=combined_uvs, material=material)
-    combined = trimesh.Trimesh(vertices=combined_verts, faces=combined_faces, visual=visual,
-                               process=False)
+    combined = trimesh.Trimesh(vertices=combined_verts, faces=combined_faces,
+                               visual=visual, process=False)
 
-    has_untextured = no_texture_mask.any()
-    return combined, texture, no_texture_mask if has_untextured else None
+    no_texture_mask: "np.ndarray | None" = None
+    if untextured:
+        no_texture_mask = face_texture_idx >= N_tex
+
+    return combined, tex_list, face_texture_idx, no_texture_mask
 
 
 def _get_texture(mesh: trimesh.Trimesh) -> Image.Image:
@@ -137,12 +157,10 @@ def _get_texture(mesh: trimesh.Trimesh) -> Image.Image:
     if mat is None:
         raise ValueError("Mesh has no material")
 
-    # PBRMaterial (GLB standard)
     tex = getattr(mat, "baseColorTexture", None)
     if tex is not None:
         return tex
 
-    # SimpleMaterial fallback
     tex = getattr(mat, "image", None)
     if tex is not None:
         return tex

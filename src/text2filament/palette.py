@@ -21,14 +21,19 @@ def parse_palette(colors: list[str]) -> np.ndarray:
     return np.array(result, dtype=np.uint8)
 
 
-def compute_palette(texture: Image.Image, n: int, seed: int = 0) -> np.ndarray:
+def compute_palette(textures: "Image.Image | list[Image.Image]", n: int, seed: int = 0) -> np.ndarray:
     """
-    Find n dominant colors in the texture using k-means in CIELAB space.
+    Find n dominant colors in the texture(s) using k-means in CIELAB space.
     Returns (n, 3) uint8 RGB array, sorted by CIELAB lightness descending.
+    Accepts a single PIL Image or a list of PIL Images.
     """
     from scipy.cluster.vq import kmeans  # type: ignore[import-untyped]
 
-    pixels = np.array(texture.convert("RGB")).reshape(-1, 3).astype(np.float32)
+    if isinstance(textures, list):
+        pixel_arrays = [np.array(t.convert("RGB")).reshape(-1, 3) for t in textures]
+        pixels = np.concatenate(pixel_arrays, axis=0).astype(np.float32)
+    else:
+        pixels = np.array(textures.convert("RGB")).reshape(-1, 3).astype(np.float32)
 
     # Subsample for speed — 20k pixels is plenty for k-means
     rng = np.random.default_rng(seed)

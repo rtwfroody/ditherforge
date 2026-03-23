@@ -83,7 +83,7 @@ def main() -> None:
     if args.auto_palette:
         n = args.auto_palette
         print(f"Computing {n}-color palette from texture...")
-        palette_rgb = compute_palette(model.texture, n)
+        palette_rgb = compute_palette(model.textures, n)
         hex_strs = [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in palette_rgb]
         print(f"  Palette: {','.join(hex_strs)}")
     else:
@@ -97,9 +97,11 @@ def main() -> None:
     base = os.path.splitext(args.output)[0]
 
     if args.debug_textures:
-        tex_path = base + "_texture.png"
-        model.texture.save(tex_path)
-        print(f"  Saved original texture → {tex_path}")
+        for i, tex in enumerate(model.textures):
+            suffix = f"_texture{i}.png" if len(model.textures) > 1 else "_texture.png"
+            tex_path = base + suffix
+            tex.save(tex_path)
+            print(f"  Saved original texture → {tex_path}")
 
     print(f"Subdividing to {args.resolution:.4g} max edge length...")
     model = subdivide(model, args.resolution)

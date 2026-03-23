@@ -12,16 +12,26 @@ MAX_ITER = 12
 def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
     """
     Subdivide mesh faces until no edge exceeds max_edge_mm.
-    UV coordinates are interpolated at each new midpoint vertex.
-    Returns a new LoadedModel (texture is passed through unchanged).
+    UV coordinates and face_texture_idx are interpolated at each new midpoint vertex.
+    Returns a new LoadedModel (textures are passed through unchanged).
     """
     current_verts = np.array(model.mesh.vertices, dtype=np.float64)
     current_faces = np.array(model.mesh.faces, dtype=np.int64)
     current_uvs = np.array(model.uvs, dtype=np.float32)
+    # Store face_texture_idx as a float32 per-vertex attribute so trimesh can
+    # interpolate it through subdivision.  Since no edge crosses a texture-group
+    # boundary, averaging is exact (both endpoints always carry the same value).
+    N_verts = len(current_verts)
+    face_tex_per_vertex = np.zeros((N_verts, 1), dtype=np.float32)
+    face_tex_per_vertex[current_faces.flatten(), 0] = (
+        np.repeat(model.face_texture_idx, 3).astype(np.float32)
+    )
+    current_face_tex = model.face_texture_idx.copy()
 
     done_verts: list[np.ndarray] = []
     done_faces: list[np.ndarray] = []
     done_uvs: list[np.ndarray] = []
+    done_face_tex: list[np.ndarray] = []
 
     for i in range(MAX_ITER + 1):
         # Per-face max edge length
@@ -39,6 +49,7 @@ def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
         done_verts.append(current_verts[unique])
         done_uvs.append(current_uvs[unique])
         done_faces.append(inverse.reshape(-1, 3))
+        done_face_tex.append(current_face_tex[face_ok])
 
         if not too_long.any():
             break
@@ -53,13 +64,20 @@ def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
         current_verts, current_faces, new_attrs = remesh.subdivide(  # type: ignore[misc]
             current_verts,
             current_faces[too_long],
-            vertex_attributes={"uv": current_uvs},
+            vertex_attributes={"uv": current_uvs, "tex_idx": face_tex_per_vertex},
         )
         current_uvs = new_attrs["uv"].astype(np.float32)  # type: ignore[index]
+        face_tex_per_vertex = new_attrs["tex_idx"].astype(np.float32)  # type: ignore[index]
+        # Recover per-face tex index from first vertex of each face (round to nearest int)
+        # face_tex_per_vertex is (N, 1)
+        current_face_tex = np.round(
+            face_tex_per_vertex[current_faces[:, 0], 0]
+        ).astype(np.int32)
 
     # Concatenate all done batches with offset vertex indices
     final_verts = np.vstack(done_verts)
     final_uvs = np.vstack(done_uvs)
+    final_face_tex = np.concatenate(done_face_tex)
 
     offsets = np.cumsum([0] + [len(v) for v in done_verts[:-1]])
     final_faces = np.vstack([
@@ -71,4 +89,16 @@ def subdivide(model: LoadedModel, max_edge_mm: float) -> LoadedModel:
         faces=final_faces,
         process=False,
     )
-    return LoadedModel(mesh=new_mesh, uvs=final_uvs, texture=model.texture)
+
+    N_tex = len(model.textures)
+    no_texture_mask: "np.ndarray | None" = None
+    if model.no_texture_mask is not None:
+        no_texture_mask = final_face_tex >= N_tex
+
+    return LoadedModel(
+        mesh=new_mesh,
+        uvs=final_uvs,
+        textures=model.textures,
+        face_texture_idx=final_face_tex,
+        no_texture_mask=no_texture_mask,
+    )
