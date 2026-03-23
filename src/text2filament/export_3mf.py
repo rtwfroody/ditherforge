@@ -134,7 +134,7 @@ def _build_project_settings(palette_rgb: np.ndarray) -> str:
     hex_colors = [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in palette_rgb]
     return json.dumps({
         "filament_colour": hex_colors,
-        "filament_type": ["PLA"] * len(hex_colors),
+        "filament_type": ["Generic PLA"] * len(hex_colors),
     }, indent=2)
 
 
