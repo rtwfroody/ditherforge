@@ -7,17 +7,23 @@ import numpy as np
 
 from .loader import LoadedModel
 
-MAX_FILAMENTS = 3  # BambuStudio/OrcaSlicer leaf-node encoding fits filament index in 2 bits
+MAX_FILAMENTS = 16
 
-# paint_color encoding: hex((filament_index) << 2), 1-based, single nibble.
-# Filament 1 → "4", filament 2 → "8", filament 3 → "C".
-# Filament 4+ would require "10", "14", … which OrcaSlicer parses nibble-by-nibble
-# and misinterprets — so we hard-limit to 3 filaments until we know the right encoding.
+# paint_color lookup table from OrcaSlicer/BambuStudio source (Model.cpp CONST_FILAMENTS).
+# Index 0 = no filament, index N = filament N (1-based).
+# Encoding is a nibble bitstream (LSB-first) where:
+#   state 1 ("4") = filament 1, state 2 ("8") = filament 2,
+#   state >= 3 uses 2 nibbles: first nibble = 0xC, second nibble = state - 3 → "0C","1C","2C",...
+_PAINT_COLORS = [
+    "",     "4",    "8",    "0C",   "1C",   "2C",   "3C",   "4C",
+    "5C",   "6C",   "7C",   "8C",   "9C",   "AC",   "BC",   "CC",   "DC",
+]
+
+
 def _paint_color(palette_index: int) -> str:
     filament = palette_index + 1
-    value = filament << 2
-    assert value <= 0xF, f"palette_index {palette_index} exceeds max filaments ({MAX_FILAMENTS})"
-    return format(value, "X")
+    assert 1 <= filament <= MAX_FILAMENTS, f"palette_index {palette_index} out of range (max {MAX_FILAMENTS})"
+    return _PAINT_COLORS[filament]
 
 
 _CONTENT_TYPES = """\
