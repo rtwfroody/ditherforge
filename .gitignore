@@ -1,10 +1,9 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# Build output
+text2filament
 
-# Virtual environments
-.venv
+# Output files
+*.3mf
+*.obj
+*.mtl
+*.ply
+*.png
