@@ -7,7 +7,6 @@ from .sample import sample_face_colors, sample_face_indices
 from .palette import parse_palette, assign_palette, compute_palette
 from .export_3mf import export_3mf, MAX_FILAMENTS
 from .export_obj import export_obj
-from .preview import export_preview
 
 
 def main() -> None:
@@ -57,16 +56,6 @@ def main() -> None:
     )
     parser.set_defaults(dither=True)
     parser.add_argument(
-        "--debug-textures",
-        action="store_true",
-        help="Save the original and dithered textures as PNGs next to the output file",
-    )
-    parser.add_argument(
-        "--preview",
-        action="store_true",
-        help="Export a colored PLY alongside the 3MF for visual inspection",
-    )
-    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print face count per material and mesh info",
@@ -103,15 +92,6 @@ def main() -> None:
         print(f"Error: 3MF palette has {len(palette_rgb)} colors but max supported is {MAX_FILAMENTS}")
         raise SystemExit(1)
 
-    base = os.path.splitext(args.output)[0]
-
-    if args.debug_textures:
-        for i, tex in enumerate(model.textures):
-            suffix = f"_texture{i}.png" if len(model.textures) > 1 else "_texture.png"
-            tex_path = base + suffix
-            tex.save(tex_path)
-            print(f"  Saved original texture → {tex_path}")
-
     MAX_VERTICES = 1_000_000
     resolution = args.resolution
     while True:
@@ -128,10 +108,7 @@ def main() -> None:
 
     if args.dither:
         print("Sampling texture colors (Floyd-Steinberg dither)...")
-        dithered_path = (base + "_dithered.png") if args.debug_textures else None
-        assignments = sample_face_indices(model, palette_rgb, save_path=dithered_path)
-        if dithered_path:
-            print(f"  Saved dithered texture → {dithered_path}")
+        assignments = sample_face_indices(model, palette_rgb)
     else:
         print("Sampling texture colors...")
         face_colors = sample_face_colors(model)
@@ -147,11 +124,6 @@ def main() -> None:
             hex_color = f"#{r:02X}{g:02X}{b:02X}"
             count = int((assignments == i).sum())
             print(f"    [{i}] {hex_color}: {count} faces")
-
-    if args.preview:
-        preview_path = args.output.replace(".3mf", "_preview.ply")
-        print(f"Writing preview to {preview_path}...")
-        export_preview(model, assignments, palette_rgb, preview_path)
 
     print(f"Exporting {args.output}...")
     if output_ext == ".3mf":
