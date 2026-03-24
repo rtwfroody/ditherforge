@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/alexflint/go-arg"
@@ -24,8 +25,10 @@ type Args struct {
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	ColorSpace  string  `arg:"--color-space" default:"cielab" help:"Color distance: cielab or rgb"`
-	NoDither    bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
-	Stats       bool    `arg:"--stats" help:"Print face counts per material"`
+	Printer      string `arg:"--printer" default:"snapmaker-u1" help:"Printer profile: snapmaker-u1, bambu-a1, bambu-p2s"`
+	OrcaProfiles string `arg:"--orca-profiles" help:"Path to OrcaSlicer profiles directory"`
+	NoDither     bool   `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
+	Stats        bool   `arg:"--stats" help:"Print face counts per material"`
 }
 
 func (Args) Description() string {
@@ -46,6 +49,38 @@ func run() error {
 	unitScale, ok := unitScales[args.GlbUnit]
 	if !ok {
 		return fmt.Errorf("invalid --glb-unit %q: must be one of m, dm, cm, mm", args.GlbUnit)
+	}
+
+	// Validate printer.
+	printerDef, ok := export3mf.Printers[args.Printer]
+	if !ok {
+		var names []string
+		for k := range export3mf.Printers {
+			names = append(names, k)
+		}
+		return fmt.Errorf("invalid --printer %q: must be one of %s", args.Printer, strings.Join(names, ", "))
+	}
+
+	// Find OrcaSlicer profiles directory.
+	profilesDir := args.OrcaProfiles
+	if profilesDir == "" {
+		// Search common locations.
+		home, _ := os.UserHomeDir()
+		candidates := []string{
+			filepath.Join(home, "programs", "OrcaSlicer", "resources", "profiles"),
+			"/usr/share/OrcaSlicer/resources/profiles",
+			"/opt/OrcaSlicer/resources/profiles",
+		}
+		for _, c := range candidates {
+			if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+				profilesDir = c
+				break
+			}
+		}
+		if profilesDir == "" {
+			fmt.Println("  Warning: OrcaSlicer profiles not found; 3MF will have minimal printer settings.")
+			fmt.Println("  Use --orca-profiles to specify the path.")
+		}
 	}
 
 	// Validate output extension.
@@ -165,7 +200,7 @@ func run() error {
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(model, assignments, args.Output, paletteRGB); err != nil {
+	if err := export3mf.Export(model, assignments, args.Output, paletteRGB, printerDef, profilesDir); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")

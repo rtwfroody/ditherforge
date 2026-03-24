@@ -15,6 +15,56 @@ import (
 // MaxFilaments is the maximum number of palette colors supported by 3MF export.
 const MaxFilaments = 16
 
+// PrinterDef maps a CLI shorthand to its OrcaSlicer vendor directory and
+// machine profile name (the JSON file stem under <vendor>/machine/).
+type PrinterDef struct {
+	Vendor      string // e.g. "Snapmaker", "BBL"
+	ProfileName string // e.g. "Snapmaker U1 (0.4 nozzle)"
+}
+
+// Printers maps CLI shorthand names to their OrcaSlicer profile info.
+var Printers = map[string]PrinterDef{
+	"snapmaker-u1": {Vendor: "Snapmaker", ProfileName: "Snapmaker U1 (0.4 nozzle)"},
+	"bambu-a1":     {Vendor: "BBL", ProfileName: "Bambu Lab A1 0.4 nozzle"},
+	"bambu-p2s":    {Vendor: "BBL", ProfileName: "Bambu Lab P2S 0.4 nozzle"},
+}
+
+// loadMachineProfile reads an OrcaSlicer machine profile JSON and resolves its
+// inheritance chain, returning the flattened key-value map.
+func loadMachineProfile(profilesDir string, vendor string, name string) (map[string]interface{}, error) {
+	machineDir := fmt.Sprintf("%s/%s/machine", profilesDir, vendor)
+	path := fmt.Sprintf("%s/%s.json", machineDir, name)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading machine profile %q: %w", path, err)
+	}
+
+	var profile map[string]interface{}
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("parsing machine profile %q: %w", path, err)
+	}
+
+	// Resolve inheritance.
+	result := map[string]interface{}{}
+	if parent, ok := profile["inherits"].(string); ok && parent != "" {
+		parentResult, err := loadMachineProfile(profilesDir, vendor, parent)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range parentResult {
+			result[k] = v
+		}
+	}
+
+	// Child overrides parent.
+	for k, v := range profile {
+		result[k] = v
+	}
+
+	return result, nil
+}
+
 // paint_color lookup table from OrcaSlicer/BambuStudio source (Model.cpp CONST_FILAMENTS).
 // Index 0 = no filament, index N = filament N (1-based).
 var paintColors = []string{
@@ -50,7 +100,7 @@ const rels = `<?xml version="1.0" encoding="UTF-8"?>
 </Relationships>`
 
 // Export writes the model and face assignments to a 3MF file.
-func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8) error {
+func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, printerDef PrinterDef, profilesDir string) error {
 	outerUUID := newUUID()
 	meshUUID := newUUID()
 	instUUID := newUUID()
@@ -121,7 +171,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 		return err
 	}
 	if paletteRGB != nil {
-		ps, err := buildProjectSettings(paletteRGB)
+		ps, err := buildProjectSettings(paletteRGB, printerDef, profilesDir)
 		if err != nil {
 			return err
 		}
@@ -171,7 +221,32 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	return sb.String(), nil
 }
 
-func buildProjectSettings(paletteRGB [][3]uint8) (string, error) {
+func buildProjectSettings(paletteRGB [][3]uint8, printerDef PrinterDef, profilesDir string) (string, error) {
+	// Start with the full machine profile from OrcaSlicer.
+	data := map[string]interface{}{}
+	if profilesDir != "" {
+		machineProfile, err := loadMachineProfile(profilesDir, printerDef.Vendor, printerDef.ProfileName)
+		if err != nil {
+			return "", fmt.Errorf("loading machine profile: %w", err)
+		}
+		for k, v := range machineProfile {
+			data[k] = v
+		}
+		// Remove internal-only fields.
+		delete(data, "type")
+		delete(data, "from")
+		delete(data, "instantiation")
+		delete(data, "inherits")
+		delete(data, "setting_id")
+		delete(data, "name")
+	}
+
+	// Set printer identification.
+	data["name"] = "project_settings"
+	data["printer_settings_id"] = printerDef.ProfileName
+	data["printer_technology"] = "FFF"
+
+	// Set filament info.
 	hexColors := make([]string, len(paletteRGB))
 	for i, p := range paletteRGB {
 		hexColors[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
@@ -180,11 +255,9 @@ func buildProjectSettings(paletteRGB [][3]uint8) (string, error) {
 	for i := range filamentTypes {
 		filamentTypes[i] = "Generic PLA"
 	}
+	data["filament_colour"] = hexColors
+	data["filament_type"] = filamentTypes
 
-	data := map[string]interface{}{
-		"filament_colour": hexColors,
-		"filament_type":   filamentTypes,
-	}
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return "", err
