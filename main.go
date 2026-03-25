@@ -9,6 +9,7 @@ import (
 
 	"github.com/alexflint/go-arg"
 	"github.com/rtwfroody/text2filament/internal/export3mf"
+	"github.com/rtwfroody/text2filament/internal/hexvoxel"
 	"github.com/rtwfroody/text2filament/internal/loader"
 	"github.com/rtwfroody/text2filament/internal/palette"
 	"github.com/rtwfroody/text2filament/internal/sample"
@@ -25,10 +26,13 @@ type Args struct {
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	ColorSpace  string  `arg:"--color-space" default:"cielab" help:"Color distance: cielab or rgb"`
-	Printer      string `arg:"--printer" default:"snapmaker-u1" help:"Printer profile: snapmaker-u1, bambu-a1, bambu-p2s"`
-	OrcaProfiles string `arg:"--orca-profiles" help:"Path to OrcaSlicer profiles directory"`
-	NoDither     bool   `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
-	Stats        bool   `arg:"--stats" help:"Print face counts per material"`
+	Mode           string  `arg:"--mode" default:"subdivide" help:"Remesh mode: subdivide or hexvoxel"`
+	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
+	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
+	Printer        string  `arg:"--printer" default:"snapmaker-u1" help:"Printer profile: snapmaker-u1, bambu-a1, bambu-p2s"`
+	OrcaProfiles   string  `arg:"--orca-profiles" help:"Path to OrcaSlicer profiles directory"`
+	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
+	Stats          bool    `arg:"--stats" help:"Print face counts per material"`
 }
 
 func (Args) Description() string {
@@ -126,6 +130,14 @@ func run() error {
 
 	if len(paletteRGB) > export3mf.MaxFilaments {
 		return fmt.Errorf("palette has %d colors but max supported is %d", len(paletteRGB), export3mf.MaxFilaments)
+	}
+
+	// Hexvoxel mode: separate code path.
+	if args.Mode == "hexvoxel" {
+		return runHexvoxel(args, model, paletteRGB, printerDef, profilesDir)
+	}
+	if args.Mode != "subdivide" {
+		return fmt.Errorf("invalid --mode %q: must be subdivide or hexvoxel", args.Mode)
 	}
 
 	// Subdivide.
@@ -229,6 +241,41 @@ func assignRGB(faceColors [][3]uint8, pal [][3]uint8) []int32 {
 		assignments[fi] = int32(bestIdx)
 	}
 	return assignments
+}
+
+func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8, printerDef export3mf.PrinterDef, profilesDir string) error {
+	cfg := hexvoxel.Config{
+		NozzleDiameter: args.NozzleDiameter,
+		LayerHeight:    args.LayerHeight,
+	}
+
+	fmt.Println("Generating hexagonal voxel shell...")
+	hexModel, assignments, err := hexvoxel.Remesh(model, paletteRGB, cfg, !args.NoDither)
+	if err != nil {
+		return fmt.Errorf("hexvoxel remesh: %w", err)
+	}
+	fmt.Printf("  %d vertices, %d faces\n", len(hexModel.Vertices), len(hexModel.Faces))
+
+	if args.Stats {
+		fmt.Println("  Face counts per material:")
+		for i, p := range paletteRGB {
+			hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+			count := 0
+			for _, a := range assignments {
+				if int(a) == i {
+					count++
+				}
+			}
+			fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
+		}
+	}
+
+	fmt.Printf("Exporting %s...\n", args.Output)
+	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB, printerDef, profilesDir); err != nil {
+		return fmt.Errorf("exporting 3MF: %w", err)
+	}
+	fmt.Println("Done.")
+	return nil
 }
 
 func main() {
