@@ -362,13 +362,11 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	// 2. Spatial index.
 	si := newSpatialIndex(model, nozzle*2)
 
-	// 3. Surface detection: for each hex column, find triangles whose XY bbox
-	// overlaps the hex's XY bbox. The hex circumradius (center-to-vertex) is
-	// `size`; any triangle with a point within that distance of the hex center
-	// could intersect the hex footprint.
+	// 3. Ray-parity voxelization: cast a Z-ray through each hex column center,
+	// collect exact surface intersections, sort by Z, then fill layers between
+	// entering/exiting pairs (odd-even parity → inside/outside).
 	type columnKey struct{ col, row int }
-	columnHits := make(map[columnKey][]surfaceHit)
-	proximitySq := size * size // hex circumradius squared
+	var hexes []activeHex
 
 	for col := 0; col < nCols; col++ {
 		cx := minV[0] + float32(col)*colStep
@@ -378,25 +376,60 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 				cy += rowStep / 2
 			}
 
-			cands := si.candidatesRadius(cx, cy, size)
+			// Find all Z-ray intersections with the mesh at (cx, cy).
+			cands := si.candidates(cx, cy)
+			var hits []surfaceHit
 			for _, ti := range cands {
 				f := model.Faces[ti]
 				v0 := model.Vertices[f[0]]
 				v1 := model.Vertices[f[1]]
 				v2 := model.Vertices[f[2]]
 
-				bary, distSq := closestPointOnTriangleXY(cx, cy, v0, v1, v2)
-				if distSq > proximitySq {
+				inside, bary := pointInTriangleXY(cx, cy, v0, v1, v2)
+				if !inside {
 					continue
 				}
 
-				// The triangle spans a Z range. Generate a hit for every
-				// layer the triangle covers, not just the single Z at the
-				// closest XY point. This fills in vertical/steep walls.
-				triZMin := minf(v0[2], minf(v1[2], v2[2]))
-				triZMax := maxf(v0[2], maxf(v1[2], v2[2]))
-				layerMin := int(math.Floor(float64(triZMin-minV[2]) / float64(layerH)))
-				layerMax := int(math.Floor(float64(triZMax-minV[2]) / float64(layerH)))
+				z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
+				hits = append(hits, surfaceHit{
+					z:      z,
+					triIdx: int(ti),
+					bary:   bary,
+					texIdx: model.FaceTextureIdx[ti],
+				})
+			}
+
+			if len(hits) == 0 {
+				continue
+			}
+
+			// Sort hits by Z.
+			sort.Slice(hits, func(i, j int) bool { return hits[i].z < hits[j].z })
+
+			// Deduplicate near-coincident hits (within half a layer height).
+			deduped := hits[:1]
+			for i := 1; i < len(hits); i++ {
+				if hits[i].z-deduped[len(deduped)-1].z > layerH/2 {
+					deduped = append(deduped, hits[i])
+				}
+			}
+
+			// If odd number of hits, discard the last one to keep pairs.
+			if len(deduped)%2 != 0 {
+				deduped = deduped[:len(deduped)-1]
+			}
+
+			// Fill layers between entering/exiting pairs.
+			key := columnKey{col, row}
+			_ = key
+			for p := 0; p+1 < len(deduped); p += 2 {
+				enterZ := deduped[p].z
+				exitZ := deduped[p+1].z
+				enterHit := deduped[p]
+				exitHit := deduped[p+1]
+
+				layerMin := int(math.Ceil(float64(enterZ-minV[2]) / float64(layerH)))
+				layerMax := int(math.Floor(float64(exitZ-minV[2]) / float64(layerH)))
 				if layerMin < 0 {
 					layerMin = 0
 				}
@@ -404,50 +437,23 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 					layerMax = nLayers - 1
 				}
 
-				key := columnKey{col, row}
 				for layer := layerMin; layer <= layerMax; layer++ {
-					columnHits[key] = append(columnHits[key], surfaceHit{
-						z:      minV[2] + float32(layer)*layerH,
-						triIdx: int(ti),
-						bary:   bary,
-						texIdx: model.FaceTextureIdx[ti],
+					cz := minV[2] + float32(layer)*layerH
+
+					// Use the closer surface hit for color sampling.
+					hit := enterHit
+					if cz-enterZ > exitZ-cz {
+						hit = exitHit
+					}
+					color := sampleHitColor(model, hit)
+
+					hexes = append(hexes, activeHex{
+						col: col, row: row, layer: layer,
+						cx: cx, cy: cy, cz: cz,
+						color: color,
 					})
 				}
 			}
-		}
-	}
-
-	fmt.Printf("  %d hex columns with surface hits\n", len(columnHits))
-
-	// 4. Mark active hex prisms and sample colors.
-	var hexes []activeHex
-
-	for key, hits := range columnHits {
-		cx := minV[0] + float32(key.col)*colStep
-		cy := minV[1] + float32(key.row)*rowStep
-		if key.col%2 == 1 {
-			cy += rowStep / 2
-		}
-
-		for _, hit := range hits {
-			layer := int(math.Round(float64(hit.z-minV[2]) / float64(layerH)))
-			if layer < 0 {
-				layer = 0
-			}
-			if layer >= nLayers {
-				layer = nLayers - 1
-			}
-
-			cz := minV[2] + float32(layer)*layerH
-
-			// Sample texture color.
-			col := sampleHitColor(model, hit)
-
-			hexes = append(hexes, activeHex{
-				col: key.col, row: key.row, layer: layer,
-				cx: cx, cy: cy, cz: cz,
-				color: col,
-			})
 		}
 	}
 
@@ -459,8 +465,11 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 		return nil, nil, fmt.Errorf("no active hex prisms found; model may be too small or outside bounds")
 	}
 
+	// Build occupancy set for neighbor lookups.
+	occupied := buildOccupancy(hexes)
+
 	// Count isolated hexes (no direct neighbors) as a diagnostic.
-	isolated := countIsolatedHexes(hexes)
+	isolated := countIsolatedHexes(hexes, occupied)
 	fmt.Printf("  %d isolated hexes (no neighbors)\n", isolated)
 
 	// 5. Palette assignment / dithering.
@@ -475,8 +484,8 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 		assignments = palette.AssignPalette(hexColors, pal)
 	}
 
-	// 6. Triangulate hex prisms and expand assignments.
-	outModel, faceAssignments := triangulateHexes(hexes, assignments, size, layerH, model.Textures)
+	// 6. Triangulate hex prisms — only emit exposed faces.
+	outModel, faceAssignments := triangulateHexes(hexes, assignments, size, layerH, model.Textures, occupied)
 
 	return outModel, faceAssignments, nil
 }
@@ -497,35 +506,56 @@ func sampleHitColor(model *loader.LoadedModel, hit surfaceHit) [3]uint8 {
 	return bilinearSample(model.Textures[hit.texIdx], u, v)
 }
 
-// countIsolatedHexes counts hexes that have no direct neighbors (same layer,
-// adjacent hex column, or same column ±1 layer).
-func countIsolatedHexes(hexes []activeHex) int {
-	type hexKey struct{ col, row, layer int }
+type hexKey struct{ col, row, layer int }
+
+// buildOccupancy creates a set of all occupied hex positions.
+func buildOccupancy(hexes []activeHex) map[hexKey]struct{} {
 	occupied := make(map[hexKey]struct{}, len(hexes))
 	for _, h := range hexes {
 		occupied[hexKey{h.col, h.row, h.layer}] = struct{}{}
 	}
+	return occupied
+}
 
+// lateralNeighborOffsets maps side index (0–5) to the (dcol, drow) of the
+// hex grid neighbor that shares that side wall.
+// Indexed by [colParity][sideIndex] → [2]int{dcol, drow}.
+// Derived from flat-top hex geometry with odd-column +Y offset.
+var lateralNeighborOffsets = [2][6][2]int{
+	// Even column: side → neighbor
+	{
+		0: {+1, 0},  // side 0 (30°)
+		1: {0, +1},  // side 1 (90°)
+		2: {-1, 0},  // side 2 (150°)
+		3: {-1, -1}, // side 3 (-150°)
+		4: {0, -1},  // side 4 (-90°)
+		5: {+1, -1}, // side 5 (-30°)
+	},
+	// Odd column: side → neighbor
+	{
+		0: {+1, +1}, // side 0 (30°)
+		1: {0, +1},  // side 1 (90°)
+		2: {-1, +1}, // side 2 (150°)
+		3: {-1, 0},  // side 3 (-150°)
+		4: {0, -1},  // side 4 (-90°)
+		5: {+1, 0},  // side 5 (-30°)
+	},
+}
+
+// countIsolatedHexes counts hexes that have no direct neighbors.
+func countIsolatedHexes(hexes []activeHex, occupied map[hexKey]struct{}) int {
 	isolated := 0
 	for _, h := range hexes {
 		hasNeighbor := false
-		// Same-layer hex neighbors. For a hex grid with odd-column offset:
-		// Even column neighbors: (±1, 0), (0, ±1), (-1,-1), (+1,-1)
-		// Odd column neighbors:  (±1, 0), (0, ±1), (-1,+1), (+1,+1)
-		var neighborOffsets [][2]int
-		if h.col%2 == 0 {
-			neighborOffsets = [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}}
-		} else {
-			neighborOffsets = [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, 1}, {1, 1}}
-		}
-		for _, off := range neighborOffsets {
+		parity := h.col & 1
+		for side := 0; side < 6; side++ {
+			off := lateralNeighborOffsets[parity][side]
 			if _, ok := occupied[hexKey{h.col + off[0], h.row + off[1], h.layer}]; ok {
 				hasNeighbor = true
 				break
 			}
 		}
 		if !hasNeighbor {
-			// Also check above/below.
 			if _, ok := occupied[hexKey{h.col, h.row, h.layer - 1}]; ok {
 				hasNeighbor = true
 			} else if _, ok := occupied[hexKey{h.col, h.row, h.layer + 1}]; ok {
@@ -540,7 +570,6 @@ func countIsolatedHexes(hexes []activeHex) int {
 }
 
 func deduplicateHexes(hexes []activeHex) []activeHex {
-	type hexKey struct{ col, row, layer int }
 	seen := make(map[hexKey]int, len(hexes))
 	var result []activeHex
 
@@ -615,17 +644,14 @@ func ditherHexes(hexes []activeHex, pal [][3]uint8) []int32 {
 }
 
 // triangulateHexes generates triangle mesh geometry for all hex prisms.
+// Only emits faces where the adjacent hex neighbor is absent (exposed faces).
 // Returns a LoadedModel and per-face palette assignments.
-func triangulateHexes(hexes []activeHex, hexAssignments []int32, size, layerH float32, textures []image.Image) (*loader.LoadedModel, []int32) {
-	const facesPerHex = 24
+func triangulateHexes(hexes []activeHex, hexAssignments []int32, size, layerH float32, textures []image.Image, occupied map[hexKey]struct{}) (*loader.LoadedModel, []int32) {
 	const vertsPerHex = 14
 
-	totalVerts := len(hexes) * vertsPerHex
-	totalFaces := len(hexes) * facesPerHex
-
-	verts := make([][3]float32, 0, totalVerts)
-	faces := make([][3]uint32, 0, totalFaces)
-	faceAssignments := make([]int32, 0, totalFaces)
+	verts := make([][3]float32, 0, len(hexes)*vertsPerHex)
+	faces := make([][3]uint32, 0, len(hexes)*12) // rough estimate
+	faceAssignments := make([]int32, 0, len(hexes)*12)
 
 	// Precompute hex vertex offsets (flat-top hexagon).
 	var hexOffsetsX, hexOffsetsY [6]float32
@@ -640,6 +666,7 @@ func triangulateHexes(hexes []activeHex, hexAssignments []int32, size, layerH fl
 	for hi, h := range hexes {
 		base := uint32(len(verts))
 		assignment := hexAssignments[hi]
+		parity := h.col & 1
 
 		// Generate 14 vertices: 6 top + 6 bottom + top center + bottom center.
 		zTop := h.cz + halfH
@@ -657,27 +684,35 @@ func triangulateHexes(hexes []activeHex, hexAssignments []int32, size, layerH fl
 		tc := base + 12 // top center
 		bc := base + 13 // bottom center
 
-		// Top hexagon (CCW from above → outward normal is +Z).
-		for i := 0; i < 6; i++ {
-			j := (i + 1) % 6
-			faces = append(faces, [3]uint32{tc, base + uint32(i), base + uint32(j)})
-			faceAssignments = append(faceAssignments, assignment)
+		// Top hexagon: only if no hex above.
+		if _, ok := occupied[hexKey{h.col, h.row, h.layer + 1}]; !ok {
+			for i := 0; i < 6; i++ {
+				j := (i + 1) % 6
+				faces = append(faces, [3]uint32{tc, base + uint32(i), base + uint32(j)})
+				faceAssignments = append(faceAssignments, assignment)
+			}
 		}
 
-		// Bottom hexagon (CW from above → outward normal is -Z).
-		for i := 0; i < 6; i++ {
-			j := (i + 1) % 6
-			faces = append(faces, [3]uint32{bc, base + 6 + uint32(j), base + 6 + uint32(i)})
-			faceAssignments = append(faceAssignments, assignment)
+		// Bottom hexagon: only if no hex below.
+		if _, ok := occupied[hexKey{h.col, h.row, h.layer - 1}]; !ok {
+			for i := 0; i < 6; i++ {
+				j := (i + 1) % 6
+				faces = append(faces, [3]uint32{bc, base + 6 + uint32(j), base + 6 + uint32(i)})
+				faceAssignments = append(faceAssignments, assignment)
+			}
 		}
 
-		// Side rectangles.
-		for i := 0; i < 6; i++ {
-			j := (i + 1) % 6
-			ti := base + uint32(i)      // top vertex i
-			tj := base + uint32(j)      // top vertex j
-			bi := base + 6 + uint32(i)  // bottom vertex i
-			bj := base + 6 + uint32(j)  // bottom vertex j
+		// Side rectangles: only if no lateral neighbor on that side.
+		for side := 0; side < 6; side++ {
+			off := lateralNeighborOffsets[parity][side]
+			if _, ok := occupied[hexKey{h.col + off[0], h.row + off[1], h.layer}]; ok {
+				continue // neighbor present, skip this side
+			}
+			j := (side + 1) % 6
+			ti := base + uint32(side)     // top vertex i
+			tj := base + uint32(j)        // top vertex j
+			bi := base + 6 + uint32(side) // bottom vertex i
+			bj := base + 6 + uint32(j)    // bottom vertex j
 			faces = append(faces, [3]uint32{ti, bi, bj})
 			faceAssignments = append(faceAssignments, assignment)
 			faces = append(faces, [3]uint32{ti, bj, tj})
