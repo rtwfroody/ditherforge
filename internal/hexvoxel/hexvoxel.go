@@ -755,6 +755,10 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 					}
 					triVerts[k] = getVertex(interp)
 				}
+				// Skip degenerate triangles (two or more vertices at the same snapped position).
+				if triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[0] == triVerts[2] {
+					continue
+				}
 				outFaces = append(outFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
 				outAssignments = append(outAssignments, assignment)
 			}
