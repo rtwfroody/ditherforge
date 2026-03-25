@@ -61,17 +61,20 @@ func edgeLen(verts [][3]float32, a, b uint32) float32 {
 
 // Subdivide adaptively subdivides the mesh until no edge exceeds maxEdgeMM,
 // using longest-edge bisection. Returns a tree of Nodes (one root per original
-// face), plus the shared vertex and UV arrays. The tree is used by Leaves (to
-// build a flat model for color sampling) and Merge (to collapse uniform
-// subtrees after color assignment).
+// face), plus the shared vertex and UV arrays, and a map of every edge that was
+// split to its midpoint vertex index. The tree is used by Leaves (to build a
+// flat model for color sampling) and Merge (to collapse uniform subtrees after
+// color assignment). The edgeMids map is used by RepairTJunctions.
 func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 	roots []*Node,
 	verts [][3]float32,
 	uvs [][2]float32,
+	edgeMids map[[2]uint32]uint32,
 	err error,
 ) {
 	verts = append([][3]float32(nil), model.Vertices...)
 	uvs = append([][2]float32(nil), model.UVs...)
+	edgeMids = make(map[[2]uint32]uint32)
 
 	// Create one root node per original face.
 	roots = make([]*Node, len(model.Faces))
@@ -87,24 +90,17 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 	faceTex := append([]int32(nil), model.FaceTextureIdx...)
 
 	for iter := 0; iter <= MaxIter; iter++ {
-		// Partition faces into ok (all edges short) and too-long.
-		var longNodes []*Node
-		var longFaces [][3]uint32
-		var longFaceTex []int32
-
-		for fi, face := range faces {
-			tooLong := edgeLen(verts, face[0], face[1]) > maxEdgeMM ||
+		// Identify faces with at least one edge exceeding maxEdgeMM.
+		hasLong := false
+		for _, face := range faces {
+			if edgeLen(verts, face[0], face[1]) > maxEdgeMM ||
 				edgeLen(verts, face[1], face[2]) > maxEdgeMM ||
-				edgeLen(verts, face[2], face[0]) > maxEdgeMM
-			if tooLong {
-				longNodes = append(longNodes, currentNodes[fi])
-				longFaces = append(longFaces, face)
-				longFaceTex = append(longFaceTex, faceTex[fi])
+				edgeLen(verts, face[2], face[0]) > maxEdgeMM {
+				hasLong = true
+				break
 			}
-			// ok faces: their nodes are already leaves (no Children), nothing to do.
 		}
-
-		if len(longFaces) == 0 {
+		if !hasLong {
 			break
 		}
 		if iter >= MaxIter {
@@ -113,8 +109,13 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 		}
 
 		// Mark only the longest edge of each too-long face.
-		markedEdges := make(map[[2]uint32]bool, len(longFaces))
-		for _, face := range longFaces {
+		markedEdges := make(map[[2]uint32]bool, len(faces))
+		for _, face := range faces {
+			if edgeLen(verts, face[0], face[1]) <= maxEdgeMM &&
+				edgeLen(verts, face[1], face[2]) <= maxEdgeMM &&
+				edgeLen(verts, face[2], face[0]) <= maxEdgeMM {
+				continue
+			}
 			var bestLen float32
 			var bestEdge [2]uint32
 			for e := 0; e < 3; e++ {
@@ -130,7 +131,7 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 		// Budget check: each marked edge produces exactly one new vertex.
 		estimated := len(verts) + len(markedEdges)
 		if estimated > maxVertices {
-			return nil, nil, nil, &TooManyVerticesError{Estimated: estimated}
+			return nil, nil, nil, nil, &TooManyVerticesError{Estimated: estimated}
 		}
 
 		// Create midpoint vertices for each marked edge.
@@ -150,10 +151,16 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 			})
 		}
 
-		// Rebuild too-long faces into children and link them to the tree.
-		newNodes := make([]*Node, 0, len(longFaces)*2)
-		newFaces := make([][3]uint32, 0, len(longFaces)*2)
-		newFaceTex := make([]int32, 0, len(longFaceTex)*2)
+		// Record midpoints for T-junction repair.
+		for e, mid := range edgeToMid {
+			edgeMids[e] = mid
+		}
+
+		// Split ALL faces that have at least one marked edge (conforming
+		// subdivision). Faces with no marked edges are done.
+		newNodes := make([]*Node, 0, len(faces)*2)
+		newFaces := make([][3]uint32, 0, len(faces)*2)
+		newFaceTex := make([]int32, 0, len(faces)*2)
 
 		addChild := func(parent *Node, face [3]uint32, tex int32) {
 			child := &Node{Face: face, TexIdx: tex}
@@ -163,9 +170,9 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 			newFaceTex = append(newFaceTex, tex)
 		}
 
-		for fi, face := range longFaces {
-			tex := longFaceTex[fi]
-			parent := longNodes[fi]
+		for fi, face := range faces {
+			tex := faceTex[fi]
+			parent := currentNodes[fi]
 			edges := [3][2]uint32{
 				makeEdge(face[0], face[1]),
 				makeEdge(face[1], face[2]),
@@ -179,6 +186,10 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 					splitMask[e] = true
 					splitCount++
 				}
+			}
+
+			if splitCount == 0 {
+				continue
 			}
 
 			switch splitCount {
@@ -224,7 +235,7 @@ func Subdivide(model *loader.LoadedModel, maxEdgeMM float32, maxVertices int) (
 		currentNodes = newNodes
 	}
 
-	return roots, verts, uvs, nil
+	return roots, verts, uvs, edgeMids, nil
 }
 
 // Leaves flattens all leaf nodes of the subdivision tree into a LoadedModel
@@ -297,6 +308,87 @@ func collectNode(n *Node, leafColors []int32, idx *int, result *[]FaceColor) int
 	}
 
 	return uniform
+}
+
+// RepairTJunctions splits any merged face whose edge has a midpoint vertex that
+// is still referenced by another face. This eliminates T-junctions created when
+// merge collapses a subdivided region but its neighbor remains subdivided.
+// Iterates until no T-junctions remain (handles multi-level subdivision).
+func RepairTJunctions(mergedFaces []FaceColor, edgeMids map[[2]uint32]uint32) []FaceColor {
+	faces := mergedFaces
+	for {
+		// Build set of vertices used by current faces.
+		usedVerts := make(map[uint32]bool, len(faces)*3)
+		for _, fc := range faces {
+			usedVerts[fc.Face[0]] = true
+			usedVerts[fc.Face[1]] = true
+			usedVerts[fc.Face[2]] = true
+		}
+
+		changed := false
+		result := make([]FaceColor, 0, len(faces))
+		for _, fc := range faces {
+			var hasMid [3]bool
+			var mids [3]uint32
+			splitCount := 0
+			for e := 0; e < 3; e++ {
+				edge := makeEdge(fc.Face[e], fc.Face[(e+1)%3])
+				if mid, ok := edgeMids[edge]; ok && usedVerts[mid] {
+					hasMid[e] = true
+					mids[e] = mid
+					splitCount++
+				}
+			}
+
+			if splitCount == 0 {
+				result = append(result, fc)
+				continue
+			}
+
+			changed = true
+			f := fc.Face
+
+			switch splitCount {
+			case 1:
+				for e := 0; e < 3; e++ {
+					if hasMid[e] {
+						va, vb, vc := f[e], f[(e+1)%3], f[(e+2)%3]
+						result = append(result, FaceColor{[3]uint32{va, mids[e], vc}, fc.TexIdx, fc.Color})
+						result = append(result, FaceColor{[3]uint32{mids[e], vb, vc}, fc.TexIdx, fc.Color})
+						break
+					}
+				}
+			case 2:
+				for e := 0; e < 3; e++ {
+					if !hasMid[e] {
+						va := f[e]
+						vb := f[(e+1)%3]
+						vc := f[(e+2)%3]
+						m1 := mids[(e+1)%3]
+						m2 := mids[(e+2)%3]
+						result = append(result, FaceColor{[3]uint32{va, vb, m1}, fc.TexIdx, fc.Color})
+						result = append(result, FaceColor{[3]uint32{va, m1, m2}, fc.TexIdx, fc.Color})
+						result = append(result, FaceColor{[3]uint32{m1, vc, m2}, fc.TexIdx, fc.Color})
+						break
+					}
+				}
+			case 3:
+				m01 := mids[0]
+				m12 := mids[1]
+				m20 := mids[2]
+				result = append(result, FaceColor{[3]uint32{f[0], m01, m20}, fc.TexIdx, fc.Color})
+				result = append(result, FaceColor{[3]uint32{m01, f[1], m12}, fc.TexIdx, fc.Color})
+				result = append(result, FaceColor{[3]uint32{m20, m12, f[2]}, fc.TexIdx, fc.Color})
+				result = append(result, FaceColor{[3]uint32{m01, m12, m20}, fc.TexIdx, fc.Color})
+			}
+		}
+
+		faces = result
+		if !changed {
+			break
+		}
+	}
+	return faces
 }
 
 // BuildModel constructs a LoadedModel from a merged face list. Vertices are

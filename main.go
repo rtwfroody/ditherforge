@@ -133,11 +133,12 @@ func run() error {
 	var roots []*subdivide.Node
 	var subdivVerts [][3]float32
 	var subdivUVs [][2]float32
+	var edgeMids map[[2]uint32]uint32
 	var leafModel *loader.LoadedModel
 	for {
 		fmt.Printf("Subdividing to %.4g mm max edge length...\n", resolution)
 		var tooMany *subdivide.TooManyVerticesError
-		roots, subdivVerts, subdivUVs, err = subdivide.Subdivide(model, resolution, 1_000_000)
+		roots, subdivVerts, subdivUVs, edgeMids, err = subdivide.Subdivide(model, resolution, 1_000_000)
 		if errors.As(err, &tooMany) {
 			resolution *= 1.5
 			fmt.Fprintf(os.Stderr, "  Would exceed 1,000,000 vertices; retrying with resolution %.4g mm...\n", resolution)
@@ -180,6 +181,8 @@ func run() error {
 	// ancestor face, reducing output triangle count.
 	fmt.Println("Merging uniform regions...")
 	mergedFaces := subdivide.Merge(roots, assignments)
+	fmt.Println("Repairing T-junctions...")
+	mergedFaces = subdivide.RepairTJunctions(mergedFaces, edgeMids)
 	model, assignments = subdivide.BuildModel(mergedFaces, subdivVerts, subdivUVs, model)
 	before, after := len(leafModel.Faces), len(model.Faces)
 	pct := 100.0 * float64(before-after) / float64(before)
