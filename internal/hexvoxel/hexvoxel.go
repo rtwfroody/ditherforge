@@ -10,7 +10,9 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/rtwfroody/text2filament/internal/loader"
 	"github.com/rtwfroody/text2filament/internal/palette"
@@ -41,7 +43,9 @@ type hexKey struct{ col, row, layer int }
 
 // spatialIndex is a 2D uniform grid for fast triangle lookup by XY position.
 type spatialIndex struct {
-	cells    [][]int32 // cell index → list of triangle indices
+	cells    [][]int32    // cell index → list of triangle indices
+	triZMin  []float32    // per-triangle Z min
+	triZMax  []float32    // per-triangle Z max
 	minX     float32
 	minY     float32
 	cellSize float32
@@ -80,8 +84,11 @@ func newSpatialIndex(model *loader.LoadedModel, cellSize float32) *spatialIndex 
 	cols := int(math.Ceil(float64(maxX-minX)/float64(cellSize))) + 1
 	rows := int(math.Ceil(float64(maxY-minY)/float64(cellSize))) + 1
 
+	nTris := len(model.Faces)
 	si := &spatialIndex{
 		cells:    make([][]int32, cols*rows),
+		triZMin:  make([]float32, nTris),
+		triZMax:  make([]float32, nTris),
 		minX:     minX,
 		minY:     minY,
 		cellSize: cellSize,
@@ -89,7 +96,7 @@ func newSpatialIndex(model *loader.LoadedModel, cellSize float32) *spatialIndex 
 		rows:     rows,
 	}
 
-	// Insert each triangle into overlapping cells.
+	// Insert each triangle into overlapping cells and record Z ranges.
 	for fi, f := range model.Faces {
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
@@ -99,6 +106,8 @@ func newSpatialIndex(model *loader.LoadedModel, cellSize float32) *spatialIndex 
 		txMax := maxf(v0[0], maxf(v1[0], v2[0]))
 		tyMin := minf(v0[1], minf(v1[1], v2[1]))
 		tyMax := maxf(v0[1], maxf(v1[1], v2[1]))
+		si.triZMin[fi] = minf(v0[2], minf(v1[2], v2[2]))
+		si.triZMax[fi] = maxf(v0[2], maxf(v1[2], v2[2]))
 
 		c0 := int((txMin - minX) / cellSize)
 		c1 := int((txMax - minX) / cellSize)
@@ -172,6 +181,70 @@ func (si *spatialIndex) candidatesRadius(x, y, radius float32) []int32 {
 		}
 	}
 	return result
+}
+
+// searchBuf is a reusable buffer for spatial index queries, avoiding per-call
+// map allocations. Each goroutine should have its own searchBuf.
+type searchBuf struct {
+	seen []uint32 // per-triangle generation counter
+	gen  uint32   // current generation; bump per query
+	result []int32
+}
+
+func newSearchBuf(nTris int) *searchBuf {
+	return &searchBuf{seen: make([]uint32, nTris)}
+}
+
+// candidatesRadiusZ returns triangle indices from cells within XY radius whose
+// Z range is within zRadius of the query Z. This filters out triangles that are
+// far away in Z, dramatically reducing candidate counts for tall models.
+func (si *spatialIndex) candidatesRadiusZ(x, y, xyRadius, z, zRadius float32, buf *searchBuf) []int32 {
+	c0 := int((x - xyRadius - si.minX) / si.cellSize)
+	c1 := int((x + xyRadius - si.minX) / si.cellSize)
+	r0 := int((y - xyRadius - si.minY) / si.cellSize)
+	r1 := int((y + xyRadius - si.minY) / si.cellSize)
+
+	if c0 < 0 {
+		c0 = 0
+	}
+	if r0 < 0 {
+		r0 = 0
+	}
+	if c1 >= si.cols {
+		c1 = si.cols - 1
+	}
+	if r1 >= si.rows {
+		r1 = si.rows - 1
+	}
+
+	buf.gen++
+	if buf.gen == 0 {
+		// Overflow: reset all entries.
+		for i := range buf.seen {
+			buf.seen[i] = 0
+		}
+		buf.gen = 1
+	}
+	buf.result = buf.result[:0]
+
+	zLo := z - zRadius
+	zHi := z + zRadius
+	gen := buf.gen
+	for c := c0; c <= c1; c++ {
+		for r := r0; r <= r1; r++ {
+			for _, ti := range si.cells[r*si.cols+c] {
+				if buf.seen[ti] == gen {
+					continue
+				}
+				buf.seen[ti] = gen
+				if si.triZMax[ti] < zLo || si.triZMin[ti] > zHi {
+					continue
+				}
+				buf.result = append(buf.result, ti)
+			}
+		}
+	}
+	return buf.result
 }
 
 // pointInTriangleXY tests if (px, py) is inside the XY projection of triangle
@@ -367,9 +440,9 @@ func dot3(a, b [3]float32) float32 {
 // computeSDF computes the signed distance field value at point p.
 // Uses the spatial index for nearest-triangle lookup (unsigned distance)
 // and ray-parity for sign determination.
-func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32) float32 {
+func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, buf *searchBuf) float32 {
 	// Find unsigned distance to nearest triangle.
-	cands := si.candidatesRadius(p[0], p[1], searchRadius)
+	cands := si.candidatesRadiusZ(p[0], p[1], searchRadius, p[2], searchRadius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	for _, ti := range cands {
 		f := model.Faces[ti]
@@ -599,18 +672,49 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	// 4. Compute SDF at vertices of expanded cell set.
 	fmt.Println("  Computing SDF at cell vertices...")
 	searchRadius := nozzle * 3
-	sdfMap := make(map[[3]float32]float32)
+
+	// Collect unique vertex positions.
+	uniqueSet := make(map[[3]float32]struct{})
 	for k := range expandedSet {
-		botLayer := k.layer
-		topLayer := k.layer + 1
-		for _, vl := range [2]int{botLayer, topLayer} {
+		for _, vl := range [2]int{k.layer, k.layer + 1} {
 			for corner := 0; corner <= 6; corner++ {
-				pos := snapPos(vertPos(k.col, k.row, vl, corner))
-				if _, ok := sdfMap[pos]; !ok {
-					sdfMap[pos] = computeSDF(pos, model, si, searchRadius)
-				}
+				uniqueSet[snapPos(vertPos(k.col, k.row, vl, corner))] = struct{}{}
 			}
 		}
+	}
+	uniqueVerts := make([][3]float32, 0, len(uniqueSet))
+	for pos := range uniqueSet {
+		uniqueVerts = append(uniqueVerts, pos)
+	}
+
+	// Compute SDF in parallel.
+	nWorkers := runtime.NumCPU()
+	sdfValues := make([]float32, len(uniqueVerts))
+	var wg sync.WaitGroup
+	chunkSize := (len(uniqueVerts) + nWorkers - 1) / nWorkers
+	for w := 0; w < nWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(uniqueVerts) {
+			end = len(uniqueVerts)
+		}
+		if start >= end {
+			break
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			buf := newSearchBuf(len(model.Faces))
+			for i := start; i < end; i++ {
+				sdfValues[i] = computeSDF(uniqueVerts[i], model, si, searchRadius, buf)
+			}
+		}(start, end)
+	}
+	wg.Wait()
+
+	sdfMap := make(map[[3]float32]float32, len(uniqueVerts))
+	for i, pos := range uniqueVerts {
+		sdfMap[pos] = sdfValues[i]
 	}
 	fmt.Printf("  %d unique SDF vertices computed\n", len(sdfMap))
 
