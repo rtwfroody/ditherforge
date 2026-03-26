@@ -221,8 +221,13 @@ func buildProjectSettings(paletteRGB [][3]uint8) (string, error) {
 	for i := range filamentTypes {
 		filamentTypes[i] = "Generic PLA"
 	}
+	filamentIDs := make([]string, len(paletteRGB))
+	for i := range filamentIDs {
+		filamentIDs[i] = "Generic PLA"
+	}
 	data["filament_colour"] = hexColors
 	data["filament_type"] = filamentTypes
+	data["filament_settings_id"] = filamentIDs
 
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
