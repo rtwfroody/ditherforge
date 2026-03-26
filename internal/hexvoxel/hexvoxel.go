@@ -27,7 +27,8 @@ type Config struct {
 
 // surfaceHit records where a hex column center intersects the original mesh.
 type surfaceHit struct {
-	z float32
+	z       float32
+	meshIdx int32
 }
 
 // activeHex represents one hex prism to generate.
@@ -436,62 +437,57 @@ func dot3(a, b [3]float32) float32 {
 }
 
 // computeSDF computes the signed distance field value at point p.
-// Uses the spatial index for nearest-triangle lookup (unsigned distance)
-// and ray-parity for sign determination.
+// Uses closest-surface-normal for sign determination, which is robust
+// for non-watertight meshes where Z-ray parity fails.
 func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, buf *searchBuf) float32 {
-	// Find unsigned distance to nearest triangle.
+	// Determine sign using the closest-surface-normal method.
+	// For the closest point on the nearest triangle, compute:
+	//   sign = dot(P - closestPoint, faceNormal)
+	// Negative means inside (point is behind the surface).
+	// This is robust for non-watertight meshes where Z-ray parity fails.
 	cands := si.candidatesRadiusZ(p[0], p[1], searchRadius, p[2], searchRadius, buf)
 	bestDistSq := float32(math.MaxFloat32)
+	var bestClosest [3]float32
+	bestTri := int32(-1)
 	for _, ti := range cands {
 		f := model.Faces[ti]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
 		v2 := model.Vertices[f[2]]
-		_, dSq := closestPointOnTriangle3D(p, v0, v1, v2)
+		cp, dSq := closestPointOnTriangle3D(p, v0, v1, v2)
 		if dSq < bestDistSq {
 			bestDistSq = dSq
+			bestClosest = cp
+			bestTri = ti
 		}
 	}
 	dist := float32(math.Sqrt(float64(bestDistSq)))
 
-	// Determine sign via Z-ray parity: count intersections below p.
-	// Cast 3 rays with different tiny perturbations and take majority vote.
-	// A single ray can give wrong parity when it passes through a shared
-	// triangle edge/vertex, causing double-counting. Using 3 rays with
-	// different offsets makes it extremely unlikely that all 3 hit edges.
-	perturbations := [3][2]float32{
-		{1.3e-5, 2.1e-5},
-		{-1.7e-5, 0.9e-5},
-		{0.7e-5, -1.5e-5},
-	}
-	insideVotes := 0
-	for _, pert := range perturbations {
-		px := p[0] + pert[0]
-		py := p[1] + pert[1]
-		pointCands := si.candidates(px, py)
-		crossings := 0
-		for _, ti := range pointCands {
-			f := model.Faces[ti]
-			v0 := model.Vertices[f[0]]
-			v1 := model.Vertices[f[1]]
-			v2 := model.Vertices[f[2]]
-
-			inside, bary := pointInTriangleXY(px, py, v0, v1, v2)
-			if !inside {
-				continue
-			}
-			z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
-			if z < p[2] {
-				crossings++
-			}
-		}
-		if crossings%2 == 1 {
-			insideVotes++
-		}
+	if bestTri < 0 {
+		return dist // no triangle found, outside
 	}
 
-	if insideVotes >= 2 {
-		return -dist // inside (majority)
+	// Compute face normal.
+	f := model.Faces[bestTri]
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	e1 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
+	e2 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
+	normal := [3]float32{
+		e1[1]*e2[2] - e1[2]*e2[1],
+		e1[2]*e2[0] - e1[0]*e2[2],
+		e1[0]*e2[1] - e1[1]*e2[0],
+	}
+
+	// dot(P - closestPoint, normal): positive = outside, negative = inside.
+	dx := p[0] - bestClosest[0]
+	dy := p[1] - bestClosest[1]
+	dz := p[2] - bestClosest[2]
+	dot := dx*normal[0] + dy*normal[1] + dz*normal[2]
+
+	if dot < 0 {
+		return -dist // inside
 	}
 	return dist // outside
 }
@@ -589,50 +585,60 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 				}
 
 				z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
-				hits = append(hits, surfaceHit{z: z})
+				hits = append(hits, surfaceHit{z: z, meshIdx: model.FaceMeshIdx[ti]})
 			}
 
 			if len(hits) == 0 {
 				continue
 			}
 
-			sort.Slice(hits, func(i, j int) bool { return hits[i].z < hits[j].z })
-
-			// Deduplicate near-coincident hits.
-			deduped := hits[:1]
-			for i := 1; i < len(hits); i++ {
-				if hits[i].z-deduped[len(deduped)-1].z > layerH/2 {
-					deduped = append(deduped, hits[i])
+			// Compute active layers as union of per-mesh Z-ray parity.
+			// This prevents separate mesh objects from contaminating each other's
+			// inside/outside determination.
+			activeLayers := make(map[int]struct{})
+			meshHits := make(map[int32][]float32)
+			for _, h := range hits {
+				meshHits[h.meshIdx] = append(meshHits[h.meshIdx], h.z)
+			}
+			for _, mHits := range meshHits {
+				sort.Slice(mHits, func(i, j int) bool { return mHits[i] < mHits[j] })
+				// Deduplicate near-coincident hits within this mesh.
+				deduped := mHits[:1]
+				for i := 1; i < len(mHits); i++ {
+					if mHits[i]-deduped[len(deduped)-1] > layerH/2 {
+						deduped = append(deduped, mHits[i])
+					}
+				}
+				if len(deduped)%2 != 0 {
+					deduped = deduped[:len(deduped)-1]
+				}
+				for p := 0; p+1 < len(deduped); p += 2 {
+					enterZ := deduped[p]
+					exitZ := deduped[p+1]
+					layMin := int(math.Ceil(float64(enterZ-minV[2]) / float64(layerH)))
+					layMax := int(math.Floor(float64(exitZ-minV[2]) / float64(layerH)))
+					if layMin < 0 {
+						layMin = 0
+					}
+					if layMax >= nLayers {
+						layMax = nLayers - 1
+					}
+					for layer := layMin; layer <= layMax; layer++ {
+						activeLayers[layer] = struct{}{}
+					}
 				}
 			}
-			if len(deduped)%2 != 0 {
-				deduped = deduped[:len(deduped)-1]
-			}
 
-			for p := 0; p+1 < len(deduped); p += 2 {
-				enterZ := deduped[p].z
-				exitZ := deduped[p+1].z
-
-				layerMin := int(math.Ceil(float64(enterZ-minV[2]) / float64(layerH)))
-				layerMax := int(math.Floor(float64(exitZ-minV[2]) / float64(layerH)))
-				if layerMin < 0 {
-					layerMin = 0
-				}
-				if layerMax >= nLayers {
-					layerMax = nLayers - 1
-				}
-
-				for layer := layerMin; layer <= layerMax; layer++ {
-					cz := minV[2] + float32(layer)*layerH
-					clr := sampleNearestColor(
-						[3]float32{cx, cy, cz},
-						model, si, colorRadius, colorBuf)
-					hexes = append(hexes, activeHex{
-						col: col, row: row, layer: layer,
-						cx: cx, cy: cy, cz: cz,
-						color: clr,
-					})
-				}
+			for layer := range activeLayers {
+				cz := minV[2] + float32(layer)*layerH
+				clr := sampleNearestColor(
+					[3]float32{cx, cy, cz},
+					model, si, colorRadius, colorBuf)
+				hexes = append(hexes, activeHex{
+					col: col, row: row, layer: layer,
+					cx: cx, cy: cy, cz: cz,
+					color: clr,
+				})
 			}
 		}
 	}

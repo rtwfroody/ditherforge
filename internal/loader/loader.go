@@ -22,6 +22,8 @@ type LoadedModel struct {
 	Textures       []image.Image
 	FaceTextureIdx []int32       // index into Textures; len(Textures) is sentinel for no-texture faces
 	NoTextureMask  []bool        // nil if no texture-less faces; true = use palette[0]
+	FaceMeshIdx    []int32       // which original mesh each face belongs to
+	NumMeshes      int           // total number of original meshes
 }
 
 // mat4 is a column-major 4x4 float64 matrix.
@@ -112,6 +114,7 @@ type primitiveData struct {
 	uvs        [][2]float32
 	indices    []uint32
 	textureIdx int // index into accumulated texture list; -1 if no texture
+	meshIdx    int // which GLTF mesh this primitive belongs to
 }
 
 // LoadGLB loads a GLB file and returns a LoadedModel.
@@ -174,6 +177,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	// Walk the default scene's node graph, accumulating transforms.
 	var texturedPrims []primitiveData
 	var untexturedPrims []primitiveData
+	meshCounter := 0 // counts distinct mesh instances (node+mesh pairs)
 
 	var visitNode func(nodeIdx int, parentTransform mat4)
 	visitNode = func(nodeIdx int, parentTransform mat4) {
@@ -184,6 +188,8 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		if node.Mesh != nil {
 			mesh := doc.Meshes[*node.Mesh]
 			for _, prim := range mesh.Primitives {
+				meshIdx := meshCounter
+				meshCounter++
 				posAttrIdx, ok := prim.Attributes[gltf.POSITION]
 				if !ok {
 					continue
@@ -231,6 +237,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 					uvs:        uvs,
 					indices:    indices,
 					textureIdx: texIdx,
+					meshIdx:    meshIdx,
 				}
 				if hasTexture {
 					texturedPrims = append(texturedPrims, pd)
@@ -270,6 +277,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	var allFaces [][3]uint32
 	var allUVs [][2]float32
 	var allFaceTex []int32
+	var allFaceMesh []int32
 
 	appendPrim := func(pd primitiveData, texIdx int32) {
 		offset := uint32(len(allVerts))
@@ -282,6 +290,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 				pd.indices[i+2] + offset,
 			})
 			allFaceTex = append(allFaceTex, texIdx)
+			allFaceMesh = append(allFaceMesh, int32(pd.meshIdx))
 		}
 	}
 
@@ -357,6 +366,8 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		Textures:       texList,
 		FaceTextureIdx: allFaceTex,
 		NoTextureMask:  noTextureMask,
+		FaceMeshIdx:    allFaceMesh,
+		NumMeshes:      meshCounter,
 	}, nil
 }
 
