@@ -18,7 +18,7 @@ import (
 // Args defines the CLI arguments.
 type Args struct {
 	Input       string  `arg:"positional,required" help:"Input .glb file"`
-	Palette     string  `arg:"--palette" default:"white,red,green,blue" help:"Comma-separated colors (CSS names or hex)"`
+	Palette     string  `arg:"--palette" default:"white,cyan,magenta,yellow" help:"Comma-separated colors (CSS names or hex)"`
 	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from texture (mutually exclusive with --palette)"`
 	Resolution  float32 `arg:"--resolution" default:"0.5" help:"Target max edge length in mm (default: 0.5)"`
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
