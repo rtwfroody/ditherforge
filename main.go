@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/alexflint/go-arg"
@@ -29,8 +28,6 @@ type Args struct {
 	Mode           string  `arg:"--mode" default:"subdivide" help:"Remesh mode: subdivide or hexvoxel"`
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
-	Printer        string  `arg:"--printer" default:"snapmaker-u1" help:"Printer profile: snapmaker-u1, bambu-a1, bambu-p2s"`
-	OrcaProfiles   string  `arg:"--orca-profiles" help:"Path to OrcaSlicer profiles directory"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
 	Stats          bool    `arg:"--stats" help:"Print face counts per material"`
 }
@@ -53,38 +50,6 @@ func run() error {
 	unitScale, ok := unitScales[args.GlbUnit]
 	if !ok {
 		return fmt.Errorf("invalid --glb-unit %q: must be one of m, dm, cm, mm", args.GlbUnit)
-	}
-
-	// Validate printer.
-	printerDef, ok := export3mf.Printers[args.Printer]
-	if !ok {
-		var names []string
-		for k := range export3mf.Printers {
-			names = append(names, k)
-		}
-		return fmt.Errorf("invalid --printer %q: must be one of %s", args.Printer, strings.Join(names, ", "))
-	}
-
-	// Find OrcaSlicer profiles directory.
-	profilesDir := args.OrcaProfiles
-	if profilesDir == "" {
-		// Search common locations.
-		home, _ := os.UserHomeDir()
-		candidates := []string{
-			filepath.Join(home, "programs", "OrcaSlicer", "resources", "profiles"),
-			"/usr/share/OrcaSlicer/resources/profiles",
-			"/opt/OrcaSlicer/resources/profiles",
-		}
-		for _, c := range candidates {
-			if fi, err := os.Stat(c); err == nil && fi.IsDir() {
-				profilesDir = c
-				break
-			}
-		}
-		if profilesDir == "" {
-			fmt.Println("  Warning: OrcaSlicer profiles not found; 3MF will have minimal printer settings.")
-			fmt.Println("  Use --orca-profiles to specify the path.")
-		}
 	}
 
 	// Validate output extension.
@@ -134,7 +99,7 @@ func run() error {
 
 	// Hexvoxel mode: separate code path.
 	if args.Mode == "hexvoxel" {
-		return runHexvoxel(args, model, paletteRGB, printerDef, profilesDir)
+		return runHexvoxel(args, model, paletteRGB)
 	}
 	if args.Mode != "subdivide" {
 		return fmt.Errorf("invalid --mode %q: must be subdivide or hexvoxel", args.Mode)
@@ -215,7 +180,7 @@ func run() error {
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(model, assignments, args.Output, paletteRGB, printerDef, profilesDir); err != nil {
+	if err := export3mf.Export(model, assignments, args.Output, paletteRGB); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
@@ -243,7 +208,7 @@ func assignRGB(faceColors [][3]uint8, pal [][3]uint8) []int32 {
 	return assignments
 }
 
-func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8, printerDef export3mf.PrinterDef, profilesDir string) error {
+func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) error {
 	cfg := hexvoxel.Config{
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
@@ -271,7 +236,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8, pr
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB, printerDef, profilesDir); err != nil {
+	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
