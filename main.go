@@ -30,6 +30,7 @@ type Args struct {
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
 	NoMerge        bool    `arg:"--no-merge" help:"Skip coplanar triangle merging"`
+	Force          bool    `arg:"--force" help:"Bypass extent size check"`
 	Stats          bool    `arg:"--stats" help:"Print face counts per material"`
 }
 
@@ -70,6 +71,27 @@ func run() error {
 	model, err := loader.LoadGLB(args.Input, scale)
 	if err != nil {
 		return fmt.Errorf("loading GLB: %w", err)
+	}
+
+	// Check model extent.
+	if !args.Force {
+		minV, maxV := model.Vertices[0], model.Vertices[0]
+		for _, v := range model.Vertices[1:] {
+			for i := 0; i < 3; i++ {
+				if v[i] < minV[i] {
+					minV[i] = v[i]
+				}
+				if v[i] > maxV[i] {
+					maxV[i] = v[i]
+				}
+			}
+		}
+		for i := 0; i < 3; i++ {
+			ext := maxV[i] - minV[i]
+			if ext > 300 {
+				return fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale to reduce size (or --force to bypass)", ext)
+			}
+		}
 	}
 
 	// Build palette.
