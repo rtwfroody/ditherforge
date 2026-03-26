@@ -60,24 +60,50 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	instUUID := newUUID()
 	buildUUID := newUUID()
 
+	// Compute XY translation to center model on build plate.
+	// Build plate center for Snapmaker U1: (135.5, 136).
+	const plateX, plateY = 135.5, 136.0
+	var minX, maxX, minY, maxY float32
+	if len(model.Vertices) > 0 {
+		minX, maxX = model.Vertices[0][0], model.Vertices[0][0]
+		minY, maxY = model.Vertices[0][1], model.Vertices[0][1]
+		for _, v := range model.Vertices[1:] {
+			if v[0] < minX {
+				minX = v[0]
+			}
+			if v[0] > maxX {
+				maxX = v[0]
+			}
+			if v[1] < minY {
+				minY = v[1]
+			}
+			if v[1] > maxY {
+				maxY = v[1]
+			}
+		}
+	}
+	tx := plateX - float64(minX+maxX)/2
+	ty := plateY - float64(minY+maxY)/2
+
 	objectRels := `<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
  <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
 </Relationships>`
 
+	transform := fmt.Sprintf("1 0 0 0 1 0 0 0 1 %.4f %.4f 0", tx, ty)
 	mainModel := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" unit="millimeter" xml:lang="en-US" requiredextensions="p">
  <resources>
   <object id="2" p:UUID="%s" type="model">
    <components>
-    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="%s"/>
    </components>
   </object>
  </resources>
  <build p:UUID="%s">
   <item objectid="2" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
  </build>
-</model>`, outerUUID, meshUUID, buildUUID, instUUID)
+</model>`, outerUUID, meshUUID, transform, buildUUID, instUUID)
 
 	objectModel, err := buildObjectModel(model, assignments)
 	if err != nil {
