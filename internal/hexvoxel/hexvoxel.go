@@ -439,12 +439,9 @@ func dot3(a, b [3]float32) float32 {
 // computeSDF computes the signed distance field value at point p.
 // Uses closest-surface-normal for sign determination, which is robust
 // for non-watertight meshes where Z-ray parity fails.
-func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, buf *searchBuf) float32 {
-	// Determine sign using the closest-surface-normal method.
-	// For the closest point on the nearest triangle, compute:
-	//   sign = dot(P - closestPoint, faceNormal)
-	// Negative means inside (point is behind the surface).
-	// This is robust for non-watertight meshes where Z-ray parity fails.
+// Points within shellThickness of the surface are always classified as
+// inside, ensuring thin features are captured even with broken meshes.
+func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, shellThickness float32, buf *searchBuf) float32 {
 	cands := si.candidatesRadiusZ(p[0], p[1], searchRadius, p[2], searchRadius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	var bestClosest [3]float32
@@ -467,7 +464,13 @@ func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searc
 		return dist // no triangle found, outside
 	}
 
-	// Compute face normal.
+	// Points within shellThickness of the surface are always inside.
+	// This ensures thin/non-watertight features get a minimum-thickness shell.
+	if dist < shellThickness {
+		return -dist
+	}
+
+	// For points further from the surface, use closest-surface-normal for sign.
 	f := model.Faces[bestTri]
 	v0 := model.Vertices[f[0]]
 	v1 := model.Vertices[f[1]]
@@ -480,7 +483,6 @@ func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searc
 		e1[0]*e2[1] - e1[1]*e2[0],
 	}
 
-	// dot(P - closestPoint, normal): positive = outside, negative = inside.
 	dx := p[0] - bestClosest[0]
 	dy := p[1] - bestClosest[1]
 	dz := p[2] - bestClosest[2]
@@ -629,6 +631,16 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 				}
 			}
 
+			// Also activate layers at each hit Z, regardless of parity.
+			// This ensures thin features with non-watertight meshes (where
+			// Z-ray parity fails due to gaps) still get a surface shell.
+			for _, h := range hits {
+				layer := int(math.Round(float64(h.z-minV[2]) / float64(layerH)))
+				if layer >= 0 && layer < nLayers {
+					activeLayers[layer] = struct{}{}
+				}
+			}
+
 			for layer := range activeLayers {
 				cz := minV[2] + float32(layer)*layerH
 				clr := sampleNearestColor(
@@ -643,8 +655,98 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 		}
 	}
 
+	// Proximity-based supplementary voxelization: for each triangle in the
+	// mesh, activate all hex cells that overlap the triangle's bounding box.
+	// This catches thin/non-watertight features that Z-ray parity misses.
+	proximitySet := make(map[hexKey]struct{})
+	for fi := range model.Faces {
+		f := model.Faces[fi]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+		// Triangle bounding box.
+		tMinX := min(v0[0], min(v1[0], v2[0]))
+		tMaxX := max(v0[0], max(v1[0], v2[0]))
+		tMinY := min(v0[1], min(v1[1], v2[1]))
+		tMaxY := max(v0[1], max(v1[1], v2[1]))
+		tMinZ := min(v0[2], min(v1[2], v2[2]))
+		tMaxZ := max(v0[2], max(v1[2], v2[2]))
+		// Map to hex grid range with one cell padding.
+		colMin := int(math.Floor(float64(tMinX-minV[0])/float64(colStep))) - 1
+		colMax := int(math.Ceil(float64(tMaxX-minV[0])/float64(colStep))) + 1
+		layerMin := int(math.Floor(float64(tMinZ-minV[2])/float64(layerH))) - 1
+		layerMax := int(math.Ceil(float64(tMaxZ-minV[2])/float64(layerH))) + 1
+		if colMin < 0 {
+			colMin = 0
+		}
+		if colMax >= nCols {
+			colMax = nCols - 1
+		}
+		if layerMin < 0 {
+			layerMin = 0
+		}
+		if layerMax >= nLayers {
+			layerMax = nLayers - 1
+		}
+		for col := colMin; col <= colMax; col++ {
+			rowOff := float32(0)
+			if col%2 == 1 {
+				rowOff = rowStep / 2
+			}
+			rMin := int(math.Floor(float64(tMinY-minV[1]-rowOff)/float64(rowStep))) - 1
+			rMax := int(math.Ceil(float64(tMaxY-minV[1]-rowOff)/float64(rowStep))) + 1
+			if rMin < 0 {
+				rMin = 0
+			}
+			if rMax >= nRows {
+				rMax = nRows - 1
+			}
+			for row := rMin; row <= rMax; row++ {
+				hcx := minV[0] + float32(col)*colStep
+				hcy := minV[1] + float32(row)*rowStep + rowOff
+				// Check if hex center is within nozzle distance of triangle bbox.
+				if hcx < tMinX-nozzle || hcx > tMaxX+nozzle ||
+					hcy < tMinY-nozzle || hcy > tMaxY+nozzle {
+					continue
+				}
+				for layer := layerMin; layer <= layerMax; layer++ {
+					proximitySet[hexKey{col, row, layer}] = struct{}{}
+				}
+			}
+		}
+	}
+	// Add proximity hexes that weren't already found by Z-ray.
+	existingHexes := make(map[hexKey]struct{}, len(hexes))
+	for _, h := range hexes {
+		existingHexes[hexKey{h.col, h.row, h.layer}] = struct{}{}
+	}
+	proximityAdded := 0
+	for k := range proximitySet {
+		if _, exists := existingHexes[k]; !exists {
+			cx := minV[0] + float32(k.col)*colStep
+			cy := minV[1] + float32(k.row)*rowStep
+			if k.col%2 == 1 {
+				cy += rowStep / 2
+			}
+			cz := minV[2] + float32(k.layer)*layerH
+			clr := sampleNearestColor(
+				[3]float32{cx, cy, cz},
+				model, si, colorRadius, colorBuf)
+			hexes = append(hexes, activeHex{
+				col: k.col, row: k.row, layer: k.layer,
+				cx: cx, cy: cy, cz: cz,
+				color: clr,
+			})
+			proximityAdded++
+		}
+	}
+
 	hexes = deduplicateHexes(hexes)
-	fmt.Printf("  %d active hex prisms\n", len(hexes))
+	if proximityAdded > 0 {
+		fmt.Printf("  %d active hex prisms (%d added by surface proximity)\n", len(hexes), proximityAdded)
+	} else {
+		fmt.Printf("  %d active hex prisms\n", len(hexes))
+	}
 	if len(hexes) == 0 {
 		return nil, nil, fmt.Errorf("no active hex prisms found")
 	}
@@ -695,6 +797,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	// 4. Compute SDF at vertices of expanded cell set.
 	fmt.Println("  Computing SDF at cell vertices...")
 	searchRadius := nozzle * 3
+	shellThickness := layerH // vertices within one layer height of the surface are forced inside
 
 	// Collect unique vertex positions.
 	uniqueSet := make(map[[3]float32]struct{})
@@ -729,7 +832,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			defer wg.Done()
 			buf := newSearchBuf(len(model.Faces))
 			for i := start; i < end; i++ {
-				sdfValues[i] = computeSDF(uniqueVerts[i], model, si, searchRadius, buf)
+				sdfValues[i] = computeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, buf)
 			}
 		}(start, end)
 	}
