@@ -22,6 +22,7 @@ import (
 type Config struct {
 	NozzleDiameter float32 // flat-to-flat hex width in mm
 	LayerHeight    float32 // Z extrusion per layer in mm
+	NoMerge        bool    // skip coplanar triangle merging
 }
 
 // surfaceHit records where a hex column center intersects the original mesh.
@@ -454,26 +455,43 @@ func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searc
 	dist := float32(math.Sqrt(float64(bestDistSq)))
 
 	// Determine sign via Z-ray parity: count intersections below p.
-	pointCands := si.candidates(p[0], p[1])
-	crossings := 0
-	for _, ti := range pointCands {
-		f := model.Faces[ti]
-		v0 := model.Vertices[f[0]]
-		v1 := model.Vertices[f[1]]
-		v2 := model.Vertices[f[2]]
+	// Cast 3 rays with different tiny perturbations and take majority vote.
+	// A single ray can give wrong parity when it passes through a shared
+	// triangle edge/vertex, causing double-counting. Using 3 rays with
+	// different offsets makes it extremely unlikely that all 3 hit edges.
+	perturbations := [3][2]float32{
+		{1.3e-5, 2.1e-5},
+		{-1.7e-5, 0.9e-5},
+		{0.7e-5, -1.5e-5},
+	}
+	insideVotes := 0
+	for _, pert := range perturbations {
+		px := p[0] + pert[0]
+		py := p[1] + pert[1]
+		pointCands := si.candidates(px, py)
+		crossings := 0
+		for _, ti := range pointCands {
+			f := model.Faces[ti]
+			v0 := model.Vertices[f[0]]
+			v1 := model.Vertices[f[1]]
+			v2 := model.Vertices[f[2]]
 
-		inside, bary := pointInTriangleXY(p[0], p[1], v0, v1, v2)
-		if !inside {
-			continue
+			inside, bary := pointInTriangleXY(px, py, v0, v1, v2)
+			if !inside {
+				continue
+			}
+			z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
+			if z < p[2] {
+				crossings++
+			}
 		}
-		z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
-		if z < p[2] {
-			crossings++
+		if crossings%2 == 1 {
+			insideVotes++
 		}
 	}
 
-	if crossings%2 == 1 {
-		return -dist // inside
+	if insideVotes >= 2 {
+		return -dist // inside (majority)
 	}
 	return dist // outside
 }
@@ -535,7 +553,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// Round position to avoid floating-point dedup issues.
 	snapPos := func(p [3]float32) [3]float32 {
-		const scale = 1e4
+		const scale = 1e3
 		return [3]float32{
 			float32(math.Round(float64(p[0])*scale)) / scale,
 			float32(math.Round(float64(p[1])*scale)) / scale,
@@ -648,13 +666,22 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	expandedSet := make(map[hexKey]struct{}, len(hexes)*2)
 	for k := range activeSet {
 		expandedSet[k] = struct{}{}
-		// Add vertical neighbors.
-		expandedSet[hexKey{k.col, k.row, k.layer - 1}] = struct{}{}
-		expandedSet[hexKey{k.col, k.row, k.layer + 1}] = struct{}{}
-		// Add lateral neighbors.
-		parity := k.col & 1
-		for _, off := range lateralOffsets[parity] {
-			expandedSet[hexKey{k.col + off[0], k.row + off[1], k.layer}] = struct{}{}
+	}
+	// Expand by 2 rings to cover diagonal neighbors (lateral+vertical).
+	// Without this, cells at edges (e.g. top rim of a cylinder) where
+	// the surface curves through diagonally adjacent cells are missed.
+	for ring := 0; ring < 2; ring++ {
+		snapshot := make([]hexKey, 0, len(expandedSet))
+		for k := range expandedSet {
+			snapshot = append(snapshot, k)
+		}
+		for _, k := range snapshot {
+			expandedSet[hexKey{k.col, k.row, k.layer - 1}] = struct{}{}
+			expandedSet[hexKey{k.col, k.row, k.layer + 1}] = struct{}{}
+			parity := k.col & 1
+			for _, off := range lateralOffsets[parity] {
+				expandedSet[hexKey{k.col + off[0], k.row + off[1], k.layer}] = struct{}{}
+			}
 		}
 	}
 	fmt.Printf("  %d cells in expanded set (from %d active)\n", len(expandedSet), len(hexes))
@@ -774,18 +801,20 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 		topLayer := k.layer + 1
 
 		// Get SDF values at all 14 positions.
+		// Use snapped positions for interpolation so that shared vertices
+		// between adjacent hex prisms produce identical results.
 		var sdfCornerBot, sdfCornerTop [6]float32
 		var posCornerBot, posCornerTop [6][3]float32
 		for c := 0; c < 6; c++ {
-			posCornerBot[c] = vertPos(k.col, k.row, botLayer, c)
-			posCornerTop[c] = vertPos(k.col, k.row, topLayer, c)
-			sdfCornerBot[c] = sdfMap[snapPos(posCornerBot[c])]
-			sdfCornerTop[c] = sdfMap[snapPos(posCornerTop[c])]
+			posCornerBot[c] = snapPos(vertPos(k.col, k.row, botLayer, c))
+			posCornerTop[c] = snapPos(vertPos(k.col, k.row, topLayer, c))
+			sdfCornerBot[c] = sdfMap[posCornerBot[c]]
+			sdfCornerTop[c] = sdfMap[posCornerTop[c]]
 		}
-		posCenterBot := vertPos(k.col, k.row, botLayer, 6)
-		posCenterTop := vertPos(k.col, k.row, topLayer, 6)
-		sdfCenterBot := sdfMap[snapPos(posCenterBot)]
-		sdfCenterTop := sdfMap[snapPos(posCenterTop)]
+		posCenterBot := snapPos(vertPos(k.col, k.row, botLayer, 6))
+		posCenterTop := snapPos(vertPos(k.col, k.row, topLayer, 6))
+		sdfCenterBot := sdfMap[posCenterBot]
+		sdfCenterTop := sdfMap[posCenterTop]
 
 		// Process 6 wedges.
 		for w := 0; w < 6; w++ {
@@ -828,6 +857,15 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 					sdfA := wedgeSDF[ea]
 					sdfB := wedgeSDF[eb]
 
+					// Canonicalize edge direction so shared edges between
+					// adjacent wedges always interpolate the same way.
+					// Without this, A→B vs B→A gives different float results.
+					if posA[0] > posB[0] || (posA[0] == posB[0] && posA[1] > posB[1]) ||
+						(posA[0] == posB[0] && posA[1] == posB[1] && posA[2] > posB[2]) {
+						posA, posB = posB, posA
+						sdfA, sdfB = sdfB, sdfA
+					}
+
 					// Interpolate along edge at zero-crossing.
 					var interp [3]float32
 					denom := sdfB - sdfA
@@ -862,10 +900,12 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	fmt.Printf("  %d vertices, %d faces after marching prisms\n", len(outVerts), len(outFaces))
 
 	// Merge coplanar same-material triangles to reduce face count.
-	before := len(outFaces)
-	outFaces, outAssignments = mergeCoplanarTriangles(outVerts, outFaces, outAssignments)
-	fmt.Printf("  %d faces after coplanar merge (%.0f%% reduction)\n",
-		len(outFaces), 100*float64(before-len(outFaces))/float64(before))
+	if !cfg.NoMerge {
+		before := len(outFaces)
+		outFaces, outAssignments = mergeCoplanarTriangles(outVerts, outFaces, outAssignments)
+		fmt.Printf("  %d faces after coplanar merge (%.0f%% reduction)\n",
+			len(outFaces), 100*float64(before-len(outFaces))/float64(before))
+	}
 
 	// Build output model.
 	uvs := make([][2]float32, len(outVerts))

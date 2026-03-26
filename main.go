@@ -29,6 +29,7 @@ type Args struct {
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
+	NoMerge        bool    `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	Stats          bool    `arg:"--stats" help:"Print face counts per material"`
 }
 
@@ -212,6 +213,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 	cfg := hexvoxel.Config{
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
+		NoMerge:        args.NoMerge,
 	}
 
 	fmt.Println("Generating hexagonal voxel shell...")
