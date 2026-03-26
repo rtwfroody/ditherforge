@@ -26,10 +26,7 @@ type Config struct {
 
 // surfaceHit records where a hex column center intersects the original mesh.
 type surfaceHit struct {
-	z      float32
-	triIdx int
-	bary   [3]float32 // barycentric coordinates
-	texIdx int32
+	z float32
 }
 
 // activeHex represents one hex prism to generate.
@@ -548,6 +545,8 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// 3. Ray-parity voxelization to determine active hexes and their colors.
 	var hexes []activeHex
+	colorBuf := newSearchBuf(len(model.Faces))
+	colorRadius := nozzle * 3
 
 	for col := 0; col < nCols; col++ {
 		cx := minV[0] + float32(col)*colStep
@@ -572,12 +571,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 				}
 
 				z := bary[0]*v0[2] + bary[1]*v1[2] + bary[2]*v2[2]
-				hits = append(hits, surfaceHit{
-					z:      z,
-					triIdx: int(ti),
-					bary:   bary,
-					texIdx: model.FaceTextureIdx[ti],
-				})
+				hits = append(hits, surfaceHit{z: z})
 			}
 
 			if len(hits) == 0 {
@@ -600,8 +594,6 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			for p := 0; p+1 < len(deduped); p += 2 {
 				enterZ := deduped[p].z
 				exitZ := deduped[p+1].z
-				enterHit := deduped[p]
-				exitHit := deduped[p+1]
 
 				layerMin := int(math.Ceil(float64(enterZ-minV[2]) / float64(layerH)))
 				layerMax := int(math.Floor(float64(exitZ-minV[2]) / float64(layerH)))
@@ -614,11 +606,9 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 				for layer := layerMin; layer <= layerMax; layer++ {
 					cz := minV[2] + float32(layer)*layerH
-					hit := enterHit
-					if cz-enterZ > exitZ-cz {
-						hit = exitHit
-					}
-					clr := sampleHitColor(model, hit)
+					clr := sampleNearestColor(
+						[3]float32{cx, cy, cz},
+						model, si, colorRadius, colorBuf)
 					hexes = append(hexes, activeHex{
 						col: col, row: row, layer: layer,
 						cx: cx, cy: cy, cz: cz,
@@ -899,20 +889,125 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	}, outAssignments, nil
 }
 
-func sampleHitColor(model *loader.LoadedModel, hit surfaceHit) [3]uint8 {
-	if hit.texIdx < 0 || int(hit.texIdx) >= len(model.Textures) {
+// sampleNearestColor finds the closest surface point to p, then samples the
+// texture color there. This gives each hex cell a color based on the actual
+// nearby surface rather than just the Z-ray enter/exit points.
+func sampleNearestColor(p [3]float32, model *loader.LoadedModel, si *spatialIndex, radius float32, buf *searchBuf) [3]uint8 {
+	cands := si.candidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
+	bestDistSq := float32(math.MaxFloat32)
+	bestTri := int32(-1)
+	var bestS, bestT float32
+	for _, ti := range cands {
+		f := model.Faces[ti]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+
+		e0 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
+		e1 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
+		d := [3]float32{v0[0] - p[0], v0[1] - p[1], v0[2] - p[2]}
+
+		a := dot3(e0, e0)
+		b := dot3(e0, e1)
+		c := dot3(e1, e1)
+		dd := dot3(e0, d)
+		e := dot3(e1, d)
+
+		det := a*c - b*b
+		s := b*e - c*dd
+		t := b*dd - a*e
+
+		if s+t <= det {
+			if s < 0 {
+				if t < 0 {
+					if dd < 0 {
+						t = 0
+						s = clampF(-dd/a, 0, 1)
+					} else {
+						s = 0
+						t = clampF(-e/c, 0, 1)
+					}
+				} else {
+					s = 0
+					t = clampF(-e/c, 0, 1)
+				}
+			} else if t < 0 {
+				t = 0
+				s = clampF(-dd/a, 0, 1)
+			} else {
+				invDet := 1.0 / det
+				s *= invDet
+				t *= invDet
+			}
+		} else {
+			if s < 0 {
+				tmp0 := b + dd
+				tmp1 := c + e
+				if tmp1 > tmp0 {
+					numer := tmp1 - tmp0
+					denom := a - 2*b + c
+					s = clampF(numer/denom, 0, 1)
+					t = 1 - s
+				} else {
+					s = 0
+					t = clampF(-e/c, 0, 1)
+				}
+			} else if t < 0 {
+				tmp0 := b + e
+				tmp1 := a + dd
+				if tmp1 > tmp0 {
+					numer := tmp1 - tmp0
+					denom := a - 2*b + c
+					t = clampF(numer/denom, 0, 1)
+					s = 1 - t
+				} else {
+					t = 0
+					s = clampF(-dd/a, 0, 1)
+				}
+			} else {
+				numer := (c + e) - (b + dd)
+				if numer <= 0 {
+					s = 0
+				} else {
+					denom := a - 2*b + c
+					s = clampF(numer/denom, 0, 1)
+				}
+				t = 1 - s
+			}
+		}
+
+		dx := d[0] + s*e0[0] + t*e1[0]
+		dy := d[1] + s*e0[1] + t*e1[1]
+		dz := d[2] + s*e0[2] + t*e1[2]
+		distSq := dx*dx + dy*dy + dz*dz
+		if distSq < bestDistSq {
+			bestDistSq = distSq
+			bestTri = ti
+			bestS = s
+			bestT = t
+		}
+	}
+
+	if bestTri < 0 {
 		return [3]uint8{128, 128, 128}
 	}
 
-	f := model.Faces[hit.triIdx]
+	texIdx := model.FaceTextureIdx[bestTri]
+	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
+		return [3]uint8{128, 128, 128}
+	}
+
+	// Barycentric coordinates: (1-s-t, s, t) in the v0/v1/v2 basis.
+	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
+	f := model.Faces[bestTri]
 	uv0 := model.UVs[f[0]]
 	uv1 := model.UVs[f[1]]
 	uv2 := model.UVs[f[2]]
 
-	u := hit.bary[0]*uv0[0] + hit.bary[1]*uv1[0] + hit.bary[2]*uv2[0]
-	v := hit.bary[0]*uv0[1] + hit.bary[1]*uv1[1] + hit.bary[2]*uv2[1]
+	u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+	v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
 
-	return bilinearSample(model.Textures[hit.texIdx], u, v)
+	return bilinearSample(model.Textures[texIdx], u, v)
 }
 
 func deduplicateHexes(hexes []activeHex) []activeHex {
