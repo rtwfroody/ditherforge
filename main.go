@@ -25,7 +25,7 @@ type Args struct {
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	ColorSpace  string  `arg:"--color-space" default:"cielab" help:"Color distance: cielab or rgb"`
-	Mode           string  `arg:"--mode" default:"subdivide" help:"Remesh mode: subdivide or hexvoxel"`
+	Mode           string  `arg:"--mode" default:"hexvoxel" help:"Remesh mode: hexvoxel or subdivide"`
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
@@ -180,7 +180,7 @@ func run() error {
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(model, assignments, args.Output, paletteRGB); err != nil {
+	if err := export3mf.Export(model, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
@@ -236,7 +236,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB); err != nil {
+	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")

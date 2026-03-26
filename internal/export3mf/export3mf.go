@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -15,6 +16,37 @@ import (
 
 //go:embed snapmaker_u1_04.json
 var snapmakerU1Profile []byte
+
+//go:embed process_0.08.json
+var process008 []byte
+
+//go:embed process_0.12.json
+var process012 []byte
+
+//go:embed process_0.16.json
+var process016 []byte
+
+//go:embed process_0.2.json
+var process020 []byte
+
+//go:embed process_0.24.json
+var process024 []byte
+
+//go:embed process_0.28.json
+var process028 []byte
+
+// processProfiles maps layer heights to their embedded process profiles.
+var processProfiles = []struct {
+	layerHeight float32
+	data        []byte
+}{
+	{0.08, process008},
+	{0.12, process012},
+	{0.16, process016},
+	{0.20, process020},
+	{0.24, process024},
+	{0.28, process028},
+}
 
 // MaxFilaments is the maximum number of palette colors supported by 3MF export.
 const MaxFilaments = 16
@@ -54,7 +86,7 @@ const rels = `<?xml version="1.0" encoding="UTF-8"?>
 </Relationships>`
 
 // Export writes the model and face assignments to a 3MF file.
-func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8) error {
+func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
 	outerUUID := newUUID()
 	meshUUID := newUUID()
 	instUUID := newUUID()
@@ -156,7 +188,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 		return err
 	}
 	if paletteRGB != nil {
-		ps, err := buildProjectSettings(paletteRGB)
+		ps, err := buildProjectSettings(paletteRGB, layerHeight)
 		if err != nil {
 			return err
 		}
@@ -189,8 +221,24 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	}
 	sb.WriteString(`    </vertices>` + "\n")
 
+	// Snap vertices to export precision for degenerate detection.
+	type snapV struct{ x, y, z int32 }
+	snapped := make([]snapV, len(model.Vertices))
+	for i, v := range model.Vertices {
+		snapped[i] = snapV{
+			int32(math.Round(float64(v[0]) * 1e6)),
+			int32(math.Round(float64(v[1]) * 1e6)),
+			int32(math.Round(float64(v[2]) * 1e6)),
+		}
+	}
+
 	sb.WriteString(`    <triangles>` + "\n")
 	for fi, face := range model.Faces {
+		// Skip degenerate triangles (vertices identical at export precision).
+		s0, s1, s2 := snapped[face[0]], snapped[face[1]], snapped[face[2]]
+		if s0 == s1 || s1 == s2 || s0 == s2 {
+			continue
+		}
 		pc := paintColor(int(assignments[fi]))
 		fmt.Fprintf(&sb, `     <triangle v1="%d" v2="%d" v3="%d" paint_color="%s"/>`+"\n",
 			face[0], face[1], face[2], pc)
@@ -206,14 +254,37 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	return sb.String(), nil
 }
 
-func buildProjectSettings(paletteRGB [][3]uint8) (string, error) {
-	// Start with the embedded Snapmaker U1 (0.4mm nozzle) profile.
+func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, error) {
+	// Start with the embedded Snapmaker U1 (0.4mm nozzle) machine profile.
 	data := map[string]interface{}{}
 	if err := json.Unmarshal(snapmakerU1Profile, &data); err != nil {
 		return "", fmt.Errorf("parsing embedded profile: %w", err)
 	}
 
+	// Merge the closest process profile by layer height.
+	bestIdx := 0
+	bestDist := float32(1e9)
+	for i, pp := range processProfiles {
+		d := pp.layerHeight - layerHeight
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDist {
+			bestDist = d
+			bestIdx = i
+		}
+	}
+	var processData map[string]interface{}
+	if err := json.Unmarshal(processProfiles[bestIdx].data, &processData); err != nil {
+		return "", fmt.Errorf("parsing embedded process profile: %w", err)
+	}
+	processName, _ := processData["name"].(string)
+	for k, v := range processData {
+		data[k] = v
+	}
+
 	data["name"] = "project_settings"
+	data["print_settings_id"] = processName
 	data["printer_settings_id"] = "Snapmaker U1 (0.4 nozzle)"
 	data["printer_technology"] = "FFF"
 
