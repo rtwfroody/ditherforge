@@ -82,9 +82,12 @@ def compute_dilate_px(nozzle_mm, layer_height_mm, model_extent_mm, resolution):
     cell_normalized = cell_diag / model_extent_mm
     # The render uses: scale = resolution * (1 - 2*margin) / 1.0  (unit box)
     pixels_per_unit = resolution * (1 - 2 * MARGIN)
-    dilate_px = int(math.ceil(cell_normalized * pixels_per_unit))
-    # Minimum 1px to avoid zero dilation.
-    return max(dilate_px, 1)
+    # Use 1.5× cell diagonal: 1× for discretization error at the boundary,
+    # plus 0.5× for concavities smaller than one cell getting filled in.
+    dilate_px = int(math.ceil(1.5 * cell_normalized * pixels_per_unit))
+    # Add 1px for silhouette centroid alignment rounding.
+    dilate_px += 1
+    return dilate_px
 
 
 def run_text2filament(input_path, extra_args, output_path):

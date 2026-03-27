@@ -339,7 +339,26 @@ func bilinearSample(img image.Image, u, v float32) [3]uint8 {
 
 // closestPointOnTriangle3D returns the closest point on triangle (v0,v1,v2)
 // to point p in 3D, and the squared distance.
+// closestRegion indicates where on the triangle the closest point lies.
+// 0 = face interior, 1-3 = on edge (v0v1=1, v1v2=2, v2v0=3), 4-6 = at vertex (v0=4, v1=5, v2=6).
+type closestRegion int
+
+const (
+	regionInterior closestRegion = 0
+	regionEdge01   closestRegion = 1 // edge v0→v1
+	regionEdge12   closestRegion = 2 // edge v1→v2
+	regionEdge20   closestRegion = 3 // edge v2→v0
+	regionVertex0  closestRegion = 4
+	regionVertex1  closestRegion = 5
+	regionVertex2  closestRegion = 6
+)
+
 func closestPointOnTriangle3D(p, v0, v1, v2 [3]float32) ([3]float32, float32) {
+	cp, dSq, _ := closestPointOnTriangle3DEx(p, v0, v1, v2)
+	return cp, dSq
+}
+
+func closestPointOnTriangle3DEx(p, v0, v1, v2 [3]float32) ([3]float32, float32, closestRegion) {
 	// Edge vectors
 	e0 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
 	e1 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
@@ -429,33 +448,103 @@ func closestPointOnTriangle3D(p, v0, v1, v2 [3]float32) ([3]float32, float32) {
 	dx := p[0] - closest[0]
 	dy := p[1] - closest[1]
 	dz := p[2] - closest[2]
-	return closest, dx*dx + dy*dy + dz*dz
+
+	// Determine region from final barycentric coordinates (s, t).
+	// u = 1 - s - t is the third barycentric coordinate.
+	const eps = 1e-6
+	region := regionInterior
+	onV0 := s < eps && t < eps
+	onV1 := s > 1-eps && t < eps
+	onV2 := s < eps && t > 1-eps
+	if onV0 {
+		region = regionVertex0
+	} else if onV1 {
+		region = regionVertex1
+	} else if onV2 {
+		region = regionVertex2
+	} else if t < eps {
+		region = regionEdge01 // edge v0→v1 (t=0)
+	} else if s < eps {
+		region = regionEdge20 // edge v2→v0 (s=0)
+	} else if s+t > 1-eps {
+		region = regionEdge12 // edge v1→v2 (s+t=1)
+	}
+
+	return closest, dx*dx + dy*dy + dz*dz, region
 }
 
 func dot3(a, b [3]float32) float32 {
 	return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
 }
 
+// edgeKey is a canonical (undirected) edge, with A <= B.
+type edgeKey struct{ A, B uint32 }
+
+func makeEdgeKey(a, b uint32) edgeKey {
+	if a > b {
+		a, b = b, a
+	}
+	return edgeKey{a, b}
+}
+
+// buildBoundaryEdges returns the set of edges that belong to only one face.
+func buildBoundaryEdges(model *loader.LoadedModel) map[edgeKey]struct{} {
+	edgeCount := make(map[edgeKey]int, len(model.Faces)*3)
+	for _, f := range model.Faces {
+		edgeCount[makeEdgeKey(f[0], f[1])]++
+		edgeCount[makeEdgeKey(f[1], f[2])]++
+		edgeCount[makeEdgeKey(f[2], f[0])]++
+	}
+	boundary := make(map[edgeKey]struct{})
+	for e, count := range edgeCount {
+		if count == 1 {
+			boundary[e] = struct{}{}
+		}
+	}
+	return boundary
+}
+
 // computeSDF computes the signed distance field value at point p.
 // Uses closest-surface-normal for sign determination, which is robust
 // for non-watertight meshes where Z-ray parity fails.
-// Points within shellThickness of the surface are always classified as
-// inside, ensuring thin features are captured even with broken meshes.
-func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, shellThickness float32, buf *searchBuf) float32 {
+// Points within shellThickness of the surface are classified as inside,
+// unless the closest point is on a boundary edge and the normal says
+// "outside" — this prevents shell thickness from creating protrusions
+// at mesh boundary edges.
+func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searchRadius float32, shellThickness float32, boundaryEdges map[edgeKey]struct{}, modelMin, modelMax [3]float32, buf *searchBuf) float32 {
+	// Points outside the model's bounding box are always outside. This
+	// prevents one-sided surfaces (like flat panels) from creating
+	// "inside" regions that extend beyond the model.
+	for i := 0; i < 3; i++ {
+		if p[i] < modelMin[i] || p[i] > modelMax[i] {
+			cands := si.candidatesRadiusZ(p[0], p[1], searchRadius, p[2], searchRadius, buf)
+			bestDistSq := float32(math.MaxFloat32)
+			for _, ti := range cands {
+				f := model.Faces[ti]
+				_, dSq := closestPointOnTriangle3D(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+				if dSq < bestDistSq {
+					bestDistSq = dSq
+				}
+			}
+			return float32(math.Sqrt(float64(bestDistSq)))
+		}
+	}
 	cands := si.candidatesRadiusZ(p[0], p[1], searchRadius, p[2], searchRadius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	var bestClosest [3]float32
 	bestTri := int32(-1)
+	var bestRegion closestRegion
 	for _, ti := range cands {
 		f := model.Faces[ti]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
 		v2 := model.Vertices[f[2]]
-		cp, dSq := closestPointOnTriangle3D(p, v0, v1, v2)
+		cp, dSq, region := closestPointOnTriangle3DEx(p, v0, v1, v2)
 		if dSq < bestDistSq {
 			bestDistSq = dSq
 			bestClosest = cp
 			bestTri = ti
+			bestRegion = region
 		}
 	}
 	dist := float32(math.Sqrt(float64(bestDistSq)))
@@ -464,13 +553,7 @@ func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searc
 		return dist // no triangle found, outside
 	}
 
-	// Points within shellThickness of the surface are always inside.
-	// This ensures thin/non-watertight features get a minimum-thickness shell.
-	if dist < shellThickness {
-		return -dist
-	}
-
-	// For points further from the surface, use closest-surface-normal for sign.
+	// Compute normal-based sign.
 	f := model.Faces[bestTri]
 	v0 := model.Vertices[f[0]]
 	v1 := model.Vertices[f[1]]
@@ -487,6 +570,34 @@ func computeSDF(p [3]float32, model *loader.LoadedModel, si *spatialIndex, searc
 	dy := p[1] - bestClosest[1]
 	dz := p[2] - bestClosest[2]
 	dot := dx*normal[0] + dy*normal[1] + dz*normal[2]
+
+	// Shell thickness: force close points inside to capture thin features.
+	// But skip this if the closest point is on a boundary edge and the
+	// normal says we're outside — that would create protrusions at mesh
+	// edges rather than fill thin geometry.
+	if dist < shellThickness {
+		if dot <= 0 {
+			// Normal says inside (or exactly on surface) — always inside.
+			return -dist
+		}
+		// Normal says outside. Check if closest point is on a boundary edge.
+		onBoundary := false
+		if bestRegion == regionEdge01 || bestRegion == regionVertex0 || bestRegion == regionVertex1 {
+			_, onBoundary = boundaryEdges[makeEdgeKey(f[0], f[1])]
+		}
+		if !onBoundary && (bestRegion == regionEdge12 || bestRegion == regionVertex1 || bestRegion == regionVertex2) {
+			_, onBoundary = boundaryEdges[makeEdgeKey(f[1], f[2])]
+		}
+		if !onBoundary && (bestRegion == regionEdge20 || bestRegion == regionVertex2 || bestRegion == regionVertex0) {
+			_, onBoundary = boundaryEdges[makeEdgeKey(f[2], f[0])]
+		}
+		if onBoundary {
+			// On a boundary edge with normal pointing away — don't force inside.
+			return dist
+		}
+		// Not on a boundary edge — force inside for shell thickness.
+		return -dist
+	}
 
 	if dot < 0 {
 		return -dist // inside
@@ -512,6 +623,8 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// 1. Bounding box.
 	minV, maxV := computeBounds(model.Vertices)
+	// Keep unpadded bounds for SDF bbox clamping.
+	modelMin, modelMax := minV, maxV
 	pad := hexFlat * 2
 	minV[0] -= pad
 	minV[1] -= pad
@@ -806,6 +919,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	fmt.Println("  Computing SDF at cell vertices...")
 	searchRadius := hexFlat * 3
 	shellThickness := layerH // vertices within one layer height of the surface are forced inside
+	boundaryEdges := buildBoundaryEdges(model)
 
 	// Collect unique vertex positions.
 	uniqueSet := make(map[[3]float32]struct{})
@@ -840,7 +954,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			defer wg.Done()
 			buf := newSearchBuf(len(model.Faces))
 			for i := start; i < end; i++ {
-				sdfValues[i] = computeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, buf)
+				sdfValues[i] = computeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, boundaryEdges, modelMin, modelMax, buf)
 			}
 		}(start, end)
 	}
