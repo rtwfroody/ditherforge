@@ -40,13 +40,14 @@ def load_mesh(path: str, normalize: bool = False) -> trimesh.Trimesh:
         mesh.vertices = np.column_stack([v[:, 0], -v[:, 2], v[:, 1]])
 
     if normalize:
-        # Center at origin, scale to unit bounding box. This makes meshes
-        # comparable regardless of their original units or scale.
+        # Center on center of mass and scale to unit bounding box. Using
+        # center of mass instead of bbox center makes the viewport stable
+        # even when the output has small protrusions that shift the bbox.
         v = mesh.vertices
         lo, hi = v.min(axis=0), v.max(axis=0)
         extent = (hi - lo).max()
         if extent > 0:
-            mesh.vertices = (v - (lo + hi) / 2) / extent
+            mesh.vertices = (v - mesh.center_mass) / extent
 
     return mesh
 
