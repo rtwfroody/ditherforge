@@ -1,4 +1,4 @@
-# text2filament MVP Implementation Plan
+# ditherforge MVP Implementation Plan
 
 ## What's Done
 

@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/rtwfroody/text2filament/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
 const MaxIter = 32

@@ -14,8 +14,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/rtwfroody/text2filament/internal/loader"
-	"github.com/rtwfroody/text2filament/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/palette"
 )
 
 // Config holds parameters for hexagonal voxel remeshing.

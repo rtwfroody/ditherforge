@@ -1,6 +1,6 @@
 # Silhouette Tests
 
-Regression tests that compare the silhouette of text2filament's output against
+Regression tests that compare the silhouette of ditherforge's output against
 the original input model. Catches problems like stray geometry, missing
 features, or shape distortion.
 
@@ -26,7 +26,7 @@ uv run --with trimesh --with pillow --with numpy python3 tests/test_silhouette.p
 
 This produces three files per view per test:
 - `{test}_{view}_input.png` — silhouette of the original model
-- `{test}_{view}_output.png` — silhouette of the text2filament output
+- `{test}_{view}_output.png` — silhouette of the ditherforge output
 - `{test}_{view}_diff.png` — color-coded comparison:
   - **Green** — both input and output agree (good)
   - **Blue** — input only, missing from output (under-coverage)

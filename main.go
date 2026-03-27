@@ -7,12 +7,12 @@ import (
 	"strings"
 
 	"github.com/alexflint/go-arg"
-	"github.com/rtwfroody/text2filament/internal/export3mf"
-	"github.com/rtwfroody/text2filament/internal/hexvoxel"
-	"github.com/rtwfroody/text2filament/internal/loader"
-	"github.com/rtwfroody/text2filament/internal/palette"
-	"github.com/rtwfroody/text2filament/internal/sample"
-	"github.com/rtwfroody/text2filament/internal/subdivide"
+	"github.com/rtwfroody/ditherforge/internal/export3mf"
+	"github.com/rtwfroody/ditherforge/internal/hexvoxel"
+	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/sample"
+	"github.com/rtwfroody/ditherforge/internal/subdivide"
 )
 
 // Args defines the CLI arguments.

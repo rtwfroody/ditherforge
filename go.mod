@@ -1,4 +1,4 @@
-module github.com/rtwfroody/text2filament
+module github.com/rtwfroody/ditherforge
 
 go 1.22
 

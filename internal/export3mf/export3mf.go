@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rtwfroody/text2filament/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
 //go:embed snapmaker_u1_04.json
@@ -316,11 +316,11 @@ func buildModelSettings(faceCount int) string {
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <config>
   <object id="2">
-    <metadata key="name" value="text2filament_output"/>
+    <metadata key="name" value="ditherforge_output"/>
     <metadata key="extruder" value="1"/>
     <metadata face_count="%d"/>
     <part id="1" subtype="normal_part">
-      <metadata key="name" value="text2filament_output"/>
+      <metadata key="name" value="ditherforge_output"/>
       <metadata key="extruder" value="1"/>
     </part>
   </object>

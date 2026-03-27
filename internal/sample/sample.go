@@ -7,7 +7,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/rtwfroody/text2filament/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
 // bilinearSample samples an image at normalized UV coordinates using bilinear

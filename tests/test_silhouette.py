@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Silhouette-based regression tests for text2filament.
+"""Silhouette-based regression tests for ditherforge.
 
-For each test vector (input file + args), runs text2filament to produce a 3MF,
+For each test vector (input file + args), runs ditherforge to produce a 3MF,
 renders orthographic silhouettes of the input and output from three views
 (front, left, top), then checks that the output silhouette approximately
 matches the input silhouette.
@@ -26,7 +26,7 @@ from PIL import Image, ImageFilter
 
 from silhouette import load_mesh, render_silhouette
 
-# Each test vector: name, input file, text2filament extra args, and parameters
+# Each test vector: name, input file, ditherforge extra args, and parameters
 # needed to compute the discretization tolerance.
 TEST_VECTORS = [
     {
@@ -90,12 +90,12 @@ def compute_dilate_px(nozzle_mm, layer_height_mm, model_extent_mm, resolution):
     return dilate_px
 
 
-def run_text2filament(input_path, extra_args, output_path):
-    """Run text2filament and return True on success."""
+def run_ditherforge(input_path, extra_args, output_path):
+    """Run ditherforge and return True on success."""
     cmd = ["go", "run", ".", input_path, "--output", output_path] + extra_args
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"  FAIL: text2filament failed:\n{result.stderr}")
+        print(f"  FAIL: ditherforge failed:\n{result.stderr}")
         return False
     return True
 
@@ -215,14 +215,14 @@ def run_test(vector, outdir, verbose):
         print(f"  SKIP: input file not found")
         return True  # don't fail on missing test data
 
-    # Run text2filament.
+    # Run ditherforge.
     with tempfile.NamedTemporaryFile(suffix=".3mf", delete=not outdir) as tmp:
         output_path = tmp.name
         if outdir:
             output_path = os.path.join(outdir, f"{name}.3mf")
 
-        print(f"  Running text2filament...")
-        if not run_text2filament(input_path, extra_args, output_path):
+        print(f"  Running ditherforge...")
+        if not run_ditherforge(input_path, extra_args, output_path):
             return False
 
         # Each mesh is normalized independently (centered on bbox center,
