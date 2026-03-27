@@ -661,9 +661,11 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	}
 
 	// Proximity-based supplementary voxelization: for each triangle in the
-	// mesh, activate all hex cells that overlap the triangle's bounding box.
-	// This catches thin/non-watertight features that Z-ray parity misses.
+	// mesh, activate hex cells whose center is within one cell radius of the
+	// triangle in 3D. This catches thin/non-watertight features that Z-ray
+	// parity misses, without creating spurious cells far from actual geometry.
 	proximitySet := make(map[hexKey]struct{})
+	proximityRadius := hexFlat // max distance from hex center to triangle surface
 	for fi := range model.Faces {
 		f := model.Faces[fi]
 		v0 := model.Vertices[f[0]]
@@ -709,13 +711,14 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			for row := rMin; row <= rMax; row++ {
 				hcx := minV[0] + float32(col)*colStep
 				hcy := minV[1] + float32(row)*rowStep + rowOff
-				// Check if hex center is within hex spacing of triangle bbox.
-				if hcx < tMinX-hexFlat || hcx > tMaxX+hexFlat ||
-					hcy < tMinY-hexFlat || hcy > tMaxY+hexFlat {
-					continue
-				}
 				for layer := layerMin; layer <= layerMax; layer++ {
-					proximitySet[hexKey{col, row, layer}] = struct{}{}
+					hcz := minV[2] + float32(layer)*layerH
+					// Check actual 3D distance from hex center to triangle.
+					_, dSq := closestPointOnTriangle3D(
+						[3]float32{hcx, hcy, hcz}, v0, v1, v2)
+					if float32(math.Sqrt(float64(dSq))) <= proximityRadius {
+						proximitySet[hexKey{col, row, layer}] = struct{}{}
+					}
 				}
 			}
 		}
