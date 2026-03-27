@@ -9,4 +9,4 @@ ditherforge
 *.png
 
 # Local scripts
-scripts/
+devscripts/
