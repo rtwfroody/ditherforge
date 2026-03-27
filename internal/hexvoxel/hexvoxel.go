@@ -1,5 +1,5 @@
 // Package hexvoxel generates a hexagonal voxel shell of a textured mesh.
-// Each hexagonal prism in the output corresponds to one nozzle-width column
+// Each hexagonal prism in the output corresponds to one column (1.5× nozzle width)
 // at one layer height, matching what a slicer actually deposits.
 // Isosurface extraction uses marching prisms (wedge decomposition) to produce
 // a smooth surface that follows the original model shape.
@@ -503,11 +503,16 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	nozzle := cfg.NozzleDiameter
 	layerH := cfg.LayerHeight
-	size := nozzle / float32(math.Sqrt(3)) // center-to-vertex
+	// Hex flat-to-flat spacing. Using 1.5× nozzle diameter because at 1.0×
+	// the hexes are too small for the slicer to fill reliably — bottom/top
+	// surfaces don't become solid. Tested with a 0.4mm nozzle: 1.5× (0.6mm)
+	// gives solid first layers while preserving good color resolution.
+	hexFlat := nozzle * 1.5
+	size := hexFlat / float32(math.Sqrt(3)) // center-to-vertex
 
 	// 1. Bounding box.
 	minV, maxV := computeBounds(model.Vertices)
-	pad := nozzle * 2
+	pad := hexFlat * 2
 	minV[0] -= pad
 	minV[1] -= pad
 	minV[2] -= pad
@@ -517,7 +522,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// Grid dimensions.
 	colStep := 1.5 * size            // horizontal spacing
-	rowStep := nozzle                 // vertical spacing (flat-to-flat)
+	rowStep := hexFlat                // vertical spacing (flat-to-flat)
 	nCols := int(math.Ceil(float64(maxV[0]-minV[0])/float64(colStep))) + 1
 	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(rowStep))) + 1
 	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
@@ -525,7 +530,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	fmt.Printf("  Hex grid: %d cols x %d rows x %d layers\n", nCols, nRows, nLayers)
 
 	// 2. Spatial index.
-	si := newSpatialIndex(model, nozzle*2)
+	si := newSpatialIndex(model, hexFlat*2)
 
 	// Precompute hex vertex offsets (flat-top hexagon).
 	var hexOffsetsX, hexOffsetsY [6]float32
@@ -562,7 +567,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	// 3. Ray-parity voxelization to determine active hexes and their colors.
 	var hexes []activeHex
 	colorBuf := newSearchBuf(len(model.Faces))
-	colorRadius := nozzle * 3
+	colorRadius := hexFlat * 3
 
 	for col := 0; col < nCols; col++ {
 		cx := minV[0] + float32(col)*colStep
@@ -704,9 +709,9 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			for row := rMin; row <= rMax; row++ {
 				hcx := minV[0] + float32(col)*colStep
 				hcy := minV[1] + float32(row)*rowStep + rowOff
-				// Check if hex center is within nozzle distance of triangle bbox.
-				if hcx < tMinX-nozzle || hcx > tMaxX+nozzle ||
-					hcy < tMinY-nozzle || hcy > tMaxY+nozzle {
+				// Check if hex center is within hex spacing of triangle bbox.
+				if hcx < tMinX-hexFlat || hcx > tMaxX+hexFlat ||
+					hcy < tMinY-hexFlat || hcy > tMaxY+hexFlat {
 					continue
 				}
 				for layer := layerMin; layer <= layerMax; layer++ {
@@ -796,7 +801,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// 4. Compute SDF at vertices of expanded cell set.
 	fmt.Println("  Computing SDF at cell vertices...")
-	searchRadius := nozzle * 3
+	searchRadius := hexFlat * 3
 	shellThickness := layerH // vertices within one layer height of the surface are forced inside
 
 	// Collect unique vertex positions.
