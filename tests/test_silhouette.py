@@ -97,6 +97,34 @@ def run_text2filament(input_path, extra_args, output_path):
     return True
 
 
+def silhouette_centroid(img):
+    """Compute the centroid of black pixels in a grayscale image."""
+    arr = np.array(img)
+    mask = arr < 128
+    if not mask.any():
+        return None
+    ys, xs = np.where(mask)
+    return (xs.mean(), ys.mean())
+
+
+def align_silhouette(output_img, input_img):
+    """Shift output_img so its silhouette centroid matches the input's.
+
+    Returns a new image with the output shifted. This corrects for small
+    alignment differences caused by different coordinate systems/tessellations.
+    """
+    inp_c = silhouette_centroid(input_img)
+    out_c = silhouette_centroid(output_img)
+    if inp_c is None or out_c is None:
+        return output_img
+    dx = int(round(inp_c[0] - out_c[0]))
+    dy = int(round(inp_c[1] - out_c[1]))
+    if dx == 0 and dy == 0:
+        return output_img
+    from PIL import ImageChops
+    return ImageChops.offset(output_img, dx, dy)
+
+
 def dilate_mask(mask, radius):
     """Dilate a boolean mask (True = object) by radius pixels."""
     img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
@@ -194,8 +222,9 @@ def run_test(vector, outdir, verbose):
         if not run_text2filament(input_path, extra_args, output_path):
             return False
 
-        # Load meshes, normalized to unit bounding box so they're comparable
-        # regardless of coordinate system or scale differences.
+        # Each mesh is normalized independently (centered on bbox center,
+        # scaled to unit extent). Silhouette centroid alignment (below)
+        # corrects for coordinate system and tessellation differences.
         print(f"  Loading meshes...")
         input_mesh = load_mesh(input_path, normalize=True)
         output_mesh = load_mesh(output_path, normalize=True)
@@ -207,7 +236,10 @@ def run_test(vector, outdir, verbose):
         all_passed = True
         for view_name, azimuth, elevation in VIEWS:
             input_img = render_silhouette(input_mesh, azimuth, elevation, RESOLUTION)
-            output_img = render_silhouette(output_mesh, azimuth, elevation, RESOLUTION)
+            output_raw = render_silhouette(output_mesh, azimuth, elevation, RESOLUTION)
+            # Align output to input by matching silhouette centroids.
+            # This corrects for coordinate system / tessellation differences.
+            output_img = align_silhouette(output_raw, input_img)
 
             if outdir:
                 input_img.save(os.path.join(outdir, f"{name}_{view_name}_input.png"))

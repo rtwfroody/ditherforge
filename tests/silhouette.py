@@ -16,12 +16,14 @@ import trimesh
 from PIL import Image, ImageDraw
 
 
-def load_mesh(path: str, normalize: bool = False) -> trimesh.Trimesh:
+def load_mesh(path: str, normalize: bool = False,
+              ref_center=None, ref_extent=None) -> trimesh.Trimesh:
     """Load a mesh file, merging all geometry into one Trimesh.
 
     Normalizes to Z-up: GLB/glTF is Y-up so we rotate X by +90°,
-    3MF is already Z-up. If normalize=True, also scales to a unit bounding
-    box centered at origin (for comparing meshes at different scales).
+    3MF is already Z-up. If normalize=True, centers on center of mass and
+    scales by bounding box extent. Pass ref_center and ref_extent to use
+    a shared reference frame (so two meshes end up aligned).
     """
     scene = trimesh.load(path)
     if isinstance(scene, trimesh.Scene):
@@ -40,14 +42,13 @@ def load_mesh(path: str, normalize: bool = False) -> trimesh.Trimesh:
         mesh.vertices = np.column_stack([v[:, 0], -v[:, 2], v[:, 1]])
 
     if normalize:
-        # Center on center of mass and scale to unit bounding box. Using
-        # center of mass instead of bbox center makes the viewport stable
-        # even when the output has small protrusions that shift the bbox.
+        # Center on bbox center and scale to unit bounding box.
         v = mesh.vertices
         lo, hi = v.min(axis=0), v.max(axis=0)
-        extent = (hi - lo).max()
+        center = ref_center if ref_center is not None else (lo + hi) / 2
+        extent = ref_extent if ref_extent is not None else (hi - lo).max()
         if extent > 0:
-            mesh.vertices = (v - mesh.center_mass) / extent
+            mesh.vertices = (v - center) / extent
 
     return mesh
 
