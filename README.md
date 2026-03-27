@@ -9,10 +9,8 @@ slicers like OrcaSlicer and BambuStudio.
 
 1. **Load** a textured GLB model and scale to millimeters.
 2. **Voxelize** onto a hexagonal prism grid matching the printer's nozzle
-   diameter and layer height (hexvoxel mode), or **subdivide** the original mesh
-   to a target resolution (subdivide mode).
-3. **Extract** a smooth isosurface via marching prisms (hexvoxel) or merge
-   uniform coplanar regions (subdivide).
+   diameter and layer height.
+3. **Extract** a smooth isosurface via marching prisms.
 4. **Sample** the original texture color at each output face.
 5. **Dither** using Floyd-Steinberg error diffusion in Morton-curve order to
    approximate the full-color texture with the available filament palette.
@@ -47,14 +45,12 @@ ditherforge <input.glb> [options]
 |------|---------|-------------|
 | `--palette` | `white,cyan,magenta,yellow` | Comma-separated colors (CSS names or `#hex`) |
 | `--auto-palette N` | — | Compute N dominant colors from texture instead of manual palette |
-| `--mode` | `hexvoxel` | Remesh mode: `hexvoxel` or `subdivide` |
-| `--nozzle-diameter` | `0.4` | Nozzle diameter in mm (hexvoxel mode) |
-| `--layer-height` | `0.2` | Layer height in mm (hexvoxel mode) |
-| `--resolution` | `0.5` | Target max edge length in mm (subdivide mode) |
+| `--mode` | `hexvoxel` | Remesh mode |
+| `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
+| `--layer-height` | `0.2` | Layer height in mm |
 | `--glb-unit` | `m` | GLB coordinate unit: `m`, `dm`, `cm`, `mm` |
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
-| `--color-space` | `cielab` | Color distance metric: `cielab` or `rgb` |
 | `--no-dither` | — | Disable Floyd-Steinberg dithering (nearest-color only) |
 | `--no-merge` | — | Skip coplanar triangle merging |
 | `--stats` | — | Print face counts per material |
@@ -77,11 +73,6 @@ Model already in millimeters:
 ditherforge model.glb --glb-unit mm
 ```
 
-Use subdivide mode for models where preserving the original mesh topology matters:
-```
-ditherforge model.glb --mode subdivide --resolution 0.3
-```
-
 ## Printing
 
 The output 3MF includes embedded printer and process profiles for the Snapmaker
@@ -100,7 +91,5 @@ uv run --with trimesh --with pillow --with numpy python3 tests/test_silhouette.p
 
 ## Status
 
-Early development. Hexvoxel mode produces good results for many models.
-Subdivide mode works but produces larger files. The embedded slicer profiles
-target the Snapmaker U1; other printers may need manual profile adjustment in
-the slicer.
+Early development. The embedded slicer profiles target the Snapmaker U1; other
+printers may need manual profile adjustment in the slicer.
