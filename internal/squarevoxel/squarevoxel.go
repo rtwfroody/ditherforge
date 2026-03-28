@@ -29,7 +29,10 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 		return nil, nil, fmt.Errorf("empty model")
 	}
 
-	cellSize := cfg.NozzleDiameter
+	// Cell edge length. At 1.0× nozzle diameter the slicer can't fill the
+	// bottom layer reliably. Empirically 1.275× (0.51mm for a 0.4mm nozzle)
+	// is the minimum that produces solid first layers.
+	cellSize := cfg.NozzleDiameter * 1.275
 	layerH := cfg.LayerHeight
 
 	// 1. Bounding box.

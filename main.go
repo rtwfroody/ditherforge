@@ -16,7 +16,7 @@ import (
 // Args defines the CLI arguments.
 type Args struct {
 	Input       string  `arg:"positional,required" help:"Input .glb file"`
-	Palette     string  `arg:"--palette" default:"white,cyan,magenta,yellow" help:"Comma-separated colors (CSS names or hex)"`
+	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: cyan,magenta,yellow + black or white based on texture brightness"`
 	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from texture (mutually exclusive with --palette)"`
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
@@ -101,6 +101,18 @@ func run() error {
 			hexStrs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		}
 		fmt.Printf("  Palette: %s\n", strings.Join(hexStrs, ","))
+	} else if args.Palette == "" {
+		// Default palette: CMY + black or white based on texture brightness.
+		// CMY can mix dark tones but not light ones, so prefer white
+		// unless the model is clearly dark. Use a low threshold since
+		// texture atlases often have dark unused regions pulling the
+		// average down.
+		bw := "white"
+		if averageTextureBrightness(model) < 85 {
+			bw = "black"
+		}
+		fmt.Printf("  Default palette: cyan,magenta,yellow,%s\n", bw)
+		paletteRGB, _ = palette.ParsePalette([]string{"cyan", "magenta", "yellow", bw})
 	} else {
 		colorStrs := strings.Split(args.Palette, ",")
 		for i := range colorStrs {
@@ -196,6 +208,34 @@ func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8)
 	}
 	fmt.Println("Done.")
 	return nil
+}
+
+// averageTextureBrightness samples the model's textures and returns an
+// average brightness in 0-255. Used to pick black vs white for the default palette.
+func averageTextureBrightness(model *loader.LoadedModel) float64 {
+	if len(model.Textures) == 0 {
+		return 128
+	}
+	var totalR, totalG, totalB float64
+	var count int
+	for _, tex := range model.Textures {
+		bounds := tex.Bounds()
+		// Sample every 16th pixel for speed.
+		for y := bounds.Min.Y; y < bounds.Max.Y; y += 16 {
+			for x := bounds.Min.X; x < bounds.Max.X; x += 16 {
+				r, g, b, _ := tex.At(x, y).RGBA()
+				totalR += float64(r >> 8)
+				totalG += float64(g >> 8)
+				totalB += float64(b >> 8)
+				count++
+			}
+		}
+	}
+	if count == 0 {
+		return 128
+	}
+	// Perceived brightness (ITU-R BT.601).
+	return (0.299*totalR + 0.587*totalG + 0.114*totalB) / float64(count)
 }
 
 func main() {
