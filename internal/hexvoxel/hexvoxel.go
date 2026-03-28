@@ -26,7 +26,7 @@ type Config struct {
 
 // Remesh generates a hexagonal voxel shell of the input model using marching
 // prisms for smooth isosurface extraction.
-func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) (*loader.LoadedModel, []int32, error) {
+func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, nil, fmt.Errorf("empty model")
 	}
@@ -291,9 +291,14 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 
 	// 5. Palette assignment / dithering.
 	var assignments []int32
-	if dither {
-		assignments = voxel.DitherCells(cells, pal)
-	} else {
+	switch ditherMode {
+	case "dizzy":
+		assignments = voxel.DitherCellsDizzy(cells, pal)
+	case "fs":
+		assignments = voxel.DitherCellsFS(cells, pal)
+	case "fs-random":
+		assignments = voxel.DitherCellsFSRandom(cells, pal)
+	default:
 		assignments = voxel.AssignColors(cells, pal)
 	}
 

@@ -188,8 +188,8 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	return BilinearSample(model.Textures[texIdx], u, v)
 }
 
-// DitherCells applies Floyd-Steinberg error diffusion over cells in spatial order.
-func DitherCells(cells []ActiveCell, pal [][3]uint8) []int32 {
+// DitherCellsFS applies Floyd-Steinberg error diffusion over cells in spatial order.
+func DitherCellsFS(cells []ActiveCell, pal [][3]uint8) []int32 {
 	order := make([]int, len(cells))
 	for i := range order {
 		order[i] = i
@@ -208,15 +208,66 @@ func DitherCells(cells []ActiveCell, pal [][3]uint8) []int32 {
 	assignments := make([]int32, len(cells))
 	errBuf := make([][3]float32, len(cells)+4)
 
-	// Use a deterministic seed so output is reproducible.
+	for i, idx := range order {
+		r := ClampF(float32(cells[idx].Color[0])+errBuf[i][0], 0, 255)
+		g := ClampF(float32(cells[idx].Color[1])+errBuf[i][1], 0, 255)
+		b := ClampF(float32(cells[idx].Color[2])+errBuf[i][2], 0, 255)
+
+		bestIdx := 0
+		bestDist := float32(math.MaxFloat32)
+		for pi, p := range pal {
+			dr := r - float32(p[0])
+			dg := g - float32(p[1])
+			db := b - float32(p[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+
+		weights := [4]float32{7.0 / 16.0, 5.0 / 16.0, 3.0 / 16.0, 1.0 / 16.0}
+		for k := 0; k < 4 && i+1+k < len(cells); k++ {
+			errBuf[i+1+k][0] += eR * weights[k]
+			errBuf[i+1+k][1] += eG * weights[k]
+			errBuf[i+1+k][2] += eB * weights[k]
+		}
+	}
+
+	return assignments
+}
+
+// DitherCellsFSRandom applies Floyd-Steinberg with per-cell noise to break up
+// regular patterns caused by linear scan order in 3D.
+func DitherCellsFSRandom(cells []ActiveCell, pal [][3]uint8) []int32 {
+	order := make([]int, len(cells))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ha, hb := cells[order[a]], cells[order[b]]
+		if ha.Layer != hb.Layer {
+			return ha.Layer < hb.Layer
+		}
+		if ha.Row != hb.Row {
+			return ha.Row < hb.Row
+		}
+		return ha.Col < hb.Col
+	})
+
+	assignments := make([]int32, len(cells))
+	errBuf := make([][3]float32, len(cells)+4)
+
 	rng := rand.New(rand.NewSource(42))
-	// Noise amplitude: enough to break up regular patterns without
-	// distorting colors noticeably. ±24 out of 255 is ~10%.
 	const noiseAmp = 24.0
 
 	for i, idx := range order {
-		// Add noise to break up regular dither patterns caused by the
-		// linear scan order not matching spatial neighbors well in 3D.
 		noise := [3]float32{
 			noiseAmp * (rng.Float32()*2 - 1),
 			noiseAmp * (rng.Float32()*2 - 1),
@@ -250,6 +301,121 @@ func DitherCells(cells []ActiveCell, pal [][3]uint8) []int32 {
 			errBuf[i+1+k][0] += eR * weights[k]
 			errBuf[i+1+k][1] += eG * weights[k]
 			errBuf[i+1+k][2] += eB * weights[k]
+		}
+	}
+
+	return assignments
+}
+
+// neighbor holds a precomputed neighbor reference with its diffusion weight.
+type neighbor struct {
+	idx    int
+	weight float32
+}
+
+// DitherCellsDizzy applies dizzy dithering: random traversal order with
+// error diffusion to actual spatial neighbors. Produces blue-noise-like
+// results without directional bias.
+func DitherCellsDizzy(cells []ActiveCell, pal [][3]uint8) []int32 {
+	n := len(cells)
+
+	// Build cell lookup map.
+	cellMap := make(map[CellKey]int, n)
+	for i, c := range cells {
+		cellMap[CellKey{c.Col, c.Row, c.Layer}] = i
+	}
+
+	// Precompute neighbor lists with weights.
+	// Face-adjacent (1 axis differs): weight 1.0
+	// Edge-adjacent (2 axes differ): weight 0.1
+	// Corner-adjacent (3 axes differ): weight 0.01
+	neighbors := make([][]neighbor, n)
+	for i, c := range cells {
+		var nbrs []neighbor
+		for dc := -1; dc <= 1; dc++ {
+			for dr := -1; dr <= 1; dr++ {
+				for dl := -1; dl <= 1; dl++ {
+					if dc == 0 && dr == 0 && dl == 0 {
+						continue
+					}
+					if j, ok := cellMap[CellKey{c.Col + dc, c.Row + dr, c.Layer + dl}]; ok {
+						axes := 0
+						if dc != 0 {
+							axes++
+						}
+						if dr != 0 {
+							axes++
+						}
+						if dl != 0 {
+							axes++
+						}
+						var w float32
+						switch axes {
+						case 1:
+							w = 1.0
+						case 2:
+							w = 0.1
+						case 3:
+							w = 0.01
+						}
+						nbrs = append(nbrs, neighbor{idx: j, weight: w})
+					}
+				}
+			}
+		}
+		neighbors[i] = nbrs
+	}
+
+	// Random permutation with deterministic seed.
+	rng := rand.New(rand.NewSource(42))
+	order := rng.Perm(n)
+
+	assignments := make([]int32, n)
+	errBuf := make([][3]float32, n)
+	processed := make([]bool, n)
+
+	for _, idx := range order {
+		r := ClampF(float32(cells[idx].Color[0])+errBuf[idx][0], 0, 255)
+		g := ClampF(float32(cells[idx].Color[1])+errBuf[idx][1], 0, 255)
+		b := ClampF(float32(cells[idx].Color[2])+errBuf[idx][2], 0, 255)
+
+		bestIdx := 0
+		bestDist := float32(math.MaxFloat32)
+		for pi, p := range pal {
+			dr := r - float32(p[0])
+			dg := g - float32(p[1])
+			db := b - float32(p[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+		processed[idx] = true
+
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+
+		// Distribute error to unprocessed neighbors.
+		var totalWeight float32
+		for _, nb := range neighbors[idx] {
+			if !processed[nb.idx] {
+				totalWeight += nb.weight
+			}
+		}
+		if totalWeight > 0 {
+			scale := 1.0 / totalWeight
+			for _, nb := range neighbors[idx] {
+				if !processed[nb.idx] {
+					w := nb.weight * scale
+					errBuf[nb.idx][0] += eR * w
+					errBuf[nb.idx][1] += eG * w
+					errBuf[nb.idx][2] += eB * w
+				}
+			}
 		}
 	}
 

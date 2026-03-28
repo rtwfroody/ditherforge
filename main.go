@@ -26,7 +26,7 @@ type Args struct {
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	InventoryFile  string  `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
 	Inventory      *int    `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
+	Dither         string  `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, fs-random, dizzy"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	MaxExtent      *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
 	Force          bool     `arg:"--force" help:"Bypass extent size check"`
@@ -149,6 +149,12 @@ func run() error {
 		return fmt.Errorf("palette has %d colors but max supported is %d", len(paletteRGB), export3mf.MaxFilaments)
 	}
 
+	switch args.Dither {
+	case "none", "fs", "fs-random", "dizzy":
+	default:
+		return fmt.Errorf("invalid --dither %q: must be none, fs, fs-random, or dizzy", args.Dither)
+	}
+
 	switch args.Mode {
 	case "hexvoxel":
 		return runHexvoxel(args, model, paletteRGB)
@@ -167,7 +173,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 	}
 
 	fmt.Println("Generating hexagonal voxel shell...")
-	hexModel, assignments, err := hexvoxel.Remesh(model, paletteRGB, cfg, !args.NoDither)
+	hexModel, assignments, err := hexvoxel.Remesh(model, paletteRGB, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("hexvoxel remesh: %w", err)
 	}
@@ -203,7 +209,7 @@ func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8)
 	}
 
 	fmt.Println("Generating square voxel shell...")
-	sqModel, assignments, err := squarevoxel.Remesh(model, paletteRGB, cfg, !args.NoDither)
+	sqModel, assignments, err := squarevoxel.Remesh(model, paletteRGB, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
 	}
