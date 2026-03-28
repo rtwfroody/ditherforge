@@ -259,12 +259,12 @@ func TestMeshRender(t *testing.T) {
 				t.Fatalf("LoadGLB: %v", err)
 			}
 
-			// Auto-scale to fit within maxExtentMM.
+			// Auto-scale to target maxExtentMM.
 			ext := modelExtent(model)
 			scale := float32(1.0)
-			if ext > maxExtentMM {
+			if ext != maxExtentMM {
 				scale = maxExtentMM / ext
-				t.Logf("  Extent %.1fmm > %.0fmm, scaling by %.4f", ext, maxExtentMM, scale)
+				t.Logf("  Extent %.1fmm, target %.0fmm, scaling by %.4f", ext, maxExtentMM, scale)
 				// Reload with adjusted scale.
 				model, err = loader.LoadGLB(glbPath, unitScale*scale)
 				if err != nil {

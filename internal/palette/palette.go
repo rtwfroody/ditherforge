@@ -344,8 +344,32 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 // scoreFunc is the signature for palette subset scoring functions.
 type scoreFunc func(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64
 
-// weightedHullScore computes total weighted squared distance from each sample
-// to the convex hull of the palette subset. Points inside the hull score 0.
+// ditherSpreadFactor controls how much the nearest-vertex distance penalizes
+// colors that are inside the hull but far from any palette color. This
+// accounts for the perceptual cost of dithering distant colors: e.g. gray
+// reproduced by alternating black and white cells looks noisy even though
+// gray is inside the {black,white,...} hull.
+const ditherSpreadFactor = 0.3
+
+// nearestVertexDist returns the Euclidean distance from p to the closest vertex.
+func nearestVertexDist(p [3]float64, verts [][3]float64) float64 {
+	best := math.MaxFloat64
+	for _, v := range verts {
+		d0 := p[0] - v[0]
+		d1 := p[1] - v[1]
+		d2 := p[2] - v[2]
+		d := d0*d0 + d1*d1 + d2*d2
+		if d < best {
+			best = d
+		}
+	}
+	return math.Sqrt(best)
+}
+
+// weightedHullScore computes total weighted distance from each sample to the
+// palette subset. Uses hull distance plus a dithering spread penalty based on
+// nearest-vertex distance, so colors that require mixing distant palette
+// entries are penalized even when geometrically inside the hull.
 func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
 	verts := make([][3]float64, len(indices))
 	for i, idx := range indices {
@@ -353,7 +377,9 @@ func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLab
 	}
 	total := 0.0
 	for _, s := range samples {
-		d := distToConvexHull(s.Lab, verts)
+		hullDist := distToConvexHull(s.Lab, verts)
+		nearDist := nearestVertexDist(s.Lab, verts)
+		d := hullDist + ditherSpreadFactor*nearDist
 		total += d * d * float64(s.Count)
 	}
 	return total
