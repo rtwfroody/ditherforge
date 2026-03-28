@@ -26,7 +26,7 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string)
 
 	if len(pcfg.Inventory) > 0 {
 		fmt.Printf("  Selecting %d colors from %d-color inventory...\n", pcfg.InventoryN, len(pcfg.Inventory))
-		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN, pcfg.InventoryMethod)
+		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN)
 		pal := make([][3]uint8, len(selected))
 		strs := make([]string, len(selected))
 		for i, e := range selected {

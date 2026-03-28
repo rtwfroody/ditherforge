@@ -27,8 +27,7 @@ type Args struct {
 	LayerHeight     float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	InventoryFile   string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
 	Inventory       *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-	InventoryMethod string   `arg:"--inventory-method" default:"nearest" help:"Inventory selection method: nearest or hull"`
-	Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
+Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
 	NoMerge         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	MaxExtent       *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
 	Force           bool     `arg:"--force" help:"Bypass extent size check"`
@@ -104,17 +103,9 @@ func run() error {
 	default:
 		return fmt.Errorf("invalid --dither %q: must be none, fs, or dizzy", args.Dither)
 	}
-	switch args.InventoryMethod {
-	case "nearest", "hull":
-	default:
-		return fmt.Errorf("invalid --inventory-method %q: must be nearest or hull", args.InventoryMethod)
-	}
-
 	// Build palette config. For inventory and auto-palette modes, the actual
 	// palette is determined after voxelization using real cell colors.
-	pcfg := voxel.PaletteConfig{
-		InventoryMethod: args.InventoryMethod,
-	}
+	var pcfg voxel.PaletteConfig
 	if args.Inventory != nil {
 		inv, err := palette.ParseInventoryFile(args.InventoryFile)
 		if err != nil {

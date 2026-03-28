@@ -11,25 +11,20 @@ func distToConvexHull(p [3]float64, verts [][3]float64) float64 {
 		return math.MaxFloat64
 	}
 
-	best := math.MaxFloat64
-
-	// Check all vertices.
-	for i := 0; i < n; i++ {
-		d := dist3(p, verts[i])
-		if d < best {
-			best = d
-		}
-	}
-
-	// Check all edges.
+	// Check tetrahedra first — if point is inside one, distance is 0.
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			d := distToSegment(p, verts[i], verts[j])
-			if d < best {
-				best = d
+			for k := j + 1; k < n; k++ {
+				for l := k + 1; l < n; l++ {
+					if pointInTetrahedron(p, verts[i], verts[j], verts[k], verts[l]) {
+						return 0
+					}
+				}
 			}
 		}
 	}
+
+	best := math.MaxFloat64
 
 	// Check all triangles.
 	for i := 0; i < n; i++ {
@@ -43,16 +38,21 @@ func distToConvexHull(p [3]float64, verts [][3]float64) float64 {
 		}
 	}
 
-	// Check all tetrahedra.
+	// Check all edges.
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			for k := j + 1; k < n; k++ {
-				for l := k + 1; l < n; l++ {
-					if pointInTetrahedron(p, verts[i], verts[j], verts[k], verts[l]) {
-						return 0
-					}
-				}
+			d := distToSegment(p, verts[i], verts[j])
+			if d < best {
+				best = d
 			}
+		}
+	}
+
+	// Check all vertices.
+	for i := 0; i < n; i++ {
+		d := dist3(p, verts[i])
+		if d < best {
+			best = d
 		}
 	}
 

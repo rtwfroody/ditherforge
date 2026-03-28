@@ -8,8 +8,10 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/clusters"
@@ -114,7 +116,9 @@ type WeightedLabSample struct {
 func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
 	hist := make(map[[3]uint8]int, len(colors)/10)
 	for _, c := range colors {
-		hist[c]++
+		// Quantize to 7 bits per channel to merge near-identical colors.
+		q := [3]uint8{c[0] &^ 1, c[1] &^ 1, c[2] &^ 1}
+		hist[q]++
 	}
 	samples := make([]WeightedLabSample, 0, len(hist))
 	for rgb, count := range hist {
@@ -129,6 +133,21 @@ func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
 		samples = append(samples, s)
 	}
 	return samples
+}
+
+// topSamples returns at most maxN samples, keeping those with the highest
+// count. Weights are preserved so scoring remains representative.
+func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
+	if len(samples) <= maxN {
+		return samples
+	}
+	// Sort by count descending.
+	sorted := make([]WeightedLabSample, len(samples))
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Count > sorted[j].Count
+	})
+	return sorted[:maxN]
 }
 
 // labPoint implements clusters.Observation for k-means clustering in Lab space.
@@ -284,15 +303,16 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 }
 
 // SelectFromInventory picks the best n colors from inventory for the given
-// cell colors, using the specified method.
-// "nearest" minimizes total nearest-vertex distance (favors direct matches).
-// "hull" minimizes distance to convex hull (accounts for dithering mixing).
-func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, method string) []InventoryEntry {
+// cell colors. Uses hull-based scoring that measures distance to the convex
+// hull of each palette subset, properly accounting for dithering's ability
+// to mix colors.
+func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int) []InventoryEntry {
 	if n >= len(inventory) {
 		return inventory
 	}
 
 	samples := CellColorHistogram(cellColors)
+	samples = topSamples(samples, 500)
 
 	// Convert inventory to Lab.
 	invLab := make([][3]float64, len(inventory))
@@ -305,10 +325,7 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
 
-	scorer := weightedNearestScore
-	if method == "hull" {
-		scorer = weightedHullScore
-	}
+	scorer := weightedHullScore
 
 	var bestSubset []int
 	if combinationsCount(len(inventory), n) <= 50000 {
@@ -327,27 +344,6 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 // scoreFunc is the signature for palette subset scoring functions.
 type scoreFunc func(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64
 
-// weightedNearestScore computes total weighted squared distance from each
-// sample to its nearest palette color.
-func weightedNearestScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
-	total := 0.0
-	for _, s := range samples {
-		best := math.MaxFloat64
-		for _, idx := range indices {
-			c := invLab[idx]
-			d0 := s.Lab[0] - c[0]
-			d1 := s.Lab[1] - c[1]
-			d2 := s.Lab[2] - c[2]
-			d := d0*d0 + d1*d1 + d2*d2
-			if d < best {
-				best = d
-			}
-		}
-		total += best * float64(s.Count)
-	}
-	return total
-}
-
 // weightedHullScore computes total weighted squared distance from each sample
 // to the convex hull of the palette subset. Points inside the hull score 0.
 func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
@@ -364,29 +360,74 @@ func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLab
 }
 
 // exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
-// minimizes the given scoring function.
+// minimizes the given scoring function. Uses parallel workers.
 func exhaustiveSearch(invLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) []int {
+	if n < 1 {
+		return nil
+	}
+
+	// Generate all subsets where the first index varies, and farm out to workers.
+	type result struct {
+		score  float64
+		subset []int
+	}
+
+	numWorkers := runtime.NumCPU()
+	jobs := make(chan []int, 64)
+	results := make(chan result, numWorkers)
+
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localBest := math.MaxFloat64
+			var localSubset []int
+			for subset := range jobs {
+				s := score(subset, invLab, samples)
+				if s < localBest {
+					localBest = s
+					localSubset = make([]int, len(subset))
+					copy(localSubset, subset)
+				}
+			}
+			results <- result{localBest, localSubset}
+		}()
+	}
+
+	// Enumerate all C(invN, n) subsets.
+	go func() {
+		indices := make([]int, n)
+		var enumerate func(start, depth int)
+		enumerate = func(start, depth int) {
+			if depth == n {
+				sub := make([]int, n)
+				copy(sub, indices)
+				jobs <- sub
+				return
+			}
+			for i := start; i <= len(invLab)-(n-depth); i++ {
+				indices[depth] = i
+				enumerate(i+1, depth+1)
+			}
+		}
+		enumerate(0, 0)
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	bestScore := math.MaxFloat64
 	var bestSubset []int
-
-	indices := make([]int, n)
-	var enumerate func(start, depth int)
-	enumerate = func(start, depth int) {
-		if depth == n {
-			s := score(indices, invLab, samples)
-			if s < bestScore {
-				bestScore = s
-				bestSubset = make([]int, n)
-				copy(bestSubset, indices)
-			}
-			return
-		}
-		for i := start; i <= len(invLab)-(n-depth); i++ {
-			indices[depth] = i
-			enumerate(i+1, depth+1)
+	for r := range results {
+		if r.score < bestScore {
+			bestScore = r.score
+			bestSubset = r.subset
 		}
 	}
-	enumerate(0, 0)
 	return bestSubset
 }
 

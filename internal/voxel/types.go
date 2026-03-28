@@ -9,7 +9,6 @@ type PaletteConfig struct {
 	Palette         [][3]uint8             // explicit colors (--palette or default)
 	Inventory       []palette.InventoryEntry // --inventory-file entries
 	InventoryN      int                    // --inventory N
-	InventoryMethod string                 // "nearest" or "hull"
 	AutoPaletteN    int                    // --auto-palette N (0 = disabled)
 }
 
