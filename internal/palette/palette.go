@@ -2,10 +2,12 @@
 package palette
 
 import (
+	"bufio"
 	"encoding/hex"
 	"fmt"
 	"image"
 	"math"
+	"os"
 	"sort"
 	"strings"
 
@@ -211,6 +213,90 @@ func ComputePalette(textures []image.Image, n int) [][3]uint8 {
 		result2[i] = e.rgb
 	}
 	return result2
+}
+
+// ParseInventoryFile reads a file with one color per line.
+// Blank lines and lines starting with # are ignored.
+func ParseInventoryFile(path string) ([][3]uint8, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var colors [][3]uint8
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rgb, err := parseColor(line)
+		if err != nil {
+			return nil, fmt.Errorf("in %s: %w", path, err)
+		}
+		colors = append(colors, rgb)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(colors) == 0 {
+		return nil, fmt.Errorf("inventory file %s contains no colors", path)
+	}
+	return colors, nil
+}
+
+// SelectFromInventory picks the best n colors from inventory for the given
+// textures. It samples the textures, clusters into n groups, then for each
+// cluster picks the inventory color closest to the centroid.
+func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) [][3]uint8 {
+	if n >= len(inventory) {
+		return inventory
+	}
+
+	// Find n ideal colors using k-means on the texture.
+	ideal := ComputePalette(textures, n)
+
+	// For each ideal color, find the closest unused inventory color.
+	used := make([]bool, len(inventory))
+	invLab := make([][3]float64, len(inventory))
+	for i, c := range inventory {
+		cf := colorful.Color{
+			R: float64(c[0]) / 255.0,
+			G: float64(c[1]) / 255.0,
+			B: float64(c[2]) / 255.0,
+		}
+		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
+	}
+
+	result := make([][3]uint8, n)
+	for i, id := range ideal {
+		cf := colorful.Color{
+			R: float64(id[0]) / 255.0,
+			G: float64(id[1]) / 255.0,
+			B: float64(id[2]) / 255.0,
+		}
+		iL, iA, iB := cf.Lab()
+
+		bestIdx := -1
+		bestDist := math.MaxFloat64
+		for j := range inventory {
+			if used[j] {
+				continue
+			}
+			dL := iL - invLab[j][0]
+			dA := iA - invLab[j][1]
+			dB := iB - invLab[j][2]
+			d := dL*dL + dA*dA + dB*dB
+			if d < bestDist {
+				bestDist = d
+				bestIdx = j
+			}
+		}
+		used[bestIdx] = true
+		result[i] = inventory[bestIdx]
+	}
+	return result
 }
 
 func fallbackPalette(pixels [][3]uint8, n int) [][3]uint8 {

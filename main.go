@@ -24,6 +24,8 @@ type Args struct {
 	Mode           string  `arg:"--mode" default:"squarevoxel" help:"Remesh mode: squarevoxel or hexvoxel"`
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
+	InventoryFile  string  `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
+	Inventory      *int    `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
 	NoMerge        bool    `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	Force          bool    `arg:"--force" help:"Bypass extent size check"`
@@ -90,9 +92,27 @@ func run() error {
 		}
 	}
 
+	// Validate inventory flags.
+	if args.Inventory != nil && args.InventoryFile == "" {
+		return fmt.Errorf("--inventory requires --inventory-file")
+	}
+
 	// Build palette.
 	var paletteRGB [][3]uint8
-	if args.AutoPalette != nil {
+	if args.Inventory != nil {
+		inv, err := palette.ParseInventoryFile(args.InventoryFile)
+		if err != nil {
+			return err
+		}
+		n := *args.Inventory
+		fmt.Printf("Selecting %d colors from %d-color inventory...\n", n, len(inv))
+		paletteRGB = palette.SelectFromInventory(model.Textures, inv, n)
+		hexStrs := make([]string, len(paletteRGB))
+		for i, p := range paletteRGB {
+			hexStrs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+		}
+		fmt.Printf("  Palette: %s\n", strings.Join(hexStrs, ","))
+	} else if args.AutoPalette != nil {
 		n := *args.AutoPalette
 		fmt.Printf("Computing %d-color palette from texture...\n", n)
 		paletteRGB = palette.ComputePalette(model.Textures, n)
