@@ -26,7 +26,7 @@ type Args struct {
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	InventoryFile  string  `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
 	Inventory      *int    `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-	Dither         string  `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, fs-random, dizzy"`
+	Dither         string  `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	MaxExtent      *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
 	Force          bool     `arg:"--force" help:"Bypass extent size check"`
@@ -150,9 +150,9 @@ func run() error {
 	}
 
 	switch args.Dither {
-	case "none", "fs", "fs-random", "dizzy":
+	case "none", "fs", "dizzy":
 	default:
-		return fmt.Errorf("invalid --dither %q: must be none, fs, fs-random, or dizzy", args.Dither)
+		return fmt.Errorf("invalid --dither %q: must be none, fs, or dizzy", args.Dither)
 	}
 
 	switch args.Mode {

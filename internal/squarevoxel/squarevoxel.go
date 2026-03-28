@@ -278,9 +278,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, ditherMode st
 		assignments = voxel.DitherCellsDizzy(cells, pal)
 	case "fs":
 		assignments = voxel.DitherCellsFS(cells, pal)
-	case "fs-random":
-		assignments = voxel.DitherCellsFSRandom(cells, pal)
-	default:
+default:
 		assignments = voxel.AssignColors(cells, pal)
 	}
 
