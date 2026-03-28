@@ -107,12 +107,18 @@ func run() error {
 		}
 		n := *args.Inventory
 		fmt.Printf("Selecting %d colors from %d-color inventory...\n", n, len(inv))
-		paletteRGB = palette.SelectFromInventory(model.Textures, inv, n)
-		hexStrs := make([]string, len(paletteRGB))
-		for i, p := range paletteRGB {
-			hexStrs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+		selected := palette.SelectFromInventory(model.Textures, inv, n)
+		paletteRGB = make([][3]uint8, len(selected))
+		strs := make([]string, len(selected))
+		for i, e := range selected {
+			paletteRGB[i] = e.Color
+			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
+			if e.Label != "" {
+				s += " (" + e.Label + ")"
+			}
+			strs[i] = s
 		}
-		fmt.Printf("  Palette: %s\n", strings.Join(hexStrs, ","))
+		fmt.Printf("  Palette: %s\n", strings.Join(strs, ", "))
 	} else if args.AutoPalette != nil {
 		n := *args.AutoPalette
 		fmt.Printf("Computing %d-color palette from texture...\n", n)

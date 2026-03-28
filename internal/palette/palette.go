@@ -218,14 +218,20 @@ func ComputePalette(textures []image.Image, n int) [][3]uint8 {
 
 // ParseInventoryFile reads a file with one color per line.
 // Blank lines and lines starting with # are ignored.
-func ParseInventoryFile(path string) ([][3]uint8, error) {
+// InventoryEntry holds a color from an inventory file with an optional label.
+type InventoryEntry struct {
+	Color [3]uint8
+	Label string // user comment after the color, empty if none
+}
+
+func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	var colors [][3]uint8
+	var entries []InventoryEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -237,19 +243,26 @@ func ParseInventoryFile(path string) ([][3]uint8, error) {
 		if strings.HasPrefix(line, "#") && (len(line) < 2 || (line[1] < '0' || line[1] > '9') && (line[1] < 'a' || line[1] > 'f') && (line[1] < 'A' || line[1] > 'F')) {
 			continue
 		}
-		rgb, err := parseColor(line)
+		// Split into color token and optional label.
+		colorStr := line
+		label := ""
+		if idx := strings.IndexAny(line, " \t"); idx >= 0 {
+			colorStr = line[:idx]
+			label = strings.TrimSpace(line[idx+1:])
+		}
+		rgb, err := parseColor(colorStr)
 		if err != nil {
 			return nil, fmt.Errorf("in %s: %w", path, err)
 		}
-		colors = append(colors, rgb)
+		entries = append(entries, InventoryEntry{Color: rgb, Label: label})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if len(colors) == 0 {
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("inventory file %s contains no colors", path)
 	}
-	return colors, nil
+	return entries, nil
 }
 
 // SelectFromInventory picks the best n colors from inventory for the given
@@ -257,7 +270,7 @@ func ParseInventoryFile(path string) ([][3]uint8, error) {
 // in CIELAB space. This favors palettes where dominant texture colors land
 // close to a palette color (producing solid areas), rather than maximizing
 // gamut span (which causes everything to be dithered).
-func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) [][3]uint8 {
+func SelectFromInventory(textures []image.Image, inventory []InventoryEntry, n int) []InventoryEntry {
 	if n >= len(inventory) {
 		return inventory
 	}
@@ -267,11 +280,11 @@ func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) []
 
 	// Convert inventory to Lab.
 	invLab := make([][3]float64, len(inventory))
-	for i, c := range inventory {
+	for i, e := range inventory {
 		cf := colorful.Color{
-			R: float64(c[0]) / 255.0,
-			G: float64(c[1]) / 255.0,
-			B: float64(c[2]) / 255.0,
+			R: float64(e.Color[0]) / 255.0,
+			G: float64(e.Color[1]) / 255.0,
+			B: float64(e.Color[2]) / 255.0,
 		}
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
@@ -283,7 +296,7 @@ func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) []
 		bestSubset = randomNearestSearch(invLab, samples, n, 50000)
 	}
 
-	result := make([][3]uint8, n)
+	result := make([]InventoryEntry, n)
 	for i, idx := range bestSubset {
 		result[i] = inventory[idx]
 	}
