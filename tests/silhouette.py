@@ -27,7 +27,15 @@ def load_mesh(path: str, normalize: bool = False,
     """
     scene = trimesh.load(path)
     if isinstance(scene, trimesh.Scene):
-        meshes = [g for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh)]
+        # Apply scene graph transforms so each node ends up in world space.
+        meshes = []
+        for node_name in scene.graph.nodes_geometry:
+            transform, geometry_name = scene.graph[node_name]
+            geom = scene.geometry[geometry_name]
+            if isinstance(geom, trimesh.Trimesh):
+                m = geom.copy()
+                m.apply_transform(transform)
+                meshes.append(m)
         if not meshes:
             sys.exit(f"No triangle meshes found in {path}")
         mesh = trimesh.util.concatenate(meshes)
