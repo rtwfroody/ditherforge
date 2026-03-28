@@ -22,8 +22,28 @@ import (
 // sourceHash is computed once in TestMain from all Go source files.
 var sourceHash string
 
-// cacheDir holds cached remesh outputs.
 const cacheDir = "tests/cache"
+
+const (
+	defaultNozzle      = float32(0.4)
+	defaultLayerHeight = float32(0.2)
+	maxExtentMM        = float32(100)
+	testResolution     = 512
+	marginFrac         = 0.05
+	minCoverage        = 0.95
+	maxOvershoot       = 0.0
+	maxDepthDiff       = 20 // p95 gray level difference (0-255)
+)
+
+var views = []struct {
+	name      string
+	azimuth   float64
+	elevation float64
+}{
+	{"front", 90, 20},
+	{"left", 0, 20},
+	{"top", 0, 90},
+}
 
 func TestMain(m *testing.M) {
 	h, err := computeSourceHash()
@@ -36,7 +56,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// computeSourceHash hashes all .go files in the repo to detect code changes.
 func computeSourceHash() (string, error) {
 	h := sha256.New()
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
@@ -60,7 +79,6 @@ func computeSourceHash() (string, error) {
 		if _, err := io.Copy(h, f); err != nil {
 			return err
 		}
-		// Include the path so file renames are detected.
 		h.Write([]byte(path))
 		return nil
 	})
@@ -70,37 +88,31 @@ func computeSourceHash() (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil))[:16], nil
 }
 
-// cachedRemeshOutput holds the data we cache from a remesh run.
 type cachedRemeshOutput struct {
 	Vertices    [][3]float32
 	Faces       [][3]uint32
 	Assignments []int32
 }
 
-// getOrRunRemesh returns cached remesh output if available, otherwise runs
-// the remesh and caches the result.
-func getOrRunRemesh(t *testing.T, vec testVector, model *loader.LoadedModel, pal [][3]uint8) (*loader.LoadedModel, []int32) {
+func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal [][3]uint8) (*loader.LoadedModel, []int32) {
 	t.Helper()
-	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s.gob", vec.name, sourceHash))
+	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s.gob", name, sourceHash))
 
-	// Try loading from cache.
 	if f, err := os.Open(cacheFile); err == nil {
 		defer f.Close()
 		var cached cachedRemeshOutput
 		if err := gob.NewDecoder(f).Decode(&cached); err == nil {
 			t.Log("Using cached remesh output")
-			outModel := &loader.LoadedModel{
+			return &loader.LoadedModel{
 				Vertices: cached.Vertices,
 				Faces:    cached.Faces,
-			}
-			return outModel, cached.Assignments
+			}, cached.Assignments
 		}
 	}
 
-	// Cache miss — run remesh.
 	cfg := squarevoxel.Config{
-		NozzleDiameter: vec.nozzle,
-		LayerHeight:    vec.layerHeight,
+		NozzleDiameter: defaultNozzle,
+		LayerHeight:    defaultLayerHeight,
 	}
 
 	t.Log("Running squarevoxel remesh...")
@@ -109,7 +121,6 @@ func getOrRunRemesh(t *testing.T, vec testVector, model *loader.LoadedModel, pal
 		t.Fatalf("Remesh: %v", err)
 	}
 
-	// Save to cache (best-effort).
 	if f, err := os.Create(cacheFile); err == nil {
 		gob.NewEncoder(f).Encode(cachedRemeshOutput{
 			Vertices:    outModel.Vertices,
@@ -119,8 +130,8 @@ func getOrRunRemesh(t *testing.T, vec testVector, model *loader.LoadedModel, pal
 		f.Close()
 	}
 
-	// Clean up stale cache files for this vector.
-	prefix := vec.name + "_"
+	// Clean stale cache for this model.
+	prefix := name + "_"
 	entries, _ := os.ReadDir(cacheDir)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) && e.Name() != filepath.Base(cacheFile) {
@@ -131,47 +142,28 @@ func getOrRunRemesh(t *testing.T, vec testVector, model *loader.LoadedModel, pal
 	return outModel, assignments
 }
 
-type testVector struct {
-	name          string
-	input         string
-	scale         float32
-	glbUnit       string
-	nozzle        float32
-	layerHeight   float32
-	modelExtentMM float64
+// modelExtent returns the max bounding box extent in mm.
+func modelExtent(model *loader.LoadedModel) float32 {
+	minV, maxV := model.Vertices[0], model.Vertices[0]
+	for _, v := range model.Vertices[1:] {
+		for i := 0; i < 3; i++ {
+			if v[i] < minV[i] {
+				minV[i] = v[i]
+			}
+			if v[i] > maxV[i] {
+				maxV[i] = v[i]
+			}
+		}
+	}
+	ext := float32(0)
+	for i := 0; i < 3; i++ {
+		d := maxV[i] - minV[i]
+		if d > ext {
+			ext = d
+		}
+	}
+	return ext
 }
-
-type view struct {
-	name      string
-	azimuth   float64
-	elevation float64
-}
-
-var testVectors = []testVector{
-	{
-		name:          "praetorian",
-		input:         "objects/glyphid_praetorian.glb",
-		scale:         0.05,
-		glbUnit:       "m",
-		nozzle:        0.4,
-		layerHeight:   0.2,
-		modelExtentMM: 117.5,
-	},
-}
-
-var views = []view{
-	{"front", 90, 20},
-	{"left", 0, 20},
-	{"top", 0, 90},
-}
-
-const (
-	testResolution = 512
-	marginFrac     = 0.05
-	minCoverage    = 0.95
-	maxOvershoot   = 0.0
-	maxDepthDiff   = 20 // p95 gray level difference (0-255)
-)
 
 func computeDilatePx(nozzleMM, layerHeightMM, modelExtentMM float64) int {
 	hexFlat := nozzleMM * 1.5
@@ -241,42 +233,54 @@ func percentile(vals []float64, p float64) float64 {
 	return vals[lo]*(1-frac) + vals[hi]*frac
 }
 
-// loadInput loads and caches the input model for a test vector.
-func loadInput(t *testing.T, vec testVector) *loader.LoadedModel {
-	t.Helper()
-	unitScales := map[string]float32{"m": 1000, "dm": 100, "cm": 10, "mm": 1}
-	scale := unitScales[vec.glbUnit] * vec.scale
-
-	t.Logf("Loading %s (scale=%.4f)...", vec.input, scale)
-	model, err := loader.LoadGLB(vec.input, scale)
-	if err != nil {
-		t.Fatalf("LoadGLB: %v", err)
-	}
-	t.Logf("  Input: %d verts, %d faces", len(model.Vertices), len(model.Faces))
-	return model
-}
-
 func TestMeshRender(t *testing.T) {
-	outdir := filepath.Join("tests", "output")
-	keepOutput := os.Getenv("KEEP_OUTPUT") != ""
+	// Auto-discover all GLB files in objects/.
+	glbs, err := filepath.Glob("objects/*.glb")
+	if err != nil {
+		t.Fatalf("globbing objects/*.glb: %v", err)
+	}
+	if len(glbs) == 0 {
+		t.Skip("no .glb files in objects/")
+	}
 
-	for _, vec := range testVectors {
-		t.Run(vec.name, func(t *testing.T) {
-			if _, err := os.Stat(vec.input); os.IsNotExist(err) {
-				t.Skipf("input file not found: %s", vec.input)
+	outdir := filepath.Join("tests", "output")
+
+	for _, glbPath := range glbs {
+		name := strings.TrimSuffix(filepath.Base(glbPath), ".glb")
+		t.Run(name, func(t *testing.T) {
+			// Load with default GLB unit (meters → mm).
+			const unitScale = float32(1000)
+
+			t.Logf("Loading %s...", glbPath)
+			model, err := loader.LoadGLB(glbPath, unitScale)
+			if err != nil {
+				t.Fatalf("LoadGLB: %v", err)
 			}
 
-			model := loadInput(t, vec)
+			// Auto-scale to fit within maxExtentMM.
+			ext := modelExtent(model)
+			scale := float32(1.0)
+			if ext > maxExtentMM {
+				scale = maxExtentMM / ext
+				t.Logf("  Extent %.1fmm > %.0fmm, scaling by %.4f", ext, maxExtentMM, scale)
+				// Reload with adjusted scale.
+				model, err = loader.LoadGLB(glbPath, unitScale*scale)
+				if err != nil {
+					t.Fatalf("LoadGLB (rescaled): %v", err)
+				}
+				ext = modelExtent(model)
+			}
+			t.Logf("  Input: %d verts, %d faces, extent %.1fmm",
+				len(model.Vertices), len(model.Faces), ext)
+
 			pal := [][3]uint8{{0, 255, 255}, {255, 0, 255}, {255, 255, 0}, {0, 0, 0}}
-			outModel, _ := getOrRunRemesh(t, vec, model, pal)
+			outModel, _ := getOrRunRemesh(t, name, model, pal)
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
 
-			dilatePx := computeDilatePx(float64(vec.nozzle), float64(vec.layerHeight), vec.modelExtentMM)
+			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
 			t.Logf("  Tolerance: %dpx", dilatePx)
 
-			if keepOutput {
-				os.MkdirAll(outdir, 0755)
-			}
+			os.MkdirAll(outdir, 0755)
 
 			for _, v := range views {
 				inpBounds := render.ProjectedBounds(model.Vertices, v.azimuth, v.elevation)
@@ -348,12 +352,10 @@ func TestMeshRender(t *testing.T) {
 				}
 				depthP95 := percentile(depthDiffs, 95)
 
-				if keepOutput {
-					saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", vec.name, v.name), inpImg, bounds)
-					saveImage(t, outdir, fmt.Sprintf("%s_%s_output.png", vec.name, v.name), outImg, bounds)
-					saveDiffImage(t, outdir, fmt.Sprintf("%s_%s_diff.png", vec.name, v.name),
-						inpMask, outMask, overshoot, testResolution, testResolution)
-				}
+					saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", name, v.name), inpImg, bounds)
+				saveImage(t, outdir, fmt.Sprintf("%s_%s_output.png", name, v.name), outImg, bounds)
+				saveDiffImage(t, outdir, fmt.Sprintf("%s_%s_diff.png", name, v.name),
+					inpMask, outMask, overshoot, testResolution, testResolution)
 
 				passed := true
 				var msgs []string

@@ -27,9 +27,10 @@ type Args struct {
 	InventoryFile  string  `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
 	Inventory      *int    `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
-	NoMerge        bool    `arg:"--no-merge" help:"Skip coplanar triangle merging"`
-	Force          bool    `arg:"--force" help:"Bypass extent size check"`
-	Stats          bool    `arg:"--stats" help:"Print face counts per material"`
+	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
+	MaxExtent      *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
+	Force          bool     `arg:"--force" help:"Bypass extent size check"`
+	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
 }
 
 func (Args) Description() string {
@@ -71,24 +72,24 @@ func run() error {
 		return fmt.Errorf("loading GLB: %w", err)
 	}
 
-	// Check model extent.
-	if !args.Force {
-		minV, maxV := model.Vertices[0], model.Vertices[0]
-		for _, v := range model.Vertices[1:] {
-			for i := 0; i < 3; i++ {
-				if v[i] < minV[i] {
-					minV[i] = v[i]
-				}
-				if v[i] > maxV[i] {
-					maxV[i] = v[i]
-				}
+	// Auto-scale to --max-extent if specified.
+	if args.MaxExtent != nil {
+		ext := modelMaxExtent(model)
+		if ext > *args.MaxExtent {
+			rescale := *args.MaxExtent / ext
+			fmt.Printf("  Extent %.1f mm > %.0f mm, scaling by %.4f\n", ext, *args.MaxExtent, rescale)
+			model, err = loader.LoadGLB(args.Input, scale*rescale)
+			if err != nil {
+				return fmt.Errorf("loading GLB (rescaled): %w", err)
 			}
 		}
-		for i := 0; i < 3; i++ {
-			ext := maxV[i] - minV[i]
-			if ext > 300 {
-				return fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale to reduce size (or --force to bypass)", ext)
-			}
+	}
+
+	// Check model extent.
+	if !args.Force {
+		ext := modelMaxExtent(model)
+		if ext > 300 {
+			return fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale or --max-extent to reduce size (or --force to bypass)", ext)
 		}
 	}
 
@@ -228,6 +229,29 @@ func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8)
 	}
 	fmt.Println("Done.")
 	return nil
+}
+
+// modelMaxExtent returns the largest bounding box extent in mm.
+func modelMaxExtent(model *loader.LoadedModel) float32 {
+	minV, maxV := model.Vertices[0], model.Vertices[0]
+	for _, v := range model.Vertices[1:] {
+		for i := 0; i < 3; i++ {
+			if v[i] < minV[i] {
+				minV[i] = v[i]
+			}
+			if v[i] > maxV[i] {
+				maxV[i] = v[i]
+			}
+		}
+	}
+	ext := float32(0)
+	for i := 0; i < 3; i++ {
+		d := maxV[i] - minV[i]
+		if d > ext {
+			ext = d
+		}
+	}
+	return ext
 }
 
 // averageTextureBrightness samples the model's textures and returns an
