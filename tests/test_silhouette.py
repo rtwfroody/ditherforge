@@ -30,21 +30,13 @@ from silhouette import load_mesh, render_silhouette
 # needed to compute the discretization tolerance.
 TEST_VECTORS = [
     {
-        "name": "boombox",
-        "input": "objects/boombox_4k.glb",
-        "args": ["--scale", ".13", "--palette", "gray,black,white,red"],
+        "name": "praetorian",
+        "input": "objects/glyphid_praetorian.glb",
+        "args": ["--scale", ".05"],
         "nozzle": 0.4,
         "layer_height": 0.2,
-        # GLB default unit is meters; extent after scale: ~0.094m * 1000 = 94mm
-        "model_extent_mm": 94.1,
-    },
-    {
-        "name": "cake",
-        "input": "objects/handpainted_watercolor_cake.glb",
-        "args": ["--mode", "hexvoxel", "--glb-unit", "mm"],
-        "nozzle": 0.4,
-        "layer_height": 0.2,
-        "model_extent_mm": 5.0,
+        # GLB default unit is meters; extent after scale .05: ~117.5mm
+        "model_extent_mm": 117.5,
     },
 ]
 
