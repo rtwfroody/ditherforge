@@ -1,14 +1,59 @@
 package voxel
 
 import (
+	"fmt"
 	"image"
 	"math"
 	"math/rand"
 	"sort"
+	"strings"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 )
+
+// ResolvePalette determines the final palette from cells and config.
+// Returns the palette RGB values and a display string for logging.
+func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string) {
+	if pcfg.Palette != nil {
+		return pcfg.Palette, ""
+	}
+
+	cellColors := make([][3]uint8, len(cells))
+	for i, c := range cells {
+		cellColors[i] = c.Color
+	}
+
+	if len(pcfg.Inventory) > 0 {
+		fmt.Printf("  Selecting %d colors from %d-color inventory...\n", pcfg.InventoryN, len(pcfg.Inventory))
+		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN, pcfg.InventoryMethod)
+		pal := make([][3]uint8, len(selected))
+		strs := make([]string, len(selected))
+		for i, e := range selected {
+			pal[i] = e.Color
+			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
+			if e.Label != "" {
+				s += " (" + e.Label + ")"
+			}
+			strs[i] = s
+		}
+		display := "  Palette: " + strings.Join(strs, ", ")
+		return pal, display
+	}
+
+	if pcfg.AutoPaletteN > 0 {
+		fmt.Printf("  Computing %d-color palette from cell colors...\n", pcfg.AutoPaletteN)
+		pal := palette.ComputePalette(cellColors, pcfg.AutoPaletteN)
+		strs := make([]string, len(pal))
+		for i, p := range pal {
+			strs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+		}
+		display := "  Palette: " + strings.Join(strs, ", ")
+		return pal, display
+	}
+
+	return nil, ""
+}
 
 // BilinearSample samples a texture at normalized UV coordinates.
 func BilinearSample(img image.Image, u, v float32) [3]uint8 {

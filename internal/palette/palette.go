@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"encoding/hex"
 	"fmt"
-	"image"
 	"math"
 	"math/rand"
 	"os"
@@ -103,6 +102,35 @@ func AssignPalette(faceColors [][3]uint8, palette [][3]uint8) []int32 {
 	return assignments
 }
 
+// WeightedLabSample is a color in Lab space with a count (weight).
+type WeightedLabSample struct {
+	Lab   [3]float64
+	Count int
+}
+
+// CellColorHistogram builds a deduplicated, weighted Lab sample set from cell
+// RGB colors. Many cells share the same color, so this is much smaller than
+// the full cell list.
+func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
+	hist := make(map[[3]uint8]int, len(colors)/10)
+	for _, c := range colors {
+		hist[c]++
+	}
+	samples := make([]WeightedLabSample, 0, len(hist))
+	for rgb, count := range hist {
+		cf := colorful.Color{
+			R: float64(rgb[0]) / 255.0,
+			G: float64(rgb[1]) / 255.0,
+			B: float64(rgb[2]) / 255.0,
+		}
+		var s WeightedLabSample
+		s.Lab[0], s.Lab[1], s.Lab[2] = cf.Lab()
+		s.Count = count
+		samples = append(samples, s)
+	}
+	return samples
+}
+
 // labPoint implements clusters.Observation for k-means clustering in Lab space.
 type labPoint struct {
 	L, A, B float64
@@ -119,42 +147,32 @@ func (p labPoint) Distance(point clusters.Coordinates) float64 {
 	return math.Sqrt(dL*dL + dA*dA + dB*dB)
 }
 
-// ComputePalette finds n dominant colors in the textures using k-means in Lab
-// space. Returns palette sorted by CIELAB lightness descending (lightest first).
-func ComputePalette(textures []image.Image, n int) [][3]uint8 {
-	// Collect all pixels.
-	var allPixels [][3]uint8
-	for _, tex := range textures {
-		bounds := tex.Bounds()
-		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				r, g, b, _ := tex.At(x, y).RGBA()
-				allPixels = append(allPixels, [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)})
-			}
-		}
+// ComputePalette finds n dominant colors using k-means in Lab space.
+// Takes cell colors (from voxelized mesh surface).
+// Returns palette sorted by CIELAB lightness descending (lightest first).
+func ComputePalette(cellColors [][3]uint8, n int) [][3]uint8 {
+	// Build weighted samples from histogram, then expand for k-means.
+	// k-means needs repeated points to weight properly.
+	hist := CellColorHistogram(cellColors)
+
+	// Build observations, repeating each color proportionally.
+	// Cap total observations at 20k.
+	totalCount := 0
+	for _, s := range hist {
+		totalCount += s.Count
+	}
+	maxObs := 20_000
+	scale := 1.0
+	if totalCount > maxObs {
+		scale = float64(maxObs) / float64(totalCount)
 	}
 
-	// Subsample to 20k pixels if needed.
-	const maxPixels = 20_000
-	if len(allPixels) > maxPixels {
-		step := len(allPixels) / maxPixels
-		sampled := make([][3]uint8, 0, maxPixels)
-		for i := 0; i < len(allPixels); i += step {
-			sampled = append(sampled, allPixels[i])
+	observations := make(clusters.Observations, 0, maxObs)
+	for _, s := range hist {
+		reps := int(math.Max(1, math.Round(float64(s.Count)*scale)))
+		for r := 0; r < reps; r++ {
+			observations = append(observations, labPoint{s.Lab[0], s.Lab[1], s.Lab[2]})
 		}
-		allPixels = sampled
-	}
-
-	// Convert pixels to Lab observations.
-	observations := make(clusters.Observations, len(allPixels))
-	for i, p := range allPixels {
-		c := colorful.Color{
-			R: float64(p[0]) / 255.0,
-			G: float64(p[1]) / 255.0,
-			B: float64(p[2]) / 255.0,
-		}
-		L, A, B := c.Lab()
-		observations[i] = labPoint{L, A, B}
 	}
 
 	// Run k-means.
@@ -162,7 +180,7 @@ func ComputePalette(textures []image.Image, n int) [][3]uint8 {
 
 	result, err := km.Partition(observations, n)
 	if err != nil {
-		return fallbackPalette(allPixels, n)
+		return fallbackPalette(cellColors, n)
 	}
 
 	// Convert centroids back to RGB.
@@ -266,17 +284,15 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 }
 
 // SelectFromInventory picks the best n colors from inventory for the given
-// textures, minimizing the total nearest-color distance across texture samples
-// in CIELAB space. This favors palettes where dominant texture colors land
-// close to a palette color (producing solid areas), rather than maximizing
-// gamut span (which causes everything to be dithered).
-func SelectFromInventory(textures []image.Image, inventory []InventoryEntry, n int) []InventoryEntry {
+// cell colors, using the specified method.
+// "nearest" minimizes total nearest-vertex distance (favors direct matches).
+// "hull" minimizes distance to convex hull (accounts for dithering mixing).
+func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, method string) []InventoryEntry {
 	if n >= len(inventory) {
 		return inventory
 	}
 
-	// Sample texture pixels into Lab space.
-	samples := sampleTextureLab(textures, 500)
+	samples := CellColorHistogram(cellColors)
 
 	// Convert inventory to Lab.
 	invLab := make([][3]float64, len(inventory))
@@ -289,11 +305,16 @@ func SelectFromInventory(textures []image.Image, inventory []InventoryEntry, n i
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
 
+	scorer := weightedNearestScore
+	if method == "hull" {
+		scorer = weightedHullScore
+	}
+
 	var bestSubset []int
 	if combinationsCount(len(inventory), n) <= 50000 {
-		bestSubset = exhaustiveNearestSearch(invLab, samples, n)
+		bestSubset = exhaustiveSearch(invLab, samples, n, scorer)
 	} else {
-		bestSubset = randomNearestSearch(invLab, samples, n, 50000)
+		bestSubset = randomSearch(invLab, samples, n, 50000, scorer)
 	}
 
 	result := make([]InventoryEntry, n)
@@ -303,64 +324,48 @@ func SelectFromInventory(textures []image.Image, inventory []InventoryEntry, n i
 	return result
 }
 
-// sampleTextureLab collects up to maxSamples texture pixels in CIELAB space.
-func sampleTextureLab(textures []image.Image, maxSamples int) [][3]float64 {
-	var allPixels [][3]uint8
-	for _, tex := range textures {
-		bounds := tex.Bounds()
-		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-			for x := bounds.Min.X; x < bounds.Max.X; x++ {
-				r, g, b, _ := tex.At(x, y).RGBA()
-				allPixels = append(allPixels, [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)})
-			}
-		}
-	}
+// scoreFunc is the signature for palette subset scoring functions.
+type scoreFunc func(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64
 
-	if len(allPixels) > maxSamples {
-		step := len(allPixels) / maxSamples
-		sampled := make([][3]uint8, 0, maxSamples)
-		for i := 0; i < len(allPixels); i += step {
-			sampled = append(sampled, allPixels[i])
-		}
-		allPixels = sampled
-	}
-
-	result := make([][3]float64, len(allPixels))
-	for i, p := range allPixels {
-		c := colorful.Color{
-			R: float64(p[0]) / 255.0,
-			G: float64(p[1]) / 255.0,
-			B: float64(p[2]) / 255.0,
-		}
-		result[i][0], result[i][1], result[i][2] = c.Lab()
-	}
-	return result
-}
-
-// nearestScore computes total squared distance from each sample to its nearest
-// palette color. Lower means less dithering noise and more solid areas.
-func nearestScore(indices []int, invLab [][3]float64, samples [][3]float64) float64 {
+// weightedNearestScore computes total weighted squared distance from each
+// sample to its nearest palette color.
+func weightedNearestScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
 	total := 0.0
 	for _, s := range samples {
 		best := math.MaxFloat64
 		for _, idx := range indices {
 			c := invLab[idx]
-			d0 := s[0] - c[0]
-			d1 := s[1] - c[1]
-			d2 := s[2] - c[2]
+			d0 := s.Lab[0] - c[0]
+			d1 := s.Lab[1] - c[1]
+			d2 := s.Lab[2] - c[2]
 			d := d0*d0 + d1*d1 + d2*d2
 			if d < best {
 				best = d
 			}
 		}
-		total += best
+		total += best * float64(s.Count)
 	}
 	return total
 }
 
-// exhaustiveNearestSearch enumerates all C(inv, n) subsets to find the one
-// that minimizes total nearest-color distance from texture samples.
-func exhaustiveNearestSearch(invLab [][3]float64, samples [][3]float64, n int) []int {
+// weightedHullScore computes total weighted squared distance from each sample
+// to the convex hull of the palette subset. Points inside the hull score 0.
+func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
+	verts := make([][3]float64, len(indices))
+	for i, idx := range indices {
+		verts[i] = invLab[idx]
+	}
+	total := 0.0
+	for _, s := range samples {
+		d := distToConvexHull(s.Lab, verts)
+		total += d * d * float64(s.Count)
+	}
+	return total
+}
+
+// exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
+// minimizes the given scoring function.
+func exhaustiveSearch(invLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) []int {
 	bestScore := math.MaxFloat64
 	var bestSubset []int
 
@@ -368,9 +373,9 @@ func exhaustiveNearestSearch(invLab [][3]float64, samples [][3]float64, n int) [
 	var enumerate func(start, depth int)
 	enumerate = func(start, depth int) {
 		if depth == n {
-			score := nearestScore(indices, invLab, samples)
-			if score < bestScore {
-				bestScore = score
+			s := score(indices, invLab, samples)
+			if s < bestScore {
+				bestScore = s
 				bestSubset = make([]int, n)
 				copy(bestSubset, indices)
 			}
@@ -385,8 +390,8 @@ func exhaustiveNearestSearch(invLab [][3]float64, samples [][3]float64, n int) [
 	return bestSubset
 }
 
-// randomNearestSearch evaluates numTrials random n-color subsets and returns the best.
-func randomNearestSearch(invLab [][3]float64, samples [][3]float64, n int, numTrials int) []int {
+// randomSearch evaluates numTrials random n-color subsets and returns the best.
+func randomSearch(invLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) []int {
 	rng := rand.New(rand.NewSource(42))
 	invN := len(invLab)
 
@@ -411,9 +416,9 @@ func randomNearestSearch(invLab [][3]float64, samples [][3]float64, n int, numTr
 			}
 		}
 
-		score := nearestScore(indices, invLab, samples)
-		if score < bestScore {
-			bestScore = score
+		s := score(indices, invLab, samples)
+		if s < bestScore {
+			bestScore = s
 			bestSubset = make([]int, n)
 			copy(bestSubset, indices)
 		}

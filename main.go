@@ -11,26 +11,28 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
+	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
 // Args defines the CLI arguments.
 type Args struct {
 	Input       string  `arg:"positional,required" help:"Input .glb file"`
 	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: cyan,magenta,yellow + black or white based on texture brightness"`
-	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from texture (mutually exclusive with --palette)"`
+	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
-	Mode           string  `arg:"--mode" default:"squarevoxel" help:"Remesh mode: squarevoxel or hexvoxel"`
-	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
-	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
-	InventoryFile  string  `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
-	Inventory      *int    `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-	Dither         string  `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
-	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
-	MaxExtent      *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
-	Force          bool     `arg:"--force" help:"Bypass extent size check"`
-	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
+	Mode            string   `arg:"--mode" default:"squarevoxel" help:"Remesh mode: squarevoxel or hexvoxel"`
+	NozzleDiameter  float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
+	LayerHeight     float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
+	InventoryFile   string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
+	Inventory       *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
+	InventoryMethod string   `arg:"--inventory-method" default:"nearest" help:"Inventory selection method: nearest or hull"`
+	Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
+	NoMerge         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
+	MaxExtent       *float32 `arg:"--max-extent" help:"Scale model so largest extent equals this value in mm"`
+	Force           bool     `arg:"--force" help:"Bypass extent size check"`
+	Stats           bool     `arg:"--stats" help:"Print face counts per material"`
 }
 
 func (Args) Description() string {
@@ -93,85 +95,69 @@ func run() error {
 		}
 	}
 
-	// Validate inventory flags.
+	// Validate flags.
 	if args.Inventory != nil && args.InventoryFile == "" {
 		return fmt.Errorf("--inventory requires --inventory-file")
 	}
-
-	// Build palette.
-	var paletteRGB [][3]uint8
-	if args.Inventory != nil {
-		inv, err := palette.ParseInventoryFile(args.InventoryFile)
-		if err != nil {
-			return err
-		}
-		n := *args.Inventory
-		fmt.Printf("Selecting %d colors from %d-color inventory...\n", n, len(inv))
-		selected := palette.SelectFromInventory(model.Textures, inv, n)
-		paletteRGB = make([][3]uint8, len(selected))
-		strs := make([]string, len(selected))
-		for i, e := range selected {
-			paletteRGB[i] = e.Color
-			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
-			if e.Label != "" {
-				s += " (" + e.Label + ")"
-			}
-			strs[i] = s
-		}
-		fmt.Printf("  Palette: %s\n", strings.Join(strs, ", "))
-	} else if args.AutoPalette != nil {
-		n := *args.AutoPalette
-		fmt.Printf("Computing %d-color palette from texture...\n", n)
-		paletteRGB = palette.ComputePalette(model.Textures, n)
-		hexStrs := make([]string, len(paletteRGB))
-		for i, p := range paletteRGB {
-			hexStrs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
-		}
-		fmt.Printf("  Palette: %s\n", strings.Join(hexStrs, ","))
-	} else if args.Palette == "" {
-		// Default palette: CMY + black or white based on texture brightness.
-		// CMY can mix dark tones but not light ones, so prefer white
-		// unless the model is clearly dark. Use a low threshold since
-		// texture atlases often have dark unused regions pulling the
-		// average down.
-		bw := "white"
-		if averageTextureBrightness(model) < 85 {
-			bw = "black"
-		}
-		fmt.Printf("  Default palette: cyan,magenta,yellow,%s\n", bw)
-		paletteRGB, _ = palette.ParsePalette([]string{"cyan", "magenta", "yellow", bw})
-	} else {
-		colorStrs := strings.Split(args.Palette, ",")
-		for i := range colorStrs {
-			colorStrs[i] = strings.TrimSpace(colorStrs[i])
-		}
-		paletteRGB, err = palette.ParsePalette(colorStrs)
-		if err != nil {
-			return err
-		}
-	}
-
-	if len(paletteRGB) > export3mf.MaxFilaments {
-		return fmt.Errorf("palette has %d colors but max supported is %d", len(paletteRGB), export3mf.MaxFilaments)
-	}
-
 	switch args.Dither {
 	case "none", "fs", "dizzy":
 	default:
 		return fmt.Errorf("invalid --dither %q: must be none, fs, or dizzy", args.Dither)
 	}
+	switch args.InventoryMethod {
+	case "nearest", "hull":
+	default:
+		return fmt.Errorf("invalid --inventory-method %q: must be nearest or hull", args.InventoryMethod)
+	}
+
+	// Build palette config. For inventory and auto-palette modes, the actual
+	// palette is determined after voxelization using real cell colors.
+	pcfg := voxel.PaletteConfig{
+		InventoryMethod: args.InventoryMethod,
+	}
+	if args.Inventory != nil {
+		inv, err := palette.ParseInventoryFile(args.InventoryFile)
+		if err != nil {
+			return err
+		}
+		pcfg.Inventory = inv
+		pcfg.InventoryN = *args.Inventory
+	} else if args.AutoPalette != nil {
+		pcfg.AutoPaletteN = *args.AutoPalette
+	} else if args.Palette == "" {
+		// Default palette: CMY + black or white based on texture brightness.
+		bw := "white"
+		if averageTextureBrightness(model) < 85 {
+			bw = "black"
+		}
+		fmt.Printf("  Default palette: cyan,magenta,yellow,%s\n", bw)
+		pcfg.Palette, _ = palette.ParsePalette([]string{"cyan", "magenta", "yellow", bw})
+	} else {
+		colorStrs := strings.Split(args.Palette, ",")
+		for i := range colorStrs {
+			colorStrs[i] = strings.TrimSpace(colorStrs[i])
+		}
+		pcfg.Palette, err = palette.ParsePalette(colorStrs)
+		if err != nil {
+			return err
+		}
+	}
+
+	if pcfg.Palette != nil && len(pcfg.Palette) > export3mf.MaxFilaments {
+		return fmt.Errorf("palette has %d colors but max supported is %d", len(pcfg.Palette), export3mf.MaxFilaments)
+	}
 
 	switch args.Mode {
 	case "hexvoxel":
-		return runHexvoxel(args, model, paletteRGB)
+		return runHexvoxel(args, model, pcfg)
 	case "squarevoxel":
-		return runSquarevoxel(args, model, paletteRGB)
+		return runSquarevoxel(args, model, pcfg)
 	default:
 		return fmt.Errorf("invalid --mode %q: must be hexvoxel or squarevoxel", args.Mode)
 	}
 }
 
-func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) error {
+func runHexvoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) error {
 	cfg := hexvoxel.Config{
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
@@ -179,7 +165,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 	}
 
 	fmt.Println("Generating hexagonal voxel shell...")
-	hexModel, assignments, err := hexvoxel.Remesh(model, paletteRGB, cfg, args.Dither)
+	hexModel, assignments, paletteRGB, err := hexvoxel.Remesh(model, pcfg, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("hexvoxel remesh: %w", err)
 	}
@@ -207,7 +193,7 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 	return nil
 }
 
-func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) error {
+func runSquarevoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) error {
 	cfg := squarevoxel.Config{
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
@@ -215,7 +201,7 @@ func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8)
 	}
 
 	fmt.Println("Generating square voxel shell...")
-	sqModel, assignments, err := squarevoxel.Remesh(model, paletteRGB, cfg, args.Dither)
+	sqModel, assignments, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
 	}

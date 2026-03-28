@@ -26,9 +26,9 @@ type Config struct {
 
 // Remesh generates a hexagonal voxel shell of the input model using marching
 // prisms for smooth isosurface extraction.
-func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, error) {
+func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, [][3]uint8, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, nil, fmt.Errorf("empty model")
+		return nil, nil, nil, fmt.Errorf("empty model")
 	}
 
 	nozzle := cfg.NozzleDiameter
@@ -203,7 +203,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, ditherMode st
 		fmt.Printf("  %d active hex prisms\n", len(cells))
 	}
 	if len(cells) == 0 {
-		return nil, nil, fmt.Errorf("no active hex prisms found")
+		return nil, nil, nil, fmt.Errorf("no active hex prisms found")
 	}
 
 	// Build cell assignment map for color lookup during marching prisms.
@@ -289,14 +289,21 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, ditherMode st
 	}
 	fmt.Printf("  %d unique SDF vertices computed\n", len(sdfMap))
 
-	// 5. Palette assignment / dithering.
+	// 5. Resolve palette and assign / dither.
+	pal, palDisplay := voxel.ResolvePalette(cells, pcfg)
+	if palDisplay != "" {
+		fmt.Println(palDisplay)
+	}
+	if len(pal) == 0 {
+		return nil, nil, nil, fmt.Errorf("no palette colors")
+	}
 	var assignments []int32
 	switch ditherMode {
 	case "dizzy":
 		assignments = voxel.DitherCellsDizzy(cells, pal)
 	case "fs":
 		assignments = voxel.DitherCellsFS(cells, pal)
-default:
+	default:
 		assignments = voxel.AssignColors(cells, pal)
 	}
 
@@ -447,7 +454,7 @@ default:
 		UVs:            uvs,
 		Textures:       textures,
 		FaceTextureIdx: faceTex,
-	}, outAssignments, nil
+	}, outAssignments, pal, nil
 }
 
 // --- Marching Prisms (Wedge) Lookup Tables ---

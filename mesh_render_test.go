@@ -17,6 +17,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/render"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
+	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
 // sourceHash is computed once in TestMain from all Go source files.
@@ -116,7 +117,8 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 	}
 
 	t.Log("Running squarevoxel remesh...")
-	outModel, assignments, err := squarevoxel.Remesh(model, pal, cfg, "dizzy")
+	pcfg := voxel.PaletteConfig{Palette: pal}
+	outModel, assignments, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
 	if err != nil {
 		t.Fatalf("Remesh: %v", err)
 	}
