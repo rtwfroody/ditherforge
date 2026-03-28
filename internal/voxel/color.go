@@ -3,6 +3,7 @@ package voxel
 import (
 	"image"
 	"math"
+	"math/rand"
 	"sort"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -207,10 +208,23 @@ func DitherCells(cells []ActiveCell, pal [][3]uint8) []int32 {
 	assignments := make([]int32, len(cells))
 	errBuf := make([][3]float32, len(cells)+4)
 
+	// Use a deterministic seed so output is reproducible.
+	rng := rand.New(rand.NewSource(42))
+	// Noise amplitude: enough to break up regular patterns without
+	// distorting colors noticeably. ±24 out of 255 is ~10%.
+	const noiseAmp = 24.0
+
 	for i, idx := range order {
-		r := ClampF(float32(cells[idx].Color[0])+errBuf[i][0], 0, 255)
-		g := ClampF(float32(cells[idx].Color[1])+errBuf[i][1], 0, 255)
-		b := ClampF(float32(cells[idx].Color[2])+errBuf[i][2], 0, 255)
+		// Add noise to break up regular dither patterns caused by the
+		// linear scan order not matching spatial neighbors well in 3D.
+		noise := [3]float32{
+			noiseAmp * (rng.Float32()*2 - 1),
+			noiseAmp * (rng.Float32()*2 - 1),
+			noiseAmp * (rng.Float32()*2 - 1),
+		}
+		r := ClampF(float32(cells[idx].Color[0])+errBuf[i][0]+noise[0], 0, 255)
+		g := ClampF(float32(cells[idx].Color[1])+errBuf[i][1]+noise[1], 0, 255)
+		b := ClampF(float32(cells[idx].Color[2])+errBuf[i][2]+noise[2], 0, 255)
 
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
