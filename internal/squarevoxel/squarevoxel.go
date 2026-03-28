@@ -200,7 +200,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	fmt.Println("  Computing SDF at cube vertices...")
 	searchRadius := cellSize * 3
 	shellThickness := layerH
-	boundaryEdges := voxel.BuildBoundaryEdges(model)
+	pn := voxel.BuildPseudonormals(model)
 	halfCell := cellSize / 2
 
 	// Cube corner offsets: 8 corners of a cube centered at (cx, cy, cz).
@@ -259,7 +259,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			defer wg.Done()
 			buf := voxel.NewSearchBuf(len(model.Faces))
 			for i := start; i < end; i++ {
-				sdfValues[i] = voxel.ComputeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, boundaryEdges, modelMin, modelMax, buf)
+				sdfValues[i] = voxel.ComputeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, pn, modelMin, modelMax, buf)
 			}
 		}(start, end)
 	}

@@ -244,7 +244,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 	fmt.Println("  Computing SDF at cell vertices...")
 	searchRadius := hexFlat * 3
 	shellThickness := layerH
-	boundaryEdges := voxel.BuildBoundaryEdges(model)
+	pn := voxel.BuildPseudonormals(model)
 
 	uniqueSet := make(map[[3]float32]struct{})
 	for k := range expandedSet {
@@ -277,7 +277,7 @@ func Remesh(model *loader.LoadedModel, pal [][3]uint8, cfg Config, dither bool) 
 			defer wg.Done()
 			buf := voxel.NewSearchBuf(len(model.Faces))
 			for i := start; i < end; i++ {
-				sdfValues[i] = voxel.ComputeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, boundaryEdges, modelMin, modelMax, buf)
+				sdfValues[i] = voxel.ComputeSDF(uniqueVerts[i], model, si, searchRadius, shellThickness, pn, modelMin, modelMax, buf)
 			}
 		}(start, end)
 	}
