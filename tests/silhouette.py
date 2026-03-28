@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 import trimesh
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 def load_mesh(path: str, normalize: bool = False,
@@ -82,33 +82,37 @@ def rotation_matrix(azimuth_deg: float, elevation_deg: float) -> np.ndarray:
 
 def projected_bounds(mesh: trimesh.Trimesh, azimuth: float,
                      elevation: float) -> tuple:
-    """Compute (x_min, x_max, y_min, y_max) in projected space."""
+    """Compute (x_min, x_max, y_min, y_max, depth_min, depth_max) in projected space."""
     rot = rotation_matrix(azimuth, elevation)
     verts = mesh.vertices @ rot.T
     return (verts[:, 0].min(), verts[:, 0].max(),
-            verts[:, 2].min(), verts[:, 2].max())
+            verts[:, 2].min(), verts[:, 2].max(),
+            verts[:, 1].min(), verts[:, 1].max())
 
 
 def union_bounds(*bounds_list) -> tuple:
-    """Return the union of multiple (x_min, x_max, y_min, y_max) tuples."""
+    """Return the union of multiple (x_min, x_max, y_min, y_max, depth_min, depth_max) tuples."""
     x_min = min(b[0] for b in bounds_list)
     x_max = max(b[1] for b in bounds_list)
     y_min = min(b[2] for b in bounds_list)
     y_max = max(b[3] for b in bounds_list)
-    return (x_min, x_max, y_min, y_max)
+    depth_min = min(b[4] for b in bounds_list)
+    depth_max = max(b[5] for b in bounds_list)
+    return (x_min, x_max, y_min, y_max, depth_min, depth_max)
 
 
 def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
                       resolution: int = 1024, bounds=None) -> Image.Image:
-    """Render orthographic depth image from given angle.
+    """Render orthographic depth image from given angle using z-buffering.
 
     Returns an RGBA image where alpha=255 marks object pixels and the
     grayscale RGB value encodes depth (nearest=dark, farthest=bright).
     Background pixels are fully transparent (alpha=0).
 
-    If bounds is provided as (x_min, x_max, y_min, y_max) in projected space,
-    use that for framing instead of auto-fitting to this mesh. This ensures
-    multiple renders share the same viewport.
+    If bounds is provided as (x_min, x_max, y_min, y_max, depth_min, depth_max)
+    in projected space, use that for framing and depth mapping instead of
+    auto-fitting to this mesh. This ensures multiple renders share the same
+    viewport and depth scale.
     """
     rot = rotation_matrix(azimuth, elevation)
     verts = mesh.vertices @ rot.T  # (N, 3)
@@ -121,7 +125,7 @@ def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
     # Compute bounding box in projected space
     margin = 0.05
     if bounds is not None:
-        x_min, x_max, y_min, y_max = bounds
+        x_min, x_max, y_min, y_max = bounds[0], bounds[1], bounds[2], bounds[3]
     else:
         x_min, x_max = proj_x.min(), proj_x.max()
         y_min, y_max = proj_y.min(), proj_y.max()
@@ -139,31 +143,120 @@ def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
     px = proj_x * scale + cx
     py = -proj_y * scale + cy
 
-    # Map depth to 0-255: nearest (min depth) = 0 (dark), farthest = 255 (bright).
-    depth_min, depth_max = depth.min(), depth.max()
+    # Depth range for mapping to 0-255.
+    if bounds is not None and len(bounds) >= 6:
+        depth_min, depth_max = bounds[4], bounds[5]
+    else:
+        depth_min, depth_max = depth.min(), depth.max()
     depth_range = depth_max - depth_min
     if depth_range < 1e-12:
         depth_range = 1.0
 
-    # Sort faces back-to-front (painter's algorithm) so nearer faces overwrite.
+    # Z-buffer rasterization with per-pixel depth interpolation.
+    # Two-pass approach: vectorized centroid fill for small faces, then
+    # full barycentric rasterization only for faces spanning >2 pixels.
+    zbuf = np.full((resolution, resolution), np.inf, dtype=np.float64)
+    depth_img = np.zeros((resolution, resolution), dtype=np.float64)
+
     faces = mesh.faces
-    face_avg_depth = depth[faces].mean(axis=1)
-    draw_order = np.argsort(-face_avg_depth)  # largest depth (farthest) first
+    # Gather per-face vertex data.
+    fx = px[faces]  # (N, 3)
+    fy = py[faces]  # (N, 3)
+    fd = depth[faces]  # (N, 3)
 
-    img = Image.new("RGBA", (resolution, resolution), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    # Compute face bounding boxes in pixel coords.
+    fxmin = np.floor(fx.min(axis=1)).astype(int)
+    fxmax = np.ceil(fx.max(axis=1)).astype(int)
+    fymin = np.floor(fy.min(axis=1)).astype(int)
+    fymax = np.ceil(fy.max(axis=1)).astype(int)
 
-    for fi in draw_order:
-        f = faces[fi]
-        polygon = [(px[f[0]], py[f[0]]),
-                    (px[f[1]], py[f[1]]),
-                    (px[f[2]], py[f[2]])]
-        # Use average face depth for fill color.
-        gray = int(255 * (face_avg_depth[fi] - depth_min) / depth_range)
-        gray = max(0, min(255, gray))
-        draw.polygon(polygon, fill=(gray, gray, gray, 255))
+    # Classify: small faces (bbox ≤ 2px in both dimensions) vs large.
+    bbox_w = fxmax - fxmin
+    bbox_h = fymax - fymin
+    small = (bbox_w <= 2) & (bbox_h <= 2)
 
-    return img
+    # --- Fast path: small faces rendered at centroid (fully vectorized) ---
+    small_idx = np.where(small)[0]
+    if len(small_idx) > 0:
+        cent_x = fx[small_idx].mean(axis=1)
+        cent_y = fy[small_idx].mean(axis=1)
+        cent_d = fd[small_idx].mean(axis=1)
+        pi_x = np.clip(cent_x.astype(int), 0, resolution - 1)
+        pi_y = np.clip(cent_y.astype(int), 0, resolution - 1)
+
+        # Sort farthest-first so that when duplicate pixels exist, the
+        # nearest face (written last) wins via numpy fancy indexing.
+        order = np.argsort(-cent_d)
+        pi_y = pi_y[order]
+        pi_x = pi_x[order]
+        cent_d = cent_d[order]
+        zbuf[pi_y, pi_x] = cent_d
+        depth_img[pi_y, pi_x] = cent_d
+
+    # --- Full rasterization for large faces ---
+    large_idx = np.where(~small)[0]
+    for fi in large_idx:
+        x0, y0, d0 = float(fx[fi, 0]), float(fy[fi, 0]), float(fd[fi, 0])
+        x1, y1, d1 = float(fx[fi, 1]), float(fy[fi, 1]), float(fd[fi, 1])
+        x2, y2, d2 = float(fx[fi, 2]), float(fy[fi, 2]), float(fd[fi, 2])
+
+        bx0 = max(0, int(fxmin[fi]))
+        by0 = max(0, int(fymin[fi]))
+        bx1 = min(resolution - 1, int(fxmax[fi]))
+        by1 = min(resolution - 1, int(fymax[fi]))
+        if bx0 > bx1 or by0 > by1:
+            continue
+
+        v0x, v0y = x1 - x0, y1 - y0
+        v1x, v1y = x2 - x0, y2 - y0
+        dot00 = v0x * v0x + v0y * v0y
+        dot01 = v0x * v1x + v0y * v1y
+        dot11 = v1x * v1x + v1y * v1y
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-10:
+            continue
+        inv_denom = 1.0 / denom
+
+        pxs = np.arange(bx0, bx1 + 1) + 0.5
+        pys = np.arange(by0, by1 + 1) + 0.5
+        gx, gy = np.meshgrid(pxs, pys)
+
+        v2x = gx - x0
+        v2y = gy - y0
+        dot02 = v0x * v2x + v0y * v2y
+        dot12 = v1x * v2x + v1y * v2y
+
+        u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+        v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+
+        inside = (u >= 0) & (v >= 0) & (u + v <= 1)
+        if not inside.any():
+            continue
+
+        interp_depth = d0 + u * (d1 - d0) + v * (d2 - d0)
+
+        iy = np.arange(by0, by1 + 1)
+        ix = np.arange(bx0, bx1 + 1)
+        closer = inside & (interp_depth < zbuf[by0:by1+1, bx0:bx1+1])
+        if closer.any():
+            rows, cols = np.where(closer)
+            zbuf[iy[rows], ix[cols]] = interp_depth[closer]
+            depth_img[iy[rows], ix[cols]] = interp_depth[closer]
+
+    # Convert z-buffer to RGBA image.
+    has_geom = zbuf < np.inf
+    gray = np.zeros((resolution, resolution), dtype=np.uint8)
+    if has_geom.any():
+        normalized = (depth_img[has_geom] - depth_min) / depth_range
+        gray[has_geom] = np.clip(normalized * 255, 0, 255).astype(np.uint8)
+
+    rgba = np.zeros((resolution, resolution, 4), dtype=np.uint8)
+    rgba[:, :, 0] = gray
+    rgba[:, :, 1] = gray
+    rgba[:, :, 2] = gray
+    rgba[has_geom, 3] = 255
+
+    return Image.fromarray(rgba)
 
 
 def main():

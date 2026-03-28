@@ -24,7 +24,7 @@ import tempfile
 import numpy as np
 from PIL import Image, ImageFilter
 
-from silhouette import load_mesh, render_silhouette
+from silhouette import load_mesh, render_silhouette, projected_bounds, union_bounds
 
 # Each test vector: name, input file, ditherforge extra args, and parameters
 # needed to compute the discretization tolerance.
@@ -55,6 +55,8 @@ MIN_COVERAGE = 0.95
 # Maximum fraction of output pixels that may fall outside the dilated input.
 # Zero tolerance — the dilation already accounts for hex discretization.
 MAX_OVERSHOOT = 0.0
+# Maximum allowed 95th-percentile depth difference (gray levels, 0-255).
+MAX_DEPTH_DIFF = 20
 
 
 def compute_dilate_px(nozzle_mm, layer_height_mm, model_extent_mm, resolution):
@@ -158,6 +160,17 @@ def compare_silhouettes(input_img, output_img, view_name, test_name, outdir,
     covered = inp_mask & out_mask
     coverage = covered.sum() / inp_count if inp_count > 0 else 0
 
+    # Check depth agreement where both have geometry.
+    both_mask = inp_mask & out_mask
+    depth_mean_abs_diff = 0.0
+    depth_p95_diff = 0.0
+    if both_mask.any():
+        inp_depth = inp[:, :, 0][both_mask].astype(float)
+        out_depth = out[:, :, 0][both_mask].astype(float)
+        abs_diff = np.abs(out_depth - inp_depth)
+        depth_mean_abs_diff = abs_diff.mean()
+        depth_p95_diff = float(np.percentile(abs_diff, 95))
+
     # Save debug images if there are issues or we're keeping output.
     if outdir:
         h, w = inp_mask.shape
@@ -184,8 +197,16 @@ def compare_silhouettes(input_img, output_img, view_name, test_name, outdir,
             f"coverage {coverage:.1%} < {MIN_COVERAGE:.1%} "
             f"({covered.sum()}/{inp_count} input px covered)")
 
+    if depth_p95_diff > MAX_DEPTH_DIFF:
+        passed = False
+        messages.append(
+            f"depth p95={depth_p95_diff:.0f} > {MAX_DEPTH_DIFF} "
+            f"(mean_abs={depth_mean_abs_diff:.1f})")
+
     status = "PASS" if passed else "FAIL"
-    detail = "; ".join(messages) if messages else f"coverage={coverage:.1%}, overshoot={overshoot_frac:.1%}"
+    detail = "; ".join(messages) if messages else (
+        f"coverage={coverage:.1%}, overshoot={overshoot_frac:.1%}, "
+        f"depth_p95={depth_p95_diff:.0f}")
     return passed, f"{view_name}: {status} ({dilate_px}px tolerance) — {detail}"
 
 
@@ -233,8 +254,14 @@ def run_test(vector, outdir, verbose):
         # Render and compare each view.
         all_passed = True
         for view_name, azimuth, elevation in VIEWS:
-            input_img = render_silhouette(input_mesh, azimuth, elevation, RESOLUTION)
-            output_raw = render_silhouette(output_mesh, azimuth, elevation, RESOLUTION)
+            # Compute shared bounds so both renders use the same viewport
+            # and depth scale, making gray values directly comparable.
+            inp_bounds = projected_bounds(input_mesh, azimuth, elevation)
+            out_bounds = projected_bounds(output_mesh, azimuth, elevation)
+            bounds = union_bounds(inp_bounds, out_bounds)
+
+            input_img = render_silhouette(input_mesh, azimuth, elevation, RESOLUTION, bounds=bounds)
+            output_raw = render_silhouette(output_mesh, azimuth, elevation, RESOLUTION, bounds=bounds)
             # Align output to input by matching silhouette centroids.
             # This corrects for coordinate system / tessellation differences.
             output_img = align_silhouette(output_raw, input_img)
