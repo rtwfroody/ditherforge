@@ -8,5 +8,8 @@ ditherforge
 *.ply
 *.png
 
+# Test cache (remesh outputs keyed by source hash)
+tests/cache/
+
 # Local scripts
 devscripts/

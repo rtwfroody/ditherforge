@@ -1,13 +1,17 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/gob"
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -15,14 +19,126 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 )
 
+// sourceHash is computed once in TestMain from all Go source files.
+var sourceHash string
+
+// cacheDir holds cached remesh outputs.
+const cacheDir = "tests/cache"
+
+func TestMain(m *testing.M) {
+	h, err := computeSourceHash()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "computing source hash: %v\n", err)
+		os.Exit(1)
+	}
+	sourceHash = h
+	os.MkdirAll(cacheDir, 0755)
+	os.Exit(m.Run())
+}
+
+// computeSourceHash hashes all .go files in the repo to detect code changes.
+func computeSourceHash() (string, error) {
+	h := sha256.New()
+	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if path == ".git" || path == "vendor" || path == "tests" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(h, f); err != nil {
+			return err
+		}
+		// Include the path so file renames are detected.
+		h.Write([]byte(path))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:16], nil
+}
+
+// cachedRemeshOutput holds the data we cache from a remesh run.
+type cachedRemeshOutput struct {
+	Vertices    [][3]float32
+	Faces       [][3]uint32
+	Assignments []int32
+}
+
+// getOrRunRemesh returns cached remesh output if available, otherwise runs
+// the remesh and caches the result.
+func getOrRunRemesh(t *testing.T, vec testVector, model *loader.LoadedModel, pal [][3]uint8) (*loader.LoadedModel, []int32) {
+	t.Helper()
+	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s.gob", vec.name, sourceHash))
+
+	// Try loading from cache.
+	if f, err := os.Open(cacheFile); err == nil {
+		defer f.Close()
+		var cached cachedRemeshOutput
+		if err := gob.NewDecoder(f).Decode(&cached); err == nil {
+			t.Log("Using cached remesh output")
+			outModel := &loader.LoadedModel{
+				Vertices: cached.Vertices,
+				Faces:    cached.Faces,
+			}
+			return outModel, cached.Assignments
+		}
+	}
+
+	// Cache miss — run remesh.
+	cfg := squarevoxel.Config{
+		NozzleDiameter: vec.nozzle,
+		LayerHeight:    vec.layerHeight,
+	}
+
+	t.Log("Running squarevoxel remesh...")
+	outModel, assignments, err := squarevoxel.Remesh(model, pal, cfg, true)
+	if err != nil {
+		t.Fatalf("Remesh: %v", err)
+	}
+
+	// Save to cache (best-effort).
+	if f, err := os.Create(cacheFile); err == nil {
+		gob.NewEncoder(f).Encode(cachedRemeshOutput{
+			Vertices:    outModel.Vertices,
+			Faces:       outModel.Faces,
+			Assignments: assignments,
+		})
+		f.Close()
+	}
+
+	// Clean up stale cache files for this vector.
+	prefix := vec.name + "_"
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) && e.Name() != filepath.Base(cacheFile) {
+			os.Remove(filepath.Join(cacheDir, e.Name()))
+		}
+	}
+
+	return outModel, assignments
+}
+
 type testVector struct {
-	name           string
-	input          string
-	scale          float32
-	glbUnit        string
-	nozzle         float32
-	layerHeight    float32
-	modelExtentMM  float64
+	name          string
+	input         string
+	scale         float32
+	glbUnit       string
+	nozzle        float32
+	layerHeight   float32
+	modelExtentMM float64
 }
 
 type view struct {
@@ -50,24 +166,23 @@ var views = []view{
 }
 
 const (
-	resolution  = 512
-	marginFrac  = 0.05
-	minCoverage = 0.95
-	maxOvershoot = 0.0
-	maxDepthDiff = 20 // p95 gray level difference (0-255)
+	testResolution = 512
+	marginFrac     = 0.05
+	minCoverage    = 0.95
+	maxOvershoot   = 0.0
+	maxDepthDiff   = 20 // p95 gray level difference (0-255)
 )
 
 func computeDilatePx(nozzleMM, layerHeightMM, modelExtentMM float64) int {
 	hexFlat := nozzleMM * 1.5
 	cellDiag := math.Sqrt(hexFlat*hexFlat + math.Max(hexFlat, layerHeightMM)*math.Max(hexFlat, layerHeightMM))
 	cellNormalized := cellDiag / modelExtentMM
-	pixelsPerUnit := float64(resolution) * (1 - 2*marginFrac)
+	pixelsPerUnit := float64(testResolution) * (1 - 2*marginFrac)
 	dilatePx := int(math.Ceil(1.5 * cellNormalized * pixelsPerUnit))
 	dilatePx++ // alignment rounding
 	return dilatePx
 }
 
-// centroid returns the centroid of object pixels, or (-1,-1) if none.
 func centroid(mask []bool, width, height int) (float64, float64) {
 	var sx, sy float64
 	var n int
@@ -86,7 +201,6 @@ func centroid(mask []bool, width, height int) (float64, float64) {
 	return sx / float64(n), sy / float64(n)
 }
 
-// shiftDepth returns a new DepthImage shifted by (dx, dy) pixels.
 func shiftDepth(img *render.DepthImage, dx, dy int) *render.DepthImage {
 	out := &render.DepthImage{
 		Width:  img.Width,
@@ -127,8 +241,22 @@ func percentile(vals []float64, p float64) float64 {
 	return vals[lo]*(1-frac) + vals[hi]*frac
 }
 
+// loadInput loads and caches the input model for a test vector.
+func loadInput(t *testing.T, vec testVector) *loader.LoadedModel {
+	t.Helper()
+	unitScales := map[string]float32{"m": 1000, "dm": 100, "cm": 10, "mm": 1}
+	scale := unitScales[vec.glbUnit] * vec.scale
+
+	t.Logf("Loading %s (scale=%.4f)...", vec.input, scale)
+	model, err := loader.LoadGLB(vec.input, scale)
+	if err != nil {
+		t.Fatalf("LoadGLB: %v", err)
+	}
+	t.Logf("  Input: %d verts, %d faces", len(model.Vertices), len(model.Faces))
+	return model
+}
+
 func TestMeshRender(t *testing.T) {
-	// Create output dir for debug images.
 	outdir := filepath.Join("tests", "output")
 	keepOutput := os.Getenv("KEEP_OUTPUT") != ""
 
@@ -138,29 +266,9 @@ func TestMeshRender(t *testing.T) {
 				t.Skipf("input file not found: %s", vec.input)
 			}
 
-			unitScales := map[string]float32{"m": 1000, "dm": 100, "cm": 10, "mm": 1}
-			scale := unitScales[vec.glbUnit] * vec.scale
-
-			t.Logf("Loading %s (scale=%.4f)...", vec.input, scale)
-			model, err := loader.LoadGLB(vec.input, scale)
-			if err != nil {
-				t.Fatalf("LoadGLB: %v", err)
-			}
-			t.Logf("  Input: %d verts, %d faces", len(model.Vertices), len(model.Faces))
-
-			// Build default palette.
+			model := loadInput(t, vec)
 			pal := [][3]uint8{{0, 255, 255}, {255, 0, 255}, {255, 255, 0}, {0, 0, 0}}
-
-			cfg := squarevoxel.Config{
-				NozzleDiameter: vec.nozzle,
-				LayerHeight:    vec.layerHeight,
-			}
-
-			t.Log("Running squarevoxel remesh...")
-			outModel, _, err := squarevoxel.Remesh(model, pal, cfg, true)
-			if err != nil {
-				t.Fatalf("Remesh: %v", err)
-			}
+			outModel, _ := getOrRunRemesh(t, vec, model, pal)
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
 
 			dilatePx := computeDilatePx(float64(vec.nozzle), float64(vec.layerHeight), vec.modelExtentMM)
@@ -171,19 +279,18 @@ func TestMeshRender(t *testing.T) {
 			}
 
 			for _, v := range views {
-				// Shared bounds for comparable depth values.
 				inpBounds := render.ProjectedBounds(model.Vertices, v.azimuth, v.elevation)
 				outBounds := render.ProjectedBounds(outModel.Vertices, v.azimuth, v.elevation)
 				bounds := render.UnionBounds(inpBounds, outBounds)
 
-				inpImg := render.Render(model.Vertices, model.Faces, v.azimuth, v.elevation, resolution, bounds)
-				outRaw := render.Render(outModel.Vertices, outModel.Faces, v.azimuth, v.elevation, resolution, bounds)
+				inpImg := render.Render(model.Vertices, model.Faces, v.azimuth, v.elevation, testResolution, bounds)
+				outRaw := render.Render(outModel.Vertices, outModel.Faces, v.azimuth, v.elevation, testResolution, bounds)
 
 				// Align output to input by centroid matching.
 				inpMask := inpImg.Mask()
 				outRawMask := outRaw.Mask()
-				ix, iy := centroid(inpMask, resolution, resolution)
-				ox, oy := centroid(outRawMask, resolution, resolution)
+				ix, iy := centroid(inpMask, testResolution, testResolution)
+				ox, oy := centroid(outRawMask, testResolution, testResolution)
 				dx, dy := 0, 0
 				if ix >= 0 && ox >= 0 {
 					dx = int(math.Round(ix - ox))
@@ -196,7 +303,6 @@ func TestMeshRender(t *testing.T) {
 
 				outMask := outImg.Mask()
 
-				// Count pixels.
 				var inpCount, outCount, coveredCount int
 				for i := range inpMask {
 					if inpMask[i] {
@@ -215,10 +321,8 @@ func TestMeshRender(t *testing.T) {
 					continue
 				}
 
-				// Dilate input mask.
-				dilatedInp := render.DilateMask(inpMask, resolution, resolution, dilatePx)
+				dilatedInp := render.DilateMask(inpMask, testResolution, testResolution, dilatePx)
 
-				// Overshoot: output pixels outside dilated input.
 				overshoot := make([]bool, len(outMask))
 				var overshootCount int
 				for i := range outMask {
@@ -232,29 +336,25 @@ func TestMeshRender(t *testing.T) {
 					overshootFrac = float64(overshootCount) / float64(outCount)
 				}
 
-				// Coverage.
 				coverage := float64(coveredCount) / float64(inpCount)
 
-				// Depth comparison where both have geometry.
 				var depthDiffs []float64
 				for i := range inpMask {
 					if inpMask[i] && outMask[i] {
-						ig := inpImg.GrayAt(i%resolution, i/resolution, bounds)
-						og := outImg.GrayAt(i%resolution, i/resolution, bounds)
+						ig := inpImg.GrayAt(i%testResolution, i/testResolution, bounds)
+						og := outImg.GrayAt(i%testResolution, i/testResolution, bounds)
 						depthDiffs = append(depthDiffs, math.Abs(float64(og-ig)))
 					}
 				}
 				depthP95 := percentile(depthDiffs, 95)
 
-				// Save debug images if keeping output.
 				if keepOutput {
 					saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", vec.name, v.name), inpImg, bounds)
 					saveImage(t, outdir, fmt.Sprintf("%s_%s_output.png", vec.name, v.name), outImg, bounds)
 					saveDiffImage(t, outdir, fmt.Sprintf("%s_%s_diff.png", vec.name, v.name),
-						inpMask, outMask, overshoot, resolution, resolution)
+						inpMask, outMask, overshoot, testResolution, testResolution)
 				}
 
-				// Check thresholds.
 				passed := true
 				var msgs []string
 
@@ -275,10 +375,8 @@ func TestMeshRender(t *testing.T) {
 
 				detail := fmt.Sprintf("coverage=%.1f%%, overshoot=%.1f%%, depth_p95=%.0f",
 					coverage*100, overshootFrac*100, depthP95)
-				if len(msgs) > 0 {
-					for _, m := range msgs {
-						detail += "; " + m
-					}
+				for _, m := range msgs {
+					detail += "; " + m
 				}
 
 				if passed {
