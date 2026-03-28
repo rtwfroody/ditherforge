@@ -93,9 +93,9 @@ def run_ditherforge(input_path, extra_args, output_path):
 
 
 def silhouette_centroid(img):
-    """Compute the centroid of black pixels in a grayscale image."""
+    """Compute the centroid of object pixels in an RGBA image."""
     arr = np.array(img)
-    mask = arr < 128
+    mask = arr[:, :, 3] > 0
     if not mask.any():
         return None
     ys, xs = np.where(mask)
@@ -116,8 +116,10 @@ def align_silhouette(output_img, input_img):
     dy = int(round(inp_c[1] - out_c[1]))
     if dx == 0 and dy == 0:
         return output_img
-    from PIL import ImageChops
-    return ImageChops.offset(output_img, dx, dy)
+    # Paste onto transparent canvas to avoid wrapping pixels around edges.
+    shifted = Image.new(output_img.mode, output_img.size, (0, 0, 0, 0))
+    shifted.paste(output_img, (dx, dy))
+    return shifted
 
 
 def dilate_mask(mask, radius):
@@ -134,9 +136,9 @@ def compare_silhouettes(input_img, output_img, view_name, test_name, outdir,
     inp = np.array(input_img)
     out = np.array(output_img)
 
-    # Black pixels = object (value < 128)
-    inp_mask = inp < 128
-    out_mask = out < 128
+    # Object pixels have alpha > 0.
+    inp_mask = inp[:, :, 3] > 0
+    out_mask = out[:, :, 3] > 0
 
     inp_count = inp_mask.sum()
     out_count = out_mask.sum()
@@ -158,7 +160,8 @@ def compare_silhouettes(input_img, output_img, view_name, test_name, outdir,
 
     # Save debug images if there are issues or we're keeping output.
     if outdir:
-        debug = np.zeros((*inp.shape, 3), dtype=np.uint8)
+        h, w = inp_mask.shape
+        debug = np.zeros((h, w, 3), dtype=np.uint8)
         debug[inp_mask & out_mask] = [0, 180, 0]        # green: both
         debug[inp_mask & ~out_mask] = [0, 0, 180]       # blue: input only
         debug[overshoot] = [255, 0, 0]                  # red: overshoot

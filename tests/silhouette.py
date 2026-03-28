@@ -100,7 +100,11 @@ def union_bounds(*bounds_list) -> tuple:
 
 def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
                       resolution: int = 1024, bounds=None) -> Image.Image:
-    """Render orthographic silhouette from given angle.
+    """Render orthographic depth image from given angle.
+
+    Returns an RGBA image where alpha=255 marks object pixels and the
+    grayscale RGB value encodes depth (nearest=dark, farthest=bright).
+    Background pixels are fully transparent (alpha=0).
 
     If bounds is provided as (x_min, x_max, y_min, y_max) in projected space,
     use that for framing instead of auto-fitting to this mesh. This ensures
@@ -112,6 +116,7 @@ def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
     # Project: use X as horizontal, Z as vertical (screen), Y as depth
     proj_x = verts[:, 0]
     proj_y = verts[:, 2]  # Z is up
+    depth = verts[:, 1]   # Y is depth (into screen)
 
     # Compute bounding box in projected space
     margin = 0.05
@@ -134,15 +139,29 @@ def render_silhouette(mesh: trimesh.Trimesh, azimuth: float, elevation: float,
     px = proj_x * scale + cx
     py = -proj_y * scale + cy
 
-    img = Image.new("L", (resolution, resolution), 255)
+    # Map depth to 0-255: nearest (min depth) = 0 (dark), farthest = 255 (bright).
+    depth_min, depth_max = depth.min(), depth.max()
+    depth_range = depth_max - depth_min
+    if depth_range < 1e-12:
+        depth_range = 1.0
+
+    # Sort faces back-to-front (painter's algorithm) so nearer faces overwrite.
+    faces = mesh.faces
+    face_avg_depth = depth[faces].mean(axis=1)
+    draw_order = np.argsort(-face_avg_depth)  # largest depth (farthest) first
+
+    img = Image.new("RGBA", (resolution, resolution), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    faces = mesh.faces
-    for f in faces:
+    for fi in draw_order:
+        f = faces[fi]
         polygon = [(px[f[0]], py[f[0]]),
                     (px[f[1]], py[f[1]]),
                     (px[f[2]], py[f[2]])]
-        draw.polygon(polygon, fill=0)
+        # Use average face depth for fill color.
+        gray = int(255 * (face_avg_depth[fi] - depth_min) / depth_range)
+        gray = max(0, min(255, gray))
+        draw.polygon(polygon, fill=(gray, gray, gray, 255))
 
     return img
 
