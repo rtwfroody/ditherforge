@@ -127,7 +127,7 @@ func percentile(vals []float64, p float64) float64 {
 	return vals[lo]*(1-frac) + vals[hi]*frac
 }
 
-func TestSilhouette(t *testing.T) {
+func TestMeshRender(t *testing.T) {
 	// Create output dir for debug images.
 	outdir := filepath.Join("tests", "output")
 	keepOutput := os.Getenv("KEEP_OUTPUT") != ""
