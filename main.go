@@ -21,7 +21,7 @@ type Args struct {
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
-	Mode           string  `arg:"--mode" default:"hexvoxel" help:"Remesh mode: hexvoxel or squarevoxel"`
+	Mode           string  `arg:"--mode" default:"squarevoxel" help:"Remesh mode: squarevoxel or hexvoxel"`
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
