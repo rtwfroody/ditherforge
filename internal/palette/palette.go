@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
@@ -228,7 +229,12 @@ func ParseInventoryFile(path string) ([][3]uint8, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		// Lines starting with "# " are comments; bare "#" followed by
+		// hex digits are color values like #FF0000.
+		if strings.HasPrefix(line, "#") && (len(line) < 2 || (line[1] < '0' || line[1] > '9') && (line[1] < 'a' || line[1] > 'f') && (line[1] < 'A' || line[1] > 'F')) {
 			continue
 		}
 		rgb, err := parseColor(line)
@@ -247,18 +253,18 @@ func ParseInventoryFile(path string) ([][3]uint8, error) {
 }
 
 // SelectFromInventory picks the best n colors from inventory for the given
-// textures. It samples the textures, clusters into n groups, then for each
-// cluster picks the inventory color closest to the centroid.
+// textures, optimizing for dithering quality. It selects the subset whose
+// convex hull in CIELAB space best covers the texture's color distribution,
+// so that dithering can mix the chosen colors to reproduce the widest range.
 func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) [][3]uint8 {
 	if n >= len(inventory) {
 		return inventory
 	}
 
-	// Find n ideal colors using k-means on the texture.
-	ideal := ComputePalette(textures, n)
+	// Sample texture pixels into Lab space.
+	samples := sampleTextureLab(textures, 500)
 
-	// For each ideal color, find the closest unused inventory color.
-	used := make([]bool, len(inventory))
+	// Convert inventory to Lab.
 	invLab := make([][3]float64, len(inventory))
 	for i, c := range inventory {
 		cf := colorful.Color{
@@ -269,32 +275,220 @@ func SelectFromInventory(textures []image.Image, inventory [][3]uint8, n int) []
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
 
-	result := make([][3]uint8, n)
-	for i, id := range ideal {
-		cf := colorful.Color{
-			R: float64(id[0]) / 255.0,
-			G: float64(id[1]) / 255.0,
-			B: float64(id[2]) / 255.0,
-		}
-		iL, iA, iB := cf.Lab()
+	var bestSubset []int
+	if combinationsCount(len(inventory), n) <= 50000 {
+		bestSubset = exhaustiveHullSearch(invLab, samples, n)
+	} else {
+		bestSubset = randomHullSearch(invLab, samples, n, 50000)
+	}
 
-		bestIdx := -1
-		bestDist := math.MaxFloat64
-		for j := range inventory {
-			if used[j] {
-				continue
-			}
-			dL := iL - invLab[j][0]
-			dA := iA - invLab[j][1]
-			dB := iB - invLab[j][2]
-			d := dL*dL + dA*dA + dB*dB
-			if d < bestDist {
-				bestDist = d
-				bestIdx = j
+	result := make([][3]uint8, n)
+	for i, idx := range bestSubset {
+		result[i] = inventory[idx]
+	}
+	return result
+}
+
+// sampleTextureLab collects up to maxSamples texture pixels in CIELAB space.
+func sampleTextureLab(textures []image.Image, maxSamples int) [][3]float64 {
+	var allPixels [][3]uint8
+	for _, tex := range textures {
+		bounds := tex.Bounds()
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				r, g, b, _ := tex.At(x, y).RGBA()
+				allPixels = append(allPixels, [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)})
 			}
 		}
-		used[bestIdx] = true
-		result[i] = inventory[bestIdx]
+	}
+
+	if len(allPixels) > maxSamples {
+		step := len(allPixels) / maxSamples
+		sampled := make([][3]uint8, 0, maxSamples)
+		for i := 0; i < len(allPixels); i += step {
+			sampled = append(sampled, allPixels[i])
+		}
+		allPixels = sampled
+	}
+
+	result := make([][3]float64, len(allPixels))
+	for i, p := range allPixels {
+		c := colorful.Color{
+			R: float64(p[0]) / 255.0,
+			G: float64(p[1]) / 255.0,
+			B: float64(p[2]) / 255.0,
+		}
+		result[i][0], result[i][1], result[i][2] = c.Lab()
+	}
+	return result
+}
+
+// distSqToHull computes the squared distance from point p to the convex hull
+// of colors in Lab space using Frank-Wolfe (conditional gradient) iteration.
+// Returns 0 if p is inside the hull.
+func distSqToHull(p [3]float64, colors [][3]float64) float64 {
+	n := len(colors)
+	if n == 0 {
+		return math.MaxFloat64
+	}
+
+	// Initialize at the closest single color.
+	bestIdx := 0
+	bestD := math.MaxFloat64
+	for i, c := range colors {
+		d0 := p[0] - c[0]
+		d1 := p[1] - c[1]
+		d2 := p[2] - c[2]
+		d := d0*d0 + d1*d1 + d2*d2
+		if d < bestD {
+			bestD = d
+			bestIdx = i
+		}
+	}
+	if n == 1 {
+		return bestD
+	}
+
+	cur := colors[bestIdx]
+
+	for iter := 0; iter < 30; iter++ {
+		// Gradient: cur - p
+		grad := [3]float64{cur[0] - p[0], cur[1] - p[1], cur[2] - p[2]}
+
+		// Find vertex minimizing dot(grad, vertex).
+		minDot := math.MaxFloat64
+		minJ := 0
+		for j, c := range colors {
+			dot := grad[0]*c[0] + grad[1]*c[1] + grad[2]*c[2]
+			if dot < minDot {
+				minDot = dot
+				minJ = j
+			}
+		}
+
+		// Direction: colors[minJ] - cur
+		dir := [3]float64{
+			colors[minJ][0] - cur[0],
+			colors[minJ][1] - cur[1],
+			colors[minJ][2] - cur[2],
+		}
+
+		// Optimal step: gamma = -<grad, dir> / <dir, dir>
+		num := -(grad[0]*dir[0] + grad[1]*dir[1] + grad[2]*dir[2])
+		den := dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]
+		if den < 1e-12 {
+			break
+		}
+		gamma := num / den
+		if gamma <= 0 {
+			break // already at optimum
+		}
+		if gamma > 1 {
+			gamma = 1
+		}
+
+		cur[0] += gamma * dir[0]
+		cur[1] += gamma * dir[1]
+		cur[2] += gamma * dir[2]
+	}
+
+	d0 := cur[0] - p[0]
+	d1 := cur[1] - p[1]
+	d2 := cur[2] - p[2]
+	return d0*d0 + d1*d1 + d2*d2
+}
+
+// hullScore computes total squared distance from all samples to the convex
+// hull of the palette colors at the given indices.
+func hullScore(indices []int, invLab [][3]float64, samples [][3]float64) float64 {
+	subset := make([][3]float64, len(indices))
+	for i, idx := range indices {
+		subset[i] = invLab[idx]
+	}
+	total := 0.0
+	for _, s := range samples {
+		total += distSqToHull(s, subset)
+	}
+	return total
+}
+
+// exhaustiveHullSearch enumerates all C(inv, n) subsets to find the one
+// whose convex hull best covers the sample colors.
+func exhaustiveHullSearch(invLab [][3]float64, samples [][3]float64, n int) []int {
+	bestScore := math.MaxFloat64
+	var bestSubset []int
+
+	indices := make([]int, n)
+	var enumerate func(start, depth int)
+	enumerate = func(start, depth int) {
+		if depth == n {
+			score := hullScore(indices, invLab, samples)
+			if score < bestScore {
+				bestScore = score
+				bestSubset = make([]int, n)
+				copy(bestSubset, indices)
+			}
+			return
+		}
+		for i := start; i <= len(invLab)-(n-depth); i++ {
+			indices[depth] = i
+			enumerate(i+1, depth+1)
+		}
+	}
+	enumerate(0, 0)
+	return bestSubset
+}
+
+// randomHullSearch evaluates numTrials random n-color subsets and returns the best.
+func randomHullSearch(invLab [][3]float64, samples [][3]float64, n int, numTrials int) []int {
+	rng := rand.New(rand.NewSource(42))
+	invN := len(invLab)
+
+	bestScore := math.MaxFloat64
+	var bestSubset []int
+	indices := make([]int, n)
+
+	for trial := 0; trial < numTrials; trial++ {
+		// Generate a random n-subset by sampling without replacement.
+		for i := 0; i < n; i++ {
+			for {
+				indices[i] = rng.Intn(invN)
+				dup := false
+				for j := 0; j < i; j++ {
+					if indices[j] == indices[i] {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					break
+				}
+			}
+		}
+
+		score := hullScore(indices, invLab, samples)
+		if score < bestScore {
+			bestScore = score
+			bestSubset = make([]int, n)
+			copy(bestSubset, indices)
+		}
+	}
+	return bestSubset
+}
+
+func combinationsCount(n, k int) int {
+	if k > n {
+		return 0
+	}
+	if k == 0 || k == n {
+		return 1
+	}
+	if k > n-k {
+		k = n - k
+	}
+	result := 1
+	for i := 0; i < k; i++ {
+		result = result * (n - i) / (i + 1)
 	}
 	return result
 }
