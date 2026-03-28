@@ -1,0 +1,252 @@
+package voxel
+
+import (
+	"image"
+	"math"
+	"sort"
+
+	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/palette"
+)
+
+// BilinearSample samples a texture at normalized UV coordinates.
+func BilinearSample(img image.Image, u, v float32) [3]uint8 {
+	bounds := img.Bounds()
+	W := float32(bounds.Max.X - bounds.Min.X)
+	H := float32(bounds.Max.Y - bounds.Min.Y)
+
+	u = u - float32(math.Floor(float64(u)))
+	v = v - float32(math.Floor(float64(v)))
+
+	px := u * (W - 1)
+	py := v * (H - 1)
+
+	x0 := int(px)
+	y0 := int(py)
+	x1 := x0 + 1
+	y1 := y0 + 1
+	if x1 >= int(W) {
+		x1 = int(W) - 1
+	}
+	if y1 >= int(H) {
+		y1 = int(H) - 1
+	}
+
+	fx := px - float32(x0)
+	fy := py - float32(y0)
+
+	x0 += bounds.Min.X
+	y0 += bounds.Min.Y
+	x1 += bounds.Min.X
+	y1 += bounds.Min.Y
+
+	sample := func(x, y int) (float32, float32, float32) {
+		r, g, b, _ := img.At(x, y).RGBA()
+		return float32(r >> 8), float32(g >> 8), float32(b >> 8)
+	}
+
+	r00, g00, b00 := sample(x0, y0)
+	r10, g10, b10 := sample(x1, y0)
+	r01, g01, b01 := sample(x0, y1)
+	r11, g11, b11 := sample(x1, y1)
+
+	lerp := func(a, b, c, d, fx, fy float32) uint8 {
+		v := a*(1-fx)*(1-fy) + b*fx*(1-fy) + c*(1-fx)*fy + d*fx*fy
+		if v < 0 {
+			v = 0
+		}
+		if v > 255 {
+			v = 255
+		}
+		return uint8(v + 0.5)
+	}
+
+	return [3]uint8{
+		lerp(r00, r10, r01, r11, fx, fy),
+		lerp(g00, g10, g01, g11, fx, fy),
+		lerp(b00, b10, b01, b11, fx, fy),
+	}
+}
+
+// SampleNearestColor finds the closest surface point to p, then samples the
+// texture color there.
+func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) [3]uint8 {
+	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
+	bestDistSq := float32(math.MaxFloat32)
+	bestTri := int32(-1)
+	var bestS, bestT float32
+	for _, ti := range cands {
+		f := model.Faces[ti]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+
+		e0 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
+		e1 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
+		d := [3]float32{v0[0] - p[0], v0[1] - p[1], v0[2] - p[2]}
+
+		a := Dot3(e0, e0)
+		b := Dot3(e0, e1)
+		c := Dot3(e1, e1)
+		dd := Dot3(e0, d)
+		e := Dot3(e1, d)
+
+		det := a*c - b*b
+		s := b*e - c*dd
+		t := b*dd - a*e
+
+		if s+t <= det {
+			if s < 0 {
+				if t < 0 {
+					if dd < 0 {
+						t = 0
+						s = ClampF(-dd/a, 0, 1)
+					} else {
+						s = 0
+						t = ClampF(-e/c, 0, 1)
+					}
+				} else {
+					s = 0
+					t = ClampF(-e/c, 0, 1)
+				}
+			} else if t < 0 {
+				t = 0
+				s = ClampF(-dd/a, 0, 1)
+			} else {
+				invDet := 1.0 / det
+				s *= invDet
+				t *= invDet
+			}
+		} else {
+			if s < 0 {
+				tmp0 := b + dd
+				tmp1 := c + e
+				if tmp1 > tmp0 {
+					numer := tmp1 - tmp0
+					denom := a - 2*b + c
+					s = ClampF(numer/denom, 0, 1)
+					t = 1 - s
+				} else {
+					s = 0
+					t = ClampF(-e/c, 0, 1)
+				}
+			} else if t < 0 {
+				tmp0 := b + e
+				tmp1 := a + dd
+				if tmp1 > tmp0 {
+					numer := tmp1 - tmp0
+					denom := a - 2*b + c
+					t = ClampF(numer/denom, 0, 1)
+					s = 1 - t
+				} else {
+					t = 0
+					s = ClampF(-dd/a, 0, 1)
+				}
+			} else {
+				numer := (c + e) - (b + dd)
+				if numer <= 0 {
+					s = 0
+				} else {
+					denom := a - 2*b + c
+					s = ClampF(numer/denom, 0, 1)
+				}
+				t = 1 - s
+			}
+		}
+
+		dx := d[0] + s*e0[0] + t*e1[0]
+		dy := d[1] + s*e0[1] + t*e1[1]
+		dz := d[2] + s*e0[2] + t*e1[2]
+		distSq := dx*dx + dy*dy + dz*dz
+		if distSq < bestDistSq {
+			bestDistSq = distSq
+			bestTri = ti
+			bestS = s
+			bestT = t
+		}
+	}
+
+	if bestTri < 0 {
+		return [3]uint8{128, 128, 128}
+	}
+
+	texIdx := model.FaceTextureIdx[bestTri]
+	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
+		return [3]uint8{128, 128, 128}
+	}
+
+	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
+	f := model.Faces[bestTri]
+	uv0 := model.UVs[f[0]]
+	uv1 := model.UVs[f[1]]
+	uv2 := model.UVs[f[2]]
+
+	u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+	v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+
+	return BilinearSample(model.Textures[texIdx], u, v)
+}
+
+// DitherCells applies Floyd-Steinberg error diffusion over cells in spatial order.
+func DitherCells(cells []ActiveCell, pal [][3]uint8) []int32 {
+	order := make([]int, len(cells))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ha, hb := cells[order[a]], cells[order[b]]
+		if ha.Layer != hb.Layer {
+			return ha.Layer < hb.Layer
+		}
+		if ha.Row != hb.Row {
+			return ha.Row < hb.Row
+		}
+		return ha.Col < hb.Col
+	})
+
+	assignments := make([]int32, len(cells))
+	errBuf := make([][3]float32, len(cells)+4)
+
+	for i, idx := range order {
+		r := ClampF(float32(cells[idx].Color[0])+errBuf[i][0], 0, 255)
+		g := ClampF(float32(cells[idx].Color[1])+errBuf[i][1], 0, 255)
+		b := ClampF(float32(cells[idx].Color[2])+errBuf[i][2], 0, 255)
+
+		bestIdx := 0
+		bestDist := float32(math.MaxFloat32)
+		for pi, p := range pal {
+			dr := r - float32(p[0])
+			dg := g - float32(p[1])
+			db := b - float32(p[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+
+		weights := [4]float32{7.0 / 16.0, 5.0 / 16.0, 3.0 / 16.0, 1.0 / 16.0}
+		for k := 0; k < 4 && i+1+k < len(cells); k++ {
+			errBuf[i+1+k][0] += eR * weights[k]
+			errBuf[i+1+k][1] += eG * weights[k]
+			errBuf[i+1+k][2] += eB * weights[k]
+		}
+	}
+
+	return assignments
+}
+
+// AssignColors assigns palette indices without dithering.
+func AssignColors(cells []ActiveCell, pal [][3]uint8) []int32 {
+	colors := make([][3]uint8, len(cells))
+	for i, c := range cells {
+		colors[i] = c.Color
+	}
+	return palette.AssignPalette(colors, pal)
+}

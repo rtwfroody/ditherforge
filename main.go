@@ -10,6 +10,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/hexvoxel"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 )
 
 // Args defines the CLI arguments.
@@ -20,7 +21,7 @@ type Args struct {
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
-	Mode           string  `arg:"--mode" default:"hexvoxel" help:"Remesh mode: hexvoxel"`
+	Mode           string  `arg:"--mode" default:"hexvoxel" help:"Remesh mode: hexvoxel or squarevoxel"`
 	NozzleDiameter float32 `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
 	LayerHeight    float32 `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
 	NoDither       bool    `arg:"--no-dither" help:"Disable Floyd-Steinberg dithering"`
@@ -115,10 +116,14 @@ func run() error {
 		return fmt.Errorf("palette has %d colors but max supported is %d", len(paletteRGB), export3mf.MaxFilaments)
 	}
 
-	if args.Mode == "hexvoxel" {
+	switch args.Mode {
+	case "hexvoxel":
 		return runHexvoxel(args, model, paletteRGB)
+	case "squarevoxel":
+		return runSquarevoxel(args, model, paletteRGB)
+	default:
+		return fmt.Errorf("invalid --mode %q: must be hexvoxel or squarevoxel", args.Mode)
 	}
-	return fmt.Errorf("invalid --mode %q: must be hexvoxel", args.Mode)
 }
 
 func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) error {
@@ -151,6 +156,42 @@ func runHexvoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) er
 
 	fmt.Printf("Exporting %s...\n", args.Output)
 	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
+		return fmt.Errorf("exporting 3MF: %w", err)
+	}
+	fmt.Println("Done.")
+	return nil
+}
+
+func runSquarevoxel(args Args, model *loader.LoadedModel, paletteRGB [][3]uint8) error {
+	cfg := squarevoxel.Config{
+		NozzleDiameter: args.NozzleDiameter,
+		LayerHeight:    args.LayerHeight,
+		NoMerge:        args.NoMerge,
+	}
+
+	fmt.Println("Generating square voxel shell...")
+	sqModel, assignments, err := squarevoxel.Remesh(model, paletteRGB, cfg, !args.NoDither)
+	if err != nil {
+		return fmt.Errorf("squarevoxel remesh: %w", err)
+	}
+	fmt.Printf("  %d vertices, %d faces\n", len(sqModel.Vertices), len(sqModel.Faces))
+
+	if args.Stats {
+		fmt.Println("  Face counts per material:")
+		for i, p := range paletteRGB {
+			hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+			count := 0
+			for _, a := range assignments {
+				if int(a) == i {
+					count++
+				}
+			}
+			fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
+		}
+	}
+
+	fmt.Printf("Exporting %s...\n", args.Output)
+	if err := export3mf.Export(sqModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
