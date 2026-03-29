@@ -69,13 +69,16 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			activeLayers := voxel.VoxelizeColumn(cx, cy, model, si, layerH, minV[2], nLayers)
 			for layer := range activeLayers {
 				cz := minV[2] + float32(layer)*layerH
-				clr := voxel.SampleNearestColor(
+				rgba := voxel.SampleNearestColor(
 					[3]float32{cx, cy, cz},
 					model, si, colorRadius, colorBuf)
+				if rgba[3] < 128 {
+					continue // skip translucent voxels
+				}
 				cells = append(cells, voxel.ActiveCell{
 					Col: col, Row: row, Layer: layer,
 					Cx: cx, Cy: cy, Cz: cz,
-					Color: clr,
+					Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
 				})
 			}
 		}
@@ -144,13 +147,16 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			cx := minV[0] + float32(k.Col)*cellSize
 			cy := minV[1] + float32(k.Row)*cellSize
 			cz := minV[2] + float32(k.Layer)*layerH
-			clr := voxel.SampleNearestColor(
+			rgba := voxel.SampleNearestColor(
 				[3]float32{cx, cy, cz},
 				model, si, colorRadius, colorBuf)
+			if rgba[3] < 128 {
+				continue // skip translucent voxels
+			}
 			cells = append(cells, voxel.ActiveCell{
 				Col: k.Col, Row: k.Row, Layer: k.Layer,
 				Cx: cx, Cy: cy, Cz: cz,
-				Color: clr,
+				Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
 			})
 			proximityAdded++
 		}

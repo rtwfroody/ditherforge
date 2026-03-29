@@ -56,7 +56,8 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string)
 }
 
 // BilinearSample samples a texture at normalized UV coordinates.
-func BilinearSample(img image.Image, u, v float32) [3]uint8 {
+// Returns RGBA; alpha is 255 for textures without transparency.
+func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	bounds := img.Bounds()
 	W := float32(bounds.Max.X - bounds.Min.X)
 	H := float32(bounds.Max.Y - bounds.Min.Y)
@@ -86,15 +87,15 @@ func BilinearSample(img image.Image, u, v float32) [3]uint8 {
 	x1 += bounds.Min.X
 	y1 += bounds.Min.Y
 
-	sample := func(x, y int) (float32, float32, float32) {
-		r, g, b, _ := img.At(x, y).RGBA()
-		return float32(r >> 8), float32(g >> 8), float32(b >> 8)
+	sample := func(x, y int) (float32, float32, float32, float32) {
+		r, g, b, a := img.At(x, y).RGBA()
+		return float32(r >> 8), float32(g >> 8), float32(b >> 8), float32(a >> 8)
 	}
 
-	r00, g00, b00 := sample(x0, y0)
-	r10, g10, b10 := sample(x1, y0)
-	r01, g01, b01 := sample(x0, y1)
-	r11, g11, b11 := sample(x1, y1)
+	r00, g00, b00, a00 := sample(x0, y0)
+	r10, g10, b10, a10 := sample(x1, y0)
+	r01, g01, b01, a01 := sample(x0, y1)
+	r11, g11, b11, a11 := sample(x1, y1)
 
 	lerp := func(a, b, c, d, fx, fy float32) uint8 {
 		v := a*(1-fx)*(1-fy) + b*fx*(1-fy) + c*(1-fx)*fy + d*fx*fy
@@ -107,16 +108,17 @@ func BilinearSample(img image.Image, u, v float32) [3]uint8 {
 		return uint8(v + 0.5)
 	}
 
-	return [3]uint8{
+	return [4]uint8{
 		lerp(r00, r10, r01, r11, fx, fy),
 		lerp(g00, g10, g01, g11, fx, fy),
 		lerp(b00, b10, b01, b11, fx, fy),
+		lerp(a00, a10, a01, a11, fx, fy),
 	}
 }
 
 // SampleNearestColor finds the closest surface point to p, then samples the
-// texture color there.
-func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) [3]uint8 {
+// texture color and alpha there. Returns RGBA.
+func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	bestTri := int32(-1)
@@ -213,12 +215,19 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	}
 
 	if bestTri < 0 {
-		return [3]uint8{128, 128, 128}
+		return [4]uint8{128, 128, 128, 255}
+	}
+
+	// Material-level alpha (from AlphaMode + BaseColorFactor).
+	matAlpha := float32(1.0)
+	if model.FaceAlpha != nil {
+		matAlpha = model.FaceAlpha[bestTri]
 	}
 
 	texIdx := model.FaceTextureIdx[bestTri]
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
-		return [3]uint8{128, 128, 128}
+		a := uint8(ClampF(matAlpha*255+0.5, 0, 255))
+		return [4]uint8{128, 128, 128, a}
 	}
 
 	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
@@ -230,7 +239,13 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
 	v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
 
-	return BilinearSample(model.Textures[texIdx], u, v)
+	rgba := BilinearSample(model.Textures[texIdx], u, v)
+	// Multiply texture alpha with material alpha.
+	if matAlpha < 1.0 {
+		combined := float32(rgba[3]) * matAlpha
+		rgba[3] = uint8(ClampF(combined+0.5, 0, 255))
+	}
+	return rgba
 }
 
 // DitherCellsFS applies Floyd-Steinberg error diffusion over cells in spatial order.
