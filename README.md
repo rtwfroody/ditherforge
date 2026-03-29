@@ -115,6 +115,7 @@ silhouettes and depth against the original model.
 
 ## Known Issues
 
+- Sometimes generates features too thin for the slicer to print.
 - Dithering produces a visible seam on some models (e.g. the earth test
   object).
 - Slicers like OrcaSlicer preserve per-face colors through to the infill,
