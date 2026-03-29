@@ -252,17 +252,20 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
 
-	uniqueSet := make(map[[3]float32]struct{})
+	vertIndex := make(map[[3]float32]int32)
 	for k := range expandedSet {
 		for _, vl := range [2]int{k.Layer, k.Layer + 1} {
 			for corner := 0; corner <= 6; corner++ {
-				uniqueSet[voxel.SnapPos(vertPos(k.Col, k.Row, vl, corner))] = struct{}{}
+				pos := voxel.SnapPos(vertPos(k.Col, k.Row, vl, corner))
+				if _, ok := vertIndex[pos]; !ok {
+					vertIndex[pos] = int32(len(vertIndex))
+				}
 			}
 		}
 	}
-	uniqueVerts := make([][3]float32, 0, len(uniqueSet))
-	for pos := range uniqueSet {
-		uniqueVerts = append(uniqueVerts, pos)
+	uniqueVerts := make([][3]float32, len(vertIndex))
+	for pos, idx := range vertIndex {
+		uniqueVerts[idx] = pos
 	}
 
 	nWorkers := runtime.NumCPU()
@@ -288,12 +291,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}(start, end)
 	}
 	wg.Wait()
-
-	sdfMap := make(map[[3]float32]float32, len(uniqueVerts))
-	for i, pos := range uniqueVerts {
-		sdfMap[pos] = sdfValues[i]
-	}
-	fmt.Printf("  %d unique SDF vertices computed\n", len(sdfMap))
+	fmt.Printf("  %d unique SDF vertices computed\n", len(vertIndex))
+	uniqueVerts = nil
 
 	// 5. Resolve palette and assign / dither.
 	pal, palDisplay := voxel.ResolvePalette(cells, pcfg)
@@ -354,13 +353,13 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		for c := 0; c < 6; c++ {
 			posCornerBot[c] = voxel.SnapPos(vertPos(k.Col, k.Row, botLayer, c))
 			posCornerTop[c] = voxel.SnapPos(vertPos(k.Col, k.Row, topLayer, c))
-			sdfCornerBot[c] = sdfMap[posCornerBot[c]]
-			sdfCornerTop[c] = sdfMap[posCornerTop[c]]
+			sdfCornerBot[c] = sdfValues[vertIndex[posCornerBot[c]]]
+			sdfCornerTop[c] = sdfValues[vertIndex[posCornerTop[c]]]
 		}
 		posCenterBot := voxel.SnapPos(vertPos(k.Col, k.Row, botLayer, 6))
 		posCenterTop := voxel.SnapPos(vertPos(k.Col, k.Row, topLayer, 6))
-		sdfCenterBot := sdfMap[posCenterBot]
-		sdfCenterTop := sdfMap[posCenterTop]
+		sdfCenterBot := sdfValues[vertIndex[posCenterBot]]
+		sdfCenterTop := sdfValues[vertIndex[posCenterTop]]
 
 		// Process 6 wedges.
 		for w := 0; w < 6; w++ {

@@ -236,15 +236,21 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 	}
 
-	uniqueSet := make(map[[3]float32]struct{})
+	// Build a map from snapped vertex position to index, and a flat array of
+	// positions for parallel SDF evaluation. This avoids storing SDF values
+	// in a second map (which would double memory usage).
+	vertIndex := make(map[[3]float32]int32)
 	for k := range expandedSet {
 		for corner := 0; corner < 8; corner++ {
-			uniqueSet[voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, corner))] = struct{}{}
+			pos := voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, corner))
+			if _, ok := vertIndex[pos]; !ok {
+				vertIndex[pos] = int32(len(vertIndex))
+			}
 		}
 	}
-	uniqueVerts := make([][3]float32, 0, len(uniqueSet))
-	for pos := range uniqueSet {
-		uniqueVerts = append(uniqueVerts, pos)
+	uniqueVerts := make([][3]float32, len(vertIndex))
+	for pos, idx := range vertIndex {
+		uniqueVerts[idx] = pos
 	}
 
 	nWorkers := runtime.NumCPU()
@@ -270,12 +276,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}(start, end)
 	}
 	wg.Wait()
-
-	sdfMap := make(map[[3]float32]float32, len(uniqueVerts))
-	for i, pos := range uniqueVerts {
-		sdfMap[pos] = sdfValues[i]
-	}
-	fmt.Printf("  %d unique SDF vertices computed\n", len(sdfMap))
+	fmt.Printf("  %d unique SDF vertices computed\n", len(vertIndex))
+	uniqueVerts = nil // free; only vertIndex+sdfValues needed from here
 
 	// 5. Resolve palette and assign / dither.
 	pal, palDisplay := voxel.ResolvePalette(cells, pcfg)
@@ -332,7 +334,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		var cornerSDF [8]float32
 		for c := 0; c < 8; c++ {
 			cornerPos[c] = voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, c))
-			cornerSDF[c] = sdfMap[cornerPos[c]]
+			cornerSDF[c] = sdfValues[vertIndex[cornerPos[c]]]
 		}
 
 		// Build 8-bit case index.
