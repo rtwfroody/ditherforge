@@ -106,6 +106,15 @@ go test -timeout 10m ./...
 Regression tests render the output mesh from multiple views and compare
 silhouettes and depth against the original model.
 
+## Known Issues
+
+- Dithering produces a visible seam on some models (e.g. the earth test
+  object).
+- Slicers like OrcaSlicer preserve per-face colors through to the infill,
+  making infill very slow due to unnecessary filament changes. The
+  `--infill` flag attempts to generate a separate single-color infill object,
+  but OrcaSlicer does not yet interpret the hollow shell correctly.
+
 ## Status
 
 Early development. The output 3MF includes embedded printer profiles for the
