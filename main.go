@@ -32,6 +32,7 @@ Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: n
 	Extent          *float32 `arg:"--extent" help:"Scale model so largest extent equals this value in mm"`
 	Force           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats           bool     `arg:"--stats" help:"Print face counts per material"`
+	InfillOnly      bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging)"`
 }
 
 func (Args) Description() string {
@@ -156,28 +157,22 @@ func runHexvoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig)
 	}
 
 	fmt.Println("Generating hexagonal voxel shell...")
-	hexModel, assignments, paletteRGB, err := hexvoxel.Remesh(model, pcfg, cfg, args.Dither)
+	meshParts, paletteRGB, err := hexvoxel.Remesh(model, pcfg, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("hexvoxel remesh: %w", err)
 	}
-	fmt.Printf("  %d vertices, %d faces\n", len(hexModel.Vertices), len(hexModel.Faces))
+	for i, mp := range meshParts {
+		fmt.Printf("  Part %d: %d vertices, %d faces\n", i, len(mp.Model.Vertices), len(mp.Model.Faces))
+	}
 
 	if args.Stats {
-		fmt.Println("  Face counts per material:")
-		for i, p := range paletteRGB {
-			hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
-			count := 0
-			for _, a := range assignments {
-				if int(a) == i {
-					count++
-				}
-			}
-			fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
-		}
+		printStats(meshParts, paletteRGB)
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(hexModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
+	exportParts := filterParts(meshParts, args.InfillOnly)
+	parts := meshPartsToExportParts(exportParts)
+	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
@@ -192,28 +187,22 @@ func runSquarevoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConf
 	}
 
 	fmt.Println("Generating square voxel shell...")
-	sqModel, assignments, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)
+	meshParts, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
 	}
-	fmt.Printf("  %d vertices, %d faces\n", len(sqModel.Vertices), len(sqModel.Faces))
+	for i, mp := range meshParts {
+		fmt.Printf("  Part %d: %d vertices, %d faces\n", i, len(mp.Model.Vertices), len(mp.Model.Faces))
+	}
 
 	if args.Stats {
-		fmt.Println("  Face counts per material:")
-		for i, p := range paletteRGB {
-			hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
-			count := 0
-			for _, a := range assignments {
-				if int(a) == i {
-					count++
-				}
-			}
-			fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
-		}
+		printStats(meshParts, paletteRGB)
 	}
 
 	fmt.Printf("Exporting %s...\n", args.Output)
-	if err := export3mf.Export(sqModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
+	exportParts := filterParts(meshParts, args.InfillOnly)
+	parts := meshPartsToExportParts(exportParts)
+	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Println("Done.")
@@ -269,6 +258,40 @@ func averageTextureBrightness(model *loader.LoadedModel) float64 {
 	}
 	// Perceived brightness (ITU-R BT.601).
 	return (0.299*totalR + 0.587*totalG + 0.114*totalB) / float64(count)
+}
+
+func filterParts(meshParts []voxel.MeshPart, infillOnly bool) []voxel.MeshPart {
+	if infillOnly && len(meshParts) > 1 {
+		return meshParts[1:]
+	}
+	return meshParts
+}
+
+func meshPartsToExportParts(meshParts []voxel.MeshPart) []export3mf.Part {
+	parts := make([]export3mf.Part, len(meshParts))
+	for i, mp := range meshParts {
+		parts[i] = export3mf.Part{
+			Model:       mp.Model,
+			Assignments: mp.Assignments,
+		}
+	}
+	return parts
+}
+
+func printStats(meshParts []voxel.MeshPart, paletteRGB [][3]uint8) {
+	fmt.Println("  Face counts per material:")
+	for i, p := range paletteRGB {
+		hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
+		count := 0
+		for _, mp := range meshParts {
+			for _, a := range mp.Assignments {
+				if int(a) == i {
+					count++
+				}
+			}
+		}
+		fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
+	}
 }
 
 func main() {

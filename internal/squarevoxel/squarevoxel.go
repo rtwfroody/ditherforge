@@ -20,13 +20,15 @@ import (
 type Config struct {
 	NozzleDiameter float32
 	LayerHeight    float32
+	WallThickness  float32 // shell thickness in mm (default 3.0)
 	NoMerge        bool
 }
 
 // Remesh generates a square voxel shell of the input model using marching cubes.
-func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, [][3]uint8, error) {
+// Returns mesh parts (shell + optional infill), the palette, and an error.
+func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) ([]voxel.MeshPart, [][3]uint8, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, nil, nil, fmt.Errorf("empty model")
+		return nil, nil, fmt.Errorf("empty model")
 	}
 
 	// Cell edge length. At 1.0× nozzle diameter the slicer can't fill the
@@ -169,7 +171,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Printf("  %d active cells\n", len(cells))
 	}
 	if len(cells) == 0 {
-		return nil, nil, nil, fmt.Errorf("no active cells found")
+		return nil, nil, fmt.Errorf("no active cells found")
 	}
 
 	// Build cell lookup maps.
@@ -181,13 +183,18 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		activeSet[k] = struct{}{}
 	}
 
-	// Expand active set by 2 rings of neighbors.
+	// Expand active set by enough rings for wall thickness + marching cubes margin.
+	wallThickness := cfg.WallThickness
+	if wallThickness <= 0 {
+		wallThickness = 3.0
+	}
+	expansionRings := int(math.Ceil(float64(wallThickness)/float64(cellSize))) + 1
 	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
 	expandedSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
 	for k := range activeSet {
 		expandedSet[k] = struct{}{}
 	}
-	for ring := 0; ring < 2; ring++ {
+	for ring := 0; ring < expansionRings; ring++ {
 		snapshot := make([]voxel.CellKey, 0, len(expandedSet))
 		for k := range expandedSet {
 			snapshot = append(snapshot, k)
@@ -205,6 +212,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// 4. Compute SDF at cube vertices.
 	fmt.Println("  Computing SDF at cube vertices...")
 	searchRadius := cellSize * 3
+	if wallThickness*2 > searchRadius {
+		searchRadius = wallThickness * 2
+	}
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
 	halfCell := cellSize / 2
@@ -285,7 +295,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Println(palDisplay)
 	}
 	if len(pal) == 0 {
-		return nil, nil, nil, fmt.Errorf("no palette colors")
+		return nil, nil, fmt.Errorf("no palette colors")
 	}
 	var assignments []int32
 	switch ditherMode {
@@ -404,10 +414,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			len(outFaces), 100*float64(before-len(outFaces))/float64(before))
 	}
 
-	// Build output model.
-	uvs := make([][2]float32, len(vd.Verts))
-	faceTex := make([]int32, len(outFaces))
-
+	// Build shell output model.
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
 	var textures []image.Image
@@ -417,11 +424,100 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		textures = []image.Image{placeholder}
 	}
 
-	return &loader.LoadedModel{
-		Vertices:       vd.Verts,
-		Faces:          outFaces,
-		UVs:            uvs,
-		Textures:       textures,
-		FaceTextureIdx: faceTex,
-	}, outAssignments, pal, nil
+	buildModel := func(verts [][3]float32, faces [][3]uint32) *loader.LoadedModel {
+		return &loader.LoadedModel{
+			Vertices:       verts,
+			Faces:          faces,
+			UVs:            make([][2]float32, len(verts)),
+			Textures:       textures,
+			FaceTextureIdx: make([]int32, len(faces)),
+		}
+	}
+
+	parts := []voxel.MeshPart{{
+		Model:       buildModel(vd.Verts, outFaces),
+		Assignments: outAssignments,
+	}}
+
+	// Generate infill mesh: a second marching cubes pass with SDF offset
+	// inward by wallThickness. This creates a solid interior object that
+	// the slicer can infill with just the first filament.
+	fmt.Println("  Generating infill mesh...")
+	infillVD := voxel.NewVertexDedup()
+	var infillFaces [][3]uint32
+
+	for k := range expandedSet {
+		var cornerPos [8][3]float32
+		var cornerSDF [8]float32
+		for c := 0; c < 8; c++ {
+			cornerPos[c] = voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, c))
+			// Offset SDF inward: points within wallThickness of surface become positive (outside).
+			cornerSDF[c] = sdfValues[vertIndex[cornerPos[c]]] + wallThickness
+		}
+
+		caseIdx := 0
+		for i := 0; i < 8; i++ {
+			if cornerSDF[i] < 0 {
+				caseIdx |= 1 << i
+			}
+		}
+
+		triEdges := mcTriTable[caseIdx]
+		if len(triEdges) == 0 {
+			continue
+		}
+
+		for t := 0; t+2 < len(triEdges); t += 3 {
+			var triVerts [3]uint32
+			for ki := 0; ki < 3; ki++ {
+				edge := triEdges[t+ki]
+				ea := mcEdges[edge][0]
+				eb := mcEdges[edge][1]
+				posA := cornerPos[ea]
+				posB := cornerPos[eb]
+				sdfA := cornerSDF[ea]
+				sdfB := cornerSDF[eb]
+
+				if posA[0] > posB[0] || (posA[0] == posB[0] && posA[1] > posB[1]) ||
+					(posA[0] == posB[0] && posA[1] == posB[1] && posA[2] > posB[2]) {
+					posA, posB = posB, posA
+					sdfA, sdfB = sdfB, sdfA
+				}
+
+				var interp [3]float32
+				denom := sdfA - sdfB
+				if denom == 0 {
+					interp = [3]float32{
+						(posA[0] + posB[0]) / 2,
+						(posA[1] + posB[1]) / 2,
+						(posA[2] + posB[2]) / 2,
+					}
+				} else {
+					frac := sdfA / denom
+					frac = voxel.ClampF(frac, 0, 1)
+					interp = [3]float32{
+						posA[0] + frac*(posB[0]-posA[0]),
+						posA[1] + frac*(posB[1]-posA[1]),
+						posA[2] + frac*(posB[2]-posA[2]),
+					}
+				}
+				triVerts[ki] = infillVD.GetVertex(interp)
+			}
+			if triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[0] == triVerts[2] {
+				continue
+			}
+			infillFaces = append(infillFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
+		}
+	}
+
+	if len(infillFaces) > 0 {
+		fmt.Printf("  %d vertices, %d faces in infill mesh\n", len(infillVD.Verts), len(infillFaces))
+		infillAssign := make([]int32, len(infillFaces)) // all zero = palette[0]
+		parts = append(parts, voxel.MeshPart{
+			Model:       buildModel(infillVD.Verts, infillFaces),
+			Assignments: infillAssign,
+		})
+	}
+
+	return parts, pal, nil
 }

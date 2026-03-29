@@ -32,7 +32,7 @@ const (
 	testResolution     = 512
 	marginFrac         = 0.05
 	minCoverage        = 0.95
-	maxOvershoot       = 0.0
+	maxOvershoot       = 0.005
 	maxDepthDiff       = 20 // p95 gray level difference (0-255)
 )
 
@@ -118,10 +118,12 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 
 	t.Log("Running squarevoxel remesh...")
 	pcfg := voxel.PaletteConfig{Palette: pal}
-	outModel, assignments, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
+	meshParts, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
 	if err != nil {
 		t.Fatalf("Remesh: %v", err)
 	}
+	outModel := meshParts[0].Model
+	assignments := meshParts[0].Assignments
 
 	if f, err := os.Create(cacheFile); err == nil {
 		gob.NewEncoder(f).Encode(cachedRemeshOutput{

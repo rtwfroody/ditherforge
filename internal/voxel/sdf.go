@@ -168,7 +168,10 @@ func ComputeSDF(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, searc
 	dist := float32(math.Sqrt(float64(bestDistSq)))
 
 	if bestTri < 0 {
-		return dist
+		// No triangles found within search radius. Since we passed the
+		// bounding box check above, the point is likely deep inside the
+		// model. Return a large negative value (inside).
+		return -searchRadius
 	}
 
 	// Choose the appropriate pseudonormal based on the closest region.

@@ -21,14 +21,15 @@ import (
 type Config struct {
 	NozzleDiameter float32 // flat-to-flat hex width in mm
 	LayerHeight    float32 // Z extrusion per layer in mm
+	WallThickness  float32 // shell thickness in mm (default 3.0)
 	NoMerge        bool    // skip coplanar triangle merging
 }
 
 // Remesh generates a hexagonal voxel shell of the input model using marching
 // prisms for smooth isosurface extraction.
-func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, [][3]uint8, error) {
+func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) ([]voxel.MeshPart, [][3]uint8, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, nil, nil, fmt.Errorf("empty model")
+		return nil, nil, fmt.Errorf("empty model")
 	}
 
 	nozzle := cfg.NozzleDiameter
@@ -209,7 +210,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Printf("  %d active hex prisms\n", len(cells))
 	}
 	if len(cells) == 0 {
-		return nil, nil, nil, fmt.Errorf("no active hex prisms found")
+		return nil, nil, fmt.Errorf("no active hex prisms found")
 	}
 
 	// Build cell assignment map for color lookup during marching prisms.
@@ -226,11 +227,16 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		{{+1, 0}, {0, +1}, {-1, 0}, {-1, -1}, {0, -1}, {+1, -1}},
 		{{+1, +1}, {0, +1}, {-1, +1}, {-1, 0}, {0, -1}, {+1, 0}},
 	}
+	wallThickness := cfg.WallThickness
+	if wallThickness <= 0 {
+		wallThickness = 3.0
+	}
+	expansionRings := int(math.Ceil(float64(wallThickness)/float64(hexFlat))) + 1
 	expandedSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
 	for k := range activeSet {
 		expandedSet[k] = struct{}{}
 	}
-	for ring := 0; ring < 2; ring++ {
+	for ring := 0; ring < expansionRings; ring++ {
 		snapshot := make([]voxel.CellKey, 0, len(expandedSet))
 		for k := range expandedSet {
 			snapshot = append(snapshot, k)
@@ -249,6 +255,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// 4. Compute SDF at vertices of expanded cell set.
 	fmt.Println("  Computing SDF at cell vertices...")
 	searchRadius := hexFlat * 3
+	if wallThickness*2 > searchRadius {
+		searchRadius = wallThickness * 2
+	}
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
 
@@ -300,7 +309,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Println(palDisplay)
 	}
 	if len(pal) == 0 {
-		return nil, nil, nil, fmt.Errorf("no palette colors")
+		return nil, nil, fmt.Errorf("no palette colors")
 	}
 	var assignments []int32
 	switch ditherMode {
@@ -441,9 +450,6 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	// Build output model.
-	uvs := make([][2]float32, len(vd.Verts))
-	faceTex := make([]int32, len(outFaces))
-
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
 	var textures []image.Image
@@ -453,13 +459,122 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		textures = []image.Image{placeholder}
 	}
 
-	return &loader.LoadedModel{
-		Vertices:       vd.Verts,
-		Faces:          outFaces,
-		UVs:            uvs,
-		Textures:       textures,
-		FaceTextureIdx: faceTex,
-	}, outAssignments, pal, nil
+	buildModel := func(verts [][3]float32, faces [][3]uint32) *loader.LoadedModel {
+		return &loader.LoadedModel{
+			Vertices:       verts,
+			Faces:          faces,
+			UVs:            make([][2]float32, len(verts)),
+			Textures:       textures,
+			FaceTextureIdx: make([]int32, len(faces)),
+		}
+	}
+
+	parts := []voxel.MeshPart{{
+		Model:       buildModel(vd.Verts, outFaces),
+		Assignments: outAssignments,
+	}}
+
+	// Generate infill mesh: a second marching prisms pass with SDF offset
+	// inward by wallThickness.
+	fmt.Println("  Generating infill mesh...")
+	infillVD := voxel.NewVertexDedup()
+	var infillFaces [][3]uint32
+
+	for k := range expandedSet {
+		botLayer := k.Layer
+		topLayer := k.Layer + 1
+
+		var sdfCornerBot, sdfCornerTop [6]float32
+		var posCornerBot, posCornerTop [6][3]float32
+		for c := 0; c < 6; c++ {
+			posCornerBot[c] = voxel.SnapPos(vertPos(k.Col, k.Row, botLayer, c))
+			posCornerTop[c] = voxel.SnapPos(vertPos(k.Col, k.Row, topLayer, c))
+			sdfCornerBot[c] = sdfValues[vertIndex[posCornerBot[c]]] + wallThickness
+			sdfCornerTop[c] = sdfValues[vertIndex[posCornerTop[c]]] + wallThickness
+		}
+		posCenterBot := voxel.SnapPos(vertPos(k.Col, k.Row, botLayer, 6))
+		posCenterTop := voxel.SnapPos(vertPos(k.Col, k.Row, topLayer, 6))
+		sdfCenterBot := sdfValues[vertIndex[posCenterBot]] + wallThickness
+		sdfCenterTop := sdfValues[vertIndex[posCenterTop]] + wallThickness
+
+		for w := 0; w < 6; w++ {
+			next := (w + 1) % 6
+
+			wedgePos := [6][3]float32{
+				posCenterBot, posCornerBot[w], posCornerBot[next],
+				posCenterTop, posCornerTop[w], posCornerTop[next],
+			}
+			wedgeSDF := [6]float32{
+				sdfCenterBot, sdfCornerBot[w], sdfCornerBot[next],
+				sdfCenterTop, sdfCornerTop[w], sdfCornerTop[next],
+			}
+
+			caseIdx := 0
+			for i := 0; i < 6; i++ {
+				if wedgeSDF[i] < 0 {
+					caseIdx |= 1 << i
+				}
+			}
+
+			triEdges := wedgeTriTable[caseIdx]
+			if len(triEdges) == 0 {
+				continue
+			}
+
+			for t := 0; t+2 < len(triEdges); t += 3 {
+				var triVerts [3]uint32
+				for ki := 0; ki < 3; ki++ {
+					edge := triEdges[t+ki]
+					ea := wedgeEdges[edge][0]
+					eb := wedgeEdges[edge][1]
+					posA := wedgePos[ea]
+					posB := wedgePos[eb]
+					sdfA := wedgeSDF[ea]
+					sdfB := wedgeSDF[eb]
+
+					if posA[0] > posB[0] || (posA[0] == posB[0] && posA[1] > posB[1]) ||
+						(posA[0] == posB[0] && posA[1] == posB[1] && posA[2] > posB[2]) {
+						posA, posB = posB, posA
+						sdfA, sdfB = sdfB, sdfA
+					}
+
+					var interp [3]float32
+					denom := sdfB - sdfA
+					if denom == 0 {
+						interp = [3]float32{
+							(posA[0] + posB[0]) / 2,
+							(posA[1] + posB[1]) / 2,
+							(posA[2] + posB[2]) / 2,
+						}
+					} else {
+						frac := -sdfA / denom
+						frac = voxel.ClampF(frac, 0, 1)
+						interp = [3]float32{
+							posA[0] + frac*(posB[0]-posA[0]),
+							posA[1] + frac*(posB[1]-posA[1]),
+							posA[2] + frac*(posB[2]-posA[2]),
+						}
+					}
+					triVerts[ki] = infillVD.GetVertex(interp)
+				}
+				if triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[0] == triVerts[2] {
+					continue
+				}
+				infillFaces = append(infillFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
+			}
+		}
+	}
+
+	if len(infillFaces) > 0 {
+		fmt.Printf("  %d vertices, %d faces in infill mesh\n", len(infillVD.Verts), len(infillFaces))
+		infillAssign := make([]int32, len(infillFaces))
+		parts = append(parts, voxel.MeshPart{
+			Model:       buildModel(infillVD.Verts, infillFaces),
+			Assignments: infillAssign,
+		})
+	}
+
+	return parts, pal, nil
 }
 
 // --- Marching Prisms (Wedge) Lookup Tables ---

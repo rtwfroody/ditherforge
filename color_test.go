@@ -97,7 +97,7 @@ func TestColorSelection(t *testing.T) {
 				Inventory:  testInventory,
 				InventoryN: tc.nColors,
 			}
-			_, _, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
+			_, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
 			if err != nil {
 				t.Fatalf("Remesh: %v", err)
 			}
