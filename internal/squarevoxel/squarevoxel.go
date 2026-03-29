@@ -182,31 +182,125 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		activeSet[k] = struct{}{}
 	}
 
-	// Expand active set by enough rings for wall thickness + marching cubes margin.
+	// Wall thickness controls how many cell rings form the shell.
 	wallThickness := cfg.WallThickness
 	if wallThickness <= 0 {
 		wallThickness = 3.0
 	}
-	expansionRings := int(math.Ceil(float64(wallThickness)/float64(cellSize))) + 1
-	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
-	expandedSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
-	for k := range activeSet {
-		expandedSet[k] = struct{}{}
+	shellRings := int(math.Ceil(float64(wallThickness) / float64(cellSize)))
+	if shellRings < 1 {
+		shellRings = 1
 	}
-	for ring := 0; ring < expansionRings; ring++ {
-		snapshot := make([]voxel.CellKey, 0, len(expandedSet))
-		for k := range expandedSet {
-			snapshot = append(snapshot, k)
-		}
-		for _, k := range snapshot {
-			expandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer - 1}] = struct{}{}
-			expandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer + 1}] = struct{}{}
-			for _, off := range lateralOffsets {
-				expandedSet[voxel.CellKey{Col: k.Col + off[0], Row: k.Row + off[1], Layer: k.Layer}] = struct{}{}
+	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
+
+	// Find all interior cells using Z-ray parity per column.
+	fmt.Println("  Finding interior cells...")
+	interiorSet := make(map[voxel.CellKey]struct{}, len(cells)*4)
+	for k := range activeSet {
+		interiorSet[k] = struct{}{}
+	}
+	for col := 0; col < nCols; col++ {
+		cx := minV[0] + float32(col)*cellSize
+		for row := 0; row < nRows; row++ {
+			cy := minV[1] + float32(row)*cellSize
+			interior := voxel.InteriorLayers(cx, cy, model, si, layerH, minV[2], nLayers)
+			for layer := range interior {
+				k := voxel.CellKey{Col: col, Row: row, Layer: layer}
+				interiorSet[k] = struct{}{}
 			}
 		}
 	}
-	fmt.Printf("  %d cells in expanded set (from %d active)\n", len(expandedSet), len(cells))
+	fmt.Printf("  %d interior cells found\n", len(interiorSet)-len(activeSet))
+
+	// BFS from active cells through interior cells to compute distance.
+	distMap := make(map[voxel.CellKey]int, len(interiorSet))
+	queue := make([]voxel.CellKey, 0, len(cells))
+	for k := range activeSet {
+		distMap[k] = 0
+		queue = append(queue, k)
+	}
+	for len(queue) > 0 {
+		k := queue[0]
+		queue = queue[1:]
+		nd := distMap[k] + 1
+		for _, nk := range [6]voxel.CellKey{
+			{Col: k.Col + 1, Row: k.Row, Layer: k.Layer},
+			{Col: k.Col - 1, Row: k.Row, Layer: k.Layer},
+			{Col: k.Col, Row: k.Row + 1, Layer: k.Layer},
+			{Col: k.Col, Row: k.Row - 1, Layer: k.Layer},
+			{Col: k.Col, Row: k.Row, Layer: k.Layer + 1},
+			{Col: k.Col, Row: k.Row, Layer: k.Layer - 1},
+		} {
+			if _, visited := distMap[nk]; visited {
+				continue
+			}
+			if _, isInterior := interiorSet[nk]; !isInterior {
+				continue
+			}
+			distMap[nk] = nd
+			queue = append(queue, nk)
+		}
+	}
+
+	// Split into shell and infill cell sets.
+	shellSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
+	infillSet := make(map[voxel.CellKey]struct{})
+	for k, d := range distMap {
+		if d < shellRings {
+			shellSet[k] = struct{}{}
+		} else {
+			infillSet[k] = struct{}{}
+		}
+	}
+	fmt.Printf("  %d shell cells, %d infill cells (shellRings=%d)\n",
+		len(shellSet), len(infillSet), shellRings)
+
+	// Exterior padding: expand 2 rings outward from activeSet for MC interpolation.
+	exteriorPadding := make(map[voxel.CellKey]struct{})
+	padSource := make(map[voxel.CellKey]struct{}, len(activeSet))
+	for k := range activeSet {
+		padSource[k] = struct{}{}
+	}
+	for ring := 0; ring < 2; ring++ {
+		snapshot := make([]voxel.CellKey, 0, len(padSource))
+		for k := range padSource {
+			snapshot = append(snapshot, k)
+		}
+		newPad := make(map[voxel.CellKey]struct{})
+		for _, k := range snapshot {
+			for _, nk := range [6]voxel.CellKey{
+				{Col: k.Col + 1, Row: k.Row, Layer: k.Layer},
+				{Col: k.Col - 1, Row: k.Row, Layer: k.Layer},
+				{Col: k.Col, Row: k.Row + 1, Layer: k.Layer},
+				{Col: k.Col, Row: k.Row - 1, Layer: k.Layer},
+				{Col: k.Col, Row: k.Row, Layer: k.Layer + 1},
+				{Col: k.Col, Row: k.Row, Layer: k.Layer - 1},
+			} {
+				if _, inShell := shellSet[nk]; inShell {
+					continue
+				}
+				if _, inInfill := infillSet[nk]; inInfill {
+					continue
+				}
+				if _, already := exteriorPadding[nk]; already {
+					continue
+				}
+				exteriorPadding[nk] = struct{}{}
+				newPad[nk] = struct{}{}
+			}
+		}
+		padSource = newPad
+	}
+
+	// shellExpandedSet = shellSet + exteriorPadding (for MC).
+	shellExpandedSet := make(map[voxel.CellKey]struct{}, len(shellSet)+len(exteriorPadding))
+	for k := range shellSet {
+		shellExpandedSet[k] = struct{}{}
+	}
+	for k := range exteriorPadding {
+		shellExpandedSet[k] = struct{}{}
+	}
+	fmt.Printf("  %d cells in shell expanded set\n", len(shellExpandedSet))
 
 	// 4. Compute SDF at cube vertices.
 	fmt.Println("  Computing SDF at cube vertices...")
@@ -249,7 +343,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// positions for parallel SDF evaluation. This avoids storing SDF values
 	// in a second map (which would double memory usage).
 	vertIndex := make(map[[3]float32]int32)
-	for k := range expandedSet {
+	for k := range shellExpandedSet {
 		for corner := 0; corner < 8; corner++ {
 			pos := voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, corner))
 			if _, ok := vertIndex[pos]; !ok {
@@ -306,13 +400,13 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		assignments = voxel.AssignColors(cells, pal)
 	}
 
-	// 6. Marching cubes isosurface extraction.
+	// 6. Marching cubes isosurface extraction for smooth outer surface.
 	fmt.Println("  Extracting isosurface with marching cubes...")
 	vd := voxel.NewVertexDedup()
-	outFaces := make([][3]uint32, 0)
-	outAssignments := make([]int32, 0)
+	mcFaces := make([][3]uint32, 0)
+	mcAssignments := make([]int32, 0)
 
-	for k := range expandedSet {
+	for k := range shellExpandedSet {
 		// Determine color assignment.
 		assignment := int32(0)
 		if hi, ok := cellAssignMap[k]; ok {
@@ -399,21 +493,31 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			if triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[0] == triVerts[2] {
 				continue
 			}
-			outFaces = append(outFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
-			outAssignments = append(outAssignments, assignment)
+			mcFaces = append(mcFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
+			mcAssignments = append(mcAssignments, assignment)
 		}
 	}
 
-	fmt.Printf("  %d vertices, %d faces after marching cubes\n", len(vd.Verts), len(outFaces))
+	fmt.Printf("  %d vertices, %d faces after marching cubes\n", len(vd.Verts), len(mcFaces))
+
+	// Shell inner boundary: voxel faces where shellSet meets non-shellSet
+	// (interior side only — exclude faces facing exterior/padding cells).
+	// These faces close the MC outer surface into a watertight hollow solid.
+	// Use the same VertexDedup as MC so both share a vertex pool.
+	innerFaces, _ := voxel.GenerateBoundaryFaces(shellSet, infillSet, minV, cellSize, layerH, vd)
+	innerAssignments := make([]int32, len(innerFaces)) // palette index 0 (interior)
+
+	shellFaces := append(mcFaces, innerFaces...)
+	shellAssignments := append(mcAssignments, innerAssignments...)
 
 	if !cfg.NoMerge {
-		before := len(outFaces)
-		outFaces, outAssignments = voxel.MergeCoplanarTriangles(vd.Verts, outFaces, outAssignments)
-		fmt.Printf("  %d faces after coplanar merge (%.0f%% reduction)\n",
-			len(outFaces), 100*float64(before-len(outFaces))/float64(before))
+		before := len(shellFaces)
+		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(vd.Verts, shellFaces, shellAssignments)
+		fmt.Printf("  Shell: %d faces after merge (%.0f%% reduction)\n",
+			len(shellFaces), 100*float64(before-len(shellFaces))/float64(before))
 	}
 
-	// Build shell output model.
+	// Build output models.
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
 	var textures []image.Image
@@ -434,87 +538,26 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	parts := []voxel.MeshPart{{
-		Model:       buildModel(vd.Verts, outFaces),
-		Assignments: outAssignments,
+		Model:       buildModel(vd.Verts, shellFaces),
+		Assignments: shellAssignments,
 	}}
 
-	// Generate infill mesh: a second marching cubes pass with SDF offset
-	// inward by wallThickness. This creates a solid interior object that
-	// the slicer can infill with just the first filament.
-	fmt.Println("  Generating infill mesh...")
-	infillVD := voxel.NewVertexDedup()
-	var infillFaces [][3]uint32
+	// Infill: voxel boundary faces of infillSet (watertight by construction).
+	if len(infillSet) > 0 {
+		infillVD := voxel.NewVertexDedup()
+		infillFaces, _ := voxel.GenerateBoundaryFaces(infillSet, nil, minV, cellSize, layerH, infillVD)
+		infillAssignments := make([]int32, len(infillFaces)) // all palette index 0
 
-	for k := range expandedSet {
-		var cornerPos [8][3]float32
-		var cornerSDF [8]float32
-		for c := 0; c < 8; c++ {
-			cornerPos[c] = voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, c))
-			// Offset SDF inward: points within wallThickness of surface become positive (outside).
-			cornerSDF[c] = sdfValues[vertIndex[cornerPos[c]]] + wallThickness
+		if !cfg.NoMerge {
+			before := len(infillFaces)
+			infillFaces, infillAssignments = voxel.MergeCoplanarTriangles(infillVD.Verts, infillFaces, infillAssignments)
+			fmt.Printf("  Infill: %d faces after coplanar merge (%.0f%% reduction)\n",
+				len(infillFaces), 100*float64(before-len(infillFaces))/float64(before))
 		}
 
-		caseIdx := 0
-		for i := 0; i < 8; i++ {
-			if cornerSDF[i] < 0 {
-				caseIdx |= 1 << i
-			}
-		}
-
-		triEdges := mcTriTable[caseIdx]
-		if len(triEdges) == 0 {
-			continue
-		}
-
-		for t := 0; t+2 < len(triEdges); t += 3 {
-			var triVerts [3]uint32
-			for ki := 0; ki < 3; ki++ {
-				edge := triEdges[t+ki]
-				ea := mcEdges[edge][0]
-				eb := mcEdges[edge][1]
-				posA := cornerPos[ea]
-				posB := cornerPos[eb]
-				sdfA := cornerSDF[ea]
-				sdfB := cornerSDF[eb]
-
-				if posA[0] > posB[0] || (posA[0] == posB[0] && posA[1] > posB[1]) ||
-					(posA[0] == posB[0] && posA[1] == posB[1] && posA[2] > posB[2]) {
-					posA, posB = posB, posA
-					sdfA, sdfB = sdfB, sdfA
-				}
-
-				var interp [3]float32
-				denom := sdfA - sdfB
-				if denom == 0 {
-					interp = [3]float32{
-						(posA[0] + posB[0]) / 2,
-						(posA[1] + posB[1]) / 2,
-						(posA[2] + posB[2]) / 2,
-					}
-				} else {
-					frac := sdfA / denom
-					frac = voxel.ClampF(frac, 0, 1)
-					interp = [3]float32{
-						posA[0] + frac*(posB[0]-posA[0]),
-						posA[1] + frac*(posB[1]-posA[1]),
-						posA[2] + frac*(posB[2]-posA[2]),
-					}
-				}
-				triVerts[ki] = infillVD.GetVertex(interp)
-			}
-			if triVerts[0] == triVerts[1] || triVerts[1] == triVerts[2] || triVerts[0] == triVerts[2] {
-				continue
-			}
-			infillFaces = append(infillFaces, [3]uint32{triVerts[0], triVerts[1], triVerts[2]})
-		}
-	}
-
-	if len(infillFaces) > 0 {
-		fmt.Printf("  %d vertices, %d faces in infill mesh\n", len(infillVD.Verts), len(infillFaces))
-		infillAssign := make([]int32, len(infillFaces)) // all zero = palette[0]
 		parts = append(parts, voxel.MeshPart{
 			Model:       buildModel(infillVD.Verts, infillFaces),
-			Assignments: infillAssign,
+			Assignments: infillAssignments,
 		})
 	}
 
