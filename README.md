@@ -90,7 +90,6 @@ go build .
 | `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
-| `--glb-unit` | `m` | GLB coordinate unit: `m`, `dm`, `cm`, `mm` |
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
 | `--no-merge` | — | Skip coplanar triangle merging |

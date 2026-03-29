@@ -18,7 +18,6 @@ type Args struct {
 	Input       string  `arg:"positional,required" help:"Input .glb file"`
 	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
 	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
-	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	NozzleDiameter  float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
@@ -42,17 +41,8 @@ func run() error {
 	var args Args
 	arg.MustParse(&args)
 
-	// Validate GlbUnit.
-	unitScales := map[string]float32{
-		"m":  1000.0,
-		"dm": 100.0,
-		"cm": 10.0,
-		"mm": 1.0,
-	}
-	unitScale, ok := unitScales[args.GlbUnit]
-	if !ok {
-		return fmt.Errorf("invalid --glb-unit %q: must be one of m, dm, cm, mm", args.GlbUnit)
-	}
+	// GLB files use meters by default; convert to mm.
+	const unitScale = float32(1000.0)
 
 	// Validate output extension.
 	ext := strings.ToLower(args.Output)
