@@ -358,7 +358,7 @@ func TestMeshRender(t *testing.T) {
 				}
 				depthP95 := percentile(depthDiffs, 95)
 
-					saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", name, v.name), inpImg, bounds)
+				saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", name, v.name), inpImg, bounds)
 				saveImage(t, outdir, fmt.Sprintf("%s_%s_output.png", name, v.name), outImg, bounds)
 				saveDiffImage(t, outdir, fmt.Sprintf("%s_%s_diff.png", name, v.name),
 					inpMask, outMask, overshoot, testResolution, testResolution)

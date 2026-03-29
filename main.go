@@ -15,22 +15,22 @@ import (
 
 // Args defines the CLI arguments.
 type Args struct {
-	Input       string  `arg:"positional,required" help:"Input .glb file"`
-	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
-	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
-	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
-	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
-	NozzleDiameter  float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
-	LayerHeight     float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
-	InventoryFile   string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
-	Inventory       *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
-	NoMerge         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
-	Size            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
-	Force           bool     `arg:"--force" help:"Bypass extent size check"`
-	Stats           bool     `arg:"--stats" help:"Print face counts per material"`
-	Infill          bool     `arg:"--infill" help:"Generate infill object inside the shell"`
-	InfillOnly      bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
+	Input          string   `arg:"positional,required" help:"Input .glb file"`
+	Palette        string   `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
+	AutoPalette    *int     `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
+	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
+	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
+	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
+	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
+	InventoryFile  string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
+	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
+	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
+	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
+	Size           *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
+	Force          bool     `arg:"--force" help:"Bypass extent size check"`
+	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
+	Infill         bool     `arg:"--infill" help:"Generate infill object inside the shell"`
+	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
 }
 
 func (Args) Description() string {
