@@ -250,8 +250,10 @@ func TestMeshRender(t *testing.T) {
 	outdir := filepath.Join("tests", "output")
 
 	for _, glbPath := range glbs {
+		glbPath := glbPath
 		name := strings.TrimSuffix(filepath.Base(glbPath), ".glb")
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			// Load with default GLB unit (meters → mm).
 			const unitScale = float32(1000)
 
