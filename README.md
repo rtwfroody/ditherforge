@@ -96,6 +96,14 @@ go build .
 | `--stats` | — | Print face counts per material |
 | `--force` | — | Bypass the 300mm extent size check |
 
+## Recommended Models
+
+These models work well with ditherforge and are free to download:
+
+| Model | Author | Source | License |
+|-------|--------|--------|---------|
+| Golden Pheasant | iRahulRajput | [Sketchfab](https://sketchfab.com/3d-models/golden-pheasant-f9b3decb485c4a7c9d97cf70b17cbd29) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) |
+
 ## Testing
 
 ```
