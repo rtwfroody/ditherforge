@@ -16,7 +16,7 @@ import (
 // Args defines the CLI arguments.
 type Args struct {
 	Input       string  `arg:"positional,required" help:"Input .glb file"`
-	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: cyan,magenta,yellow + black or white based on texture brightness"`
+	Palette     string  `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
 	AutoPalette *int    `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
@@ -116,13 +116,13 @@ func run() error {
 	} else if args.AutoPalette != nil {
 		pcfg.AutoPaletteN = *args.AutoPalette
 	} else if args.Palette == "" {
-		// Default palette: CMY + black or white based on texture brightness.
-		bw := "white"
-		if averageTextureBrightness(model) < 85 {
-			bw = "black"
+		// Default: pick best 4 from a standard set of colors.
+		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
+		for _, name := range defaultColors {
+			rgb, _ := palette.ParsePalette([]string{name})
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
 		}
-		fmt.Printf("  Default palette: cyan,magenta,yellow,%s\n", bw)
-		pcfg.Palette, _ = palette.ParsePalette([]string{"cyan", "magenta", "yellow", bw})
+		pcfg.InventoryN = 4
 	} else {
 		colorStrs := strings.Split(args.Palette, ",")
 		for i := range colorStrs {

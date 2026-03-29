@@ -28,7 +28,7 @@ const cacheDir = "tests/cache"
 const (
 	defaultNozzle      = float32(0.4)
 	defaultLayerHeight = float32(0.2)
-	maxExtentMM        = float32(100)
+	maxExtentMM        = float32(50)
 	testResolution     = 512
 	marginFrac         = 0.05
 	minCoverage        = 0.95
