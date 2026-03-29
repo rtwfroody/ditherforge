@@ -1,6 +1,5 @@
 // Package squarevoxel generates a square voxel shell of a textured mesh.
-// Each cube cell has edge length equal to the nozzle diameter, giving finer
-// resolution than hexvoxel mode (which uses 1.5× nozzle).
+// Each cube cell has edge length ~1.275× the nozzle diameter.
 // Isosurface extraction uses marching cubes for a smooth surface.
 package squarevoxel
 

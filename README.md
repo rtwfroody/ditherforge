@@ -8,9 +8,9 @@ slicers like OrcaSlicer and BambuStudio.
 ## How It Works
 
 1. **Load** a textured GLB model and scale to millimeters.
-2. **Voxelize** onto a hexagonal prism grid matching the printer's nozzle
-   diameter and layer height.
-3. **Extract** a smooth isosurface via marching prisms.
+2. **Voxelize** onto a square grid matching the printer's nozzle diameter and
+   layer height.
+3. **Extract** a smooth isosurface via marching cubes.
 4. **Sample** the original texture color at each output face.
 5. **Dither** using Floyd-Steinberg error diffusion in Morton-curve order to
    approximate the full-color texture with the available filament palette.
@@ -45,13 +45,15 @@ ditherforge <input.glb> [options]
 |------|---------|-------------|
 | `--palette` | `white,cyan,magenta,yellow` | Comma-separated colors (CSS names or `#hex`) |
 | `--auto-palette N` | — | Compute N dominant colors from texture instead of manual palette |
-| `--mode` | `hexvoxel` | Remesh mode |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
 | `--glb-unit` | `m` | GLB coordinate unit: `m`, `dm`, `cm`, `mm` |
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
-| `--no-dither` | — | Disable Floyd-Steinberg dithering (nearest-color only) |
+| `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
+| `--extent` | — | Scale model so largest extent equals this value in mm |
+| `--inventory-file` | — | File with one filament color per line |
+| `--inventory N` | — | Pick best N colors from inventory file |
 | `--no-merge` | — | Skip coplanar triangle merging |
 | `--stats` | — | Print face counts per material |
 | `--force` | — | Bypass the 300 mm extent size check |

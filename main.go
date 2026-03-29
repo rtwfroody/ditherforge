@@ -7,7 +7,6 @@ import (
 
 	"github.com/alexflint/go-arg"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
-	"github.com/rtwfroody/ditherforge/internal/hexvoxel"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
@@ -22,9 +21,8 @@ type Args struct {
 	GlbUnit     string  `arg:"--glb-unit" default:"m" help:"GLB coordinate unit: m, dm, cm, mm"`
 	Scale       float32 `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output      string  `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
-	Mode            string   `arg:"--mode" default:"squarevoxel" help:"Remesh mode: squarevoxel or hexvoxel"`
-	NozzleDiameter  float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm (hexvoxel mode)"`
-	LayerHeight     float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm (hexvoxel mode)"`
+	NozzleDiameter  float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
+	LayerHeight     float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
 	InventoryFile   string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
 	Inventory       *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
 Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
@@ -139,47 +137,10 @@ func run() error {
 		return fmt.Errorf("palette has %d colors but max supported is %d", len(pcfg.Palette), export3mf.MaxFilaments)
 	}
 
-	switch args.Mode {
-	case "hexvoxel":
-		return runHexvoxel(args, model, pcfg)
-	case "squarevoxel":
-		return runSquarevoxel(args, model, pcfg)
-	default:
-		return fmt.Errorf("invalid --mode %q: must be hexvoxel or squarevoxel", args.Mode)
-	}
+	return runRemesh(args, model, pcfg)
 }
 
-func runHexvoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) error {
-	cfg := hexvoxel.Config{
-		NozzleDiameter: args.NozzleDiameter,
-		LayerHeight:    args.LayerHeight,
-		NoMerge:        args.NoMerge,
-	}
-
-	fmt.Println("Generating hexagonal voxel shell...")
-	meshParts, paletteRGB, err := hexvoxel.Remesh(model, pcfg, cfg, args.Dither)
-	if err != nil {
-		return fmt.Errorf("hexvoxel remesh: %w", err)
-	}
-	for i, mp := range meshParts {
-		fmt.Printf("  Part %d: %d vertices, %d faces\n", i, len(mp.Model.Vertices), len(mp.Model.Faces))
-	}
-
-	if args.Stats {
-		printStats(meshParts, paletteRGB)
-	}
-
-	fmt.Printf("Exporting %s...\n", args.Output)
-	exportParts := filterParts(meshParts, args.InfillOnly)
-	parts := meshPartsToExportParts(exportParts)
-	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
-		return fmt.Errorf("exporting 3MF: %w", err)
-	}
-	fmt.Println("Done.")
-	return nil
-}
-
-func runSquarevoxel(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) error {
+func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) error {
 	cfg := squarevoxel.Config{
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
