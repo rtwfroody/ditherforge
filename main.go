@@ -30,7 +30,8 @@ Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: n
 	Extent          *float32 `arg:"--extent" help:"Scale model so largest extent equals this value in mm"`
 	Force           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats           bool     `arg:"--stats" help:"Print face counts per material"`
-	InfillOnly      bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging)"`
+	Infill          bool     `arg:"--infill" help:"Generate infill object inside the shell"`
+	InfillOnly      bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
 }
 
 func (Args) Description() string {
@@ -145,6 +146,7 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
 		NoMerge:        args.NoMerge,
+		Infill:         args.Infill || args.InfillOnly,
 	}
 
 	fmt.Println("Generating square voxel shell...")

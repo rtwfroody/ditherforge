@@ -21,6 +21,7 @@ type Config struct {
 	LayerHeight    float32
 	WallThickness  float32 // shell thickness in mm (default 3.0)
 	NoMerge        bool
+	Infill         bool // generate infill object inside the shell
 }
 
 // Remesh generates a square voxel shell of the input model using marching cubes.
@@ -182,92 +183,53 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		activeSet[k] = struct{}{}
 	}
 
-	// Wall thickness controls how many cell rings form the shell.
 	wallThickness := cfg.WallThickness
 	if wallThickness <= 0 {
 		wallThickness = 3.0
 	}
-	shellRings := int(math.Ceil(float64(wallThickness) / float64(cellSize)))
-	if shellRings < 1 {
-		shellRings = 1
-	}
 	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
 
-	// Find all interior cells using Z-ray parity per column.
-	fmt.Println("  Finding interior cells...")
-	interiorSet := make(map[voxel.CellKey]struct{}, len(cells)*4)
-	for k := range activeSet {
-		interiorSet[k] = struct{}{}
-	}
-	for col := 0; col < nCols; col++ {
-		cx := minV[0] + float32(col)*cellSize
-		for row := 0; row < nRows; row++ {
-			cy := minV[1] + float32(row)*cellSize
-			interior := voxel.InteriorLayers(cx, cy, model, si, layerH, minV[2], nLayers)
-			for layer := range interior {
-				k := voxel.CellKey{Col: col, Row: row, Layer: layer}
-				interiorSet[k] = struct{}{}
+	// Build the expanded cell set for marching cubes, and optionally the
+	// infill cell set for a separate infill object.
+	var shellExpandedSet map[voxel.CellKey]struct{}
+	var infillSet map[voxel.CellKey]struct{}
+
+	if cfg.Infill {
+		// Find all interior cells using Z-ray parity per column.
+		shellRings := int(math.Ceil(float64(wallThickness) / float64(cellSize)))
+		if shellRings < 1 {
+			shellRings = 1
+		}
+
+		fmt.Println("  Finding interior cells...")
+		interiorSet := make(map[voxel.CellKey]struct{}, len(cells)*4)
+		for k := range activeSet {
+			interiorSet[k] = struct{}{}
+		}
+		for col := 0; col < nCols; col++ {
+			cx := minV[0] + float32(col)*cellSize
+			for row := 0; row < nRows; row++ {
+				cy := minV[1] + float32(row)*cellSize
+				interior := voxel.InteriorLayers(cx, cy, model, si, layerH, minV[2], nLayers)
+				for layer := range interior {
+					k := voxel.CellKey{Col: col, Row: row, Layer: layer}
+					interiorSet[k] = struct{}{}
+				}
 			}
 		}
-	}
-	fmt.Printf("  %d interior cells found\n", len(interiorSet)-len(activeSet))
+		fmt.Printf("  %d interior cells found\n", len(interiorSet)-len(activeSet))
 
-	// BFS from active cells through interior cells to compute distance.
-	distMap := make(map[voxel.CellKey]int, len(interiorSet))
-	queue := make([]voxel.CellKey, 0, len(cells))
-	for k := range activeSet {
-		distMap[k] = 0
-		queue = append(queue, k)
-	}
-	for len(queue) > 0 {
-		k := queue[0]
-		queue = queue[1:]
-		nd := distMap[k] + 1
-		for _, nk := range [6]voxel.CellKey{
-			{Col: k.Col + 1, Row: k.Row, Layer: k.Layer},
-			{Col: k.Col - 1, Row: k.Row, Layer: k.Layer},
-			{Col: k.Col, Row: k.Row + 1, Layer: k.Layer},
-			{Col: k.Col, Row: k.Row - 1, Layer: k.Layer},
-			{Col: k.Col, Row: k.Row, Layer: k.Layer + 1},
-			{Col: k.Col, Row: k.Row, Layer: k.Layer - 1},
-		} {
-			if _, visited := distMap[nk]; visited {
-				continue
-			}
-			if _, isInterior := interiorSet[nk]; !isInterior {
-				continue
-			}
-			distMap[nk] = nd
-			queue = append(queue, nk)
+		// BFS from active cells through interior cells to compute distance.
+		distMap := make(map[voxel.CellKey]int, len(interiorSet))
+		queue := make([]voxel.CellKey, 0, len(cells))
+		for k := range activeSet {
+			distMap[k] = 0
+			queue = append(queue, k)
 		}
-	}
-
-	// Split into shell and infill cell sets.
-	shellSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
-	infillSet := make(map[voxel.CellKey]struct{})
-	for k, d := range distMap {
-		if d < shellRings {
-			shellSet[k] = struct{}{}
-		} else {
-			infillSet[k] = struct{}{}
-		}
-	}
-	fmt.Printf("  %d shell cells, %d infill cells (shellRings=%d)\n",
-		len(shellSet), len(infillSet), shellRings)
-
-	// Exterior padding: expand 2 rings outward from activeSet for MC interpolation.
-	exteriorPadding := make(map[voxel.CellKey]struct{})
-	padSource := make(map[voxel.CellKey]struct{}, len(activeSet))
-	for k := range activeSet {
-		padSource[k] = struct{}{}
-	}
-	for ring := 0; ring < 2; ring++ {
-		snapshot := make([]voxel.CellKey, 0, len(padSource))
-		for k := range padSource {
-			snapshot = append(snapshot, k)
-		}
-		newPad := make(map[voxel.CellKey]struct{})
-		for _, k := range snapshot {
+		for len(queue) > 0 {
+			k := queue[0]
+			queue = queue[1:]
+			nd := distMap[k] + 1
 			for _, nk := range [6]voxel.CellKey{
 				{Col: k.Col + 1, Row: k.Row, Layer: k.Layer},
 				{Col: k.Col - 1, Row: k.Row, Layer: k.Layer},
@@ -276,31 +238,98 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				{Col: k.Col, Row: k.Row, Layer: k.Layer + 1},
 				{Col: k.Col, Row: k.Row, Layer: k.Layer - 1},
 			} {
-				if _, inShell := shellSet[nk]; inShell {
+				if _, visited := distMap[nk]; visited {
 					continue
 				}
-				if _, inInfill := infillSet[nk]; inInfill {
+				if _, isInterior := interiorSet[nk]; !isInterior {
 					continue
 				}
-				if _, already := exteriorPadding[nk]; already {
-					continue
-				}
-				exteriorPadding[nk] = struct{}{}
-				newPad[nk] = struct{}{}
+				distMap[nk] = nd
+				queue = append(queue, nk)
 			}
 		}
-		padSource = newPad
-	}
 
-	// shellExpandedSet = shellSet + exteriorPadding (for MC).
-	shellExpandedSet := make(map[voxel.CellKey]struct{}, len(shellSet)+len(exteriorPadding))
-	for k := range shellSet {
-		shellExpandedSet[k] = struct{}{}
+		// Split into shell and infill cell sets.
+		shellSet := make(map[voxel.CellKey]struct{}, len(cells)*2)
+		infillSet = make(map[voxel.CellKey]struct{})
+		for k, d := range distMap {
+			if d < shellRings {
+				shellSet[k] = struct{}{}
+			} else {
+				infillSet[k] = struct{}{}
+			}
+		}
+		fmt.Printf("  %d shell cells, %d infill cells (shellRings=%d)\n",
+			len(shellSet), len(infillSet), shellRings)
+
+		// Exterior padding: expand 2 rings outward from activeSet for MC.
+		exteriorPadding := make(map[voxel.CellKey]struct{})
+		padSource := make(map[voxel.CellKey]struct{}, len(activeSet))
+		for k := range activeSet {
+			padSource[k] = struct{}{}
+		}
+		for ring := 0; ring < 2; ring++ {
+			snapshot := make([]voxel.CellKey, 0, len(padSource))
+			for k := range padSource {
+				snapshot = append(snapshot, k)
+			}
+			newPad := make(map[voxel.CellKey]struct{})
+			for _, k := range snapshot {
+				for _, nk := range [6]voxel.CellKey{
+					{Col: k.Col + 1, Row: k.Row, Layer: k.Layer},
+					{Col: k.Col - 1, Row: k.Row, Layer: k.Layer},
+					{Col: k.Col, Row: k.Row + 1, Layer: k.Layer},
+					{Col: k.Col, Row: k.Row - 1, Layer: k.Layer},
+					{Col: k.Col, Row: k.Row, Layer: k.Layer + 1},
+					{Col: k.Col, Row: k.Row, Layer: k.Layer - 1},
+				} {
+					if _, inShell := shellSet[nk]; inShell {
+						continue
+					}
+					if _, inInfill := infillSet[nk]; inInfill {
+						continue
+					}
+					if _, already := exteriorPadding[nk]; already {
+						continue
+					}
+					exteriorPadding[nk] = struct{}{}
+					newPad[nk] = struct{}{}
+				}
+			}
+			padSource = newPad
+		}
+
+		shellExpandedSet = make(map[voxel.CellKey]struct{}, len(shellSet)+len(exteriorPadding))
+		for k := range shellSet {
+			shellExpandedSet[k] = struct{}{}
+		}
+		for k := range exteriorPadding {
+			shellExpandedSet[k] = struct{}{}
+		}
+		fmt.Printf("  %d cells in shell expanded set\n", len(shellExpandedSet))
+	} else {
+		// No infill: expand active set by enough rings for wall thickness
+		// + marching cubes margin.
+		expansionRings := int(math.Ceil(float64(wallThickness)/float64(cellSize))) + 1
+		shellExpandedSet = make(map[voxel.CellKey]struct{}, len(cells)*2)
+		for k := range activeSet {
+			shellExpandedSet[k] = struct{}{}
+		}
+		for ring := 0; ring < expansionRings; ring++ {
+			snapshot := make([]voxel.CellKey, 0, len(shellExpandedSet))
+			for k := range shellExpandedSet {
+				snapshot = append(snapshot, k)
+			}
+			for _, k := range snapshot {
+				shellExpandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer - 1}] = struct{}{}
+				shellExpandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer + 1}] = struct{}{}
+				for _, off := range lateralOffsets {
+					shellExpandedSet[voxel.CellKey{Col: k.Col + off[0], Row: k.Row + off[1], Layer: k.Layer}] = struct{}{}
+				}
+			}
+		}
+		fmt.Printf("  %d cells in expanded set (from %d active)\n", len(shellExpandedSet), len(cells))
 	}
-	for k := range exteriorPadding {
-		shellExpandedSet[k] = struct{}{}
-	}
-	fmt.Printf("  %d cells in shell expanded set\n", len(shellExpandedSet))
 
 	// 4. Compute SDF at cube vertices.
 	fmt.Println("  Computing SDF at cube vertices...")
@@ -500,23 +529,6 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 
 	fmt.Printf("  %d vertices, %d faces after marching cubes\n", len(vd.Verts), len(mcFaces))
 
-	// Shell inner boundary: voxel faces where shellSet meets non-shellSet
-	// (interior side only — exclude faces facing exterior/padding cells).
-	// These faces close the MC outer surface into a watertight hollow solid.
-	// Use the same VertexDedup as MC so both share a vertex pool.
-	innerFaces, _ := voxel.GenerateBoundaryFaces(shellSet, infillSet, minV, cellSize, layerH, vd)
-	innerAssignments := make([]int32, len(innerFaces)) // palette index 0 (interior)
-
-	shellFaces := append(mcFaces, innerFaces...)
-	shellAssignments := append(mcAssignments, innerAssignments...)
-
-	if !cfg.NoMerge {
-		before := len(shellFaces)
-		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(vd.Verts, shellFaces, shellAssignments)
-		fmt.Printf("  Shell: %d faces after merge (%.0f%% reduction)\n",
-			len(shellFaces), 100*float64(before-len(shellFaces))/float64(before))
-	}
-
 	// Build output models.
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
@@ -537,24 +549,58 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 	}
 
+	// Infill: voxel boundary faces of infillSet (watertight by construction).
+	// Generate infill first because the shell reuses its faces (flipped) as
+	// the inner boundary.
+	var infillFaces [][3]uint32
+	var infillVD *voxel.VertexDedup
+	if len(infillSet) > 0 {
+		infillVD = voxel.NewVertexDedup()
+		infillFaces, _ = voxel.GenerateBoundaryFaces(infillSet, nil, minV, cellSize, layerH, infillVD)
+
+		if !cfg.NoMerge {
+			before := len(infillFaces)
+			infillAssignments := make([]int32, len(infillFaces))
+			infillFaces, infillAssignments = voxel.MergeCoplanarTriangles(infillVD.Verts, infillFaces, infillAssignments)
+			_ = infillAssignments
+			fmt.Printf("  Infill: %d faces after coplanar merge (%.0f%% reduction)\n",
+				len(infillFaces), 100*float64(before-len(infillFaces))/float64(before))
+		}
+	}
+
+	// Shell inner boundary: reuse the infill's outer surface with flipped
+	// winding order. This guarantees the shell's inner surface is exactly
+	// the infill's outer surface — no gaps possible.
+	if len(infillFaces) > 0 {
+		for _, f := range infillFaces {
+			// Flip winding: swap vertices 1 and 2 to reverse normal direction.
+			flipped := [3]uint32{
+				vd.GetVertex(infillVD.Verts[f[0]]),
+				vd.GetVertex(infillVD.Verts[f[2]]),
+				vd.GetVertex(infillVD.Verts[f[1]]),
+			}
+			mcFaces = append(mcFaces, flipped)
+			mcAssignments = append(mcAssignments, 0) // palette index 0 (interior)
+		}
+	}
+
+	shellFaces := mcFaces
+	shellAssignments := mcAssignments
+
+	if !cfg.NoMerge {
+		before := len(shellFaces)
+		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(vd.Verts, shellFaces, shellAssignments)
+		fmt.Printf("  Shell: %d faces after merge (%.0f%% reduction)\n",
+			len(shellFaces), 100*float64(before-len(shellFaces))/float64(before))
+	}
+
 	parts := []voxel.MeshPart{{
 		Model:       buildModel(vd.Verts, shellFaces),
 		Assignments: shellAssignments,
 	}}
 
-	// Infill: voxel boundary faces of infillSet (watertight by construction).
-	if len(infillSet) > 0 {
-		infillVD := voxel.NewVertexDedup()
-		infillFaces, _ := voxel.GenerateBoundaryFaces(infillSet, nil, minV, cellSize, layerH, infillVD)
-		infillAssignments := make([]int32, len(infillFaces)) // all palette index 0
-
-		if !cfg.NoMerge {
-			before := len(infillFaces)
-			infillFaces, infillAssignments = voxel.MergeCoplanarTriangles(infillVD.Verts, infillFaces, infillAssignments)
-			fmt.Printf("  Infill: %d faces after coplanar merge (%.0f%% reduction)\n",
-				len(infillFaces), 100*float64(before-len(infillFaces))/float64(before))
-		}
-
+	if len(infillFaces) > 0 {
+		infillAssignments := make([]int32, len(infillFaces))
 		parts = append(parts, voxel.MeshPart{
 			Model:       buildModel(infillVD.Verts, infillFaces),
 			Assignments: infillAssignments,
