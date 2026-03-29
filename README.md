@@ -14,6 +14,10 @@ This loads `model.glb`, scales it to 100mm, automatically picks the best 4
 filament colors, and writes `output.3mf`. Open the result in OrcaSlicer or
 BambuStudio and print.
 
+The `--layer-height` option (default 0.2mm) should match the layer height you
+use in your slicer. It controls the vertical resolution of the voxel grid, so
+matching it to your print settings produces the best results.
+
 ## How It Works
 
 1. **Load** a textured GLB model and scale to millimeters.
