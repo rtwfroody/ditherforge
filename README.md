@@ -51,7 +51,7 @@ ditherforge <input.glb> [options]
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
 | `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
-| `--extent` | — | Scale model so largest extent equals this value in mm |
+| `--size` | — | Scale model so largest extent equals this value in mm |
 | `--inventory-file` | — | File with one filament color per line |
 | `--inventory N` | — | Pick best N colors from inventory file |
 | `--no-merge` | — | Skip coplanar triangle merging |

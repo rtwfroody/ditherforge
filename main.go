@@ -27,7 +27,7 @@ type Args struct {
 	Inventory       *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
 Dither          string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
 	NoMerge         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
-	Extent          *float32 `arg:"--extent" help:"Scale model so largest extent equals this value in mm"`
+	Size            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats           bool     `arg:"--stats" help:"Print face counts per material"`
 	Infill          bool     `arg:"--infill" help:"Generate infill object inside the shell"`
@@ -73,12 +73,12 @@ func run() error {
 		return fmt.Errorf("loading GLB: %w", err)
 	}
 
-	// Auto-scale to --extent if specified.
-	if args.Extent != nil {
+	// Auto-scale to --size if specified.
+	if args.Size != nil {
 		ext := modelMaxExtent(model)
-		if ext != *args.Extent {
-			rescale := *args.Extent / ext
-			fmt.Printf("  Extent %.1f mm, target %.0f mm, scaling by %.4f\n", ext, *args.Extent, rescale)
+		if ext != *args.Size {
+			rescale := *args.Size / ext
+			fmt.Printf("  Extent %.1f mm, target %.0f mm, scaling by %.4f\n", ext, *args.Size, rescale)
 			model, err = loader.LoadGLB(args.Input, scale*rescale)
 			if err != nil {
 				return fmt.Errorf("loading GLB (rescaled): %w", err)
@@ -90,7 +90,7 @@ func run() error {
 	if !args.Force {
 		ext := modelMaxExtent(model)
 		if ext > 300 {
-			return fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale or --extent to reduce size (or --force to bypass)", ext)
+			return fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale or --size to reduce size (or --force to bypass)", ext)
 		}
 	}
 
