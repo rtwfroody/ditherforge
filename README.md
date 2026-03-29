@@ -1,9 +1,18 @@
 # ditherforge
 
 Convert textured 3D models (GLB) into multi-color 3D-printable files (3MF) for
-multi-filament printers. ditherforge maps the original texture onto a limited
-filament palette using Floyd-Steinberg dithering, producing files ready for
-slicers like OrcaSlicer and BambuStudio.
+multi-filament printers.
+
+## Quick Start
+
+```
+go install github.com/rtwfroody/ditherforge@latest
+ditherforge model.glb --size 100
+```
+
+This loads `model.glb`, scales it to 100mm, automatically picks the best 4
+filament colors, and writes `output.3mf`. Open the result in OrcaSlicer or
+BambuStudio and print.
 
 ## How It Works
 
@@ -12,10 +21,46 @@ slicers like OrcaSlicer and BambuStudio.
    layer height.
 3. **Extract** a smooth isosurface via marching cubes.
 4. **Sample** the original texture color at each output face.
-5. **Dither** using Floyd-Steinberg error diffusion in Morton-curve order to
-   approximate the full-color texture with the available filament palette.
-6. **Export** a 3MF file with per-face paint colors and embedded slicer profiles
-   (Snapmaker U1 / OrcaSlicer compatible).
+5. **Dither** to approximate the full-color texture with the available filament
+   palette.
+6. **Export** a 3MF file with per-face material assignments.
+
+## Color Palette Selection
+
+ditherforge offers several ways to choose which filament colors to use:
+
+**Default (no flags):** Automatically picks the best 4 colors from
+cyan, magenta, yellow, black, white, red, green, and blue based on the
+model's texture.
+
+**Manual palette (`--palette`):** Specify exact colors by CSS name or hex code:
+```
+ditherforge model.glb --palette "red,white,blue,black"
+```
+
+**Auto-palette (`--auto-palette N`):** Compute N dominant colors directly from
+the texture:
+```
+ditherforge model.glb --auto-palette 4
+```
+
+**Inventory file (`--inventory-file` + `--inventory N`):** Provide a file
+listing your available filaments (one color per line), and let ditherforge pick
+the best N. This is ideal when you have a specific set of spools on hand. See
+[panchroma_basic.txt](panchroma_basic.txt) for an example inventory file.
+```
+ditherforge model.glb --inventory-file panchroma_basic.txt --inventory 4
+```
+
+## Dithering Modes
+
+The `--dither` flag controls how colors are distributed across faces:
+
+- **`dizzy`** (default) — Random traversal order with error diffusion to
+  spatial neighbors. Produces blue-noise-like patterns without directional bias.
+- **`fs`** — Floyd-Steinberg error diffusion in scanline order. Classic
+  dithering, but can show directional artifacts.
+- **`none`** — Each face gets the nearest palette color with no dithering.
 
 ## Installation
 
@@ -33,65 +78,36 @@ cd ditherforge
 go build .
 ```
 
-## Usage
-
-```
-ditherforge <input.glb> [options]
-```
-
-### Options
+## Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--palette` | `white,cyan,magenta,yellow` | Comma-separated colors (CSS names or `#hex`) |
-| `--auto-palette N` | — | Compute N dominant colors from texture instead of manual palette |
+| `--size` | — | Scale model so largest extent equals this value in mm |
+| `--palette` | auto | Comma-separated colors (CSS names or `#hex`) |
+| `--auto-palette N` | — | Compute N dominant colors from texture |
+| `--inventory-file` | — | File with one filament color per line |
+| `--inventory N` | — | Pick best N colors from inventory file |
+| `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
 | `--glb-unit` | `m` | GLB coordinate unit: `m`, `dm`, `cm`, `mm` |
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
-| `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
-| `--size` | — | Scale model so largest extent equals this value in mm |
-| `--inventory-file` | — | File with one filament color per line |
-| `--inventory N` | — | Pick best N colors from inventory file |
 | `--no-merge` | — | Skip coplanar triangle merging |
 | `--stats` | — | Print face counts per material |
-| `--force` | — | Bypass the 300 mm extent size check |
-
-### Examples
-
-Basic usage with a custom palette:
-```
-ditherforge model.glb --palette "gray,black,white,red" --scale 0.13
-```
-
-Auto-detect 4 dominant colors from the texture:
-```
-ditherforge model.glb --auto-palette 4
-```
-
-Model already in millimeters:
-```
-ditherforge model.glb --glb-unit mm
-```
-
-## Printing
-
-The output 3MF includes embedded printer and process profiles for the Snapmaker
-U1 with a 0.4 mm nozzle. It can be opened directly in OrcaSlicer or
-BambuStudio. The file uses per-face paint colors, so the slicer handles
-filament changes automatically via its AMS/multi-material system.
+| `--force` | — | Bypass the 300mm extent size check |
 
 ## Testing
 
-Silhouette-based regression tests compare the output shape against the original
-model from multiple views. See [tests/README.md](tests/README.md) for details.
+```
+go test -timeout 10m ./...
+```
 
-```
-uv run --with trimesh --with pillow --with numpy python3 tests/test_silhouette.py
-```
+Regression tests render the output mesh from multiple views and compare
+silhouettes and depth against the original model.
 
 ## Status
 
-Early development. The embedded slicer profiles target the Snapmaker U1; other
-printers may need manual profile adjustment in the slicer.
+Early development. The output 3MF includes embedded printer profiles for the
+Snapmaker U1 with a 0.4mm nozzle. Other printers may need manual profile
+adjustment in the slicer.

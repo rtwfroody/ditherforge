@@ -1,0 +1,28 @@
+#080A0D Black
+#485259 Dark Grey
+#8C9099 Grey
+#616469 Steel Grey
+#D9DFE5 Cold White
+#EBF7FF White
+#E72F1D Red
+#D60212 Wine Red
+#F67405 Orange
+#F24574 Magenta
+#F1A1AF Pink
+#EED230 Lemon Yellow
+#FFE800 Yellow
+#EED1A8 Cream
+#C2AB72 Beige
+#A79E82 Tan
+#55331A Brown
+#06924D Green
+#D5D701 Lime Green
+#4E742D Jungle Green
+#948902 Olive Green
+#575B54 Dark Olive Drab
+#0066D9 Azure Blue
+#003776 Blue
+#5EBDDB Aqua Blue
+#487BA2 Stone Blue
+#4CC0C7 Polymaker Teal
+#6C47B2 Purple
