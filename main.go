@@ -37,6 +37,10 @@ func (Args) Description() string {
 	return "Convert a textured GLB model to a multi-material 3MF file."
 }
 
+func (Args) Version() string {
+	return "ditherforge 0.1.0-alpha"
+}
+
 func run() error {
 	var args Args
 	arg.MustParse(&args)
