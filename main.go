@@ -85,6 +85,8 @@ func run() error {
 		}
 	}
 
+	fmt.Printf("  Extent: %.1f mm\n", modelMaxExtent(model))
+
 	// Check model extent.
 	if !args.Force {
 		ext := modelMaxExtent(model)
