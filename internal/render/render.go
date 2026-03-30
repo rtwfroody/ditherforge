@@ -281,6 +281,158 @@ func Render(vertices [][3]float32, faces [][3]uint32, azimuth, elevation float64
 	return img
 }
 
+// ColorImage holds a rendered color buffer.
+type ColorImage struct {
+	Width, Height int
+	R, G, B       []uint8
+	HasPixel      []bool
+}
+
+// ToRGBA converts the color buffer to an RGBA image with transparent background.
+func (c *ColorImage) ToRGBA() *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, c.Width, c.Height))
+	for i := 0; i < c.Width*c.Height; i++ {
+		if !c.HasPixel[i] {
+			continue
+		}
+		x := i % c.Width
+		y := i / c.Width
+		img.SetRGBA(x, y, color.RGBA{c.R[i], c.G[i], c.B[i], 255})
+	}
+	return img
+}
+
+// RenderColor produces a color image from an orthographic view of a triangle mesh.
+// colorFn is called for each visible pixel with the face index and barycentric
+// coordinates (u, v) where the point = (1-u-v)*v0 + u*v1 + v*v2.
+func RenderColor(
+	vertices [][3]float32,
+	faces [][3]uint32,
+	azimuth, elevation float64,
+	resolution int,
+	bounds Bounds,
+	colorFn func(faceIdx int, baryU, baryV float64) [3]uint8,
+) *ColorImage {
+	rot := rotationMatrix(azimuth, elevation)
+	margin := 0.05
+
+	type projected struct {
+		px, py, depth float64
+	}
+	proj := make([]projected, len(vertices))
+	for i, v := range vertices {
+		t := transform(rot, v)
+		proj[i] = projected{px: t[0], py: t[2], depth: t[1]}
+	}
+
+	xRange := bounds.XMax - bounds.XMin
+	yRange := bounds.YMax - bounds.YMin
+	maxRange := math.Max(xRange, yRange)
+	if maxRange < 1e-12 {
+		maxRange = 1
+	}
+	res := float64(resolution)
+	scale := res * (1 - 2*margin) / maxRange
+	cx := res/2 - (bounds.XMin+bounds.XMax)/2*scale
+	cy := res/2 + (bounds.YMin+bounds.YMax)/2*scale
+
+	type pixVert struct {
+		x, y, d float64
+	}
+	pv := make([]pixVert, len(proj))
+	for i, p := range proj {
+		pv[i] = pixVert{
+			x: p.px*scale + cx,
+			y: -p.py*scale + cy,
+			d: p.depth,
+		}
+	}
+
+	n := resolution * resolution
+	img := &ColorImage{
+		Width:    resolution,
+		Height:   resolution,
+		R:        make([]uint8, n),
+		G:        make([]uint8, n),
+		B:        make([]uint8, n),
+		HasPixel: make([]bool, n),
+	}
+	zbuf := make([]float64, n)
+	for i := range zbuf {
+		zbuf[i] = math.Inf(1)
+	}
+
+	for fi, f := range faces {
+		v0, v1, v2 := pv[f[0]], pv[f[1]], pv[f[2]]
+
+		minX := math.Floor(math.Min(v0.x, math.Min(v1.x, v2.x)))
+		maxX := math.Ceil(math.Max(v0.x, math.Max(v1.x, v2.x)))
+		minY := math.Floor(math.Min(v0.y, math.Min(v1.y, v2.y)))
+		maxY := math.Ceil(math.Max(v0.y, math.Max(v1.y, v2.y)))
+
+		bx0 := int(minX)
+		bx1 := int(maxX)
+		by0 := int(minY)
+		by1 := int(maxY)
+		if bx0 < 0 {
+			bx0 = 0
+		}
+		if by0 < 0 {
+			by0 = 0
+		}
+		if bx1 >= resolution {
+			bx1 = resolution - 1
+		}
+		if by1 >= resolution {
+			by1 = resolution - 1
+		}
+		if bx0 > bx1 || by0 > by1 {
+			continue
+		}
+
+		e0x, e0y := v1.x-v0.x, v1.y-v0.y
+		e1x, e1y := v2.x-v0.x, v2.y-v0.y
+		dot00 := e0x*e0x + e0y*e0y
+		dot01 := e0x*e1x + e0y*e1y
+		dot11 := e1x*e1x + e1y*e1y
+		denom := dot00*dot11 - dot01*dot01
+		if math.Abs(denom) < 1e-10 {
+			continue
+		}
+		invDenom := 1.0 / denom
+
+		for py := by0; py <= by1; py++ {
+			for px := bx0; px <= bx1; px++ {
+				qx := float64(px) + 0.5 - v0.x
+				qy := float64(py) + 0.5 - v0.y
+
+				dot02 := e0x*qx + e0y*qy
+				dot12 := e1x*qx + e1y*qy
+
+				u := (dot11*dot02 - dot01*dot12) * invDenom
+				v := (dot00*dot12 - dot01*dot02) * invDenom
+
+				if u < 0 || v < 0 || u+v > 1 {
+					continue
+				}
+
+				d := v0.d + u*(v1.d-v0.d) + v*(v2.d-v0.d)
+				idx := py*resolution + px
+				if d < zbuf[idx] {
+					zbuf[idx] = d
+					c := colorFn(fi, u, v)
+					img.R[idx] = c[0]
+					img.G[idx] = c[1]
+					img.B[idx] = c[2]
+					img.HasPixel[idx] = true
+				}
+			}
+		}
+	}
+
+	return img
+}
+
 // DilateMask dilates a boolean mask by radius pixels using a box filter.
 func DilateMask(mask []bool, width, height, radius int) []bool {
 	out := make([]bool, len(mask))

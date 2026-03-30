@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/render"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -93,9 +95,21 @@ type cachedRemeshOutput struct {
 	Vertices    [][3]float32
 	Faces       [][3]uint32
 	Assignments []int32
+	PaletteRGB  [][3]uint8
 }
 
-func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal [][3]uint8) (*loader.LoadedModel, []int32) {
+func defaultPaletteConfig() voxel.PaletteConfig {
+	defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
+	var pcfg voxel.PaletteConfig
+	for _, name := range defaultColors {
+		rgb, _ := palette.ParsePalette([]string{name})
+		pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
+	}
+	pcfg.InventoryN = 4
+	return pcfg
+}
+
+func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pcfg voxel.PaletteConfig) (*loader.LoadedModel, []int32, [][3]uint8) {
 	t.Helper()
 	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s.gob", name, sourceHash))
 
@@ -107,7 +121,7 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 			return &loader.LoadedModel{
 				Vertices: cached.Vertices,
 				Faces:    cached.Faces,
-			}, cached.Assignments
+			}, cached.Assignments, cached.PaletteRGB
 		}
 	}
 
@@ -117,8 +131,7 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 	}
 
 	t.Log("Running squarevoxel remesh...")
-	pcfg := voxel.PaletteConfig{Palette: pal}
-	meshParts, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
+	meshParts, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy")
 	if err != nil {
 		t.Fatalf("Remesh: %v", err)
 	}
@@ -130,6 +143,7 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 			Vertices:    outModel.Vertices,
 			Faces:       outModel.Faces,
 			Assignments: assignments,
+			PaletteRGB:  paletteRGB,
 		})
 		f.Close()
 	}
@@ -143,7 +157,7 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pal []
 		}
 	}
 
-	return outModel, assignments
+	return outModel, assignments, paletteRGB
 }
 
 // modelExtent returns the max bounding box extent in mm.
@@ -279,8 +293,7 @@ func TestMeshRender(t *testing.T) {
 			t.Logf("  Input: %d verts, %d faces, extent %.1fmm",
 				len(model.Vertices), len(model.Faces), ext)
 
-			pal := [][3]uint8{{0, 255, 255}, {255, 0, 255}, {255, 255, 0}, {0, 0, 0}}
-			outModel, _ := getOrRunRemesh(t, name, model, pal)
+			outModel, _, _ := getOrRunRemesh(t, name, model, defaultPaletteConfig())
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
 
 			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
@@ -435,4 +448,280 @@ func saveDiffImage(t *testing.T, outdir, name string, inpMask, outMask, overshoo
 	}
 	defer f.Close()
 	png.Encode(f, img)
+}
+
+// --- Texture render test ---
+
+const (
+	colorBlockSize       = 16
+	colorMinBlockCov     = 0.25
+	colorMaxMedianDeltaE = 5.0
+	colorMaxP95DeltaE    = 15.0
+)
+
+func inputColorFn(model *loader.LoadedModel) func(faceIdx int, baryU, baryV float64) [3]uint8 {
+	return func(faceIdx int, baryU, baryV float64) [3]uint8 {
+		f := model.Faces[faceIdx]
+		texIdx := int(model.FaceTextureIdx[faceIdx])
+		if texIdx >= len(model.Textures) {
+			return [3]uint8{128, 128, 128}
+		}
+		uv0 := model.UVs[f[0]]
+		uv1 := model.UVs[f[1]]
+		uv2 := model.UVs[f[2]]
+		w := float32(1.0 - baryU - baryV)
+		u := w*uv0[0] + float32(baryU)*uv1[0] + float32(baryV)*uv2[0]
+		v := w*uv0[1] + float32(baryU)*uv1[1] + float32(baryV)*uv2[1]
+		rgba := voxel.BilinearSample(model.Textures[texIdx], u, v)
+		return [3]uint8{rgba[0], rgba[1], rgba[2]}
+	}
+}
+
+func outputColorFn(assignments []int32, paletteRGB [][3]uint8) func(faceIdx int, baryU, baryV float64) [3]uint8 {
+	return func(faceIdx int, baryU, baryV float64) [3]uint8 {
+		return paletteRGB[assignments[faceIdx]]
+	}
+}
+
+func shiftColor(img *render.ColorImage, dx, dy int) *render.ColorImage {
+	out := &render.ColorImage{
+		Width:    img.Width,
+		Height:   img.Height,
+		R:        make([]uint8, len(img.R)),
+		G:        make([]uint8, len(img.G)),
+		B:        make([]uint8, len(img.B)),
+		HasPixel: make([]bool, len(img.HasPixel)),
+	}
+	for y := 0; y < img.Height; y++ {
+		ny := y + dy
+		if ny < 0 || ny >= img.Height {
+			continue
+		}
+		for x := 0; x < img.Width; x++ {
+			nx := x + dx
+			if nx < 0 || nx >= img.Width {
+				continue
+			}
+			si := y*img.Width + x
+			di := ny*img.Width + nx
+			out.R[di] = img.R[si]
+			out.G[di] = img.G[si]
+			out.B[di] = img.B[si]
+			out.HasPixel[di] = img.HasPixel[si]
+		}
+	}
+	return out
+}
+
+func rgbToLab(r, g, b uint8) (float64, float64, float64) {
+	c := colorful.Color{R: float64(r) / 255, G: float64(g) / 255, B: float64(b) / 255}
+	return c.Lab()
+}
+
+func deltaE(l1, a1, b1, l2, a2, b2 float64) float64 {
+	dl := l1 - l2
+	da := a1 - a2
+	db := b1 - b2
+	return math.Sqrt(dl*dl + da*da + db*db)
+}
+
+func saveColorImage(t *testing.T, outdir, name string, img *render.ColorImage) {
+	path := filepath.Join(outdir, name)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Logf("failed to save %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	png.Encode(f, img.ToRGBA())
+}
+
+func saveDeltaEImage(t *testing.T, outdir, name string, blockDeltaEs [][]float64, blocksX, blocksY, blockSize int) {
+	img := image.NewRGBA(image.Rect(0, 0, blocksX*blockSize, blocksY*blockSize))
+	for by := 0; by < blocksY; by++ {
+		for bx := 0; bx < blocksX; bx++ {
+			de := blockDeltaEs[by][bx]
+			var r, g, b uint8
+			if de < 0 {
+				// No data — dark gray.
+				r, g, b = 40, 40, 40
+			} else {
+				// Scale so deltaE=20 maps to white.
+				v := uint8(math.Min(255, de/20*255))
+				r, g, b = v, v, v
+			}
+			for py := by * blockSize; py < (by+1)*blockSize; py++ {
+				for px := bx * blockSize; px < (bx+1)*blockSize; px++ {
+					i := py*img.Stride + px*4
+					img.Pix[i+0] = r
+					img.Pix[i+1] = g
+					img.Pix[i+2] = b
+					img.Pix[i+3] = 255
+				}
+			}
+		}
+	}
+	path := filepath.Join(outdir, name)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Logf("failed to save %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	png.Encode(f, img)
+}
+
+func TestTextureRender(t *testing.T) {
+	glbs, err := filepath.Glob("objects/*.glb")
+	if err != nil {
+		t.Fatalf("globbing objects/*.glb: %v", err)
+	}
+	if len(glbs) == 0 {
+		t.Skip("no .glb files in objects/")
+	}
+
+	outdir := filepath.Join("tests", "output")
+
+	for _, glbPath := range glbs {
+		glbPath := glbPath
+		name := strings.TrimSuffix(filepath.Base(glbPath), ".glb")
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			const unitScale = float32(1000)
+
+			t.Logf("Loading %s...", glbPath)
+			model, err := loader.LoadGLB(glbPath, unitScale)
+			if err != nil {
+				t.Fatalf("LoadGLB: %v", err)
+			}
+
+			ext := modelExtent(model)
+			if ext != maxExtentMM {
+				scale := maxExtentMM / ext
+				model, err = loader.LoadGLB(glbPath, unitScale*scale)
+				if err != nil {
+					t.Fatalf("LoadGLB (rescaled): %v", err)
+				}
+				ext = modelExtent(model)
+			}
+
+			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, model, defaultPaletteConfig())
+
+			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
+
+			os.MkdirAll(outdir, 0755)
+
+			inpColorFn := inputColorFn(model)
+			outColorFn := outputColorFn(assignments, paletteRGB)
+
+			for _, v := range views {
+				inpBounds := render.ProjectedBounds(model.Vertices, v.azimuth, v.elevation)
+				outBounds := render.ProjectedBounds(outModel.Vertices, v.azimuth, v.elevation)
+				bounds := render.UnionBounds(inpBounds, outBounds)
+
+				inpImg := render.RenderColor(model.Vertices, model.Faces, v.azimuth, v.elevation, testResolution, bounds, inpColorFn)
+				outRaw := render.RenderColor(outModel.Vertices, outModel.Faces, v.azimuth, v.elevation, testResolution, bounds, outColorFn)
+
+				// Centroid-align output to input (reuse depth mask approach).
+				inpDepth := render.Render(model.Vertices, model.Faces, v.azimuth, v.elevation, testResolution, bounds)
+				outDepth := render.Render(outModel.Vertices, outModel.Faces, v.azimuth, v.elevation, testResolution, bounds)
+				inpMask := inpDepth.Mask()
+				outRawMask := outDepth.Mask()
+				ix, iy := centroid(inpMask, testResolution, testResolution)
+				ox, oy := centroid(outRawMask, testResolution, testResolution)
+				dx, dy := 0, 0
+				if ix >= 0 && ox >= 0 {
+					dx = int(math.Round(ix - ox))
+					dy = int(math.Round(iy - oy))
+				}
+				_ = dilatePx // used by mesh test; alignment uses same centroid logic
+
+				outImg := outRaw
+				if dx != 0 || dy != 0 {
+					outImg = shiftColor(outRaw, dx, dy)
+				}
+
+				// Block-averaged deltaE comparison.
+				blocksX := testResolution / colorBlockSize
+				blocksY := testResolution / colorBlockSize
+				blockDeltaEs := make([][]float64, blocksY)
+				var validDeltaEs []float64
+
+				for by := 0; by < blocksY; by++ {
+					blockDeltaEs[by] = make([]float64, blocksX)
+					for bx := 0; bx < blocksX; bx++ {
+						var sumIR, sumIG, sumIB float64
+						var sumOR, sumOG, sumOB float64
+						var overlap int
+						blockPixels := colorBlockSize * colorBlockSize
+
+						for py := by * colorBlockSize; py < (by+1)*colorBlockSize; py++ {
+							for px := bx * colorBlockSize; px < (bx+1)*colorBlockSize; px++ {
+								i := py*testResolution + px
+								if inpImg.HasPixel[i] && outImg.HasPixel[i] {
+									sumIR += float64(inpImg.R[i])
+									sumIG += float64(inpImg.G[i])
+									sumIB += float64(inpImg.B[i])
+									sumOR += float64(outImg.R[i])
+									sumOG += float64(outImg.G[i])
+									sumOB += float64(outImg.B[i])
+									overlap++
+								}
+							}
+						}
+
+						if float64(overlap)/float64(blockPixels) < colorMinBlockCov {
+							blockDeltaEs[by][bx] = -1 // no data
+							continue
+						}
+
+						n := float64(overlap)
+						il, ia, ib := rgbToLab(
+							uint8(sumIR/n), uint8(sumIG/n), uint8(sumIB/n))
+						ol, oa, ob := rgbToLab(
+							uint8(sumOR/n), uint8(sumOG/n), uint8(sumOB/n))
+						de := deltaE(il, ia, ib, ol, oa, ob)
+						blockDeltaEs[by][bx] = de
+						validDeltaEs = append(validDeltaEs, de)
+					}
+				}
+
+				saveColorImage(t, outdir, fmt.Sprintf("%s_%s_input_color.png", name, v.name), inpImg)
+				saveColorImage(t, outdir, fmt.Sprintf("%s_%s_output_color.png", name, v.name), outImg)
+				saveDeltaEImage(t, outdir, fmt.Sprintf("%s_%s_color_diff.png", name, v.name),
+					blockDeltaEs, blocksX, blocksY, colorBlockSize)
+
+				if len(validDeltaEs) == 0 {
+					t.Logf("  %s: no overlapping blocks, skipping color check", v.name)
+					continue
+				}
+
+				medianDE := percentile(validDeltaEs, 50)
+				p95DE := percentile(validDeltaEs, 95)
+
+				passed := true
+				var msgs []string
+				if medianDE > colorMaxMedianDeltaE {
+					passed = false
+					msgs = append(msgs, fmt.Sprintf("median deltaE %.1f > %.1f", medianDE, colorMaxMedianDeltaE))
+				}
+				if p95DE > colorMaxP95DeltaE {
+					passed = false
+					msgs = append(msgs, fmt.Sprintf("p95 deltaE %.1f > %.1f", p95DE, colorMaxP95DeltaE))
+				}
+
+				detail := fmt.Sprintf("median_dE=%.1f, p95_dE=%.1f, blocks=%d",
+					medianDE, p95DE, len(validDeltaEs))
+				for _, m := range msgs {
+					detail += "; " + m
+				}
+
+				if passed {
+					t.Logf("  %s: PASS — %s", v.name, detail)
+				} else {
+					t.Errorf("  %s: FAIL — %s", v.name, detail)
+				}
+			}
+		})
+	}
 }
