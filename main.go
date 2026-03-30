@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/alexflint/go-arg"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
@@ -61,22 +62,26 @@ func run() error {
 
 	scale := unitScale * args.Scale
 
-	fmt.Printf("Loading %s...\n", args.Input)
+	fmt.Printf("Loading %s...", args.Input)
+	tLoad := time.Now()
 	model, err := loader.LoadGLB(args.Input, scale)
 	if err != nil {
 		return fmt.Errorf("loading GLB: %w", err)
 	}
+	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
 
 	// Auto-scale to --size if specified.
 	if args.Size != nil {
 		ext := modelMaxExtent(model)
 		if ext != *args.Size {
 			rescale := *args.Size / ext
-			fmt.Printf("  Extent %.1f mm, target %.0f mm, scaling by %.4f\n", ext, *args.Size, rescale)
+			fmt.Printf("  Rescaling to %.0f mm...", *args.Size)
+			tRescale := time.Now()
 			model, err = loader.LoadGLB(args.Input, scale*rescale)
 			if err != nil {
 				return fmt.Errorf("loading GLB (rescaled): %w", err)
 			}
+			fmt.Printf(" done in %.1fs\n", time.Since(tRescale).Seconds())
 		}
 	}
 
@@ -143,26 +148,24 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		Infill:         args.Infill || args.InfillOnly,
 	}
 
-	fmt.Println("Generating square voxel shell...")
+	fmt.Println("Remeshing...")
 	meshParts, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
-	}
-	for i, mp := range meshParts {
-		fmt.Printf("  Part %d: %d vertices, %d faces\n", i, len(mp.Model.Vertices), len(mp.Model.Faces))
 	}
 
 	if args.Stats {
 		printStats(meshParts, paletteRGB)
 	}
 
-	fmt.Printf("Exporting %s...\n", args.Output)
+	fmt.Printf("Exporting %s...", args.Output)
+	tExport := time.Now()
 	exportParts := filterParts(meshParts, args.InfillOnly)
 	parts := meshPartsToExportParts(exportParts)
 	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
-	fmt.Println("Done.")
+	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())
 	return nil
 }
 

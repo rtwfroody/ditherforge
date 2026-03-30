@@ -25,7 +25,7 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string)
 	}
 
 	if len(pcfg.Inventory) > 0 {
-		fmt.Printf("  Selecting %d colors from %d-color inventory...\n", pcfg.InventoryN, len(pcfg.Inventory))
+		fmt.Printf("  Selecting %d colors from %d-color inventory...", pcfg.InventoryN, len(pcfg.Inventory))
 		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN)
 		pal := make([][3]uint8, len(selected))
 		strs := make([]string, len(selected))
@@ -37,18 +37,18 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string)
 			}
 			strs[i] = s
 		}
-		display := "  Palette: " + strings.Join(strs, ", ")
+		display := " " + strings.Join(strs, ", ")
 		return pal, display
 	}
 
 	if pcfg.AutoPaletteN > 0 {
-		fmt.Printf("  Computing %d-color palette from cell colors...\n", pcfg.AutoPaletteN)
+		fmt.Printf("  Computing %d-color palette from cell colors...", pcfg.AutoPaletteN)
 		pal := palette.ComputePalette(cellColors, pcfg.AutoPaletteN)
 		strs := make([]string, len(pal))
 		for i, p := range pal {
 			strs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		}
-		display := "  Palette: " + strings.Join(strs, ", ")
+		display := " " + strings.Join(strs, ", ")
 		return pal, display
 	}
 

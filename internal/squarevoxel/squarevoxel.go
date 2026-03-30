@@ -10,6 +10,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -53,12 +54,12 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
 	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
 
-	fmt.Printf("  Square grid: %d cols x %d rows x %d layers\n", nCols, nRows, nLayers)
-
 	// 2. Spatial index.
 	si := voxel.NewSpatialIndex(model, cellSize*2)
 
 	// 3. Z-ray voxelization.
+	fmt.Printf("  Voxelizing...")
+	tVoxelize := time.Now()
 	var cells []voxel.ActiveCell
 	colorBuf := voxel.NewSearchBuf(len(model.Faces))
 	colorRadius := cellSize * 3
@@ -165,11 +166,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	cells = voxel.DeduplicateCells(cells)
-	if proximityAdded > 0 {
-		fmt.Printf("  %d active cells (%d added by surface proximity)\n", len(cells), proximityAdded)
-	} else {
-		fmt.Printf("  %d active cells\n", len(cells))
-	}
+	fmt.Printf(" %d cells in %.1fs\n", len(cells), time.Since(tVoxelize).Seconds())
 	if len(cells) == 0 {
 		return nil, nil, fmt.Errorf("no active cells found")
 	}
@@ -201,7 +198,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			shellRings = 1
 		}
 
-		fmt.Println("  Finding interior cells...")
+		fmt.Printf("  Finding interior cells...")
+		tInterior := time.Now()
 		interiorSet := make(map[voxel.CellKey]struct{}, len(cells)*4)
 		for k := range activeSet {
 			interiorSet[k] = struct{}{}
@@ -217,7 +215,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				}
 			}
 		}
-		fmt.Printf("  %d interior cells found\n", len(interiorSet)-len(activeSet))
+		fmt.Printf(" %d cells in %.1fs\n", len(interiorSet)-len(activeSet), time.Since(tInterior).Seconds())
 
 		// BFS from active cells through interior cells to compute distance.
 		distMap := make(map[voxel.CellKey]int, len(interiorSet))
@@ -259,7 +257,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				infillSet[k] = struct{}{}
 			}
 		}
-		fmt.Printf("  %d shell cells, %d infill cells (shellRings=%d)\n",
+		fmt.Printf("  Shell/infill split: %d shell, %d infill (shellRings=%d)\n",
 			len(shellSet), len(infillSet), shellRings)
 
 		// Exterior padding: expand 2 rings outward from activeSet for MC.
@@ -306,7 +304,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		for k := range exteriorPadding {
 			shellExpandedSet[k] = struct{}{}
 		}
-		fmt.Printf("  %d cells in shell expanded set\n", len(shellExpandedSet))
+		fmt.Printf("  Expanded set: %d cells\n", len(shellExpandedSet))
 	} else {
 		// No infill: expand active set by enough rings for wall thickness
 		// + marching cubes margin.
@@ -328,11 +326,12 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				}
 			}
 		}
-		fmt.Printf("  %d cells in expanded set (from %d active)\n", len(shellExpandedSet), len(cells))
+		fmt.Printf("  Expanded set: %d cells (from %d active)\n", len(shellExpandedSet), len(cells))
 	}
 
 	// 4. Compute SDF at cube vertices.
-	fmt.Println("  Computing SDF at cube vertices...")
+	fmt.Printf("  Computing SDF...")
+	tSDF := time.Now()
 	searchRadius := cellSize * 3
 	if wallThickness*2 > searchRadius {
 		searchRadius = wallThickness * 2
@@ -408,17 +407,19 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}(start, end)
 	}
 	wg.Wait()
-	fmt.Printf("  %d unique SDF vertices computed\n", len(vertIndex))
+	fmt.Printf(" %d vertices in %.1fs\n", len(vertIndex), time.Since(tSDF).Seconds())
 	uniqueVerts = nil // free; only vertIndex+sdfValues needed from here
 
 	// 5. Resolve palette and assign / dither.
 	pal, palDisplay := voxel.ResolvePalette(cells, pcfg)
 	if palDisplay != "" {
-		fmt.Println(palDisplay)
+		fmt.Printf("%s\n", palDisplay)
 	}
 	if len(pal) == 0 {
 		return nil, nil, fmt.Errorf("no palette colors")
 	}
+	fmt.Printf("  Dithering (%s)...", ditherMode)
+	tDither := time.Now()
 	var assignments []int32
 	switch ditherMode {
 	case "dizzy":
@@ -428,9 +429,11 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	default:
 		assignments = voxel.AssignColors(cells, pal)
 	}
+	fmt.Printf(" %d cells in %.1fs\n", len(cells), time.Since(tDither).Seconds())
 
 	// 6. Marching cubes isosurface extraction for smooth outer surface.
-	fmt.Println("  Extracting isosurface with marching cubes...")
+	fmt.Printf("  Marching cubes...")
+	tMC := time.Now()
 	vd := voxel.NewVertexDedup()
 	mcFaces := make([][3]uint32, 0)
 	mcAssignments := make([]int32, 0)
@@ -527,7 +530,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 	}
 
-	fmt.Printf("  %d vertices, %d faces after marching cubes\n", len(vd.Verts), len(mcFaces))
+	fmt.Printf(" %d faces in %.1fs\n", len(mcFaces), time.Since(tMC).Seconds())
 
 	// Build output models.
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
@@ -559,12 +562,13 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		infillFaces, _ = voxel.GenerateBoundaryFaces(infillSet, nil, minV, cellSize, layerH, infillVD)
 
 		if !cfg.NoMerge {
+			fmt.Printf("  Merging infill faces...")
+			tMergeInfill := time.Now()
 			before := len(infillFaces)
 			infillAssignments := make([]int32, len(infillFaces))
 			infillFaces, infillAssignments = voxel.MergeCoplanarTriangles(infillVD.Verts, infillFaces, infillAssignments)
 			_ = infillAssignments
-			fmt.Printf("  Infill: %d faces after coplanar merge (%.0f%% reduction)\n",
-				len(infillFaces), 100*float64(before-len(infillFaces))/float64(before))
+			fmt.Printf(" %d -> %d faces in %.1fs\n", before, len(infillFaces), time.Since(tMergeInfill).Seconds())
 		}
 	}
 
@@ -588,10 +592,11 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	shellAssignments := mcAssignments
 
 	if !cfg.NoMerge {
+		fmt.Printf("  Merging shell faces...")
+		tMergeShell := time.Now()
 		before := len(shellFaces)
 		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(vd.Verts, shellFaces, shellAssignments)
-		fmt.Printf("  Shell: %d faces after merge (%.0f%% reduction)\n",
-			len(shellFaces), 100*float64(before-len(shellFaces))/float64(before))
+		fmt.Printf(" %d -> %d faces in %.1fs\n", before, len(shellFaces), time.Since(tMergeShell).Seconds())
 	}
 
 	parts := []voxel.MeshPart{{

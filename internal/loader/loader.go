@@ -8,7 +8,6 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
-	"math"
 
 	"github.com/qmuntal/gltf"
 	"github.com/qmuntal/gltf/modeler"
@@ -367,15 +366,6 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 
-	// Print info.
-	if len(allVerts) > 0 && len(texList) > 0 {
-		bounds := computeExtent(allVerts)
-		texW := texList[0].Bounds().Max.X
-		texH := texList[0].Bounds().Max.Y
-		fmt.Printf("  %d vertices, %d faces, texture %dx%d, extent %.1f x %.1f x %.1f mm\n",
-			len(allVerts), len(allFaces), texW, texH,
-			bounds[0], bounds[1], bounds[2])
-	}
 
 	var faceAlpha []float32
 	if hasNonOpaque {
@@ -395,25 +385,3 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	}, nil
 }
 
-func computeExtent(verts [][3]float32) [3]float32 {
-	if len(verts) == 0 {
-		return [3]float32{}
-	}
-	minV := verts[0]
-	maxV := verts[0]
-	for _, v := range verts[1:] {
-		for i := 0; i < 3; i++ {
-			if v[i] < minV[i] {
-				minV[i] = v[i]
-			}
-			if v[i] > maxV[i] {
-				maxV[i] = v[i]
-			}
-		}
-	}
-	return [3]float32{
-		float32(math.Abs(float64(maxV[0] - minV[0]))),
-		float32(math.Abs(float64(maxV[1] - minV[1]))),
-		float32(math.Abs(float64(maxV[2] - minV[2]))),
-	}
-}
