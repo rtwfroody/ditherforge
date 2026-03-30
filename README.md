@@ -122,8 +122,6 @@ silhouettes and depth against the original model.
 ## Known Issues
 
 - Sometimes generates features too thin for the slicer to print.
-- Dithering produces a visible seam on some models (e.g. the earth test
-  object).
 - Slicers like OrcaSlicer preserve per-face colors through to the infill,
   making infill very slow due to unnecessary filament changes. The
   `--infill` flag attempts to generate a separate single-color infill object,

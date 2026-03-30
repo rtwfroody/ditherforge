@@ -329,20 +329,24 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 
-	// Deduplicate vertices by position. Meshes often have duplicate vertices at
-	// UV seams (same position, different UV). Merging them ensures the mesh is
-	// topologically connected, which is required for manifold subdivision output.
+	// Deduplicate vertices by (position, UV) pair. Vertices at UV seams share
+	// the same position but have different UVs and must remain separate.
 	{
-		posToIdx := make(map[[3]float32]uint32, len(allVerts))
+		type posUV struct {
+			pos [3]float32
+			uv  [2]float32
+		}
+		keyToIdx := make(map[posUV]uint32, len(allVerts))
 		remap := make([]uint32, len(allVerts))
 		var newVerts [][3]float32
 		var newUVs [][2]float32
 		for i, v := range allVerts {
-			if idx, ok := posToIdx[v]; ok {
+			key := posUV{pos: v, uv: allUVs[i]}
+			if idx, ok := keyToIdx[key]; ok {
 				remap[i] = idx
 			} else {
 				idx := uint32(len(newVerts))
-				posToIdx[v] = idx
+				keyToIdx[key] = idx
 				remap[i] = idx
 				newVerts = append(newVerts, v)
 				newUVs = append(newUVs, allUVs[i])
