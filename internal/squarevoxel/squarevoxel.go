@@ -332,9 +332,14 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// 4. Compute SDF at cube vertices.
 	fmt.Printf("  Computing SDF...")
 	tSDF := time.Now()
-	searchRadius := cellSize * 3
-	if wallThickness*2 > searchRadius {
-		searchRadius = wallThickness * 2
+	// Search radius must reach the farthest expanded cell from the surface.
+	var searchRadius float32
+	if cfg.Infill {
+		// Infill path: only 2 rings of exterior padding.
+		searchRadius = cellSize * 3
+	} else {
+		// Non-infill path: expansionRings = ceil(wallThickness/cellSize) + 1.
+		searchRadius = wallThickness + cellSize*3
 	}
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
