@@ -1,5 +1,7 @@
 # ditherforge
 
+![Golden Pheasant printed with ditherforge](images/golden_pheasant.jpg)
+
 Convert textured 3D models (GLB) into multi-color 3D-printable files (3MF) for
 multi-filament printers.
 
