@@ -306,9 +306,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 		fmt.Printf("  Expanded set: %d cells\n", len(shellExpandedSet))
 	} else {
-		// No infill: expand active set by enough rings for wall thickness
-		// + marching cubes margin.
-		expansionRings := int(math.Ceil(float64(wallThickness)/float64(cellSize))) + 1
+		// No infill: expand active set by 2 rings for MC interpolation.
+		expansionRings := 2
 		shellExpandedSet = make(map[voxel.CellKey]struct{}, len(cells)*2)
 		for k := range activeSet {
 			shellExpandedSet[k] = struct{}{}
@@ -332,15 +331,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// 4. Compute SDF at cube vertices.
 	fmt.Printf("  Computing SDF...")
 	tSDF := time.Now()
-	// Search radius must reach the farthest expanded cell from the surface.
-	var searchRadius float32
-	if cfg.Infill {
-		// Infill path: only 2 rings of exterior padding.
-		searchRadius = cellSize * 3
-	} else {
-		// Non-infill path: expansionRings = ceil(wallThickness/cellSize) + 1.
-		searchRadius = wallThickness + cellSize*3
-	}
+	searchRadius := cellSize * 3
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
 	halfCell := cellSize / 2
