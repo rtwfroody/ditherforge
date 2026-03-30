@@ -85,7 +85,8 @@ func run() error {
 		}
 	}
 
-	fmt.Printf("  Extent: %.1f mm\n", modelMaxExtent(model))
+	ex := modelExtents(model)
+	fmt.Printf("  Extent: %.1f x %.1f x %.1f mm\n", ex[0], ex[1], ex[2])
 
 	// Check model extent.
 	if !args.Force {
@@ -171,8 +172,8 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 	return nil
 }
 
-// modelMaxExtent returns the largest bounding box extent in mm.
-func modelMaxExtent(model *loader.LoadedModel) float32 {
+// modelExtents returns the bounding box extents [x, y, z] in mm.
+func modelExtents(model *loader.LoadedModel) [3]float32 {
 	minV, maxV := model.Vertices[0], model.Vertices[0]
 	for _, v := range model.Vertices[1:] {
 		for i := 0; i < 3; i++ {
@@ -184,14 +185,20 @@ func modelMaxExtent(model *loader.LoadedModel) float32 {
 			}
 		}
 	}
-	ext := float32(0)
-	for i := 0; i < 3; i++ {
-		d := maxV[i] - minV[i]
-		if d > ext {
-			ext = d
-		}
+	return [3]float32{maxV[0] - minV[0], maxV[1] - minV[1], maxV[2] - minV[2]}
+}
+
+// modelMaxExtent returns the largest bounding box extent in mm.
+func modelMaxExtent(model *loader.LoadedModel) float32 {
+	ex := modelExtents(model)
+	m := ex[0]
+	if ex[1] > m {
+		m = ex[1]
 	}
-	return ext
+	if ex[2] > m {
+		m = ex[2]
+	}
+	return m
 }
 
 // averageTextureBrightness samples the model's textures and returns an
