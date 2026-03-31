@@ -335,50 +335,46 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	searchRadius := cellSize * 3
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
-	halfCell := cellSize / 2
 
-	// Cube corner offsets: 8 corners of a cube centered at (cx, cy, cz).
-	// Bottom layer (z - layerH/2): corners 0-3
-	// Top layer (z + layerH/2): corners 4-7
-	// Corner numbering:
-	//   0: (-half, -half, bot)  1: (+half, -half, bot)
-	//   2: (+half, +half, bot)  3: (-half, +half, bot)
-	//   4: (-half, -half, top)  5: (+half, -half, top)
-	//   6: (+half, +half, top)  7: (-half, +half, top)
-	halfH := layerH / 2
-	cubeOffsets := [8][3]float32{
-		{-halfCell, -halfCell, -halfH}, {+halfCell, -halfCell, -halfH},
-		{+halfCell, +halfCell, -halfH}, {-halfCell, +halfCell, -halfH},
-		{-halfCell, -halfCell, +halfH}, {+halfCell, -halfCell, +halfH},
-		{+halfCell, +halfCell, +halfH}, {-halfCell, +halfCell, +halfH},
+	// Corner grid: each cell (Col, Row, Layer) has 8 corners at integer
+	// offsets (Col+di, Row+dj, Layer+dk) where di, dj, dk ∈ {0, 1}.
+	// The corner grid has (nCols+1) × (nRows+1) × (nLayers+1) positions.
+	cornerStride := [2]int32{int32(nCols + 1), int32((nCols + 1) * (nRows + 1))}
+	cornerIdx := func(ci, cj, ck int) int32 {
+		return int32(ci) + int32(cj)*cornerStride[0] + int32(ck)*cornerStride[1]
 	}
-
-	vertPos := func(col, row, layer, corner int) [3]float32 {
-		cx := minV[0] + float32(col)*cellSize
-		cy := minV[1] + float32(row)*cellSize
-		cz := minV[2] + float32(layer)*layerH
+	cornerPos := func(ci, cj, ck int) [3]float32 {
 		return [3]float32{
-			cx + cubeOffsets[corner][0],
-			cy + cubeOffsets[corner][1],
-			cz + cubeOffsets[corner][2],
+			minV[0] + (float32(ci)-0.5)*cellSize,
+			minV[1] + (float32(cj)-0.5)*cellSize,
+			minV[2] + (float32(ck)-0.5)*layerH,
 		}
 	}
+	// Integer offsets for the 8 cube corners relative to the cell.
+	// Corner numbering matches the marching cubes table:
+	//   0: (0,0,0)  1: (1,0,0)  2: (1,1,0)  3: (0,1,0)
+	//   4: (0,0,1)  5: (1,0,1)  6: (1,1,1)  7: (0,1,1)
+	cornerOffsets := [8][3]int{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+		{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}
 
-	// Build a map from snapped vertex position to index, and a flat array of
-	// positions for parallel SDF evaluation. This avoids storing SDF values
-	// in a second map (which would double memory usage).
-	vertIndex := make(map[[3]float32]int32)
+	// Build a sparse map from corner index to SDF array index.
+	vertIndex := make(map[int32]int32, len(shellExpandedSet)*4)
 	for k := range shellExpandedSet {
-		for corner := 0; corner < 8; corner++ {
-			pos := voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, corner))
-			if _, ok := vertIndex[pos]; !ok {
-				vertIndex[pos] = int32(len(vertIndex))
+		for _, off := range cornerOffsets {
+			ci, cj, ck := k.Col+off[0], k.Row+off[1], k.Layer+off[2]
+			idx := cornerIdx(ci, cj, ck)
+			if _, ok := vertIndex[idx]; !ok {
+				vertIndex[idx] = int32(len(vertIndex))
 			}
 		}
 	}
+	// Build flat arrays of positions for parallel SDF evaluation.
 	uniqueVerts := make([][3]float32, len(vertIndex))
-	for pos, idx := range vertIndex {
-		uniqueVerts[idx] = pos
+	for gridIdx, sdfIdx := range vertIndex {
+		ci := gridIdx % cornerStride[0]
+		cj := (gridIdx / cornerStride[0]) % int32(nRows+1)
+		ck := gridIdx / cornerStride[1]
+		uniqueVerts[sdfIdx] = cornerPos(int(ci), int(cj), int(ck))
 	}
 	finishBar(barPrep, "Prepared SDF", fmt.Sprintf("%d vertices", len(uniqueVerts)), time.Since(tPrep))
 
@@ -478,11 +474,13 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 
 		// Get SDF at 8 cube corners.
-		var cornerPos [8][3]float32
+		var cPos [8][3]float32
 		var cornerSDF [8]float32
 		for c := 0; c < 8; c++ {
-			cornerPos[c] = voxel.SnapPos(vertPos(k.Col, k.Row, k.Layer, c))
-			cornerSDF[c] = sdfValues[vertIndex[cornerPos[c]]]
+			off := cornerOffsets[c]
+			ci, cj, ck := k.Col+off[0], k.Row+off[1], k.Layer+off[2]
+			cPos[c] = cornerPos(ci, cj, ck)
+			cornerSDF[c] = sdfValues[vertIndex[cornerIdx(ci, cj, ck)]]
 		}
 
 		// Build 8-bit case index.
@@ -504,8 +502,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				edge := triEdges[t+ki]
 				ea := mcEdges[edge][0]
 				eb := mcEdges[edge][1]
-				posA := cornerPos[ea]
-				posB := cornerPos[eb]
+				posA := cPos[ea]
+				posB := cPos[eb]
 				sdfA := cornerSDF[ea]
 				sdfB := cornerSDF[eb]
 
