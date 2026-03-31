@@ -84,61 +84,31 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// 2. Spatial index.
 	si := voxel.NewSpatialIndex(model, cellSize*2)
 
-	// 3. Z-ray voxelization.
+	// 3. Triangle-overlap voxelization.
+	// For each triangle, mark all cells whose AABB overlaps the triangle.
 	tVoxelize := time.Now()
-	bar := newBar(nCols, "  Voxelizing")
-	var cells []voxel.ActiveCell
-	colorBuf := voxel.NewSearchBuf(len(model.Faces))
-	colorRadius := cellSize * 3
-
-	for col := 0; col < nCols; col++ {
-		bar.Add(1)
-		cx := minV[0] + float32(col)*cellSize
-		for row := 0; row < nRows; row++ {
-			cy := minV[1] + float32(row)*cellSize
-
-			activeLayers := voxel.VoxelizeColumn(cx, cy, model, si, layerH, minV[2], nLayers)
-			for layer := range activeLayers {
-				cz := minV[2] + float32(layer)*layerH
-				rgba := voxel.SampleNearestColor(
-					[3]float32{cx, cy, cz},
-					model, si, colorRadius, colorBuf)
-				if rgba[3] < 128 {
-					continue // skip translucent voxels
-				}
-				cells = append(cells, voxel.ActiveCell{
-					Col: col, Row: row, Layer: layer,
-					Cx: cx, Cy: cy, Cz: cz,
-					Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
-				})
-			}
-		}
-	}
-
-	// Proximity-based supplementary voxelization.
-	finishBar(bar, "Voxelized (z-ray)", fmt.Sprintf("%d cells", len(cells)), time.Since(tVoxelize))
-	tProximity := time.Now()
-	barProx := newBar(len(model.Faces), "  Proximity voxels")
-	proximitySet := make(map[voxel.CellKey]struct{})
-	proximityRadius := cellSize
+	bar := newBar(len(model.Faces), "  Voxelizing")
+	halfExtent := [3]float32{cellSize / 2, cellSize / 2, layerH / 2}
+	cellSet := make(map[voxel.CellKey]struct{})
 	for fi := range model.Faces {
-		barProx.Add(1)
+		bar.Add(1)
 		f := model.Faces[fi]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
 		v2 := model.Vertices[f[2]]
+		// Bounding box of triangle in grid coordinates.
 		tMinX := min(v0[0], min(v1[0], v2[0]))
 		tMaxX := max(v0[0], max(v1[0], v2[0]))
 		tMinY := min(v0[1], min(v1[1], v2[1]))
 		tMaxY := max(v0[1], max(v1[1], v2[1]))
 		tMinZ := min(v0[2], min(v1[2], v2[2]))
 		tMaxZ := max(v0[2], max(v1[2], v2[2]))
-		colMin := int(math.Floor(float64(tMinX-minV[0])/float64(cellSize))) - 1
-		colMax := int(math.Ceil(float64(tMaxX-minV[0])/float64(cellSize))) + 1
-		rowMin := int(math.Floor(float64(tMinY-minV[1])/float64(cellSize))) - 1
-		rowMax := int(math.Ceil(float64(tMaxY-minV[1])/float64(cellSize))) + 1
-		layerMin := int(math.Floor(float64(tMinZ-minV[2])/float64(layerH))) - 1
-		layerMax := int(math.Ceil(float64(tMaxZ-minV[2])/float64(layerH))) + 1
+		colMin := int(math.Floor(float64(tMinX-minV[0])/float64(cellSize) - 0.5))
+		colMax := int(math.Ceil(float64(tMaxX-minV[0])/float64(cellSize) + 0.5))
+		rowMin := int(math.Floor(float64(tMinY-minV[1])/float64(cellSize) - 0.5))
+		rowMax := int(math.Ceil(float64(tMaxY-minV[1])/float64(cellSize) + 0.5))
+		layerMin := int(math.Floor(float64(tMinZ-minV[2])/float64(layerH) - 0.5))
+		layerMax := int(math.Ceil(float64(tMaxZ-minV[2])/float64(layerH) + 0.5))
 		if colMin < 0 {
 			colMin = 0
 		}
@@ -158,58 +128,45 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			layerMax = nLayers - 1
 		}
 		for col := colMin; col <= colMax; col++ {
-			hcx := minV[0] + float32(col)*cellSize
+			cx := minV[0] + float32(col)*cellSize
 			for row := rowMin; row <= rowMax; row++ {
-				hcy := minV[1] + float32(row)*cellSize
+				cy := minV[1] + float32(row)*cellSize
 				for layer := layerMin; layer <= layerMax; layer++ {
-					hcz := minV[2] + float32(layer)*layerH
-					_, dSq := voxel.ClosestPointOnTriangle3D(
-						[3]float32{hcx, hcy, hcz}, v0, v1, v2)
-					if float32(math.Sqrt(float64(dSq))) <= proximityRadius {
-						proximitySet[voxel.CellKey{Col: col, Row: row, Layer: layer}] = struct{}{}
+					cz := minV[2] + float32(layer)*layerH
+					center := [3]float32{cx, cy, cz}
+					if voxel.TriangleAABBOverlap(v0, v1, v2, center, halfExtent) {
+						cellSet[voxel.CellKey{Col: col, Row: row, Layer: layer}] = struct{}{}
 					}
 				}
 			}
 		}
 	}
-	finishBar(barProx, "Proximity candidates", fmt.Sprintf("%d cells", len(proximitySet)), time.Since(tProximity))
+	finishBar(bar, "Voxelized", fmt.Sprintf("%d cells", len(cellSet)), time.Since(tVoxelize))
 
-	existingCells := make(map[voxel.CellKey]struct{}, len(cells))
-	for _, c := range cells {
-		existingCells[voxel.CellKey{Col: c.Col, Row: c.Row, Layer: c.Layer}] = struct{}{}
-	}
+	// Color each active cell.
 	tColor := time.Now()
-	newCells := 0
-	for k := range proximitySet {
-		if _, exists := existingCells[k]; !exists {
-			newCells++
+	colorBuf := voxel.NewSearchBuf(len(model.Faces))
+	colorRadius := cellSize * 3
+	var cells []voxel.ActiveCell
+	barColor := newBar(len(cellSet), "  Coloring cells")
+	for k := range cellSet {
+		barColor.Add(1)
+		cx := minV[0] + float32(k.Col)*cellSize
+		cy := minV[1] + float32(k.Row)*cellSize
+		cz := minV[2] + float32(k.Layer)*layerH
+		rgba := voxel.SampleNearestColor(
+			[3]float32{cx, cy, cz},
+			model, si, colorRadius, colorBuf)
+		if rgba[3] < 128 {
+			continue // skip translucent voxels
 		}
+		cells = append(cells, voxel.ActiveCell{
+			Col: k.Col, Row: k.Row, Layer: k.Layer,
+			Cx: cx, Cy: cy, Cz: cz,
+			Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
+		})
 	}
-	barColor := newBar(newCells, "  Coloring new cells")
-	proximityAdded := 0
-	for k := range proximitySet {
-		if _, exists := existingCells[k]; !exists {
-			barColor.Add(1)
-			cx := minV[0] + float32(k.Col)*cellSize
-			cy := minV[1] + float32(k.Row)*cellSize
-			cz := minV[2] + float32(k.Layer)*layerH
-			rgba := voxel.SampleNearestColor(
-				[3]float32{cx, cy, cz},
-				model, si, colorRadius, colorBuf)
-			if rgba[3] < 128 {
-				continue // skip translucent voxels
-			}
-			cells = append(cells, voxel.ActiveCell{
-				Col: k.Col, Row: k.Row, Layer: k.Layer,
-				Cx: cx, Cy: cy, Cz: cz,
-				Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
-			})
-			proximityAdded++
-		}
-	}
-
-	cells = voxel.DeduplicateCells(cells)
-	finishBar(barColor, "Colored new cells", fmt.Sprintf("%d added, %d total cells", proximityAdded, len(cells)), time.Since(tColor))
+	finishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
 		return nil, nil, fmt.Errorf("no active cells found")
 	}

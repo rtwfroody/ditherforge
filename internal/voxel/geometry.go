@@ -190,6 +190,111 @@ func TriNormal(a, b, c [3]float32) [3]float32 {
 	return [3]float32{n[0] / l, n[1] / l, n[2] / l}
 }
 
+// TriangleAABBOverlap tests whether a triangle (v0, v1, v2) overlaps an
+// axis-aligned bounding box defined by its center and half-extents.
+// Uses the Separating Axis Theorem (Akenine-Möller method).
+func TriangleAABBOverlap(v0, v1, v2, center, halfExtent [3]float32) bool {
+	// Translate triangle so box center is at origin.
+	t0 := [3]float32{v0[0] - center[0], v0[1] - center[1], v0[2] - center[2]}
+	t1 := [3]float32{v1[0] - center[0], v1[1] - center[1], v1[2] - center[2]}
+	t2 := [3]float32{v2[0] - center[0], v2[1] - center[1], v2[2] - center[2]}
+
+	// Triangle edges.
+	e0 := [3]float32{t1[0] - t0[0], t1[1] - t0[1], t1[2] - t0[2]}
+	e1 := [3]float32{t2[0] - t1[0], t2[1] - t1[1], t2[2] - t1[2]}
+	e2 := [3]float32{t0[0] - t2[0], t0[1] - t2[1], t0[2] - t2[2]}
+
+	// Test 9 cross-product axes (3 edges × 3 box face normals).
+	// Each axis is edgeN × (1,0,0), edgeN × (0,1,0), edgeN × (0,0,1).
+	edges := [3][3]float32{e0, e1, e2}
+	for _, e := range edges {
+		for a := 0; a < 3; a++ {
+			// axis = e × unitAxis[a]
+			// For a=0 (X): axis = (0, -e[2], e[1])
+			// For a=1 (Y): axis = (e[2], 0, -e[0])
+			// For a=2 (Z): axis = (-e[1], e[0], 0)
+			b := (a + 1) % 3
+			c := (a + 2) % 3
+			// Project triangle vertices onto axis.
+			p0 := -e[c]*t0[b] + e[b]*t0[c]
+			p1 := -e[c]*t1[b] + e[b]*t1[c]
+			p2 := -e[c]*t2[b] + e[b]*t2[c]
+			minP := p0
+			maxP := p0
+			if p1 < minP {
+				minP = p1
+			}
+			if p1 > maxP {
+				maxP = p1
+			}
+			if p2 < minP {
+				minP = p2
+			}
+			if p2 > maxP {
+				maxP = p2
+			}
+			// Project box onto axis.
+			abs_ec := e[c]
+			if abs_ec < 0 {
+				abs_ec = -abs_ec
+			}
+			abs_eb := e[b]
+			if abs_eb < 0 {
+				abs_eb = -abs_eb
+			}
+			r := halfExtent[b]*abs_ec + halfExtent[c]*abs_eb
+			if minP > r || maxP < -r {
+				return false
+			}
+		}
+	}
+
+	// Test 3 box face normals (AABB axes).
+	// Use half-open interval [−half, +half) so a triangle exactly on the
+	// boundary between two cells is counted in exactly one of them.
+	for a := 0; a < 3; a++ {
+		minT := t0[a]
+		maxT := t0[a]
+		if t1[a] < minT {
+			minT = t1[a]
+		}
+		if t1[a] > maxT {
+			maxT = t1[a]
+		}
+		if t2[a] < minT {
+			minT = t2[a]
+		}
+		if t2[a] > maxT {
+			maxT = t2[a]
+		}
+		if minT >= halfExtent[a] || maxT < -halfExtent[a] {
+			return false
+		}
+	}
+
+	// Test triangle normal.
+	n := Cross3f(e0, e1)
+	d := Dot3(n, t0)
+	abs_nx := n[0]
+	if abs_nx < 0 {
+		abs_nx = -abs_nx
+	}
+	abs_ny := n[1]
+	if abs_ny < 0 {
+		abs_ny = -abs_ny
+	}
+	abs_nz := n[2]
+	if abs_nz < 0 {
+		abs_nz = -abs_nz
+	}
+	r := halfExtent[0]*abs_nx + halfExtent[1]*abs_ny + halfExtent[2]*abs_nz
+	if d > r || d < -r {
+		return false
+	}
+
+	return true
+}
+
 // ComputeBounds returns the min and max corners of a point set.
 func ComputeBounds(verts [][3]float32) ([3]float32, [3]float32) {
 	minV := verts[0]
