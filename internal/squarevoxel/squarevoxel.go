@@ -116,9 +116,13 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	// Proximity-based supplementary voxelization.
+	finishBar(bar, "Voxelized (z-ray)", fmt.Sprintf("%d cells", len(cells)), time.Since(tVoxelize))
+	tProximity := time.Now()
+	barProx := newBar(len(model.Faces), "  Proximity voxels")
 	proximitySet := make(map[voxel.CellKey]struct{})
 	proximityRadius := cellSize
 	for fi := range model.Faces {
+		barProx.Add(1)
 		f := model.Faces[fi]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
@@ -168,13 +172,24 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			}
 		}
 	}
+	finishBar(barProx, "Proximity candidates", fmt.Sprintf("%d cells", len(proximitySet)), time.Since(tProximity))
+
 	existingCells := make(map[voxel.CellKey]struct{}, len(cells))
 	for _, c := range cells {
 		existingCells[voxel.CellKey{Col: c.Col, Row: c.Row, Layer: c.Layer}] = struct{}{}
 	}
+	tColor := time.Now()
+	newCells := 0
+	for k := range proximitySet {
+		if _, exists := existingCells[k]; !exists {
+			newCells++
+		}
+	}
+	barColor := newBar(newCells, "  Coloring new cells")
 	proximityAdded := 0
 	for k := range proximitySet {
 		if _, exists := existingCells[k]; !exists {
+			barColor.Add(1)
 			cx := minV[0] + float32(k.Col)*cellSize
 			cy := minV[1] + float32(k.Row)*cellSize
 			cz := minV[2] + float32(k.Layer)*layerH
@@ -194,7 +209,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	cells = voxel.DeduplicateCells(cells)
-	finishBar(bar, "Voxelized", fmt.Sprintf("%d cells", len(cells)), time.Since(tVoxelize))
+	finishBar(barColor, "Colored new cells", fmt.Sprintf("%d added, %d total cells", proximityAdded, len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
 		return nil, nil, fmt.Errorf("no active cells found")
 	}
@@ -358,7 +373,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 
 	// 4. Compute SDF at cube vertices.
-	tSDF := time.Now()
+	tPrep := time.Now()
+	barPrep := newBar(-1, "  Preparing SDF")
 	searchRadius := cellSize * 3
 	shellThickness := layerH
 	pn := voxel.BuildPseudonormals(model)
@@ -407,7 +423,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	for pos, idx := range vertIndex {
 		uniqueVerts[idx] = pos
 	}
+	finishBar(barPrep, "Prepared SDF", fmt.Sprintf("%d vertices", len(uniqueVerts)), time.Since(tPrep))
 
+	tSDF := time.Now()
 	nWorkers := runtime.NumCPU()
 	sdfValues := make([]float32, len(uniqueVerts))
 	barSDF := newBar(len(uniqueVerts), "  Computing SDF")
