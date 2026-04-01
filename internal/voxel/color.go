@@ -224,10 +224,16 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		matAlpha = model.FaceAlpha[bestTri]
 	}
 
+	// Get material base color.
+	bc := [4]uint8{255, 255, 255, 255}
+	if model.FaceBaseColor != nil {
+		bc = model.FaceBaseColor[bestTri]
+	}
+
 	texIdx := model.FaceTextureIdx[bestTri]
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
-		a := uint8(ClampF(matAlpha*255+0.5, 0, 255))
-		return [4]uint8{128, 128, 128, a}
+		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+		return [4]uint8{bc[0], bc[1], bc[2], a}
 	}
 
 	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
@@ -240,7 +246,13 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
 
 	rgba := BilinearSample(model.Textures[texIdx], u, v)
-	// Multiply texture alpha with material alpha.
+	// Alpha-blend texture sample over material base color.
+	texA := float32(rgba[3]) / 255
+	rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
+	rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
+	rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
+	rgba[3] = bc[3] // use base color alpha (texture alpha already composited)
+	// Multiply with material alpha.
 	if matAlpha < 1.0 {
 		combined := float32(rgba[3]) * matAlpha
 		rgba[3] = uint8(ClampF(combined+0.5, 0, 255))
