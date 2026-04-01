@@ -27,7 +27,8 @@ type Config struct {
 	WallThickness  float32 // shell thickness in mm (default 3.0)
 	NoMerge        bool
 	Infill         bool // generate infill object inside the shell
-	MinFeatureSize float32 // minimum feature size in mm (0 to disable)
+	MinFeatureSize float32  // minimum feature size in mm (0 to disable)
+	ColorSnap      float64 // shift cell colors toward nearest palette color by this many ΔE (0 to disable)
 }
 
 var isTTY = term.IsTerminal(int(os.Stderr.Fd()))
@@ -426,6 +427,10 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 	if len(pal) == 0 {
 		return nil, nil, fmt.Errorf("no palette colors")
+	}
+	if cfg.ColorSnap > 0 {
+		voxel.SnapColors(cells, pal, cfg.ColorSnap)
+		fmt.Printf("  Snapped cell colors toward palette by ΔE %.1f\n", cfg.ColorSnap)
 	}
 	tDither := time.Now()
 	barDither := newBar(-1, fmt.Sprintf("  Dithering (%s)", ditherMode))

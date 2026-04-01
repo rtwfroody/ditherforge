@@ -33,6 +33,7 @@ type Args struct {
 	Infill         bool     `arg:"--infill" help:"Generate infill object inside the shell"`
 	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
 	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)"`
+	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)"`
 }
 
 func (Args) Description() string {
@@ -155,6 +156,7 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 	if args.MinFeatureSize != nil {
 		cfg.MinFeatureSize = *args.MinFeatureSize
 	}
+	cfg.ColorSnap = args.ColorSnap
 
 	fmt.Println("Remeshing...")
 	meshParts, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)

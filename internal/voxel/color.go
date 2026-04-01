@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 )
@@ -431,6 +432,65 @@ func DitherCellsDizzy(cells []ActiveCell, pal [][3]uint8) []int32 {
 	}
 
 	return assignments
+}
+
+// SnapColors moves each cell's color toward its nearest palette color by up
+// to deltaE units (standard CIE76 ΔE) in CIELAB space. If the cell is
+// already closer than deltaE, it snaps to the palette color exactly.
+func SnapColors(cells []ActiveCell, pal [][3]uint8, deltaE float64) {
+	// go-colorful uses Lab values scaled by 1/100 relative to standard CIELAB,
+	// so distances are also 1/100 of standard ΔE.
+	scaledDE := deltaE / 100.0
+
+	// Convert palette to Lab.
+	palLab := make([][3]float64, len(pal))
+	for i, p := range pal {
+		c := colorful.Color{
+			R: float64(p[0]) / 255.0,
+			G: float64(p[1]) / 255.0,
+			B: float64(p[2]) / 255.0,
+		}
+		palLab[i][0], palLab[i][1], palLab[i][2] = c.Lab()
+	}
+
+	for i := range cells {
+		cc := cells[i].Color
+		c := colorful.Color{
+			R: float64(cc[0]) / 255.0,
+			G: float64(cc[1]) / 255.0,
+			B: float64(cc[2]) / 255.0,
+		}
+		cL, cA, cB := c.Lab()
+
+		// Find nearest palette color in Lab.
+		bestIdx := 0
+		bestDist := math.MaxFloat64
+		for pi, pl := range palLab {
+			dL := cL - pl[0]
+			dA := cA - pl[1]
+			dB := cB - pl[2]
+			d := math.Sqrt(dL*dL + dA*dA + dB*dB)
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+
+		if bestDist <= scaledDE {
+			cells[i].Color = pal[bestIdx]
+		} else {
+			t := scaledDE / bestDist
+			nL := cL + t*(palLab[bestIdx][0]-cL)
+			nA := cA + t*(palLab[bestIdx][1]-cA)
+			nB := cB + t*(palLab[bestIdx][2]-cB)
+			nc := colorful.Lab(nL, nA, nB).Clamped()
+			cells[i].Color = [3]uint8{
+				uint8(math.Round(nc.R * 255)),
+				uint8(math.Round(nc.G * 255)),
+				uint8(math.Round(nc.B * 255)),
+			}
+		}
+	}
 }
 
 // AssignColors assigns palette indices without dithering.
