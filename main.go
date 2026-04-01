@@ -32,6 +32,7 @@ type Args struct {
 	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
 	Infill         bool     `arg:"--infill" help:"Generate infill object inside the shell"`
 	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
+	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)"`
 }
 
 func (Args) Description() string {
@@ -149,6 +150,10 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		LayerHeight:    args.LayerHeight,
 		NoMerge:        args.NoMerge,
 		Infill:         args.Infill || args.InfillOnly,
+		MinFeatureSize: -1, // use default (cellSize)
+	}
+	if args.MinFeatureSize != nil {
+		cfg.MinFeatureSize = *args.MinFeatureSize
 	}
 
 	fmt.Println("Remeshing...")

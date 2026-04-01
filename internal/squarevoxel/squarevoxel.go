@@ -27,6 +27,7 @@ type Config struct {
 	WallThickness  float32 // shell thickness in mm (default 3.0)
 	NoMerge        bool
 	Infill         bool // generate infill object inside the shell
+	MinFeatureSize float32 // minimum feature size in mm (0 to disable)
 }
 
 var isTTY = term.IsTerminal(int(os.Stderr.Fd()))
@@ -438,6 +439,27 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		assignments = voxel.AssignColors(cells, pal)
 	}
 	finishBar(barDither, fmt.Sprintf("Dithered (%s)", ditherMode), fmt.Sprintf("%d cells", len(cells)), time.Since(tDither))
+
+	// 5b. Enforce minimum feature thickness by clamping SDF.
+	// For all interior points where |SDF| < t/2, clamp to -t/2. This pushes
+	// the zero-level-set outward at thin regions while preserving thick
+	// geometry exactly.
+	minFeature := cfg.MinFeatureSize
+	if minFeature < 0 {
+		minFeature = cellSize
+	}
+	if minFeature > 0 {
+		tThin := time.Now()
+		halfT := minFeature / 2
+		clamped := 0
+		for i, sdf := range sdfValues {
+			if sdf < 0 && sdf > -halfT {
+				sdfValues[i] = -halfT
+				clamped++
+			}
+		}
+		fmt.Printf("  Min feature size %.2fmm: %d corners clamped in %.1fs\n", minFeature, clamped, time.Since(tThin).Seconds())
+	}
 
 	// 6. Marching cubes isosurface extraction for smooth outer surface.
 	tMC := time.Now()
