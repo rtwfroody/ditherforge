@@ -21,6 +21,7 @@ type LoadedModel struct {
 	Textures       []image.Image
 	FaceTextureIdx []int32       // index into Textures; len(Textures) is sentinel for no-texture faces
 	FaceAlpha      []float32     // per-face material alpha (0=transparent, 1=opaque); nil if all opaque
+	FaceBaseColor  [][4]uint8    // per-face material base color (RGBA)
 	NoTextureMask  []bool        // nil if no texture-less faces; true = use palette[0]
 	FaceMeshIdx    []int32       // which original mesh each face belongs to
 	NumMeshes      int           // total number of original meshes
@@ -115,7 +116,8 @@ type primitiveData struct {
 	indices    []uint32
 	textureIdx int     // index into accumulated texture list; -1 if no texture
 	meshIdx    int     // which GLTF mesh this primitive belongs to
-	matAlpha   float32 // material-level alpha (from BaseColorFactor + AlphaMode)
+	matAlpha   float32  // material-level alpha (from BaseColorFactor + AlphaMode)
+	baseColor  [4]uint8 // material base color factor (RGBA, 0-255)
 }
 
 // LoadGLB loads a GLB file and returns a LoadedModel.
@@ -234,11 +236,21 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 
 				texIdx, hasTexture := resolveTexture(prim.Material)
 				alpha := float32(1.0)
+				baseColor := [4]uint8{255, 255, 255, 255}
 				if prim.Material != nil {
 					mat := doc.Materials[*prim.Material]
 					if mat.AlphaMode == gltf.AlphaBlend {
 						if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.BaseColorFactor != nil {
 							alpha = float32(pbr.BaseColorFactor[3])
+						}
+					}
+					if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.BaseColorFactor != nil {
+						bc := pbr.BaseColorFactor
+						baseColor = [4]uint8{
+							uint8(bc[0] * 255),
+							uint8(bc[1] * 255),
+							uint8(bc[2] * 255),
+							uint8(bc[3] * 255),
 						}
 					}
 				}
@@ -249,6 +261,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 					textureIdx: texIdx,
 					meshIdx:    meshIdx,
 					matAlpha:   alpha,
+					baseColor:  baseColor,
 				}
 				if hasTexture {
 					texturedPrims = append(texturedPrims, pd)
@@ -289,6 +302,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	var allUVs [][2]float32
 	var allFaceTex []int32
 	var allFaceAlpha []float32
+	var allFaceBaseColor [][4]uint8
 	var allFaceMesh []int32
 	hasNonOpaque := false
 
@@ -304,6 +318,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 			})
 			allFaceTex = append(allFaceTex, texIdx)
 			allFaceAlpha = append(allFaceAlpha, pd.matAlpha)
+			allFaceBaseColor = append(allFaceBaseColor, pd.baseColor)
 			allFaceMesh = append(allFaceMesh, int32(pd.meshIdx))
 			if pd.matAlpha < 1.0 {
 				hasNonOpaque = true
@@ -383,6 +398,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		Textures:       texList,
 		FaceTextureIdx: allFaceTex,
 		FaceAlpha:      faceAlpha,
+		FaceBaseColor:  allFaceBaseColor,
 		NoTextureMask:  noTextureMask,
 		FaceMeshIdx:    allFaceMesh,
 		NumMeshes:      meshCounter,

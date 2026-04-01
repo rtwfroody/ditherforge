@@ -461,10 +461,11 @@ const (
 
 func inputColorFn(model *loader.LoadedModel) func(faceIdx int, baryU, baryV float64) [3]uint8 {
 	return func(faceIdx int, baryU, baryV float64) [3]uint8 {
+		bc := model.FaceBaseColor[faceIdx]
 		f := model.Faces[faceIdx]
 		texIdx := int(model.FaceTextureIdx[faceIdx])
 		if texIdx >= len(model.Textures) {
-			return [3]uint8{128, 128, 128}
+			return [3]uint8{bc[0], bc[1], bc[2]}
 		}
 		uv0 := model.UVs[f[0]]
 		uv1 := model.UVs[f[1]]
@@ -473,7 +474,12 @@ func inputColorFn(model *loader.LoadedModel) func(faceIdx int, baryU, baryV floa
 		u := w*uv0[0] + float32(baryU)*uv1[0] + float32(baryV)*uv2[0]
 		v := w*uv0[1] + float32(baryU)*uv1[1] + float32(baryV)*uv2[1]
 		rgba := voxel.BilinearSample(model.Textures[texIdx], u, v)
-		return [3]uint8{rgba[0], rgba[1], rgba[2]}
+		// Alpha-blend texture sample over the material base color.
+		a := float32(rgba[3]) / 255
+		blend := func(tex, base uint8) uint8 {
+			return uint8(float32(tex)*a + float32(base)*(1-a))
+		}
+		return [3]uint8{blend(rgba[0], bc[0]), blend(rgba[1], bc[1]), blend(rgba[2], bc[2])}
 	}
 }
 
