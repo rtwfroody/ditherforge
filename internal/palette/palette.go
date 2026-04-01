@@ -303,10 +303,10 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 }
 
 // SelectFromInventory picks the best n colors from inventory for the given
-// cell colors. Uses hull-based scoring that measures distance to the convex
-// hull of each palette subset, properly accounting for dithering's ability
-// to mix colors.
-func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int) []InventoryEntry {
+// cell colors. When dithering is true, uses hull-based scoring that accounts
+// for dithering's ability to mix colors. When false, uses nearest-color
+// scoring that minimizes the error when each cell gets exactly one color.
+func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, dithering bool) []InventoryEntry {
 	if n >= len(inventory) {
 		return inventory
 	}
@@ -325,7 +325,12 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
 
-	scorer := weightedHullScore
+	var scorer scoreFunc
+	if dithering {
+		scorer = weightedHullScore
+	} else {
+		scorer = weightedNearestScore
+	}
 
 	var bestSubset []int
 	if combinationsCount(len(inventory), n) <= 50000 {
@@ -380,6 +385,22 @@ func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLab
 		hullDist := distToConvexHull(s.Lab, verts)
 		nearDist := nearestVertexDist(s.Lab, verts)
 		d := hullDist + ditherSpreadFactor*nearDist
+		total += d * d * float64(s.Count)
+	}
+	return total
+}
+
+// weightedNearestScore computes total weighted squared distance from each
+// sample to the nearest palette color. Used when dithering is disabled,
+// since each cell gets exactly one color.
+func weightedNearestScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
+	verts := make([][3]float64, len(indices))
+	for i, idx := range indices {
+		verts[i] = invLab[idx]
+	}
+	total := 0.0
+	for _, s := range samples {
+		d := nearestVertexDist(s.Lab, verts)
 		total += d * d * float64(s.Count)
 	}
 	return total

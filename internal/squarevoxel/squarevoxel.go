@@ -420,7 +420,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	uniqueVerts = nil // free; only vertIndex+sdfValues needed from here
 
 	// 5. Resolve palette and assign / dither.
-	pal, palDisplay := voxel.ResolvePalette(cells, pcfg)
+	pal, palDisplay := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
 	if palDisplay != "" {
 		fmt.Printf("%s\n", palDisplay)
 	}

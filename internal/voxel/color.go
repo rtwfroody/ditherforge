@@ -13,8 +13,10 @@ import (
 )
 
 // ResolvePalette determines the final palette from cells and config.
+// dithering indicates whether dithering will be used, which affects
+// inventory color selection strategy.
 // Returns the palette RGB values and a display string for logging.
-func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string) {
+func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, string) {
 	if pcfg.Palette != nil {
 		return pcfg.Palette, ""
 	}
@@ -26,7 +28,7 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig) ([][3]uint8, string)
 
 	if len(pcfg.Inventory) > 0 {
 		fmt.Printf("  Selecting %d colors from %d-color inventory...", pcfg.InventoryN, len(pcfg.Inventory))
-		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN)
+		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN, dithering)
 		pal := make([][3]uint8, len(selected))
 		strs := make([]string, len(selected))
 		for i, e := range selected {
