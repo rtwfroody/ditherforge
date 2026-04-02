@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -15,25 +17,27 @@ import (
 )
 
 // Args defines the CLI arguments.
+// Fields tagged cache:"skip" do not affect the voxelization/SDF cache.
+// All other fields are included in the cache key by default.
 type Args struct {
 	Input          string   `arg:"positional,required" help:"Input .glb file"`
-	Palette        string   `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
-	AutoPalette    *int     `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
+	Palette        string   `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue" cache:"skip"`
+	AutoPalette    *int     `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface" cache:"skip"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
-	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
+	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file" cache:"skip"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
-	InventoryFile  string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
-	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
-	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy"`
-	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
+	InventoryFile  string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)" cache:"skip"`
+	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)" cache:"skip"`
+	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy" cache:"skip"`
+	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging" cache:"skip"`
 	Size           *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
-	Force          bool     `arg:"--force" help:"Bypass extent size check"`
-	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
+	Force          bool     `arg:"--force" help:"Bypass extent size check" cache:"skip"`
+	Stats          bool     `arg:"--stats" help:"Print face counts per material" cache:"skip"`
 	Infill         bool     `arg:"--infill" help:"Generate infill object inside the shell"`
-	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)"`
-	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)"`
-	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)"`
+	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)" cache:"skip"`
+	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)" cache:"skip"`
+	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)" cache:"skip"`
 }
 
 func (Args) Description() string {
@@ -158,10 +162,19 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 	}
 	cfg.ColorSnap = args.ColorSnap
 
+	cacheOpts := squarevoxel.CacheOptions{
+		InputPath:  args.Input,
+		ConfigHash: argsConfigHash(args),
+	}
+	cached := squarevoxel.LoadCache(cacheOpts)
+
 	fmt.Println("Remeshing...")
-	meshParts, paletteRGB, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither)
+	meshParts, paletteRGB, newCache, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither, cached)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
+	}
+	if newCache != nil {
+		squarevoxel.SaveCache(newCache, cacheOpts)
 	}
 
 	if args.Stats {
@@ -268,6 +281,38 @@ func printStats(meshParts []voxel.MeshPart, paletteRGB [][3]uint8) {
 		}
 		fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
 	}
+}
+
+// argsConfigHash returns a SHA-256 hash of all Args fields that affect the
+// voxelization cache. Fields tagged cache:"skip" are excluded. The app version
+// is included so cache is invalidated on upgrades.
+func argsConfigHash(args Args) [32]byte {
+	h := sha256.New()
+	fmt.Fprintf(h, "version=%s\n", Args{}.Version())
+
+	v := reflect.ValueOf(args)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.Tag.Get("cache") == "skip" {
+			continue
+		}
+		fv := v.Field(i)
+		// Dereference pointers so we hash the value, not the address.
+		if fv.Kind() == reflect.Ptr {
+			if fv.IsNil() {
+				fmt.Fprintf(h, "%s=<nil>\n", field.Name)
+			} else {
+				fmt.Fprintf(h, "%s=%v\n", field.Name, fv.Elem().Interface())
+			}
+		} else {
+			fmt.Fprintf(h, "%s=%v\n", field.Name, fv.Interface())
+		}
+	}
+
+	var hash [32]byte
+	copy(hash[:], h.Sum(nil))
+	return hash
 }
 
 func main() {

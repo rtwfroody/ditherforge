@@ -55,10 +55,12 @@ func finishBar(bar *progressbar.ProgressBar, description string, detail string, 
 }
 
 // Remesh generates a square voxel shell of the input model using marching cubes.
-// Returns mesh parts (shell + optional infill), the palette, and an error.
-func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) ([]voxel.MeshPart, [][3]uint8, error) {
+// If cached is non-nil, skips voxelization and SDF computation.
+// Returns mesh parts, palette, cache data (for saving), and an error.
+// Cache data is nil when a cache hit was used (no new data to save).
+func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string, cached *CacheData) ([]voxel.MeshPart, [][3]uint8, *CacheData, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, nil, fmt.Errorf("empty model")
+		return nil, nil, nil, fmt.Errorf("empty model")
 	}
 
 	// Cell edge length. At 1.0× nozzle diameter the slicer can't fill the
@@ -67,8 +69,37 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	cellSize := cfg.NozzleDiameter * 1.275
 	layerH := cfg.LayerHeight
 
+	var cells []voxel.ActiveCell
+	var cellAssignMap map[voxel.CellKey]int
+	var shellExpandedSet map[voxel.CellKey]struct{}
+	var infillSet map[voxel.CellKey]struct{}
+	var sdfValues []float32
+	var vertIndex map[int32]int32
+	var cornerStride [2]int32
+	var minV [3]float32
+	var nCols, nRows, nLayers int
+
+	if cached != nil {
+		cells = cached.Cells
+		cellAssignMap = cached.CellAssignMap
+		shellExpandedSet = cellKeysToMap(cached.ShellExpanded)
+		infillSet = cellKeysToMap(cached.InfillCells)
+		sdfValues = cached.SDFValues
+		vertIndex = cached.VertIndex
+		cornerStride = cached.CornerStride
+		minV = cached.MinV
+		cellSize = cached.CellSize
+		layerH = cached.LayerH
+		nCols = cached.NCols
+		nRows = cached.NRows
+		nLayers = cached.NLayers
+	}
+
+	if cached == nil {
+
 	// 1. Bounding box.
-	minV, maxV := voxel.ComputeBounds(model.Vertices)
+	var maxV [3]float32
+	minV, maxV = voxel.ComputeBounds(model.Vertices)
 	modelMin, modelMax := minV, maxV
 	xyPad := cellSize * 2
 	zPad := layerH * 2
@@ -79,9 +110,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	maxV[1] += xyPad
 	maxV[2] += zPad
 
-	nCols := int(math.Ceil(float64(maxV[0]-minV[0])/float64(cellSize))) + 1
-	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
-	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
+	nCols = int(math.Ceil(float64(maxV[0]-minV[0])/float64(cellSize))) + 1
+	nRows = int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
+	nLayers = int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
 
 	// 2. Spatial index.
 	si := voxel.NewSpatialIndex(model, cellSize*2)
@@ -149,7 +180,6 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	tColor := time.Now()
 	colorBuf := voxel.NewSearchBuf(len(model.Faces))
 	colorRadius := cellSize * 3
-	var cells []voxel.ActiveCell
 	barColor := newBar(len(cellSet), "  Coloring cells")
 	for k := range cellSet {
 		barColor.Add(1)
@@ -170,11 +200,11 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 	finishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
-		return nil, nil, fmt.Errorf("no active cells found")
+		return nil, nil, nil, fmt.Errorf("no active cells found")
 	}
 
 	// Build cell lookup maps.
-	cellAssignMap := make(map[voxel.CellKey]int, len(cells))
+	cellAssignMap = make(map[voxel.CellKey]int, len(cells))
 	activeSet := make(map[voxel.CellKey]struct{}, len(cells))
 	for i, c := range cells {
 		k := voxel.CellKey{Col: c.Col, Row: c.Row, Layer: c.Layer}
@@ -186,13 +216,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	if wallThickness <= 0 {
 		wallThickness = 3.0
 	}
-	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
-
 	// Build the expanded cell set for marching cubes, and optionally the
 	// infill cell set for a separate infill object.
-	var shellExpandedSet map[voxel.CellKey]struct{}
-	var infillSet map[voxel.CellKey]struct{}
-
+	lateralOffs := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
 	if cfg.Infill {
 		// Find all interior cells using Z-ray parity per column.
 		shellRings := int(math.Ceil(float64(wallThickness) / float64(cellSize)))
@@ -323,7 +349,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 			for _, k := range snapshot {
 				shellExpandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer - 1}] = struct{}{}
 				shellExpandedSet[voxel.CellKey{Col: k.Col, Row: k.Row, Layer: k.Layer + 1}] = struct{}{}
-				for _, off := range lateralOffsets {
+				for _, off := range lateralOffs {
 					shellExpandedSet[voxel.CellKey{Col: k.Col + off[0], Row: k.Row + off[1], Layer: k.Layer}] = struct{}{}
 				}
 			}
@@ -341,30 +367,16 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	// Corner grid: each cell (Col, Row, Layer) has 8 corners at integer
 	// offsets (Col+di, Row+dj, Layer+dk) where di, dj, dk ∈ {0, 1}.
 	// The corner grid has (nCols+1) × (nRows+1) × (nLayers+1) positions.
-	cornerStride := [2]int32{int32(nCols + 1), int32((nCols + 1) * (nRows + 1))}
-	cornerIdx := func(ci, cj, ck int) int32 {
-		return int32(ci) + int32(cj)*cornerStride[0] + int32(ck)*cornerStride[1]
-	}
-	cornerPos := func(ci, cj, ck int) [3]float32 {
-		return [3]float32{
-			minV[0] + (float32(ci)-0.5)*cellSize,
-			minV[1] + (float32(cj)-0.5)*cellSize,
-			minV[2] + (float32(ck)-0.5)*layerH,
-		}
-	}
-	// Integer offsets for the 8 cube corners relative to the cell.
-	// Corner numbering matches the marching cubes table:
-	//   0: (0,0,0)  1: (1,0,0)  2: (1,1,0)  3: (0,1,0)
-	//   4: (0,0,1)  5: (1,0,1)  6: (1,1,1)  7: (0,1,1)
-	cornerOffsets := [8][3]int{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
-		{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}
+	cornerStride = [2]int32{int32(nCols + 1), int32((nCols + 1) * (nRows + 1))}
 
 	// Build a sparse map from corner index to SDF array index.
-	vertIndex := make(map[int32]int32, len(shellExpandedSet)*4)
+	coOff := [8][3]int{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+		{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}
+	vertIndex = make(map[int32]int32, len(shellExpandedSet)*4)
 	for k := range shellExpandedSet {
-		for _, off := range cornerOffsets {
+		for _, off := range coOff {
 			ci, cj, ck := k.Col+off[0], k.Row+off[1], k.Layer+off[2]
-			idx := cornerIdx(ci, cj, ck)
+			idx := int32(ci) + int32(cj)*cornerStride[0] + int32(ck)*cornerStride[1]
 			if _, ok := vertIndex[idx]; !ok {
 				vertIndex[idx] = int32(len(vertIndex))
 			}
@@ -376,13 +388,17 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		ci := gridIdx % cornerStride[0]
 		cj := (gridIdx / cornerStride[0]) % int32(nRows+1)
 		ck := gridIdx / cornerStride[1]
-		uniqueVerts[sdfIdx] = cornerPos(int(ci), int(cj), int(ck))
+		uniqueVerts[sdfIdx] = [3]float32{
+			minV[0] + (float32(ci)-0.5)*cellSize,
+			minV[1] + (float32(cj)-0.5)*cellSize,
+			minV[2] + (float32(ck)-0.5)*layerH,
+		}
 	}
 	finishBar(barPrep, "Prepared SDF", fmt.Sprintf("%d vertices", len(uniqueVerts)), time.Since(tPrep))
 
 	tSDF := time.Now()
 	nWorkers := runtime.NumCPU()
-	sdfValues := make([]float32, len(uniqueVerts))
+	sdfValues = make([]float32, len(uniqueVerts))
 	barSDF := newBar(len(uniqueVerts), "  Computing SDF")
 	var sdfProgress atomic.Int64
 	var wg sync.WaitGroup
@@ -420,13 +436,50 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	finishBar(barSDF, "Computed SDF", fmt.Sprintf("%d vertices", len(vertIndex)), time.Since(tSDF))
 	uniqueVerts = nil // free; only vertIndex+sdfValues needed from here
 
+	} // end if cached == nil
+
+	// Build cache data to return for saving (nil if we used cached input).
+	var newCacheData *CacheData
+	if cached == nil {
+		newCacheData = &CacheData{
+			Cells:         cells,
+			CellAssignMap: cellAssignMap,
+			ShellExpanded: cellKeysFromMap(shellExpandedSet),
+			InfillCells:   cellKeysFromMap(infillSet),
+			SDFValues:     sdfValues,
+			VertIndex:     vertIndex,
+			CornerStride:  cornerStride,
+			MinV:          minV,
+			CellSize:      cellSize,
+			LayerH:        layerH,
+			NCols:         nCols,
+			NRows:         nRows,
+			NLayers:       nLayers,
+		}
+	}
+
+	// Derived constants used by marching cubes (computed from cached or fresh state).
+	lateralOffsets := [4][2]int{{+1, 0}, {-1, 0}, {0, +1}, {0, -1}}
+	cornerOffsets := [8][3]int{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+		{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}
+	cornerIdx := func(ci, cj, ck int) int32 {
+		return int32(ci) + int32(cj)*cornerStride[0] + int32(ck)*cornerStride[1]
+	}
+	cornerPos := func(ci, cj, ck int) [3]float32 {
+		return [3]float32{
+			minV[0] + (float32(ci)-0.5)*cellSize,
+			minV[1] + (float32(cj)-0.5)*cellSize,
+			minV[2] + (float32(ck)-0.5)*layerH,
+		}
+	}
+
 	// 5. Resolve palette and assign / dither.
 	pal, palDisplay := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
 	if palDisplay != "" {
 		fmt.Printf("%s\n", palDisplay)
 	}
 	if len(pal) == 0 {
-		return nil, nil, fmt.Errorf("no palette colors")
+		return nil, nil, nil, fmt.Errorf("no palette colors")
 	}
 	if cfg.ColorSnap > 0 {
 		voxel.SnapColors(cells, pal, cfg.ColorSnap)
@@ -650,5 +703,5 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		})
 	}
 
-	return parts, pal, nil
+	return parts, pal, newCacheData, nil
 }
