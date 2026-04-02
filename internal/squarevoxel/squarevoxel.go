@@ -491,8 +491,6 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	switch ditherMode {
 	case "dizzy":
 		assignments = voxel.DitherCellsDizzy(cells, pal)
-	case "fs":
-		assignments = voxel.DitherCellsFS(cells, pal)
 	default:
 		assignments = voxel.AssignColors(cells, pal)
 	}

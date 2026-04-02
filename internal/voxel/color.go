@@ -5,7 +5,6 @@ import (
 	"image"
 	"math"
 	"math/rand"
-	"sort"
 	"strings"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -262,62 +261,6 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	}
 	return rgba
 }
-
-// DitherCellsFS applies Floyd-Steinberg error diffusion over cells in spatial order.
-func DitherCellsFS(cells []ActiveCell, pal [][3]uint8) []int32 {
-	order := make([]int, len(cells))
-	for i := range order {
-		order[i] = i
-	}
-	sort.Slice(order, func(a, b int) bool {
-		ha, hb := cells[order[a]], cells[order[b]]
-		if ha.Layer != hb.Layer {
-			return ha.Layer < hb.Layer
-		}
-		if ha.Row != hb.Row {
-			return ha.Row < hb.Row
-		}
-		return ha.Col < hb.Col
-	})
-
-	assignments := make([]int32, len(cells))
-	errBuf := make([][3]float32, len(cells)+4)
-
-	for i, idx := range order {
-		r := ClampF(float32(cells[idx].Color[0])+errBuf[i][0], 0, 255)
-		g := ClampF(float32(cells[idx].Color[1])+errBuf[i][1], 0, 255)
-		b := ClampF(float32(cells[idx].Color[2])+errBuf[i][2], 0, 255)
-
-		bestIdx := 0
-		bestDist := float32(math.MaxFloat32)
-		for pi, p := range pal {
-			dr := r - float32(p[0])
-			dg := g - float32(p[1])
-			db := b - float32(p[2])
-			d := dr*dr + dg*dg + db*db
-			if d < bestDist {
-				bestDist = d
-				bestIdx = pi
-			}
-		}
-		assignments[idx] = int32(bestIdx)
-
-		chosen := pal[bestIdx]
-		eR := r - float32(chosen[0])
-		eG := g - float32(chosen[1])
-		eB := b - float32(chosen[2])
-
-		weights := [4]float32{7.0 / 16.0, 5.0 / 16.0, 3.0 / 16.0, 1.0 / 16.0}
-		for k := 0; k < 4 && i+1+k < len(cells); k++ {
-			errBuf[i+1+k][0] += eR * weights[k]
-			errBuf[i+1+k][1] += eG * weights[k]
-			errBuf[i+1+k][2] += eB * weights[k]
-		}
-	}
-
-	return assignments
-}
-
 
 // neighbor holds a precomputed neighbor reference with its diffusion weight.
 type neighbor struct {

@@ -29,7 +29,7 @@ type Args struct {
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
 	InventoryFile  string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)" cache:"skip"`
 	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)" cache:"skip"`
-	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, fs, dizzy" cache:"skip"`
+	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, dizzy" cache:"skip"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging" cache:"skip"`
 	Size           *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force          bool     `arg:"--force" help:"Bypass extent size check" cache:"skip"`
@@ -108,9 +108,9 @@ func run() error {
 		return fmt.Errorf("--inventory requires --inventory-file")
 	}
 	switch args.Dither {
-	case "none", "fs", "dizzy":
+	case "none", "dizzy":
 	default:
-		return fmt.Errorf("invalid --dither %q: must be none, fs, or dizzy", args.Dither)
+		return fmt.Errorf("invalid --dither %q: must be none or dizzy", args.Dither)
 	}
 	// Build palette config. For inventory and auto-palette modes, the actual
 	// palette is determined after voxelization using real cell colors.
