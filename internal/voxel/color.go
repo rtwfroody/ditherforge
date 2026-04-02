@@ -118,19 +118,30 @@ func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	}
 }
 
-// FaceAlpha returns the effective alpha for a face, sampling the texture at
-// the centroid UV and combining with material alpha and base color alpha.
-func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
-	matAlpha := float32(1.0)
+// faceMaterial returns material-level alpha, base color, and texture index for a face.
+func faceMaterial(faceIdx int, model *loader.LoadedModel) (matAlpha float32, bc [4]uint8, texIdx int32) {
+	matAlpha = 1.0
 	if model.FaceAlpha != nil {
 		matAlpha = model.FaceAlpha[faceIdx]
 	}
-	bc := [4]uint8{255, 255, 255, 255}
+	bc = [4]uint8{255, 255, 255, 255}
 	if model.FaceBaseColor != nil {
 		bc = model.FaceBaseColor[faceIdx]
 	}
+	texIdx = -1
+	if model.FaceTextureIdx != nil {
+		texIdx = model.FaceTextureIdx[faceIdx]
+	}
+	return
+}
 
-	texIdx := model.FaceTextureIdx[faceIdx]
+// FaceAlpha returns the effective alpha for a face, sampling the texture at
+// the centroid UV and combining with material alpha and base color alpha.
+// Note: centroid sampling is an approximation; large triangles spanning
+// both opaque and transparent texture regions may be misclassified.
+func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
+	matAlpha, bc, texIdx := faceMaterial(faceIdx, model)
+
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
 		return uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
 	}
@@ -250,19 +261,8 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		return [4]uint8{128, 128, 128, 255}
 	}
 
-	// Material-level alpha (from AlphaMode + BaseColorFactor).
-	matAlpha := float32(1.0)
-	if model.FaceAlpha != nil {
-		matAlpha = model.FaceAlpha[bestTri]
-	}
+	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
 
-	// Get material base color.
-	bc := [4]uint8{255, 255, 255, 255}
-	if model.FaceBaseColor != nil {
-		bc = model.FaceBaseColor[bestTri]
-	}
-
-	texIdx := model.FaceTextureIdx[bestTri]
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
 		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
 		return [4]uint8{bc[0], bc[1], bc[2], a}
@@ -283,12 +283,8 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
 	rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
 	rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
-	rgba[3] = bc[3] // use base color alpha (texture alpha already composited)
-	// Multiply with material alpha.
-	if matAlpha < 1.0 {
-		combined := float32(rgba[3]) * matAlpha
-		rgba[3] = uint8(ClampF(combined+0.5, 0, 255))
-	}
+	// Combine texture alpha, base color alpha, and material alpha.
+	rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
 	return rgba
 }
 
