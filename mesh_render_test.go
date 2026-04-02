@@ -371,9 +371,9 @@ func TestMeshRender(t *testing.T) {
 				}
 				depthP95 := percentile(depthDiffs, 95)
 
-				saveImage(t, outdir, fmt.Sprintf("%s_%s_input.png", name, v.name), inpImg, bounds)
-				saveImage(t, outdir, fmt.Sprintf("%s_%s_output.png", name, v.name), outImg, bounds)
-				saveDiffImage(t, outdir, fmt.Sprintf("%s_%s_diff.png", name, v.name),
+				saveImage(t, outdir, fmt.Sprintf("mesh-%s-%s-input.png", name, v.name), inpImg, bounds)
+				saveImage(t, outdir, fmt.Sprintf("mesh-%s-%s-output.png", name, v.name), outImg, bounds)
+				saveDiffImage(t, outdir, fmt.Sprintf("mesh-%s-%s-diff.png", name, v.name),
 					inpMask, outMask, overshoot, testResolution, testResolution)
 
 				passed := true
@@ -692,9 +692,9 @@ func TestTextureRender(t *testing.T) {
 					}
 				}
 
-				saveColorImage(t, outdir, fmt.Sprintf("%s_%s_input_color.png", name, v.name), inpImg)
-				saveColorImage(t, outdir, fmt.Sprintf("%s_%s_output_color.png", name, v.name), outImg)
-				saveDeltaEImage(t, outdir, fmt.Sprintf("%s_%s_color_diff.png", name, v.name),
+				saveColorImage(t, outdir, fmt.Sprintf("texture-%s-%s-input.png", name, v.name), inpImg)
+				saveColorImage(t, outdir, fmt.Sprintf("texture-%s-%s-output.png", name, v.name), outImg)
+				saveDeltaEImage(t, outdir, fmt.Sprintf("texture-%s-%s-diff.png", name, v.name),
 					blockDeltaEs, blocksX, blocksY, colorBlockSize)
 
 				if len(validDeltaEs) == 0 {
