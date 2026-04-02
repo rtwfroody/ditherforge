@@ -235,12 +235,17 @@ func ClipMeshByPatches(
 			}
 
 			ck := CentroidToCell(centroid, minV, cellSize, layerH)
-			assignment := int32(0)
+			var assignment int32
 			if pid, ok := patchMap[ck]; ok {
 				assignment = patchAssignment[pid]
 			} else {
-				// Fallback: search nearby cells.
-				assignment = nearestPatchAssignment(ck, patchMap, patchAssignment)
+				// Fallback: search nearby cells. If none found,
+				// the fragment is in a transparent region — drop it.
+				a, found := nearestPatchAssignment(ck, patchMap, patchAssignment)
+				if !found {
+					continue
+				}
+				assignment = a
 			}
 
 			vi0 := vd.GetVertex(tri[0])
@@ -267,9 +272,10 @@ func CentroidToCell(p [3]float32, minV [3]float32, cellSize, layerH float32) Cel
 
 // nearestPatchAssignment searches neighboring cells for the nearest occupied
 // cell and returns its palette assignment.
-func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignment []int32) int32 {
+func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignment []int32) (int32, bool) {
 	bestDist := int32(math.MaxInt32)
 	bestAssign := int32(0)
+	found := false
 	for r := 1; r <= 3; r++ {
 		if int32(r*r) > bestDist {
 			break // can't improve
@@ -285,12 +291,13 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 					if pid, ok := patchMap[nk]; ok {
 						bestDist = dist
 						bestAssign = patchAssignment[pid]
+						found = true
 					}
 				}
 			}
 		}
 	}
-	return bestAssign
+	return bestAssign, found
 }
 
 // triArea returns the area of a triangle defined by 3 vertices.
