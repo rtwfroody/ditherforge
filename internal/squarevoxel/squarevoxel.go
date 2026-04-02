@@ -39,7 +39,7 @@ func newBar(total int, description string) *progressbar.ProgressBar {
 		progressbar.OptionSetWidth(30),
 		progressbar.OptionShowCount(),
 		progressbar.OptionClearOnFinish(),
-		progressbar.OptionThrottle(500*time.Millisecond),
+		progressbar.OptionThrottle(100*time.Millisecond),
 	)
 }
 
