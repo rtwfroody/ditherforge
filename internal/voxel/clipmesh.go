@@ -173,6 +173,11 @@ func ClipMeshByPatches(
 	var assignments []int32
 
 	for fi := range model.Faces {
+		// Skip translucent faces.
+		if FaceAlpha(fi, model) < 128 {
+			continue
+		}
+
 		f := model.Faces[fi]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]

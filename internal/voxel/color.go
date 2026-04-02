@@ -118,6 +118,36 @@ func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	}
 }
 
+// FaceAlpha returns the effective alpha for a face, sampling the texture at
+// the centroid UV and combining with material alpha and base color alpha.
+func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
+	matAlpha := float32(1.0)
+	if model.FaceAlpha != nil {
+		matAlpha = model.FaceAlpha[faceIdx]
+	}
+	bc := [4]uint8{255, 255, 255, 255}
+	if model.FaceBaseColor != nil {
+		bc = model.FaceBaseColor[faceIdx]
+	}
+
+	texIdx := model.FaceTextureIdx[faceIdx]
+	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
+		return uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+	}
+
+	f := model.Faces[faceIdx]
+	uv0 := model.UVs[f[0]]
+	uv1 := model.UVs[f[1]]
+	uv2 := model.UVs[f[2]]
+	u := (uv0[0] + uv1[0] + uv2[0]) / 3
+	v := (uv0[1] + uv1[1] + uv2[1]) / 3
+
+	rgba := BilinearSample(model.Textures[texIdx], u, v)
+	texA := float32(rgba[3]) / 255
+	a := texA * float32(bc[3]) * matAlpha
+	return uint8(ClampF(a+0.5, 0, 255))
+}
+
 // SampleNearestColor finds the closest surface point to p, then samples the
 // texture color and alpha there. Returns RGBA.
 func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) [4]uint8 {
