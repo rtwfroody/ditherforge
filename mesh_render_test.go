@@ -33,8 +33,8 @@ const (
 	maxExtentMM        = float32(50)
 	testResolution     = 512
 	marginFrac         = 0.05
-	minCoverage        = 0.95
-	maxOvershoot       = 0.005
+	// Only ever tighten this requirement.
+	minCoverage        = 0.98
 	maxDepthDiff       = 20 // p95 gray level difference (0-255)
 )
 
@@ -379,10 +379,11 @@ func TestMeshRender(t *testing.T) {
 				passed := true
 				var msgs []string
 
-				if overshootFrac > maxOvershoot {
+				// Do not relax this requirement.
+				if overshootFrac > 0.0 {
 					passed = false
-					msgs = append(msgs, fmt.Sprintf("overshoot %.1f%% > %.1f%% (%d px)",
-						overshootFrac*100, maxOvershoot*100, overshootCount))
+					msgs = append(msgs, fmt.Sprintf("overshoot %.1f%% > 0 (%d px)",
+						overshootFrac*100, overshootCount))
 				}
 				if coverage < minCoverage {
 					passed = false
