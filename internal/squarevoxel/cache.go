@@ -15,28 +15,20 @@ import (
 )
 
 const (
-	cacheFormatVersion = "ditherforge-cache-v1"
+	cacheFormatVersion = "ditherforge-cache-v2"
 	cacheMaxAge        = 7 * 24 * time.Hour
 )
 
-// CacheData holds the intermediate state after SDF computation,
+// CacheData holds the intermediate state after voxelization,
 // enabling fast re-runs with different palette/dithering options.
 type CacheData struct {
 	Version       string
 	KeyHash       [32]byte
 	Cells         []voxel.ActiveCell
 	CellAssignMap map[voxel.CellKey]int
-	ShellExpanded []voxel.CellKey // serialized from map
-	InfillCells   []voxel.CellKey // nil if no infill
-	SDFValues     []float32
-	VertIndex     map[int32]int32
-	CornerStride  [2]int32
 	MinV          [3]float32
 	CellSize      float32
 	LayerH        float32
-	NCols         int
-	NRows         int
-	NLayers       int
 }
 
 // CacheOptions identifies an input file and config for cache lookup.
@@ -45,7 +37,7 @@ type CacheOptions struct {
 	ConfigHash [32]byte // hash of all cache-relevant args + version
 }
 
-// LoadCache attempts to load cached voxelization+SDF data. Returns nil if
+// LoadCache attempts to load cached voxelization data. Returns nil if
 // no valid cache exists.
 func LoadCache(opts CacheOptions) *CacheData {
 	if opts.InputPath == "" {
@@ -63,8 +55,7 @@ func LoadCache(opts CacheOptions) *CacheData {
 	if err != nil {
 		return nil
 	}
-	fmt.Printf("  Using cached voxelization + SDF (%d cells, %d SDF vertices)\n",
-		len(cd.Cells), len(cd.SDFValues))
+	fmt.Printf("  Using cached voxelization (%d cells)\n", len(cd.Cells))
 	return cd
 }
 
@@ -130,27 +121,6 @@ func cachePath(inputPath string, key [32]byte) (string, error) {
 	return filepath.Join(dir, fmt.Sprintf("%s.%x.dfcache", base, key[:4])), nil
 }
 
-func cellKeysFromMap(m map[voxel.CellKey]struct{}) []voxel.CellKey {
-	if m == nil {
-		return nil
-	}
-	keys := make([]voxel.CellKey, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-func cellKeysToMap(keys []voxel.CellKey) map[voxel.CellKey]struct{} {
-	if keys == nil {
-		return nil
-	}
-	m := make(map[voxel.CellKey]struct{}, len(keys))
-	for _, k := range keys {
-		m[k] = struct{}{}
-	}
-	return m
-}
 
 func saveCacheFile(path string, data *CacheData) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

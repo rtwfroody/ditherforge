@@ -17,7 +17,7 @@ import (
 )
 
 // Args defines the CLI arguments.
-// Fields tagged cache:"skip" do not affect the voxelization/SDF cache.
+// Fields tagged cache:"skip" do not affect the voxelization cache.
 // All other fields are included in the cache key by default.
 type Args struct {
 	Input          string   `arg:"positional,required" help:"Input .glb file"`
@@ -34,11 +34,8 @@ type Args struct {
 	Size           *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force          bool     `arg:"--force" help:"Bypass extent size check" cache:"skip"`
 	Stats          bool     `arg:"--stats" help:"Print face counts per material" cache:"skip"`
-	Infill         bool     `arg:"--infill" help:"Generate infill object inside the shell"`
-	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)" cache:"skip"`
-	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)" cache:"skip"`
 	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)" cache:"skip"`
-	NoCache        bool     `arg:"--no-cache" help:"Disable voxelization/SDF cache"`
+	NoCache        bool     `arg:"--no-cache" help:"Disable voxelization cache"`
 }
 
 func (Args) Description() string {
@@ -46,7 +43,7 @@ func (Args) Description() string {
 }
 
 func (Args) Version() string {
-	return "ditherforge 0.1.4-alpha"
+	return "ditherforge 0.2.0-alpha"
 }
 
 func run() error {
@@ -155,13 +152,8 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
 		NoMerge:        args.NoMerge,
-		Infill:         args.Infill || args.InfillOnly,
-		MinFeatureSize: -1, // use default (cellSize)
+		ColorSnap:      args.ColorSnap,
 	}
-	if args.MinFeatureSize != nil {
-		cfg.MinFeatureSize = *args.MinFeatureSize
-	}
-	cfg.ColorSnap = args.ColorSnap
 
 	cacheOpts := squarevoxel.CacheOptions{
 		InputPath:  args.Input,
@@ -187,8 +179,7 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 
 	fmt.Printf("Exporting %s...", args.Output)
 	tExport := time.Now()
-	exportParts := filterParts(meshParts, args.InfillOnly)
-	parts := meshPartsToExportParts(exportParts)
+	parts := meshPartsToExportParts(meshParts)
 	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
@@ -223,41 +214,6 @@ func modelMaxExtent(model *loader.LoadedModel) float32 {
 		m = ex[2]
 	}
 	return m
-}
-
-// averageTextureBrightness samples the model's textures and returns an
-// average brightness in 0-255. Used to pick black vs white for the default palette.
-func averageTextureBrightness(model *loader.LoadedModel) float64 {
-	if len(model.Textures) == 0 {
-		return 128
-	}
-	var totalR, totalG, totalB float64
-	var count int
-	for _, tex := range model.Textures {
-		bounds := tex.Bounds()
-		// Sample every 16th pixel for speed.
-		for y := bounds.Min.Y; y < bounds.Max.Y; y += 16 {
-			for x := bounds.Min.X; x < bounds.Max.X; x += 16 {
-				r, g, b, _ := tex.At(x, y).RGBA()
-				totalR += float64(r >> 8)
-				totalG += float64(g >> 8)
-				totalB += float64(b >> 8)
-				count++
-			}
-		}
-	}
-	if count == 0 {
-		return 128
-	}
-	// Perceived brightness (ITU-R BT.601).
-	return (0.299*totalR + 0.587*totalG + 0.114*totalB) / float64(count)
-}
-
-func filterParts(meshParts []voxel.MeshPart, infillOnly bool) []voxel.MeshPart {
-	if infillOnly && len(meshParts) > 1 {
-		return meshParts[1:]
-	}
-	return meshParts
 }
 
 func meshPartsToExportParts(meshParts []voxel.MeshPart) []export3mf.Part {
