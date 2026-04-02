@@ -38,6 +38,7 @@ type Args struct {
 	InfillOnly     bool     `arg:"--infill-only" help:"Export only the infill mesh (for debugging, implies --infill)" cache:"skip"`
 	MinFeatureSize *float32 `arg:"--min-feature-size" help:"Minimum feature size in mm (default: 1 voxel edge)" cache:"skip"`
 	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)" cache:"skip"`
+	NoCache        bool     `arg:"--no-cache" help:"Disable voxelization/SDF cache"`
 }
 
 func (Args) Description() string {
@@ -166,7 +167,10 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		InputPath:  args.Input,
 		ConfigHash: argsConfigHash(args),
 	}
-	cached := squarevoxel.LoadCache(cacheOpts)
+	var cached *squarevoxel.CacheData
+	if !args.NoCache {
+		cached = squarevoxel.LoadCache(cacheOpts)
+	}
 
 	fmt.Println("Remeshing...")
 	meshParts, paletteRGB, newCache, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither, cached)
