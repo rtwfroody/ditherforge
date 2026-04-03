@@ -135,19 +135,106 @@ func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
 	return samples
 }
 
-// topSamples returns at most maxN samples, keeping those with the highest
-// count. Weights are preserved so scoring remains representative.
+// topSamples returns at most maxN samples while preserving color diversity.
+// It bins samples in Lab space and takes the top samples from each bin
+// proportionally, so minority color regions are not drowned out by the
+// majority.
 func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
 	if len(samples) <= maxN {
 		return samples
 	}
-	// Sort by count descending.
-	sorted := make([]WeightedLabSample, len(samples))
-	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Count > sorted[j].Count
+
+	// Bin samples in coarse Lab space (L in [0,100], a/b in ~[-128,128]).
+	// Use 8 bins per axis = 512 bins total.
+	const binsPerAxis = 8
+	type binKey [3]int
+	binOf := func(lab [3]float64) binKey {
+		l := int(lab[0] / (100.0 / binsPerAxis))
+		a := int((lab[1] + 128) / (256.0 / binsPerAxis))
+		b := int((lab[2] + 128) / (256.0 / binsPerAxis))
+		if l < 0 {
+			l = 0
+		} else if l >= binsPerAxis {
+			l = binsPerAxis - 1
+		}
+		if a < 0 {
+			a = 0
+		} else if a >= binsPerAxis {
+			a = binsPerAxis - 1
+		}
+		if b < 0 {
+			b = 0
+		} else if b >= binsPerAxis {
+			b = binsPerAxis - 1
+		}
+		return binKey{l, a, b}
+	}
+
+	// Group samples into bins, sorted by count within each bin.
+	bins := make(map[binKey][]int) // bin -> indices into samples
+	for i := range samples {
+		k := binOf(samples[i].Lab)
+		bins[k] = append(bins[k], i)
+	}
+	for _, idxs := range bins {
+		sort.Slice(idxs, func(a, b int) bool {
+			return samples[idxs[a]].Count > samples[idxs[b]].Count
+		})
+	}
+
+	// Each occupied bin gets at least 1 slot, then remaining slots are
+	// distributed proportionally to total weight.
+	nBins := len(bins)
+	base := nBins
+	if base > maxN {
+		base = maxN
+	}
+	remaining := maxN - base
+
+	// Compute total weight per bin, sorted by weight descending for
+	// deterministic allocation (map iteration order is random).
+	type binInfo struct {
+		key    binKey
+		weight int
+	}
+	binList := make([]binInfo, 0, nBins)
+	totalWeight := 0
+	for k, idxs := range bins {
+		w := 0
+		for _, i := range idxs {
+			w += samples[i].Count
+		}
+		binList = append(binList, binInfo{k, w})
+		totalWeight += w
+	}
+	sort.Slice(binList, func(i, j int) bool {
+		return binList[i].weight > binList[j].weight
 	})
-	return sorted[:maxN]
+
+	// Allocate slots: 1 guaranteed per bin + proportional share of remainder.
+	result := make([]WeightedLabSample, 0, maxN)
+	for _, bi := range binList {
+		idxs := bins[bi.key]
+		slots := 1
+		if totalWeight > 0 {
+			slots += int(float64(remaining) * float64(bi.weight) / float64(totalWeight))
+		}
+		if slots > len(idxs) {
+			slots = len(idxs)
+		}
+		for j := 0; j < slots; j++ {
+			result = append(result, samples[idxs[j]])
+		}
+	}
+
+	// If we ended up with more than maxN due to rounding, trim.
+	if len(result) > maxN {
+		sort.Slice(result, func(i, j int) bool {
+			return result[i].Count > result[j].Count
+		})
+		result = result[:maxN]
+	}
+	return result
 }
 
 // labPoint implements clusters.Observation for k-means clustering in Lab space.
@@ -312,7 +399,7 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 	}
 
 	samples := CellColorHistogram(cellColors)
-	samples = topSamples(samples, 500)
+	samples = topSamples(samples, 5000)
 
 	// Convert inventory to Lab.
 	invLab := make([][3]float64, len(inventory))
