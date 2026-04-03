@@ -9,6 +9,9 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
+	"encoding/json"
+
+	"github.com/qmuntal/draco-go/draco"
 	"github.com/qmuntal/gltf"
 	"github.com/qmuntal/gltf/modeler"
 )
@@ -53,6 +56,90 @@ func mul(a, b mat4) mat4 {
 		}
 	}
 	return r
+}
+
+// dracoExt is the parsed KHR_draco_mesh_compression extension data.
+type dracoExt struct {
+	BufferView int            `json:"bufferView"`
+	Attributes map[string]int `json:"attributes"`
+}
+
+// decodeDraco attempts to decode a Draco-compressed primitive.
+// Returns positions, UVs, indices, and true if successful.
+func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]float32, []uint32, bool) {
+	extRaw, ok := prim.Extensions["KHR_draco_mesh_compression"]
+	if !ok {
+		return nil, nil, nil, false
+	}
+	// The extension data may be raw JSON or already unmarshalled.
+	var ext dracoExt
+	switch v := extRaw.(type) {
+	case json.RawMessage:
+		if err := json.Unmarshal(v, &ext); err != nil {
+			return nil, nil, nil, false
+		}
+	default:
+		// Try re-marshalling and unmarshalling.
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil, nil, nil, false
+		}
+		if err := json.Unmarshal(data, &ext); err != nil {
+			return nil, nil, nil, false
+		}
+	}
+
+	bv := doc.BufferViews[ext.BufferView]
+	bvData, err := modeler.ReadBufferView(doc, bv)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+
+	if draco.GetEncodedGeometryType(bvData) != draco.EGT_TRIANGULAR_MESH {
+		return nil, nil, nil, false
+	}
+
+	m := draco.NewMesh()
+	d := draco.NewDecoder()
+	if err := d.DecodeMesh(m, bvData); err != nil {
+		return nil, nil, nil, false
+	}
+
+	// Read positions.
+	posID, ok := ext.Attributes["POSITION"]
+	if !ok {
+		return nil, nil, nil, false
+	}
+	posAttr := m.AttrByUniqueID(uint32(posID))
+	if posAttr == nil {
+		return nil, nil, nil, false
+	}
+	nPoints := m.NumPoints()
+	posFlat := make([]float32, nPoints*3)
+	m.AttrData(posAttr, posFlat)
+	positions := make([][3]float32, nPoints)
+	for i := uint32(0); i < nPoints; i++ {
+		positions[i] = [3]float32{posFlat[i*3], posFlat[i*3+1], posFlat[i*3+2]}
+	}
+
+	// Read UVs (optional).
+	var uvs [][2]float32
+	if uvID, ok := ext.Attributes["TEXCOORD_0"]; ok {
+		uvAttr := m.AttrByUniqueID(uint32(uvID))
+		if uvAttr != nil {
+			uvFlat := make([]float32, nPoints*2)
+			m.AttrData(uvAttr, uvFlat)
+			uvs = make([][2]float32, nPoints)
+			for i := uint32(0); i < nPoints; i++ {
+				uvs[i] = [2]float32{uvFlat[i*2], uvFlat[i*2+1]}
+			}
+		}
+	}
+
+	// Read face indices.
+	indices := m.Faces(nil)
+
+	return positions, uvs, indices, true
 }
 
 // transformPoint applies a column-major 4x4 matrix to a 3D point (w=1).
@@ -193,13 +280,43 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 			for _, prim := range mesh.Primitives {
 				meshIdx := meshCounter
 				meshCounter++
-				posAttrIdx, ok := prim.Attributes[gltf.POSITION]
-				if !ok {
+				if _, ok := prim.Attributes[gltf.POSITION]; !ok {
 					continue
 				}
 
-				positions, err := modeler.ReadPosition(doc, doc.Accessors[posAttrIdx], nil)
-				if err != nil || len(positions) == 0 {
+				var positions [][3]float32
+				var uvs [][2]float32
+				var indices []uint32
+
+				// Try Draco decoding first.
+				if dracoPositions, dracoUVs, dracoIndices, ok := decodeDraco(doc, prim); ok {
+					positions = dracoPositions
+					uvs = dracoUVs
+					indices = dracoIndices
+				} else {
+					// Standard (non-Draco) path.
+					posAccessor := doc.Accessors[prim.Attributes[gltf.POSITION]]
+					if posAccessor.BufferView == nil {
+						continue
+					}
+					positions, err = modeler.ReadPosition(doc, posAccessor, nil)
+					if err != nil || len(positions) == 0 {
+						continue
+					}
+					if texCoordAttrIdx, ok := prim.Attributes[gltf.TEXCOORD_0]; ok {
+						if acc := doc.Accessors[texCoordAttrIdx]; acc.BufferView != nil {
+							uvs, _ = modeler.ReadTextureCoord(doc, acc, nil)
+						}
+					}
+					if prim.Indices != nil {
+						rawIdx, err := modeler.ReadIndices(doc, doc.Accessors[*prim.Indices], nil)
+						if err == nil {
+							indices = rawIdx
+						}
+					}
+				}
+
+				if len(positions) == 0 {
 					continue
 				}
 
@@ -209,22 +326,8 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 					transformed[i] = transformPoint(worldM, p)
 				}
 
-				// Read UVs.
-				var uvs [][2]float32
-				if texCoordAttrIdx, ok := prim.Attributes[gltf.TEXCOORD_0]; ok {
-					uvs, _ = modeler.ReadTextureCoord(doc, doc.Accessors[texCoordAttrIdx], nil)
-				}
 				if len(uvs) != len(positions) {
 					uvs = make([][2]float32, len(positions))
-				}
-
-				// Read indices.
-				var indices []uint32
-				if prim.Indices != nil {
-					rawIdx, err := modeler.ReadIndices(doc, doc.Accessors[*prim.Indices], nil)
-					if err == nil {
-						indices = rawIdx
-					}
 				}
 				if len(indices) == 0 {
 					// No index buffer: generate sequential indices.
