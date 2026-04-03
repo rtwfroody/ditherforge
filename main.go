@@ -165,7 +165,7 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 	}
 
 	fmt.Println("Remeshing...")
-	meshParts, paletteRGB, newCache, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither, cached)
+	outModel, assignments, paletteRGB, newCache, err := squarevoxel.Remesh(model, pcfg, cfg, args.Dither, cached)
 	if err != nil {
 		return fmt.Errorf("squarevoxel remesh: %w", err)
 	}
@@ -174,13 +174,12 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 	}
 
 	if args.Stats {
-		printStats(meshParts, paletteRGB)
+		printStats(assignments, paletteRGB)
 	}
 
 	fmt.Printf("Exporting %s...", args.Output)
 	tExport := time.Now()
-	parts := meshPartsToExportParts(meshParts)
-	if err := export3mf.Export(parts, args.Output, paletteRGB, args.LayerHeight); err != nil {
+	if err := export3mf.Export(outModel, assignments, args.Output, paletteRGB, args.LayerHeight); err != nil {
 		return fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())
@@ -216,27 +215,14 @@ func modelMaxExtent(model *loader.LoadedModel) float32 {
 	return m
 }
 
-func meshPartsToExportParts(meshParts []voxel.MeshPart) []export3mf.Part {
-	parts := make([]export3mf.Part, len(meshParts))
-	for i, mp := range meshParts {
-		parts[i] = export3mf.Part{
-			Model:       mp.Model,
-			Assignments: mp.Assignments,
-		}
-	}
-	return parts
-}
-
-func printStats(meshParts []voxel.MeshPart, paletteRGB [][3]uint8) {
+func printStats(assignments []int32, paletteRGB [][3]uint8) {
 	fmt.Println("  Face counts per material:")
 	for i, p := range paletteRGB {
 		hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		count := 0
-		for _, mp := range meshParts {
-			for _, a := range mp.Assignments {
-				if int(a) == i {
-					count++
-				}
+		for _, a := range assignments {
+			if int(a) == i {
+				count++
 			}
 		}
 		fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)

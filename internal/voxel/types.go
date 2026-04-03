@@ -2,7 +2,6 @@
 package voxel
 
 import (
-	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 )
 
@@ -20,12 +19,6 @@ type Config struct {
 	NozzleDiameter float32 // nozzle width in mm
 	LayerHeight    float32 // Z extrusion per layer in mm
 	NoMerge        bool    // skip coplanar triangle merging
-}
-
-// MeshPart is one output mesh with per-face palette assignments.
-type MeshPart struct {
-	Model       *loader.LoadedModel
-	Assignments []int32
 }
 
 // ActiveCell represents one voxel cell to generate.

@@ -85,23 +85,17 @@ const rels = `<?xml version="1.0" encoding="UTF-8"?>
  <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
 </Relationships>`
 
-// Part is a mesh with per-face palette assignments for export.
-type Part struct {
-	Model       *loader.LoadedModel
-	Assignments []int32
-}
-
-// Export writes multiple mesh parts to a 3MF file.
-func Export(parts []Part, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
-	outerUUID := newUUID()
+// Export writes a single mesh with per-face palette assignments to a 3MF file.
+func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
+	objUUID := newUUID()
 	instUUID := newUUID()
 	buildUUID := newUUID()
 
-	// Compute translation from the first part (shell).
+	// Compute translation to center on build plate.
 	const plateX, plateY = 135.5, 136.0
 	var minX, maxX, minY, maxY, minZ float32
-	if len(parts) > 0 && len(parts[0].Model.Vertices) > 0 {
-		verts := parts[0].Model.Vertices
+	if len(model.Vertices) > 0 {
+		verts := model.Vertices
 		minX, maxX = verts[0][0], verts[0][0]
 		minY, maxY = verts[0][1], verts[0][1]
 		minZ = verts[0][2]
@@ -128,37 +122,26 @@ func Export(parts []Part, outputPath string, paletteRGB [][3]uint8, layerHeight 
 	tz := -float64(minZ)
 	transform := fmt.Sprintf("1 0 0 0 1 0 0 0 1 %.4f %.4f %.4f", tx, ty, tz)
 
-	// Each sub-model gets a unique objectid (1..N). The wrapper object
-	// that groups them via <components> gets id N+1.
-	wrapperID := len(parts) + 1
-
-	// Build relationships and components for each part.
-	var relsSB, compsSB strings.Builder
-	for i := range parts {
-		volID := i + 1
-		fmt.Fprintf(&relsSB, ` <Relationship Target="/3D/Objects/object_%d.model" Id="rel-%d" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>`+"\n", volID, volID)
-		compUUID := newUUID()
-		fmt.Fprintf(&compsSB, `    <component p:path="/3D/Objects/object_%d.model" objectid="%d" p:UUID="%s" transform="%s"/>`+"\n", volID, volID, compUUID, transform)
-	}
-
 	objectRels := `<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-` + relsSB.String() + `</Relationships>`
+ <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`
 
 	mainModel := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" unit="millimeter" xml:lang="en-US" requiredextensions="p">
  <resources>
-  <object id="%d" p:UUID="%s" type="model">
+  <object id="2" p:UUID="%s" type="model">
    <components>
-%s   </components>
+    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="%s"/>
+   </components>
   </object>
  </resources>
  <build p:UUID="%s">
-  <item objectid="%d" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+  <item objectid="2" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
  </build>
-</model>`, wrapperID, outerUUID, compsSB.String(), buildUUID, wrapperID, instUUID)
+</model>`, objUUID, newUUID(), transform, buildUUID, instUUID)
 
-	modelSettings := buildModelSettings(parts)
+	modelSettings := buildModelSettings(model)
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -193,14 +176,12 @@ func Export(parts []Part, outputPath string, paletteRGB [][3]uint8, layerHeight 
 	if err := writeEntry("3D/_rels/3dmodel.model.rels", objectRels); err != nil {
 		return err
 	}
-	for i, p := range parts {
-		objectModel, err := buildObjectModel(p.Model, p.Assignments, i+1)
-		if err != nil {
-			return err
-		}
-		if err := writeEntry(fmt.Sprintf("3D/Objects/object_%d.model", i+1), objectModel); err != nil {
-			return err
-		}
+	objectModel, err := buildObjectModel(model, assignments)
+	if err != nil {
+		return err
+	}
+	if err := writeEntry("3D/Objects/object_1.model", objectModel); err != nil {
+		return err
 	}
 	if err := writeEntry("Metadata/model_settings.config", modelSettings); err != nil {
 		return err
@@ -218,7 +199,7 @@ func Export(parts []Part, outputPath string, paletteRGB [][3]uint8, layerHeight 
 	return nil
 }
 
-func buildObjectModel(model *loader.LoadedModel, assignments []int32, objectID int) (string, error) {
+func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, error) {
 	objUUID := newUUID()
 	var sb strings.Builder
 
@@ -230,7 +211,7 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32, objectID i
 	sb.WriteString(` requiredextensions="p">` + "\n")
 	sb.WriteString(` <metadata name="BambuStudio:3mfVersion">1</metadata>` + "\n")
 	sb.WriteString(` <resources>` + "\n")
-	fmt.Fprintf(&sb, `  <object id="%d" p:UUID="%s" type="model">`+"\n", objectID, objUUID)
+	fmt.Fprintf(&sb, `  <object id="1" p:UUID="%s" type="model">`+"\n", objUUID)
 	sb.WriteString(`   <mesh>` + "\n")
 
 	sb.WriteString(`    <vertices>` + "\n")
@@ -330,32 +311,18 @@ func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, e
 	return string(b), nil
 }
 
-func buildModelSettings(parts []Part) string {
-	wrapperID := len(parts) + 1
+func buildModelSettings(model *loader.LoadedModel) string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	sb.WriteString(`<config>` + "\n")
-	fmt.Fprintf(&sb, "  <object id=\"%d\">\n", wrapperID)
+	sb.WriteString("  <object id=\"2\">\n")
 	sb.WriteString(`    <metadata key="name" value="ditherforge_output"/>` + "\n")
 	sb.WriteString(`    <metadata key="extruder" value="1"/>` + "\n")
-	totalFaces := 0
-	for _, p := range parts {
-		totalFaces += len(p.Model.Faces)
-	}
-	fmt.Fprintf(&sb, "    <metadata face_count=\"%d\"/>\n", totalFaces)
-	for i, p := range parts {
-		extruder := 1
-		name := "shell"
-		if i > 0 {
-			name = fmt.Sprintf("infill_%d", i)
-		}
-		// Part id must match the objectid inside the sub-model file.
-		fmt.Fprintf(&sb, "    <part id=\"%d\" subtype=\"normal_part\">\n", i+1)
-		fmt.Fprintf(&sb, "      <metadata key=\"name\" value=\"%s\"/>\n", name)
-		fmt.Fprintf(&sb, "      <metadata key=\"extruder\" value=\"%d\"/>\n", extruder)
-		_ = p // face count used above
-		sb.WriteString("    </part>\n")
-	}
+	fmt.Fprintf(&sb, "    <metadata face_count=\"%d\"/>\n", len(model.Faces))
+	sb.WriteString("    <part id=\"1\" subtype=\"normal_part\">\n")
+	sb.WriteString("      <metadata key=\"name\" value=\"shell\"/>\n")
+	sb.WriteString("      <metadata key=\"extruder\" value=\"1\"/>\n")
+	sb.WriteString("    </part>\n")
 	sb.WriteString(`  </object>` + "\n")
 	sb.WriteString(`</config>`)
 	return sb.String()

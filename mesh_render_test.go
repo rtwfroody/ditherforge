@@ -131,12 +131,10 @@ func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pcfg v
 	}
 
 	t.Log("Running squarevoxel remesh...")
-	meshParts, paletteRGB, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy", nil)
+	outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy", nil)
 	if err != nil {
 		t.Fatalf("Remesh: %v", err)
 	}
-	outModel := meshParts[0].Model
-	assignments := meshParts[0].Assignments
 
 	if f, err := os.Create(cacheFile); err == nil {
 		gob.NewEncoder(f).Encode(cachedRemeshOutput{

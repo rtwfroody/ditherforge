@@ -51,10 +51,10 @@ func finishBar(bar *progressbar.ProgressBar, description string, detail string, 
 // Remesh voxelizes the model for color decisions, then clips the original
 // mesh along color patch boundaries.
 // If cached is non-nil, skips voxelization.
-// Returns mesh parts, palette, cache data (for saving), and an error.
-func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string, cached *CacheData) ([]voxel.MeshPart, [][3]uint8, *CacheData, error) {
+// Returns output model, per-face assignments, palette, cache data, and error.
+func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string, cached *CacheData) (*loader.LoadedModel, []int32, [][3]uint8, *CacheData, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, nil, nil, fmt.Errorf("empty model")
+		return nil, nil, nil, nil, fmt.Errorf("empty model")
 	}
 
 	// Cell edge length. At 1.0× nozzle diameter the slicer can't fill the
@@ -177,7 +177,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	}
 	finishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
-		return nil, nil, nil, fmt.Errorf("no active cells found")
+		return nil, nil, nil, nil, fmt.Errorf("no active cells found")
 	}
 
 	// Build cell lookup map.
@@ -207,7 +207,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Printf("%s\n", palDisplay)
 	}
 	if len(pal) == 0 {
-		return nil, nil, nil, fmt.Errorf("no palette colors")
+		return nil, nil, nil, nil, fmt.Errorf("no palette colors")
 	}
 	if cfg.ColorSnap > 0 {
 		voxel.SnapColors(cells, pal, cfg.ColorSnap)
@@ -276,10 +276,5 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		FaceTextureIdx: make([]int32, len(shellFaces)),
 	}
 
-	parts := []voxel.MeshPart{{
-		Model:       outModel,
-		Assignments: shellAssignments,
-	}}
-
-	return parts, pal, newCacheData, nil
+	return outModel, shellAssignments, pal, newCacheData, nil
 }
