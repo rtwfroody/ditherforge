@@ -7,6 +7,14 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
+// cellAccum accumulates area-weighted surface data for one cell.
+type cellAccum struct {
+	normalSum [3]float64 // area-weighted normal (float64 for precision)
+	centroid  [3]float64 // area-weighted centroid accumulator
+	totalArea float64
+	assignment int32
+}
+
 // ClipTriangleByPlane clips a single triangle against an axis-aligned plane.
 // Returns triangles on the negative side (<=) and positive side (>).
 // Preserves winding order.
@@ -130,6 +138,12 @@ func ClipMeshByPatches(
 			faces = append(faces, [3]uint32{vi0, vi1, vi2})
 			assignments = append(assignments, cf.assignment)
 		}
+	}
+
+	// Per-cell accumulators for single-plane simplification (pass 1).
+	var cellAccumMap map[CellKey]*cellAccum
+	if simplify {
+		cellAccumMap = make(map[CellKey]*cellAccum)
 	}
 
 	for fi := range model.Faces {
@@ -279,85 +293,240 @@ func ClipMeshByPatches(
 			continue
 		}
 
-		// Group fragments by cell key. Fragments in the same cell from one
-		// original triangle are contiguous and convex — can be re-triangulated
-		// with fewer triangles (ignoring shared edges with neighbors).
-		byCell := map[CellKey][]cellFrag{}
+		// Accumulate per-cell surface data for single-plane simplification.
 		for _, cf := range cellFrags {
-			byCell[cf.ck] = append(byCell[cf.ck], cf)
-		}
-
-		// Build 2D projection axes from the original triangle normal.
-		n := TriNormal(v0, v1, v2)
-		var u, vAxis [3]float32
-		if n[0]*n[0] < 0.81 { // not nearly parallel to X axis
-			u = Cross3f(n, [3]float32{1, 0, 0})
-		} else {
-			u = Cross3f(n, [3]float32{0, 1, 0})
-		}
-		uLen := float32(math.Sqrt(float64(u[0]*u[0] + u[1]*u[1] + u[2]*u[2])))
-		canProject := uLen >= 1e-10
-		if canProject {
-			u[0] /= uLen; u[1] /= uLen; u[2] /= uLen
-			vAxis = Cross3f(n, u)
-		}
-
-		for _, cellFrags := range byCell {
-			assign := cellFrags[0].assignment
-
-			if len(cellFrags) == 1 || !canProject {
-				emitDirect(cellFrags)
+			// Unnormalized cross product — magnitude proportional to 2x area.
+			e1 := [3]float32{cf.tri[1][0] - cf.tri[0][0], cf.tri[1][1] - cf.tri[0][1], cf.tri[1][2] - cf.tri[0][2]}
+			e2 := [3]float32{cf.tri[2][0] - cf.tri[0][0], cf.tri[2][1] - cf.tri[0][1], cf.tri[2][2] - cf.tri[0][2]}
+			nx := float64(e1[1]*e2[2] - e1[2]*e2[1])
+			ny := float64(e1[2]*e2[0] - e1[0]*e2[2])
+			nz := float64(e1[0]*e2[1] - e1[1]*e2[0])
+			area := math.Sqrt(nx*nx+ny*ny+nz*nz) / 2
+			if area < 1e-12 {
 				continue
 			}
+			cx := float64(cf.tri[0][0]+cf.tri[1][0]+cf.tri[2][0]) / 3
+			cy := float64(cf.tri[0][1]+cf.tri[1][1]+cf.tri[2][1]) / 3
+			cz := float64(cf.tri[0][2]+cf.tri[1][2]+cf.tri[2][2]) / 3
 
-			// Collect unique vertices, snapping to avoid duplicates.
-			type v3key struct{ x, y, z int32 }
-			snap := func(p [3]float32) v3key {
-				return v3key{
-					int32(math.Round(float64(p[0]) * 1e6)),
-					int32(math.Round(float64(p[1]) * 1e6)),
-					int32(math.Round(float64(p[2]) * 1e6)),
+			ca, ok := cellAccumMap[cf.ck]
+			if !ok {
+				ca = &cellAccum{assignment: cf.assignment}
+				cellAccumMap[cf.ck] = ca
+			}
+			ca.normalSum[0] += nx
+			ca.normalSum[1] += ny
+			ca.normalSum[2] += nz
+			ca.centroid[0] += cx * area
+			ca.centroid[1] += cy * area
+			ca.centroid[2] += cz * area
+			ca.totalArea += area
+		}
+	}
+
+	// Pass 2: compute shared edge vertices and emit watertight polygons.
+	if simplify {
+		steps := [3]float32{cellSize, cellSize, layerH}
+
+		// Resolve each cell's plane (normal + centroid).
+		type cellPlane struct {
+			normal   [3]float32
+			centroid [3]float32
+		}
+		cellPlanes := make(map[CellKey]cellPlane, len(cellAccumMap))
+		for ck, ca := range cellAccumMap {
+			if ca.totalArea < 1e-12 {
+				continue
+			}
+			nx, ny, nz := ca.normalSum[0], ca.normalSum[1], ca.normalSum[2]
+			nLen := math.Sqrt(nx*nx + ny*ny + nz*nz)
+			if nLen < 1e-12 {
+				continue
+			}
+			cellPlanes[ck] = cellPlane{
+				normal: [3]float32{float32(nx / nLen), float32(ny / nLen), float32(nz / nLen)},
+				centroid: [3]float32{
+					float32(ca.centroid[0] / ca.totalArea),
+					float32(ca.centroid[1] / ca.totalArea),
+					float32(ca.centroid[2] / ca.totalArea),
+				},
+			}
+		}
+
+		// planeEdgeParam computes the parameter t ∈ [0,1] where a cell's
+		// plane intersects a box edge. The edge varies along axis a from
+		// aMin to aMin+edgeLen, fixed at bPos and cPos on the other axes.
+		// Returns (t, true) if the plane crosses the edge, or (0, false) if
+		// the plane is parallel to the edge.
+		planeEdgeParam := func(cp cellPlane, a, b, c int, aMin, edgeLen, bPos, cPos float32) (float64, bool) {
+			denom := float64(cp.normal[a]) * float64(edgeLen)
+			if math.Abs(denom) < 1e-10 {
+				return 0, false
+			}
+			numer := float64(cp.normal[a])*float64(cp.centroid[a]-aMin) +
+				float64(cp.normal[b])*float64(cp.centroid[b]-bPos) +
+				float64(cp.normal[c])*float64(cp.centroid[c]-cPos)
+			return numer / denom, true
+		}
+
+		// Pre-compute shared vertices at voxel grid edges.
+		// An edge is parallel to axis a, at grid lines bLine and cLine on the
+		// other two axes. Up to 4 cells share each edge.
+		type edgeKey struct {
+			axis  int
+			aCell int
+			bLine int
+			cLine int
+		}
+		// edgeVert stores a shared vertex and which cells contributed to it.
+		type edgeVert struct {
+			pos        [3]float32
+			cells      [4]bool // which of the 4 neighbor cells contributed
+		}
+		sharedVerts := make(map[edgeKey]edgeVert)
+
+		edgeNeighborCK := func(ek edgeKey, dbb, dcc int) CellKey {
+			switch ek.axis {
+			case 0:
+				return CellKey{ek.aCell, ek.bLine - 1 + dbb, ek.cLine - 1 + dcc}
+			case 1:
+				return CellKey{ek.cLine - 1 + dcc, ek.aCell, ek.bLine - 1 + dbb}
+			default:
+				return CellKey{ek.bLine - 1 + dbb, ek.cLine - 1 + dcc, ek.aCell}
+			}
+		}
+
+		for ck := range cellPlanes {
+			coords := [3]int{ck.Col, ck.Row, ck.Layer}
+			for a := 0; a < 3; a++ {
+				b := (a + 1) % 3
+				c := (a + 2) % 3
+				for db := 0; db <= 1; db++ {
+					for dc := 0; dc <= 1; dc++ {
+						ek := edgeKey{
+							axis:  a,
+							aCell: coords[a],
+							bLine: coords[b] + db,
+							cLine: coords[c] + dc,
+						}
+						if _, ok := sharedVerts[ek]; ok {
+							continue
+						}
+
+						// Edge endpoints: varies in axis a, fixed in b and c.
+						bPos := minV[b] + float32(ek.bLine)*steps[b] - steps[b]/2
+						cPos := minV[c] + float32(ek.cLine)*steps[c] - steps[c]/2
+						aMin := minV[a] + float32(ek.aCell)*steps[a] - steps[a]/2
+						edgeLen := steps[a]
+
+						// Find up to 4 cells sharing this edge and average their
+						// plane intersection parameters.
+						var tSum float64
+						var tCount int
+						var contrib [4]bool
+						for dbb := 0; dbb <= 1; dbb++ {
+							for dcc := 0; dcc <= 1; dcc++ {
+								nck := edgeNeighborCK(ek, dbb, dcc)
+								cp, ok := cellPlanes[nck]
+								if !ok {
+									continue
+								}
+								t, ok := planeEdgeParam(cp, a, b, c, aMin, edgeLen, bPos, cPos)
+								if !ok || t < 0 || t > 1 {
+									continue
+								}
+								tSum += t
+								tCount++
+								contrib[dbb*2+dcc] = true
+							}
+						}
+						if tCount == 0 {
+							continue
+						}
+						tAvg := tSum / float64(tCount)
+						if tAvg < 0 {
+							tAvg = 0
+						}
+						if tAvg > 1 {
+							tAvg = 1
+						}
+						var pos [3]float32
+						pos[a] = aMin + float32(tAvg)*edgeLen
+						pos[b] = bPos
+						pos[c] = cPos
+						sharedVerts[ek] = edgeVert{pos: pos, cells: contrib}
+					}
 				}
 			}
-			vertMap := map[v3key]int{}
-			var verts3D [][3]float32
-			for _, cf := range cellFrags {
-				for _, p := range cf.tri {
-					sk := snap(p)
-					if _, ok := vertMap[sk]; !ok {
-						vertMap[sk] = len(verts3D)
-						verts3D = append(verts3D, p)
+		}
+
+		// Build polygon for each cell from shared edge vertices.
+		for ck, cp := range cellPlanes {
+			coords := [3]int{ck.Col, ck.Row, ck.Layer}
+			var polyVerts [][3]float32
+
+			for a := 0; a < 3; a++ {
+				b := (a + 1) % 3
+				c := (a + 2) % 3
+				for db := 0; db <= 1; db++ {
+					for dc := 0; dc <= 1; dc++ {
+						ek := edgeKey{
+							axis:  a,
+							aCell: coords[a],
+							bLine: coords[b] + db,
+							cLine: coords[c] + dc,
+						}
+						ev, ok := sharedVerts[ek]
+						if !ok {
+							continue
+						}
+						// Include this vertex if this cell contributed to it,
+						// OR if this cell's plane crosses the edge (with relaxed
+						// tolerance to account for averaging).
+						//
+						// This cell is at coords[b], coords[c]. The neighbor at
+						// slot (dbb,dcc) is at (bLine-1+dbb, cLine-1+dcc).
+						// Since bLine = coords[b]+db, this cell is at dbb=1-db,
+						// dcc=1-dc → slot (1-db)*2+(1-dc).
+						contributed := ev.cells[(1-db)*2+(1-dc)]
+
+						if !contributed {
+							// Cell didn't contribute. Check if its plane
+							// crosses the edge with relaxed tolerance.
+							bPos := minV[b] + float32(ek.bLine)*steps[b] - steps[b]/2
+							cPos := minV[c] + float32(ek.cLine)*steps[c] - steps[c]/2
+							aMin := minV[a] + float32(ek.aCell)*steps[a] - steps[a]/2
+							t, ok := planeEdgeParam(cp, a, b, c, aMin, steps[a], bPos, cPos)
+							if !ok || t < -0.1 || t > 1.1 {
+								continue
+							}
+						}
+						polyVerts = append(polyVerts, ev.pos)
 					}
 				}
 			}
 
-			if len(verts3D) < 3 {
+			if len(polyVerts) < 3 {
 				continue
 			}
 
-			// Project to 2D and compute convex hull.
-			pts2D := make([][2]float64, len(verts3D))
-			for i, p := range verts3D {
-				pts2D[i] = [2]float64{
-					float64(p[0]*u[0] + p[1]*u[1] + p[2]*u[2]),
-					float64(p[0]*vAxis[0] + p[1]*vAxis[1] + p[2]*vAxis[2]),
+			// Sort vertices by angle around centroid on the cell's plane.
+			sortPolygonVerts(polyVerts, cp.normal)
+
+			// Ensure winding matches the accumulated normal.
+			polyNorm := TriNormal(polyVerts[0], polyVerts[1], polyVerts[2])
+			if Dot3(polyNorm, cp.normal) < 0 {
+				for i, j := 0, len(polyVerts)-1; i < j; i, j = i+1, j-1 {
+					polyVerts[i], polyVerts[j] = polyVerts[j], polyVerts[i]
 				}
 			}
 
-			hull := convexHull2D(pts2D)
-			if len(hull) < 3 {
-				emitDirect(cellFrags)
-				continue
-			}
-
-			// Fan-triangulate the convex hull: N-2 triangles.
-			p0 := verts3D[hull[0]]
-			for i := 1; i < len(hull)-1; i++ {
-				p1 := verts3D[hull[i]]
-				p2 := verts3D[hull[i+1]]
-				vi0 := vd.GetVertex(p0)
-				vi1 := vd.GetVertex(p1)
-				vi2 := vd.GetVertex(p2)
+			assign := cellAccumMap[ck].assignment
+			// Fan-triangulate.
+			for i := 1; i < len(polyVerts)-1; i++ {
+				vi0 := vd.GetVertex(polyVerts[0])
+				vi1 := vd.GetVertex(polyVerts[i])
+				vi2 := vd.GetVertex(polyVerts[i+1])
 				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
 					continue
 				}
@@ -408,54 +577,45 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 	return bestAssign, found
 }
 
-// convexHull2D returns the convex hull of a set of 2D points as indices
-// into the input slice, in counter-clockwise order. Uses Andrew's monotone chain.
-func convexHull2D(pts [][2]float64) []int {
-	n := len(pts)
-	if n < 3 {
-		idx := make([]int, n)
-		for i := range idx {
-			idx[i] = i
-		}
-		return idx
+// sortPolygonVerts sorts polygon vertices by angle around their centroid,
+// projected onto the plane defined by the given normal.
+func sortPolygonVerts(verts [][3]float32, normal [3]float32) {
+	if len(verts) < 3 {
+		return
 	}
+	// Build orthonormal basis on the plane.
+	var u [3]float32
+	if normal[0]*normal[0] < 0.81 {
+		u = Cross3f(normal, [3]float32{1, 0, 0})
+	} else {
+		u = Cross3f(normal, [3]float32{0, 1, 0})
+	}
+	uLen := float32(math.Sqrt(float64(u[0]*u[0] + u[1]*u[1] + u[2]*u[2])))
+	u[0] /= uLen
+	u[1] /= uLen
+	u[2] /= uLen
+	v := Cross3f(normal, u)
 
-	// Sort indices by x, then y.
-	idx := make([]int, n)
-	for i := range idx {
-		idx[i] = i
+	// Compute centroid.
+	var cx, cy, cz float32
+	for _, p := range verts {
+		cx += p[0]
+		cy += p[1]
+		cz += p[2]
 	}
-	sort.Slice(idx, func(a, b int) bool {
-		pa, pb := pts[idx[a]], pts[idx[b]]
-		if pa[0] != pb[0] {
-			return pa[0] < pb[0]
-		}
-		return pa[1] < pb[1]
+	n := float32(len(verts))
+	cx /= n
+	cy /= n
+	cz /= n
+
+	// Sort by angle.
+	sort.Slice(verts, func(i, j int) bool {
+		di := [3]float32{verts[i][0] - cx, verts[i][1] - cy, verts[i][2] - cz}
+		dj := [3]float32{verts[j][0] - cx, verts[j][1] - cy, verts[j][2] - cz}
+		ai := math.Atan2(float64(Dot3(di, v)), float64(Dot3(di, u)))
+		aj := math.Atan2(float64(Dot3(dj, v)), float64(Dot3(dj, u)))
+		return ai < aj
 	})
-
-	cross := func(o, a, b int) float64 {
-		return (pts[a][0]-pts[o][0])*(pts[b][1]-pts[o][1]) -
-			(pts[a][1]-pts[o][1])*(pts[b][0]-pts[o][0])
-	}
-
-	// Build lower hull.
-	hull := make([]int, 0, n+1)
-	for _, i := range idx {
-		for len(hull) >= 2 && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
-			hull = hull[:len(hull)-1]
-		}
-		hull = append(hull, i)
-	}
-	// Build upper hull.
-	lower := len(hull) + 1
-	for j := n - 2; j >= 0; j-- {
-		i := idx[j]
-		for len(hull) >= lower && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
-			hull = hull[:len(hull)-1]
-		}
-		hull = append(hull, i)
-	}
-	return hull[:len(hull)-1] // remove last (duplicate of first)
 }
 
 // triArea returns the area of a triangle defined by 3 vertices.
