@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -223,6 +224,22 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		assignments = voxel.AssignColors(cells, pal)
 	}
 	finishBar(barDither, fmt.Sprintf("Dithered (%s)", ditherMode), fmt.Sprintf("%d cells", len(cells)), time.Since(tDither))
+
+	// Print per-color usage, sorted by count descending.
+	counts := make([]int, len(pal))
+	for _, a := range assignments {
+		counts[a]++
+	}
+	total := len(assignments)
+	order := make([]int, len(pal))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return counts[order[a]] > counts[order[b]] })
+	for _, i := range order {
+		c := pal[i]
+		fmt.Printf("    #%02X%02X%02X: %d cells (%.1f%%)\n", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
+	}
 
 	// 5. Flood fill to merge same-color cells into patches.
 	tFlood := time.Now()
