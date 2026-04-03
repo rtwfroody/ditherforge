@@ -44,7 +44,7 @@ func (Args) Description() string {
 }
 
 func (Args) Version() string {
-	return "ditherforge 0.2.1-alpha"
+	return "ditherforge 0.2.2-alpha"
 }
 
 func run() error {
