@@ -323,6 +323,18 @@ func ClampF(v, lo, hi float32) float32 {
 	return v
 }
 
+// AABBCellRange returns the range of cell indices [min, max] per axis that
+// overlap the given AABB, with 0.5-cell padding to catch boundary cells.
+func AABBCellRange(tMin, tMax, minV [3]float32, cellSize, layerH float32) (colMin, colMax, rowMin, rowMax, layerMin, layerMax int) {
+	colMin = int(math.Floor(float64(tMin[0]-minV[0])/float64(cellSize) - 0.5))
+	colMax = int(math.Ceil(float64(tMax[0]-minV[0])/float64(cellSize) + 0.5))
+	rowMin = int(math.Floor(float64(tMin[1]-minV[1])/float64(cellSize) - 0.5))
+	rowMax = int(math.Ceil(float64(tMax[1]-minV[1])/float64(cellSize) + 0.5))
+	layerMin = int(math.Floor(float64(tMin[2]-minV[2])/float64(layerH) - 0.5))
+	layerMax = int(math.Ceil(float64(tMax[2]-minV[2])/float64(layerH) + 0.5))
+	return
+}
+
 // Minf returns the minimum of two float32s.
 func Minf(a, b float32) float32 {
 	if a < b {

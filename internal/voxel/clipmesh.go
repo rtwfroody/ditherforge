@@ -7,58 +7,6 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// BoundaryPlane represents an axis-aligned clipping plane between two patches.
-type BoundaryPlane struct {
-	Axis  int     // 0=X, 1=Y, 2=Z
-	Value float32 // coordinate of the plane
-}
-
-// FindBoundaryPlanes returns the set of unique axis-aligned planes where
-// adjacent cells belong to different patches (different palette assignments).
-func FindBoundaryPlanes(
-	cells []ActiveCell,
-	assignments []int32,
-	cellAssignMap map[CellKey]int,
-	minV [3]float32,
-	cellSize, layerH float32,
-) []BoundaryPlane {
-	seen := make(map[BoundaryPlane]struct{})
-	for i, c := range cells {
-		k := CellKey{c.Col, c.Row, c.Layer}
-		myColor := assignments[i]
-
-		// Check 3 positive neighbors (avoid duplicate checks).
-		neighbors := [3]CellKey{
-			{k.Col + 1, k.Row, k.Layer},
-			{k.Col, k.Row + 1, k.Layer},
-			{k.Col, k.Row, k.Layer + 1},
-		}
-		for axis, nk := range neighbors {
-			ni, ok := cellAssignMap[nk]
-			if !ok || assignments[ni] == myColor {
-				continue
-			}
-			var val float32
-			switch axis {
-			case 0: // X boundary between col and col+1
-				val = minV[0] + (float32(k.Col)+0.5)*cellSize
-			case 1: // Y boundary between row and row+1
-				val = minV[1] + (float32(k.Row)+0.5)*cellSize
-			case 2: // Z boundary between layer and layer+1
-				val = minV[2] + (float32(k.Layer)+0.5)*layerH
-			}
-			bp := BoundaryPlane{Axis: axis, Value: val}
-			seen[bp] = struct{}{}
-		}
-	}
-
-	planes := make([]BoundaryPlane, 0, len(seen))
-	for bp := range seen {
-		planes = append(planes, bp)
-	}
-	return planes
-}
-
 // ClipTriangleByPlane clips a single triangle against an axis-aligned plane.
 // Returns triangles on the negative side (<=) and positive side (>).
 // Preserves winding order.
@@ -148,25 +96,17 @@ func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 
 // ClipMeshByPatches clips the original model's triangles against patch
 // boundary planes and assigns each fragment the palette color of its
-// enclosing patch.
+// enclosing patch. Only clips against boundaries that are local to each
+// triangle's footprint, avoiding unnecessary splits from distant color
+// transitions.
 func ClipMeshByPatches(
 	model *loader.LoadedModel,
-	planes []BoundaryPlane,
 	patchMap map[CellKey]int,
 	patchAssignment []int32,
 	minV [3]float32,
 	cellSize, layerH float32,
 ) ([][3]float32, [][3]uint32, []int32) {
-	// Sort planes by axis, then by value, for efficient per-triangle filtering.
-	axisPlanes := [3][]float32{} // sorted plane values per axis
-	for _, bp := range planes {
-		axisPlanes[bp.Axis] = append(axisPlanes[bp.Axis], bp.Value)
-	}
-	for i := range axisPlanes {
-		sort.Slice(axisPlanes[i], func(a, b int) bool {
-			return axisPlanes[i][a] < axisPlanes[i][b]
-		})
-	}
+	cellSteps := [3]float32{cellSize, cellSize, layerH}
 
 	vd := NewVertexDedup()
 	var faces [][3]uint32
@@ -183,33 +123,95 @@ func ClipMeshByPatches(
 		v1 := model.Vertices[f[1]]
 		v2 := model.Vertices[f[2]]
 
+		// Triangle AABB.
+		tMin := [3]float32{
+			Minf(v0[0], Minf(v1[0], v2[0])),
+			Minf(v0[1], Minf(v1[1], v2[1])),
+			Minf(v0[2], Minf(v1[2], v2[2])),
+		}
+		tMax := [3]float32{
+			Maxf(v0[0], Maxf(v1[0], v2[0])),
+			Maxf(v0[1], Maxf(v1[1], v2[1])),
+			Maxf(v0[2], Maxf(v1[2], v2[2])),
+		}
+
+		// Find cells overlapping this triangle's AABB.
+		colMin, colMax, rowMin, rowMax, layerMin, layerMax := AABBCellRange(tMin, tMax, minV, cellSize, layerH)
+
+		// Collect local boundary planes from cells in this region.
+		var localAxisPlanes [3]map[float32]struct{}
+		for col := colMin; col <= colMax; col++ {
+			for row := rowMin; row <= rowMax; row++ {
+				for layer := layerMin; layer <= layerMax; layer++ {
+					ck := CellKey{col, row, layer}
+					ci, ok := patchMap[ck]
+					if !ok {
+						continue
+					}
+					myAssign := patchAssignment[ci]
+
+					// Check 3 positive neighbors.
+					neighbors := [3]CellKey{
+						{col + 1, row, layer},
+						{col, row + 1, layer},
+						{col, row, layer + 1},
+					}
+					for axis, nk := range neighbors {
+						ni, ok := patchMap[nk]
+						if !ok || patchAssignment[ni] == myAssign {
+							continue
+						}
+						cellCoords := [3]int{col, row, layer}
+						val := minV[axis] + (float32(cellCoords[axis])+0.5)*cellSteps[axis]
+						if val <= tMin[axis] || val >= tMax[axis] {
+							continue // plane outside triangle AABB
+						}
+						if localAxisPlanes[axis] == nil {
+							localAxisPlanes[axis] = make(map[float32]struct{})
+						}
+						localAxisPlanes[axis][val] = struct{}{}
+					}
+				}
+			}
+		}
+
+		// Sort local planes per axis.
+		var sortedPlanes [3][]float32
+		for axis := 0; axis < 3; axis++ {
+			if len(localAxisPlanes[axis]) == 0 {
+				continue
+			}
+			sorted := make([]float32, 0, len(localAxisPlanes[axis]))
+			for v := range localAxisPlanes[axis] {
+				sorted = append(sorted, v)
+			}
+			sort.Slice(sorted, func(a, b int) bool { return sorted[a] < sorted[b] })
+			sortedPlanes[axis] = sorted
+		}
+
 		// Start with this triangle as the only fragment.
 		fragments := [][3][3]float32{{v0, v1, v2}}
 
-		// Clip against each axis's planes.
+		// Clip against each axis's local planes.
 		for axis := 0; axis < 3; axis++ {
-			pvals := axisPlanes[axis]
+			pvals := sortedPlanes[axis]
 			if len(pvals) == 0 {
 				continue
 			}
 
 			var next [][3][3]float32
 			for _, tri := range fragments {
-				// Find AABB of this fragment on this axis.
 				lo := Minf(tri[0][axis], Minf(tri[1][axis], tri[2][axis]))
 				hi := Maxf(tri[0][axis], Maxf(tri[1][axis], tri[2][axis]))
 
-				// Find planes that intersect this range.
 				iLo := sort.Search(len(pvals), func(i int) bool { return pvals[i] > lo })
 				iHi := sort.Search(len(pvals), func(i int) bool { return pvals[i] >= hi })
 
 				if iLo >= iHi {
-					// No planes intersect this fragment.
 					next = append(next, tri)
 					continue
 				}
 
-				// Clip sequentially against each intersecting plane.
 				current := [][3][3]float32{tri}
 				for pi := iLo; pi < iHi; pi++ {
 					var remaining [][3][3]float32
@@ -220,7 +222,6 @@ func ClipMeshByPatches(
 					}
 					current = remaining
 				}
-				// Remaining fragments are on the positive side of all planes.
 				next = append(next, current...)
 			}
 			fragments = next
@@ -228,7 +229,6 @@ func ClipMeshByPatches(
 
 		// Assign each fragment to a patch by centroid lookup.
 		for _, tri := range fragments {
-			// Filter degenerate triangles.
 			if triArea(tri) < 1e-8 {
 				continue
 			}

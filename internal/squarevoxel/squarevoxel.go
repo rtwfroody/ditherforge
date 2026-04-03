@@ -114,12 +114,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		tMaxY := max(v0[1], max(v1[1], v2[1]))
 		tMinZ := min(v0[2], min(v1[2], v2[2]))
 		tMaxZ := max(v0[2], max(v1[2], v2[2]))
-		colMin := int(math.Floor(float64(tMinX-minV[0])/float64(cellSize) - 0.5))
-		colMax := int(math.Ceil(float64(tMaxX-minV[0])/float64(cellSize) + 0.5))
-		rowMin := int(math.Floor(float64(tMinY-minV[1])/float64(cellSize) - 0.5))
-		rowMax := int(math.Ceil(float64(tMaxY-minV[1])/float64(cellSize) + 0.5))
-		layerMin := int(math.Floor(float64(tMinZ-minV[2])/float64(layerH) - 0.5))
-		layerMax := int(math.Ceil(float64(tMaxZ-minV[2])/float64(layerH) + 0.5))
+		tMin := [3]float32{tMinX, tMinY, tMinZ}
+		tMax := [3]float32{tMaxX, tMaxY, tMaxZ}
+		colMin, colMax, rowMin, rowMax, layerMin, layerMax := voxel.AABBCellRange(tMin, tMax, minV, cellSize, layerH)
 		if colMin < 0 {
 			colMin = 0
 		}
@@ -254,16 +251,11 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		patchAssignment[pid] = assignments[i]
 	}
 
-	// 6. Find boundary planes between different-color patches.
-	tPlanes := time.Now()
-	planes := voxel.FindBoundaryPlanes(cells, assignments, cellAssignMap, minV, cellSize, layerH)
-	fmt.Printf("  Found %d boundary planes in %.1fs\n", len(planes), time.Since(tPlanes).Seconds())
-
-	// 7. Clip original mesh along patch boundaries.
+	// 6. Clip original mesh along patch boundaries.
 	tClip := time.Now()
 	barClip := newBar(-1, "  Clipping mesh")
 	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
-		model, planes, patchMap, patchAssignment, minV, cellSize, layerH)
+		model, patchMap, patchAssignment, minV, cellSize, layerH)
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
 
 	// 8. Optional coplanar merge.
