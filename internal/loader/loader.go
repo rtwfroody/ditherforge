@@ -4,12 +4,12 @@ package loader
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
-
-	"encoding/json"
+	"os"
 
 	"github.com/qmuntal/draco-go/draco"
 	"github.com/qmuntal/gltf"
@@ -89,19 +89,26 @@ func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]f
 		}
 	}
 
+	if ext.BufferView < 0 || ext.BufferView >= len(doc.BufferViews) {
+		fmt.Fprintf(os.Stderr, "Warning: Draco bufferView %d out of range\n", ext.BufferView)
+		return nil, nil, nil, false
+	}
 	bv := doc.BufferViews[ext.BufferView]
 	bvData, err := modeler.ReadBufferView(doc, bv)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Draco buffer read failed: %v\n", err)
 		return nil, nil, nil, false
 	}
 
 	if draco.GetEncodedGeometryType(bvData) != draco.EGT_TRIANGULAR_MESH {
+		fmt.Fprintf(os.Stderr, "Warning: Draco geometry is not a triangle mesh\n")
 		return nil, nil, nil, false
 	}
 
 	m := draco.NewMesh()
 	d := draco.NewDecoder()
 	if err := d.DecodeMesh(m, bvData); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Draco decode failed: %v\n", err)
 		return nil, nil, nil, false
 	}
 
@@ -116,7 +123,10 @@ func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]f
 	}
 	nPoints := m.NumPoints()
 	posFlat := make([]float32, nPoints*3)
-	m.AttrData(posAttr, posFlat)
+	if _, ok := m.AttrData(posAttr, posFlat); !ok {
+		fmt.Fprintf(os.Stderr, "Warning: Draco position attribute read failed\n")
+		return nil, nil, nil, false
+	}
 	positions := make([][3]float32, nPoints)
 	for i := uint32(0); i < nPoints; i++ {
 		positions[i] = [3]float32{posFlat[i*3], posFlat[i*3+1], posFlat[i*3+2]}
@@ -128,16 +138,21 @@ func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]f
 		uvAttr := m.AttrByUniqueID(uint32(uvID))
 		if uvAttr != nil {
 			uvFlat := make([]float32, nPoints*2)
-			m.AttrData(uvAttr, uvFlat)
-			uvs = make([][2]float32, nPoints)
-			for i := uint32(0); i < nPoints; i++ {
-				uvs[i] = [2]float32{uvFlat[i*2], uvFlat[i*2+1]}
+			if _, ok := m.AttrData(uvAttr, uvFlat); ok {
+				uvs = make([][2]float32, nPoints)
+				for i := uint32(0); i < nPoints; i++ {
+					uvs[i] = [2]float32{uvFlat[i*2], uvFlat[i*2+1]}
+				}
 			}
 		}
 	}
 
-	// Read face indices.
-	indices := m.Faces(nil)
+	// Read face indices. Note: m.Faces() has a bug where the returned
+	// slice is truncated to NumFaces() instead of NumFaces()*3.
+	// Pre-allocate the correct size and ignore the return value.
+	nFaces := m.NumFaces()
+	indices := make([]uint32, nFaces*3)
+	m.Faces(indices)
 
 	return positions, uvs, indices, true
 }
