@@ -31,6 +31,7 @@ type Args struct {
 	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)" cache:"skip"`
 	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, dizzy" cache:"skip"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging" cache:"skip"`
+	NoSimplify     bool     `arg:"--no-simplify" help:"Skip per-cell convex hull simplification" cache:"skip"`
 	Size           *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force          bool     `arg:"--force" help:"Bypass extent size check" cache:"skip"`
 	Stats          bool     `arg:"--stats" help:"Print face counts per material" cache:"skip"`
@@ -152,6 +153,7 @@ func runRemesh(args Args, model *loader.LoadedModel, pcfg voxel.PaletteConfig) e
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
 		NoMerge:        args.NoMerge,
+		NoSimplify:     args.NoSimplify,
 		ColorSnap:      args.ColorSnap,
 	}
 

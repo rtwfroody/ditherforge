@@ -23,6 +23,7 @@ type Config struct {
 	NozzleDiameter float32
 	LayerHeight    float32
 	NoMerge        bool
+	NoSimplify     bool
 	ColorSnap      float64 // shift cell colors toward nearest palette color by this many ΔE (0 to disable)
 }
 
@@ -255,7 +256,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	tClip := time.Now()
 	barClip := newBar(-1, "  Clipping mesh")
 	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
-		model, patchMap, patchAssignment, minV, cellSize, layerH)
+		model, patchMap, patchAssignment, minV, cellSize, layerH, !cfg.NoSimplify)
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
 
 	// 8. Optional coplanar merge.

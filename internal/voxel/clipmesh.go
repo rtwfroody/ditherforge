@@ -105,12 +105,32 @@ func ClipMeshByPatches(
 	patchAssignment []int32,
 	minV [3]float32,
 	cellSize, layerH float32,
+	simplify bool,
 ) ([][3]float32, [][3]uint32, []int32) {
+	type cellFrag struct {
+		tri        [3][3]float32
+		ck         CellKey
+		assignment int32
+	}
+
 	cellSteps := [3]float32{cellSize, cellSize, layerH}
 
 	vd := NewVertexDedup()
 	var faces [][3]uint32
 	var assignments []int32
+
+	emitDirect := func(frags []cellFrag) {
+		for _, cf := range frags {
+			vi0 := vd.GetVertex(cf.tri[0])
+			vi1 := vd.GetVertex(cf.tri[1])
+			vi2 := vd.GetVertex(cf.tri[2])
+			if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+				continue // degenerate after dedup
+			}
+			faces = append(faces, [3]uint32{vi0, vi1, vi2})
+			assignments = append(assignments, cf.assignment)
+		}
+	}
 
 	for fi := range model.Faces {
 		// Skip translucent faces.
@@ -227,7 +247,8 @@ func ClipMeshByPatches(
 			fragments = next
 		}
 
-		// Assign each fragment to a patch by centroid lookup.
+		// Assign each fragment a color by mapping its centroid to a cell.
+		var cellFrags []cellFrag
 		for _, tri := range fragments {
 			if triArea(tri) < 1e-8 {
 				continue
@@ -244,23 +265,105 @@ func ClipMeshByPatches(
 			if pid, ok := patchMap[ck]; ok {
 				assignment = patchAssignment[pid]
 			} else {
-				// Fallback: search nearby cells. If none found,
-				// the fragment is in a transparent region — drop it.
 				a, found := nearestPatchAssignment(ck, patchMap, patchAssignment)
 				if !found {
 					continue
 				}
 				assignment = a
 			}
+			cellFrags = append(cellFrags, cellFrag{tri, ck, assignment})
+		}
 
-			vi0 := vd.GetVertex(tri[0])
-			vi1 := vd.GetVertex(tri[1])
-			vi2 := vd.GetVertex(tri[2])
-			if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-				continue // degenerate after dedup
+		if !simplify {
+			emitDirect(cellFrags)
+			continue
+		}
+
+		// Group fragments by cell key. Fragments in the same cell from one
+		// original triangle are contiguous and convex — can be re-triangulated
+		// with fewer triangles (ignoring shared edges with neighbors).
+		byCell := map[CellKey][]cellFrag{}
+		for _, cf := range cellFrags {
+			byCell[cf.ck] = append(byCell[cf.ck], cf)
+		}
+
+		// Build 2D projection axes from the original triangle normal.
+		n := TriNormal(v0, v1, v2)
+		var u, vAxis [3]float32
+		if n[0]*n[0] < 0.81 { // not nearly parallel to X axis
+			u = Cross3f(n, [3]float32{1, 0, 0})
+		} else {
+			u = Cross3f(n, [3]float32{0, 1, 0})
+		}
+		uLen := float32(math.Sqrt(float64(u[0]*u[0] + u[1]*u[1] + u[2]*u[2])))
+		canProject := uLen >= 1e-10
+		if canProject {
+			u[0] /= uLen; u[1] /= uLen; u[2] /= uLen
+			vAxis = Cross3f(n, u)
+		}
+
+		for _, cellFrags := range byCell {
+			assign := cellFrags[0].assignment
+
+			if len(cellFrags) == 1 || !canProject {
+				emitDirect(cellFrags)
+				continue
 			}
-			faces = append(faces, [3]uint32{vi0, vi1, vi2})
-			assignments = append(assignments, assignment)
+
+			// Collect unique vertices, snapping to avoid duplicates.
+			type v3key struct{ x, y, z int32 }
+			snap := func(p [3]float32) v3key {
+				return v3key{
+					int32(math.Round(float64(p[0]) * 1e6)),
+					int32(math.Round(float64(p[1]) * 1e6)),
+					int32(math.Round(float64(p[2]) * 1e6)),
+				}
+			}
+			vertMap := map[v3key]int{}
+			var verts3D [][3]float32
+			for _, cf := range cellFrags {
+				for _, p := range cf.tri {
+					sk := snap(p)
+					if _, ok := vertMap[sk]; !ok {
+						vertMap[sk] = len(verts3D)
+						verts3D = append(verts3D, p)
+					}
+				}
+			}
+
+			if len(verts3D) < 3 {
+				continue
+			}
+
+			// Project to 2D and compute convex hull.
+			pts2D := make([][2]float64, len(verts3D))
+			for i, p := range verts3D {
+				pts2D[i] = [2]float64{
+					float64(p[0]*u[0] + p[1]*u[1] + p[2]*u[2]),
+					float64(p[0]*vAxis[0] + p[1]*vAxis[1] + p[2]*vAxis[2]),
+				}
+			}
+
+			hull := convexHull2D(pts2D)
+			if len(hull) < 3 {
+				emitDirect(cellFrags)
+				continue
+			}
+
+			// Fan-triangulate the convex hull: N-2 triangles.
+			p0 := verts3D[hull[0]]
+			for i := 1; i < len(hull)-1; i++ {
+				p1 := verts3D[hull[i]]
+				p2 := verts3D[hull[i+1]]
+				vi0 := vd.GetVertex(p0)
+				vi1 := vd.GetVertex(p1)
+				vi2 := vd.GetVertex(p2)
+				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+					continue
+				}
+				faces = append(faces, [3]uint32{vi0, vi1, vi2})
+				assignments = append(assignments, assign)
+			}
 		}
 	}
 
@@ -303,6 +406,56 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 		}
 	}
 	return bestAssign, found
+}
+
+// convexHull2D returns the convex hull of a set of 2D points as indices
+// into the input slice, in counter-clockwise order. Uses Andrew's monotone chain.
+func convexHull2D(pts [][2]float64) []int {
+	n := len(pts)
+	if n < 3 {
+		idx := make([]int, n)
+		for i := range idx {
+			idx[i] = i
+		}
+		return idx
+	}
+
+	// Sort indices by x, then y.
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(a, b int) bool {
+		pa, pb := pts[idx[a]], pts[idx[b]]
+		if pa[0] != pb[0] {
+			return pa[0] < pb[0]
+		}
+		return pa[1] < pb[1]
+	})
+
+	cross := func(o, a, b int) float64 {
+		return (pts[a][0]-pts[o][0])*(pts[b][1]-pts[o][1]) -
+			(pts[a][1]-pts[o][1])*(pts[b][0]-pts[o][0])
+	}
+
+	// Build lower hull.
+	hull := make([]int, 0, n+1)
+	for _, i := range idx {
+		for len(hull) >= 2 && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, i)
+	}
+	// Build upper hull.
+	lower := len(hull) + 1
+	for j := n - 2; j >= 0; j-- {
+		i := idx[j]
+		for len(hull) >= lower && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, i)
+	}
+	return hull[:len(hull)-1] // remove last (duplicate of first)
 }
 
 // triArea returns the area of a triangle defined by 3 vertices.
