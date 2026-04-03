@@ -1,5 +1,5 @@
-// Package loader loads a GLB file and extracts mesh geometry, per-vertex UVs,
-// and texture images.
+// Package loader loads GLB and 3MF files and extracts mesh geometry,
+// per-vertex UVs, and texture images.
 package loader
 
 import (

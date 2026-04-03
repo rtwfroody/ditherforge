@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ import (
 // Fields tagged cache:"skip" do not affect the voxelization cache.
 // All other fields are included in the cache key by default.
 type Args struct {
-	Input          string   `arg:"positional,required" help:"Input .glb file"`
+	Input          string   `arg:"positional,required" help:"Input .glb or .3mf file"`
 	Palette        string   `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue" cache:"skip"`
 	AutoPalette    *int     `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface" cache:"skip"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
@@ -44,7 +45,7 @@ func (Args) Description() string {
 }
 
 func (Args) Version() string {
-	return "ditherforge 0.2.2-alpha"
+	return "ditherforge 0.2.3-alpha"
 }
 
 func run() error {
@@ -65,13 +66,34 @@ func run() error {
 		return fmt.Errorf("output must be .3mf, got %q", outputExt)
 	}
 
-	scale := unitScale * args.Scale
+	// Dispatch loader based on input extension.
+	// GLB uses meters internally → multiply by 1000 to get mm.
+	// 3MF is already in mm → no unit conversion needed.
+	inputExt := strings.ToLower(filepath.Ext(args.Input))
+	var baseScale float32
+	switch inputExt {
+	case ".glb":
+		baseScale = unitScale * args.Scale
+	case ".3mf":
+		baseScale = args.Scale
+	default:
+		return fmt.Errorf("unsupported input format %q (use .glb or .3mf)", inputExt)
+	}
+	loadModel := func(scale float32) (*loader.LoadedModel, error) {
+		switch inputExt {
+		case ".glb":
+			return loader.LoadGLB(args.Input, scale)
+		default:
+			return loader.Load3MF(args.Input, scale)
+		}
+	}
+	scale := baseScale
 
 	fmt.Printf("Loading %s...", args.Input)
 	tLoad := time.Now()
-	model, err := loader.LoadGLB(args.Input, scale)
+	model, err := loadModel(scale)
 	if err != nil {
-		return fmt.Errorf("loading GLB: %w", err)
+		return fmt.Errorf("loading %s: %w", inputExt, err)
 	}
 	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
 
@@ -82,9 +104,9 @@ func run() error {
 			rescale := *args.Size / ext
 			fmt.Printf("  Rescaling to %.0f mm...", *args.Size)
 			tRescale := time.Now()
-			model, err = loader.LoadGLB(args.Input, scale*rescale)
+			model, err = loadModel(scale * rescale)
 			if err != nil {
-				return fmt.Errorf("loading GLB (rescaled): %w", err)
+				return fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
 			}
 			fmt.Printf(" done in %.1fs\n", time.Since(tRescale).Seconds())
 		}
