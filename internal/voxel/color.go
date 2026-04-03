@@ -142,11 +142,21 @@ func faceMaterial(faceIdx int, model *loader.LoadedModel) (matAlpha float32, bc 
 func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 	matAlpha, bc, texIdx := faceMaterial(faceIdx, model)
 
+	f := model.Faces[faceIdx]
+
+	// Vertex-colored faces: average vertex alpha at centroid.
+	if (texIdx < 0 || int(texIdx) >= len(model.Textures)) && model.VertexColors != nil {
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		avgA := (float32(c0[3]) + float32(c1[3]) + float32(c2[3])) / 3
+		a := avgA / 255 * float32(bc[3]) * matAlpha
+		return uint8(ClampF(a+0.5, 0, 255))
+	}
+
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
 		return uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
 	}
-
-	f := model.Faces[faceIdx]
 	uv0 := model.UVs[f[0]]
 	uv1 := model.UVs[f[1]]
 	uv2 := model.UVs[f[2]]
@@ -262,30 +272,48 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	}
 
 	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
+	f := model.Faces[bestTri]
+	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
 
-	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
+	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
+		// Texture sampling path.
+		uv0 := model.UVs[f[0]]
+		uv1 := model.UVs[f[1]]
+		uv2 := model.UVs[f[2]]
+
+		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+
+		rgba := BilinearSample(model.Textures[texIdx], u, v)
+		// Alpha-blend texture sample over material base color.
+		texA := float32(rgba[3]) / 255
+		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
+		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
+		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
+		// Combine texture alpha, base color alpha, and material alpha.
+		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
+		return rgba
+	} else if model.VertexColors != nil {
+		// Vertex color interpolation path.
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		r := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
+		g := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
+		b := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
+		a := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
+		// Modulate by material base color and alpha.
+		return [4]uint8{
+			uint8(ClampF(r*float32(bc[0])/255+0.5, 0, 255)),
+			uint8(ClampF(g*float32(bc[1])/255+0.5, 0, 255)),
+			uint8(ClampF(b*float32(bc[2])/255+0.5, 0, 255)),
+			uint8(ClampF(a*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+		}
+	} else {
+		// Base color only path.
 		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
 		return [4]uint8{bc[0], bc[1], bc[2], a}
 	}
-
-	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
-	f := model.Faces[bestTri]
-	uv0 := model.UVs[f[0]]
-	uv1 := model.UVs[f[1]]
-	uv2 := model.UVs[f[2]]
-
-	u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
-	v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
-
-	rgba := BilinearSample(model.Textures[texIdx], u, v)
-	// Alpha-blend texture sample over material base color.
-	texA := float32(rgba[3]) / 255
-	rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
-	rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
-	rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
-	// Combine texture alpha, base color alpha, and material alpha.
-	rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
-	return rgba
 }
 
 // neighbor holds a precomputed neighbor reference with its diffusion weight.

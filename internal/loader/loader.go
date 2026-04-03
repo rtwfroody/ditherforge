@@ -21,11 +21,12 @@ type LoadedModel struct {
 	Vertices       [][3]float32  // world-space, already transformed + scaled
 	Faces          [][3]uint32
 	UVs            [][2]float32  // per-vertex, aligned to Vertices
+	VertexColors   [][4]uint8   // per-vertex RGBA; nil if no vertex colors
 	Textures       []image.Image
 	FaceTextureIdx []int32       // index into Textures; len(Textures) is sentinel for no-texture faces
 	FaceAlpha      []float32     // per-face material alpha (0=transparent, 1=opaque); nil if all opaque
 	FaceBaseColor  [][4]uint8    // per-face material base color (RGBA)
-	NoTextureMask  []bool        // nil if no texture-less faces; true = use palette[0]
+	NoTextureMask  []bool        // nil if no texture-less faces; true = use base color
 	FaceMeshIdx    []int32       // which original mesh each face belongs to
 	NumMeshes      int           // total number of original meshes
 }
@@ -65,67 +66,67 @@ type dracoExt struct {
 }
 
 // decodeDraco attempts to decode a Draco-compressed primitive.
-// Returns positions, UVs, indices, and true if successful.
-func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]float32, []uint32, bool) {
+// Returns positions, UVs, vertex colors, indices, and true if successful.
+func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]float32, [][4]uint8, []uint32, bool) {
 	extRaw, ok := prim.Extensions["KHR_draco_mesh_compression"]
 	if !ok {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	// The extension data may be raw JSON or already unmarshalled.
 	var ext dracoExt
 	switch v := extRaw.(type) {
 	case json.RawMessage:
 		if err := json.Unmarshal(v, &ext); err != nil {
-			return nil, nil, nil, false
+			return nil, nil, nil, nil, false
 		}
 	default:
 		// Try re-marshalling and unmarshalling.
 		data, err := json.Marshal(v)
 		if err != nil {
-			return nil, nil, nil, false
+			return nil, nil, nil, nil, false
 		}
 		if err := json.Unmarshal(data, &ext); err != nil {
-			return nil, nil, nil, false
+			return nil, nil, nil, nil, false
 		}
 	}
 
 	if ext.BufferView < 0 || ext.BufferView >= len(doc.BufferViews) {
 		fmt.Fprintf(os.Stderr, "Warning: Draco bufferView %d out of range\n", ext.BufferView)
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	bv := doc.BufferViews[ext.BufferView]
 	bvData, err := modeler.ReadBufferView(doc, bv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Draco buffer read failed: %v\n", err)
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if draco.GetEncodedGeometryType(bvData) != draco.EGT_TRIANGULAR_MESH {
 		fmt.Fprintf(os.Stderr, "Warning: Draco geometry is not a triangle mesh\n")
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	m := draco.NewMesh()
 	d := draco.NewDecoder()
 	if err := d.DecodeMesh(m, bvData); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Draco decode failed: %v\n", err)
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	// Read positions.
 	posID, ok := ext.Attributes["POSITION"]
 	if !ok {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	posAttr := m.AttrByUniqueID(uint32(posID))
 	if posAttr == nil {
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	nPoints := m.NumPoints()
 	posFlat := make([]float32, nPoints*3)
 	if _, ok := m.AttrData(posAttr, posFlat); !ok {
 		fmt.Fprintf(os.Stderr, "Warning: Draco position attribute read failed\n")
-		return nil, nil, nil, false
+		return nil, nil, nil, nil, false
 	}
 	positions := make([][3]float32, nPoints)
 	for i := uint32(0); i < nPoints; i++ {
@@ -147,6 +148,52 @@ func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]f
 		}
 	}
 
+	// Read vertex colors (optional). Handles both uint8 and float32 storage,
+	// and both VEC3 (RGB) and VEC4 (RGBA) component counts.
+	var vertColors [][4]uint8
+	if colorID, ok := ext.Attributes["COLOR_0"]; ok {
+		colorAttr := m.AttrByUniqueID(uint32(colorID))
+		if colorAttr != nil {
+			nComp := int(colorAttr.NumComponents())
+			if nComp < 3 {
+				nComp = 3
+			}
+			if colorAttr.DataType() == draco.DT_FLOAT32 {
+				colorFlat := make([]float32, nPoints*uint32(nComp))
+				if _, ok := m.AttrData(colorAttr, colorFlat); ok {
+					vertColors = make([][4]uint8, nPoints)
+					for i := uint32(0); i < nPoints; i++ {
+						off := i * uint32(nComp)
+						vertColors[i][0] = uint8(clampF32(colorFlat[off]*255, 0, 255))
+						vertColors[i][1] = uint8(clampF32(colorFlat[off+1]*255, 0, 255))
+						vertColors[i][2] = uint8(clampF32(colorFlat[off+2]*255, 0, 255))
+						if nComp >= 4 {
+							vertColors[i][3] = uint8(clampF32(colorFlat[off+3]*255, 0, 255))
+						} else {
+							vertColors[i][3] = 255
+						}
+					}
+				}
+			} else {
+				colorFlat := make([]uint8, nPoints*uint32(nComp))
+				if _, ok := m.AttrData(colorAttr, colorFlat); ok {
+					vertColors = make([][4]uint8, nPoints)
+					for i := uint32(0); i < nPoints; i++ {
+						off := i * uint32(nComp)
+						vertColors[i][0] = colorFlat[off]
+						vertColors[i][1] = colorFlat[off+1]
+						vertColors[i][2] = colorFlat[off+2]
+						if nComp >= 4 {
+							vertColors[i][3] = colorFlat[off+3]
+						} else {
+							vertColors[i][3] = 255
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Read face indices. Note: m.Faces() has a bug where the returned
 	// slice is truncated to NumFaces() instead of NumFaces()*3.
 	// Pre-allocate the correct size and ignore the return value.
@@ -154,7 +201,7 @@ func decodeDraco(doc *gltf.Document, prim *gltf.Primitive) ([][3]float32, [][2]f
 	indices := make([]uint32, nFaces*3)
 	m.Faces(indices)
 
-	return positions, uvs, indices, true
+	return positions, uvs, vertColors, indices, true
 }
 
 // transformPoint applies a column-major 4x4 matrix to a 3D point (w=1).
@@ -213,13 +260,25 @@ func nodeMatrix(node *gltf.Node) mat4 {
 
 // primitiveData holds extracted data for one GLTF primitive.
 type primitiveData struct {
-	positions  [][3]float32
-	uvs        [][2]float32
-	indices    []uint32
-	textureIdx int     // index into accumulated texture list; -1 if no texture
-	meshIdx    int     // which GLTF mesh this primitive belongs to
-	matAlpha   float32  // material-level alpha (from BaseColorFactor + AlphaMode)
-	baseColor  [4]uint8 // material base color factor (RGBA, 0-255)
+	positions    [][3]float32
+	uvs          [][2]float32
+	vertexColors [][4]uint8 // per-vertex RGBA; nil if no vertex colors
+	indices      []uint32
+	textureIdx   int     // index into accumulated texture list; -1 if no texture
+	meshIdx      int     // which GLTF mesh this primitive belongs to
+	matAlpha     float32  // material-level alpha (from BaseColorFactor + AlphaMode)
+	baseColor    [4]uint8 // material base color factor (RGBA, 0-255)
+}
+
+// clampF32 clamps v to [lo, hi].
+func clampF32(v, lo, hi float32) float32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // LoadGLB loads a GLB file and returns a LoadedModel.
@@ -301,12 +360,14 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 
 				var positions [][3]float32
 				var uvs [][2]float32
+				var vertexColors [][4]uint8
 				var indices []uint32
 
 				// Try Draco decoding first.
-				if dracoPositions, dracoUVs, dracoIndices, ok := decodeDraco(doc, prim); ok {
+				if dracoPositions, dracoUVs, dracoColors, dracoIndices, ok := decodeDraco(doc, prim); ok {
 					positions = dracoPositions
 					uvs = dracoUVs
+					vertexColors = dracoColors
 					indices = dracoIndices
 				} else {
 					// Standard (non-Draco) path.
@@ -321,6 +382,14 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 					if texCoordAttrIdx, ok := prim.Attributes[gltf.TEXCOORD_0]; ok {
 						if acc := doc.Accessors[texCoordAttrIdx]; acc.BufferView != nil {
 							uvs, _ = modeler.ReadTextureCoord(doc, acc, nil)
+						}
+					}
+					if colorAttrIdx, ok := prim.Attributes[gltf.COLOR_0]; ok {
+						if acc := doc.Accessors[colorAttrIdx]; acc.BufferView != nil {
+							vertexColors, _ = modeler.ReadColor(doc, acc, nil)
+							if len(vertexColors) != len(positions) {
+								vertexColors = nil
+							}
 						}
 					}
 					if prim.Indices != nil {
@@ -373,15 +442,21 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 					}
 				}
 				pd := primitiveData{
-					positions:  transformed,
-					uvs:        uvs,
-					indices:    indices,
-					textureIdx: texIdx,
-					meshIdx:    meshIdx,
-					matAlpha:   alpha,
-					baseColor:  baseColor,
+					positions:    transformed,
+					uvs:          uvs,
+					vertexColors: vertexColors,
+					indices:      indices,
+					textureIdx:   texIdx,
+					meshIdx:      meshIdx,
+					matAlpha:     alpha,
+					baseColor:    baseColor,
 				}
 				if hasTexture {
+					texturedPrims = append(texturedPrims, pd)
+				} else if len(vertexColors) > 0 {
+					// Vertex-colored primitives are treated like textured ones
+					// (they have per-vertex color data for sampling).
+					pd.textureIdx = -1
 					texturedPrims = append(texturedPrims, pd)
 				} else {
 					pd.textureIdx = -1
@@ -405,11 +480,11 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 
-	if len(texturedPrims) == 0 {
-		return nil, fmt.Errorf("GLB contains no textured meshes")
+	if len(texturedPrims) == 0 && len(untexturedPrims) == 0 {
+		return nil, fmt.Errorf("GLB contains no meshes")
 	}
-	if len(untexturedPrims) > 0 {
-		fmt.Printf("  Warning: %d primitives have no texture; their faces will use palette index 0.\n", len(untexturedPrims))
+	if len(texturedPrims) > 0 && len(untexturedPrims) > 0 {
+		fmt.Printf("  Warning: %d primitives have no texture; their faces will use base color.\n", len(untexturedPrims))
 	}
 
 	nTex := len(texList) // sentinel value for untextured faces
@@ -418,16 +493,36 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	var allVerts [][3]float32
 	var allFaces [][3]uint32
 	var allUVs [][2]float32
+	var allVertColors [][4]uint8
 	var allFaceTex []int32
 	var allFaceAlpha []float32
 	var allFaceBaseColor [][4]uint8
 	var allFaceMesh []int32
 	hasNonOpaque := false
+	hasVertexColors := false
 
 	appendPrim := func(pd primitiveData, texIdx int32) {
 		offset := uint32(len(allVerts))
 		allVerts = append(allVerts, pd.positions...)
 		allUVs = append(allUVs, pd.uvs...)
+		if pd.vertexColors != nil {
+			if !hasVertexColors {
+				// First vertex-colored primitive: backfill earlier vertices with white.
+				hasVertexColors = true
+				backfill := make([][4]uint8, int(offset))
+				for i := range backfill {
+					backfill[i] = [4]uint8{255, 255, 255, 255}
+				}
+				allVertColors = append(backfill, pd.vertexColors...)
+			} else {
+				allVertColors = append(allVertColors, pd.vertexColors...)
+			}
+		} else if hasVertexColors {
+			// Pad with white for primitives without vertex colors.
+			for range pd.positions {
+				allVertColors = append(allVertColors, [4]uint8{255, 255, 255, 255})
+			}
+		}
 		for i := 0; i+2 < len(pd.indices); i += 3 {
 			allFaces = append(allFaces, [3]uint32{
 				pd.indices[i] + offset,
@@ -462,19 +557,24 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 
-	// Deduplicate vertices by (position, UV) pair. Vertices at UV seams share
-	// the same position but have different UVs and must remain separate.
+	// Deduplicate vertices by (position, UV, color) tuple. Vertices at UV seams
+	// or color boundaries share the same position but must remain separate.
 	{
-		type posUV struct {
-			pos [3]float32
-			uv  [2]float32
+		type vertKey struct {
+			pos   [3]float32
+			uv    [2]float32
+			color [4]uint8
 		}
-		keyToIdx := make(map[posUV]uint32, len(allVerts))
+		keyToIdx := make(map[vertKey]uint32, len(allVerts))
 		remap := make([]uint32, len(allVerts))
 		var newVerts [][3]float32
 		var newUVs [][2]float32
+		var newVertColors [][4]uint8
 		for i, v := range allVerts {
-			key := posUV{pos: v, uv: allUVs[i]}
+			key := vertKey{pos: v, uv: allUVs[i]}
+			if hasVertexColors {
+				key.color = allVertColors[i]
+			}
 			if idx, ok := keyToIdx[key]; ok {
 				remap[i] = idx
 			} else {
@@ -483,6 +583,9 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 				remap[i] = idx
 				newVerts = append(newVerts, v)
 				newUVs = append(newUVs, allUVs[i])
+				if hasVertexColors {
+					newVertColors = append(newVertColors, allVertColors[i])
+				}
 			}
 		}
 		for fi, f := range allFaces {
@@ -490,6 +593,9 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 		allVerts = newVerts
 		allUVs = newUVs
+		if hasVertexColors {
+			allVertColors = newVertColors
+		}
 	}
 
 	// Build NoTextureMask.
@@ -503,16 +609,21 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 
-
 	var faceAlpha []float32
 	if hasNonOpaque {
 		faceAlpha = allFaceAlpha
+	}
+
+	var vertColors [][4]uint8
+	if hasVertexColors {
+		vertColors = allVertColors
 	}
 
 	return &LoadedModel{
 		Vertices:       allVerts,
 		Faces:          allFaces,
 		UVs:            allUVs,
+		VertexColors:   vertColors,
 		Textures:       texList,
 		FaceTextureIdx: allFaceTex,
 		FaceAlpha:      faceAlpha,
