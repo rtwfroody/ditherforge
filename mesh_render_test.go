@@ -109,9 +109,14 @@ func defaultPaletteConfig() voxel.PaletteConfig {
 	return pcfg
 }
 
-func getOrRunRemesh(t *testing.T, name string, model *loader.LoadedModel, pcfg voxel.PaletteConfig) (*loader.LoadedModel, []int32, [][3]uint8) {
+func getOrRunRemesh(t *testing.T, name string, modelPath string, model *loader.LoadedModel, pcfg voxel.PaletteConfig) (*loader.LoadedModel, []int32, [][3]uint8) {
 	t.Helper()
-	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s.gob", name, sourceHash))
+	// Include model file mod time in cache key so edits invalidate cache.
+	modelHash := ""
+	if info, err := os.Stat(modelPath); err == nil {
+		modelHash = fmt.Sprintf("_%x", info.ModTime().UnixNano())
+	}
+	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s%s.gob", name, sourceHash, modelHash))
 
 	if f, err := os.Open(cacheFile); err == nil {
 		defer f.Close()
@@ -318,7 +323,7 @@ func TestMeshRender(t *testing.T) {
 			t.Logf("  Input: %d verts, %d faces, extent %.1fmm",
 				len(model.Vertices), len(model.Faces), ext)
 
-			outModel, _, _ := getOrRunRemesh(t, name, model, defaultPaletteConfig())
+			outModel, _, _ := getOrRunRemesh(t, name, modelPath, model, defaultPaletteConfig())
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
 
 			// If the input mesh is watertight, the output must be too.
@@ -650,7 +655,7 @@ func TestTextureRender(t *testing.T) {
 				ext = modelExtent(model)
 			}
 
-			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, model, defaultPaletteConfig())
+			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, glbPath, model, defaultPaletteConfig())
 
 			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
 
