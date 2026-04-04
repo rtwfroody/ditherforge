@@ -58,6 +58,12 @@ jobs:
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
           go build -o "ditherforge${EXT}" .
 
+      - name: Smoke test
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          ./ditherforge --version
+          go test -short -timeout 2m ./...
+
       - name: Package
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -65,9 +71,14 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
           ARCHIVE="ditherforge-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir "$ARCHIVE"
-          cp "ditherforge${EXT}" README.md LICENSE "$ARCHIVE/" 2>/dev/null || cp "ditherforge${EXT}" README.md "$ARCHIVE/"
-          tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
-          echo "archive=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+          cp "ditherforge${EXT}" README.md LICENSE "$ARCHIVE/"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -r "${ARCHIVE}.zip" "$ARCHIVE"
+            echo "archive=${ARCHIVE}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
+            echo "archive=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -105,4 +116,4 @@ jobs:
             --title "Latest build (v${VERSION})" \
             --notes "Automated build from main branch (v${VERSION}, commit ${GITHUB_SHA::8})." \
             --prerelease \
-            artifacts/*.tar.gz
+            artifacts/*
