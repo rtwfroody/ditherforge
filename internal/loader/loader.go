@@ -9,7 +9,10 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/qmuntal/draco-go/draco"
 	"github.com/qmuntal/gltf"
@@ -289,15 +292,32 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	}
 
 	// Decode all images referenced in the document.
+	// Images may be embedded (BufferView) or external (URI relative to the GLB file).
+	dir := filepath.Dir(path)
 	decodedImages := make([]image.Image, len(doc.Images))
 	for i, img := range doc.Images {
-		if img.BufferView == nil {
+		var imgBytes []byte
+		if img.BufferView != nil {
+			bvIdx := *img.BufferView
+			bv := doc.BufferViews[bvIdx]
+			buf := doc.Buffers[bv.Buffer]
+			imgBytes = buf.Data[bv.ByteOffset : bv.ByteOffset+bv.ByteLength]
+		} else if img.URI != "" {
+			if strings.HasPrefix(img.URI, "data:") {
+				return nil, fmt.Errorf("image %d: data URIs not supported", i)
+			}
+			decoded, err := url.PathUnescape(img.URI)
+			if err != nil {
+				return nil, fmt.Errorf("image %d: invalid URI %q: %w", i, img.URI, err)
+			}
+			imgPath := filepath.Join(dir, decoded)
+			imgBytes, err = os.ReadFile(imgPath)
+			if err != nil {
+				return nil, fmt.Errorf("reading external image %q: %w", img.URI, err)
+			}
+		} else {
 			continue
 		}
-		bvIdx := *img.BufferView
-		bv := doc.BufferViews[bvIdx]
-		buf := doc.Buffers[bv.Buffer]
-		imgBytes := buf.Data[bv.ByteOffset : bv.ByteOffset+bv.ByteLength]
 		decoded, _, err := image.Decode(bytes.NewReader(imgBytes))
 		if err != nil {
 			return nil, fmt.Errorf("decoding image %d: %w", i, err)
