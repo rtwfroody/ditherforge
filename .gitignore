@@ -1,5 +1,6 @@
 # Build output
 /ditherforge
+/ditherforge-cli
 build/bin/
 
 # Frontend
