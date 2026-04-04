@@ -19,9 +19,7 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
-            cgo: "1"
-            packages: gcc-aarch64-linux-gnu
-            cc: aarch64-linux-gnu-gcc
+            cgo: "0"
           - os: ubuntu-latest
             goos: darwin
             goarch: amd64
@@ -44,10 +42,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install cross-compiler
-        if: matrix.packages
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
-
       - name: Extract version
         id: version
         run: |
@@ -59,7 +53,6 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
-          CC: ${{ matrix.cc || '' }}
         run: |
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
