@@ -1,5 +1,5 @@
 #!/bin/bash
 set -e
-go build -o ditherforge .
+wails build
 go build -o ditherforge-cli ./cmd/ditherforge
-echo "Built ditherforge (GUI) and ditherforge-cli (CLI)"
+echo "Built build/bin/ditherforge (GUI) and ditherforge-cli (CLI)"
