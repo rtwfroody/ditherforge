@@ -252,11 +252,15 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				opaqueFaces = append(opaqueFaces, model.Faces[fi])
 			}
 		}
+		// Target ~2 triangles per surface cell. This preserves enough
+		// geometry for accurate clipping while removing sub-voxel detail.
 		targetFaces := len(cells) * 2
 		if targetFaces < len(opaqueFaces) {
 			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
 			wr := voxel.CheckWatertight(decFaces)
 			fmt.Printf("  Decimated mesh: %s\n", wr)
+			// Only geometry needed — color info is already in the voxel grid,
+			// and ClipMeshByPatches only reads Vertices/Faces.
 			decimModel = &loader.LoadedModel{
 				Vertices: decVerts,
 				Faces:    decFaces,

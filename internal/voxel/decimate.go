@@ -111,12 +111,12 @@ func (h collapseHeap) Swap(i, j int) {
 	h[i].idx = i
 	h[j].idx = j
 }
-func (h *collapseHeap) Push(x interface{}) {
+func (h *collapseHeap) Push(x any) {
 	c := x.(*collapseEntry)
 	c.idx = len(*h)
 	*h = append(*h, c)
 }
-func (h *collapseHeap) Pop() interface{} {
+func (h *collapseHeap) Pop() any {
 	old := *h
 	n := len(old)
 	c := old[n-1]
@@ -253,6 +253,8 @@ func (d *decimator) pushEdge(ek decimEdgeKey) {
 	dy := float64(v2[1] - v1[1])
 	dz := float64(v2[2] - v1[2])
 	edgeLen := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	// Zero-length edges get scale=0, making them free to collapse (they're
+	// degenerate and collapsing them is always beneficial).
 	scale := edgeLen / d.cellSize
 	if scale > 1 {
 		scale = 1

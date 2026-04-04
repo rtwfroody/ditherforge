@@ -82,7 +82,12 @@ func ClipTriangleByPlane(
 func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 	denom := b[axis] - a[axis]
 	if denom == 0 {
-		return a // edge parallel to plane; return either endpoint
+		// Edge parallel to plane — should not normally be called.
+		// Return the canonicalized endpoint for consistency.
+		if a[axis] > b[axis] {
+			return b
+		}
+		return a
 	}
 	// Canonicalize: always interpolate from the vertex with the smaller
 	// coordinate on the clipping axis. This ensures identical floating-point
