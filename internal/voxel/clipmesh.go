@@ -1,6 +1,7 @@
 package voxel
 
 import (
+	"fmt"
 	"math"
 	"sort"
 
@@ -342,7 +343,7 @@ func ClipMeshByPatches(
 		}
 	}
 
-	// Pass 2: extract cell-edge vertices and emit watertight polygons.
+	// Pass 2: per-face simplification, then per-cell assembly.
 	if simplify {
 		type vertKey struct {
 			x, y, z int64
@@ -351,49 +352,206 @@ func ClipMeshByPatches(
 			return int64(math.Round(float64(v) * 1e4))
 		}
 
-		for _, cd := range cellDataMap {
-			// Normalize the accumulated normal.
-			nx, ny, nz := cd.normalSum[0], cd.normalSum[1], cd.normalSum[2]
-			nLen := math.Sqrt(nx*nx + ny*ny + nz*nz)
-			if nLen < 1e-12 {
-				continue
-			}
-			normal := [3]float32{float32(nx / nLen), float32(ny / nLen), float32(nz / nLen)}
+		// Phase 2a: Collect fragment vertices per voxel face.
+		// A voxel face is identified by (axis, boundary_index, b_coord, c_coord)
+		// where b and c are cell coords on the axes perpendicular to `axis`.
+		// The face at boundary n separates cells n and n+1 along `axis`.
+		type faceKey struct {
+			axis    int
+			n, b, c int
+		}
+		type faceData struct {
+			verts   [][3]float32
+			vertSet map[vertKey]bool
+		}
+		faceMap := make(map[faceKey]*faceData)
 
-			// Extract boundary vertices: vertices where 1+ coordinates
-			// lie on cell boundary planes. Vertices on boundaries are set
-			// exactly by edgePlaneIntersect and are shared by all cells
-			// touching that boundary, making the mesh watertight.
-			// - 1 boundary coord (face vertex): shared by 2 cells
-			// - 2 boundary coords (edge vertex): shared by 4 cells
-			// - 3 boundary coords (corner vertex): shared by 8 cells
-			seen := make(map[vertKey]bool)
-			var polyVerts [][3]float32
-
+		for ck, cd := range cellDataMap {
+			coords := [3]int{ck.Col, ck.Row, ck.Layer}
 			for _, tri := range cd.frags {
 				for _, v := range tri {
-					onBoundary := 0
 					for axis := 0; axis < 3; axis++ {
-						if isOnCellBoundary(v[axis], minV[axis], cellSteps[axis]) {
-							onBoundary++
+						if !isOnCellBoundary(v[axis], minV[axis], cellSteps[axis]) {
+							continue
+						}
+						n := int(math.Round(float64(v[axis]-minV[axis])/float64(cellSteps[axis]) - 0.5))
+						bAxis := (axis + 1) % 3
+						cAxis := (axis + 2) % 3
+						fk := faceKey{axis, n, coords[bAxis], coords[cAxis]}
+						vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
+						fd := faceMap[fk]
+						if fd == nil {
+							fd = &faceData{vertSet: make(map[vertKey]bool)}
+							faceMap[fk] = fd
+						}
+						if !fd.vertSet[vk] {
+							fd.vertSet[vk] = true
+							fd.verts = append(fd.verts, v)
 						}
 					}
-					if onBoundary < 1 {
+				}
+			}
+		}
+
+		// Compute 2D convex hull for each face. The hull is computed
+		// once per face and shared by both adjacent cells.
+		faceHulls := make(map[faceKey][][3]float32)
+		for fk, fd := range faceMap {
+			if len(fd.verts) < 2 {
+				continue
+			}
+			bAxis := (fk.axis + 1) % 3
+			cAxis := (fk.axis + 2) % 3
+			pts2D := make([][2]float64, len(fd.verts))
+			for i, v := range fd.verts {
+				pts2D[i] = [2]float64{float64(v[bAxis]), float64(v[cAxis])}
+			}
+			hullIdx := convexHull2D(pts2D)
+			hull := make([][3]float32, len(hullIdx))
+			for i, idx := range hullIdx {
+				hull[i] = fd.verts[idx]
+			}
+
+			// Re-insert cell-edge vertices that the convex hull
+			// eliminated (collinear with hull edges). The boundary
+			// tracing algorithm needs these as transition points.
+			hullSet := make(map[vertKey]bool, len(hull))
+			for _, v := range hull {
+				hullSet[vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}] = true
+			}
+			for _, v := range fd.verts {
+				vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
+				if hullSet[vk] {
+					continue
+				}
+				onBound := 0
+				for a := 0; a < 3; a++ {
+					if isOnCellBoundary(v[a], minV[a], cellSteps[a]) {
+						onBound++
+					}
+				}
+				if onBound < 2 {
+					continue
+				}
+				// Find hull edge this vertex lies on and insert it.
+				p2 := [2]float64{float64(v[bAxis]), float64(v[cAxis])}
+				for ei := range hull {
+					ej := (ei + 1) % len(hull)
+					a2 := [2]float64{float64(hull[ei][bAxis]), float64(hull[ei][cAxis])}
+					b2 := [2]float64{float64(hull[ej][bAxis]), float64(hull[ej][cAxis])}
+					dx, dy := b2[0]-a2[0], b2[1]-a2[1]
+					edgeLen2 := dx*dx + dy*dy
+					if edgeLen2 < 1e-20 {
 						continue
 					}
-					vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
-					if seen[vk] {
+					t := ((p2[0]-a2[0])*dx + (p2[1]-a2[1])*dy) / edgeLen2
+					if t < 0.01 || t > 0.99 {
 						continue
 					}
-					seen[vk] = true
-					polyVerts = append(polyVerts, v)
+					proj := [2]float64{a2[0] + t*dx, a2[1] + t*dy}
+					dist2 := (p2[0]-proj[0])*(p2[0]-proj[0]) + (p2[1]-proj[1])*(p2[1]-proj[1])
+					if dist2 < 1e-6 {
+						pos := ei + 1
+						hull = append(hull, [3]float32{})
+						copy(hull[pos+1:], hull[pos:])
+						hull[pos] = v
+						hullSet[vk] = true
+						break
+					}
+				}
+			}
+			faceHulls[fk] = hull
+		}
+
+		// Phase 2b: Trace boundary polygon per cell using face hull edges.
+		// Each face hull is shared between 2 adjacent cells, traversed in
+		// opposite directions. This ensures edges on shared faces are exactly
+		// reversed, making the mesh watertight by construction.
+		//
+		// Convention:
+		//   HIGH face (n = coords[axis]):   hull as-is  (CCW from +axis = outward)
+		//   LOW  face (n = coords[axis]-1): hull reversed (CW from +axis = outward)
+		//
+		// At cell-edge vertices (2+ coords on boundaries), the polygon
+		// transitions from one face hull to another. Walking hull→transition→
+		// hull→transition forms the closed boundary polygon.
+		type hullEntry struct {
+			hull         [][3]float32
+			isTransition []bool
+		}
+		type transRef struct{ hi, vi int }
+
+		var dbgTraced, dbgFallbackNoTrans, dbgFallbackFail int
+
+		for ck, cd := range cellDataMap {
+			coords := [3]int{ck.Col, ck.Row, ck.Layer}
+
+			// Collect face hulls oriented for this cell.
+			var hulls []hullEntry
+			for axis := 0; axis < 3; axis++ {
+				bAxis := (axis + 1) % 3
+				cAxis := (axis + 2) % 3
+				for _, side := range []int{0, 1} { // 0=low, 1=high
+					var n int
+					if side == 0 {
+						n = coords[axis] - 1
+					} else {
+						n = coords[axis]
+					}
+					fk := faceKey{axis, n, coords[bAxis], coords[cAxis]}
+					fhull, ok := faceHulls[fk]
+					if !ok || len(fhull) < 2 {
+						continue
+					}
+					h := make([][3]float32, len(fhull))
+					if side == 0 {
+						for i := range fhull {
+							h[len(fhull)-1-i] = fhull[i]
+						}
+					} else {
+						copy(h, fhull)
+					}
+					isT := make([]bool, len(h))
+					for i, v := range h {
+						onBound := 0
+						for a := 0; a < 3; a++ {
+							if isOnCellBoundary(v[a], minV[a], cellSteps[a]) {
+								onBound++
+							}
+						}
+						isT[i] = onBound >= 2
+					}
+					hulls = append(hulls, hullEntry{h, isT})
 				}
 			}
 
-			if len(polyVerts) < 3 {
-				// Fallback: emit fragments directly for cells where we
-				// can't build a polygon from boundary vertices (e.g.
-				// surface barely clips a corner or lies within one cell).
+			// Build transition vertex → hull references.
+			transMap := make(map[vertKey][]transRef)
+			for hi, he := range hulls {
+				for vi, isT := range he.isTransition {
+					if isT {
+						v := he.hull[vi]
+						vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
+						transMap[vk] = append(transMap[vk], transRef{hi, vi})
+					}
+				}
+			}
+
+			// Find starting transition vertex.
+			startH, startV := -1, -1
+			for hi, he := range hulls {
+				for vi, isT := range he.isTransition {
+					if isT {
+						startH, startV = hi, vi
+						break
+					}
+				}
+				if startH >= 0 {
+					break
+				}
+			}
+			if startH < 0 {
+				dbgFallbackNoTrans++
 				for _, tri := range cd.frags {
 					vi0 := vd.GetVertex(tri[0])
 					vi1 := vd.GetVertex(tri[1])
@@ -407,56 +565,98 @@ func ClipMeshByPatches(
 				continue
 			}
 
-			// Project boundary vertices onto the surface plane and
-			// compute convex hull to minimize triangle count.
-			var u, vAxis [3]float32
-			if normal[0]*normal[0] < 0.81 {
-				u = Cross3f(normal, [3]float32{1, 0, 0})
-			} else {
-				u = Cross3f(normal, [3]float32{0, 1, 0})
-			}
-			uLen := float32(math.Sqrt(float64(u[0]*u[0] + u[1]*u[1] + u[2]*u[2])))
-			if uLen < 1e-10 {
-				continue
-			}
-			u[0] /= uLen; u[1] /= uLen; u[2] /= uLen
-			vAxis = Cross3f(normal, u)
+			// Trace boundary polygon by following face hull edges.
+			var polygon [][3]float32
+			curH, curV := startH, startV
+			polygon = append(polygon, hulls[curH].hull[curV])
 
-			pts2D := make([][2]float64, len(polyVerts))
-			for i, p := range polyVerts {
-				pts2D[i] = [2]float64{
-					float64(p[0]*u[0] + p[1]*u[1] + p[2]*u[2]),
-					float64(p[0]*vAxis[0] + p[1]*vAxis[1] + p[2]*vAxis[2]),
+			maxIter := 10
+			for _, he := range hulls {
+				maxIter += len(he.hull)
+			}
+
+			traceOK := true
+			for step := 0; step < maxIter; step++ {
+				he := hulls[curH]
+				hn := len(he.hull)
+
+				// Walk forward to next transition vertex.
+				idx := (curV + 1) % hn
+				found := false
+				for idx != curV {
+					if he.isTransition[idx] {
+						found = true
+						break
+					}
+					polygon = append(polygon, he.hull[idx])
+					idx = (idx + 1) % hn
+				}
+				if !found {
+					break // single-face polygon, hull IS the polygon
+				}
+
+				// Check if we returned to the start.
+				v := he.hull[idx]
+				vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
+				sv := hulls[startH].hull[startV]
+				svk := vertKey{snapCoord(sv[0]), snapCoord(sv[1]), snapCoord(sv[2])}
+				if vk == svk {
+					break
+				}
+
+				// Switch to another hull at this transition vertex.
+				refs := transMap[vk]
+				switched := false
+				for _, ref := range refs {
+					if ref.hi != curH {
+						curH, curV = ref.hi, ref.vi
+						polygon = append(polygon, hulls[curH].hull[curV])
+						switched = true
+						break
+					}
+				}
+				if !switched {
+					traceOK = false
+					break
 				}
 			}
 
-			hull := convexHull2D(pts2D)
-			if len(hull) < 3 {
+			if !traceOK || len(polygon) < 3 {
+				dbgFallbackFail++
+				if dbgFallbackFail <= 5 {
+					fmt.Printf("  TRACE FAIL cell(%d,%d,%d): traceOK=%v polyLen=%d hulls=%d\n",
+						ck.Col, ck.Row, ck.Layer, traceOK, len(polygon), len(hulls))
+					for hi, he := range hulls {
+						transCount := 0
+						for _, t := range he.isTransition {
+							if t {
+								transCount++
+							}
+						}
+						fmt.Printf("    hull[%d]: %d verts, %d transitions\n", hi, len(he.hull), transCount)
+					}
+				}
+				for _, tri := range cd.frags {
+					vi0 := vd.GetVertex(tri[0])
+					vi1 := vd.GetVertex(tri[1])
+					vi2 := vd.GetVertex(tri[2])
+					if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+						continue
+					}
+					faces = append(faces, [3]uint32{vi0, vi1, vi2})
+					assignments = append(assignments, cd.assignment)
+				}
 				continue
 			}
 
-			// Ensure winding matches the accumulated normal.
-			p0 := polyVerts[hull[0]]
-			p1 := polyVerts[hull[1]]
-			p2 := polyVerts[hull[2]]
-			polyNorm := TriNormal(p0, p1, p2)
-			reverse := Dot3(polyNorm, normal) < 0
-
-			// Fan-triangulate the convex hull.
-			for i := 1; i < len(hull)-1; i++ {
-				var a, b, c [3]float32
-				if reverse {
-					a = polyVerts[hull[0]]
-					b = polyVerts[hull[len(hull)-i]]
-					c = polyVerts[hull[len(hull)-i-1]]
-				} else {
-					a = polyVerts[hull[0]]
-					b = polyVerts[hull[i]]
-					c = polyVerts[hull[i+1]]
-				}
-				vi0 := vd.GetVertex(a)
-				vi1 := vd.GetVertex(b)
-				vi2 := vd.GetVertex(c)
+			dbgTraced++
+			// Fan-triangulate. Winding is determined by the face hull
+			// traversal convention and matches the surface orientation
+			// for valid input meshes.
+			for i := 1; i < len(polygon)-1; i++ {
+				vi0 := vd.GetVertex(polygon[0])
+				vi1 := vd.GetVertex(polygon[i])
+				vi2 := vd.GetVertex(polygon[i+1])
 				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
 					continue
 				}
@@ -464,6 +664,8 @@ func ClipMeshByPatches(
 				assignments = append(assignments, cd.assignment)
 			}
 		}
+		fmt.Printf("  Trace stats: %d traced, %d fallback(no trans), %d fallback(fail)\n",
+			dbgTraced, dbgFallbackNoTrans, dbgFallbackFail)
 	}
 
 	return vd.Verts, faces, assignments
