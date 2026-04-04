@@ -85,18 +85,27 @@ func ClipTriangleByPlane(
 
 // edgePlaneIntersect returns the point where the edge from a to b
 // crosses the axis-aligned plane at axis=value.
+// The interpolation is canonicalized so that the same edge always produces
+// the same intersection point regardless of vertex order (a,b vs b,a).
 func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 	denom := b[axis] - a[axis]
 	if denom == 0 {
 		return a // edge parallel to plane; return either endpoint
 	}
-	t := (value - a[axis]) / denom
+	// Canonicalize: always interpolate from the vertex with the smaller
+	// coordinate on the clipping axis. This ensures identical floating-point
+	// results for shared edges between adjacent triangles.
+	lo, hi := a, b
+	if lo[axis] > hi[axis] {
+		lo, hi = hi, lo
+	}
+	t := (value - lo[axis]) / (hi[axis] - lo[axis])
 	var p [3]float32
 	for i := 0; i < 3; i++ {
 		if i == axis {
 			p[i] = value // exact
 		} else {
-			p[i] = a[i] + t*(b[i]-a[i])
+			p[i] = lo[i] + t*(hi[i]-lo[i])
 		}
 	}
 	return p
@@ -151,6 +160,42 @@ func ClipMeshByPatches(
 		cellDataMap = make(map[CellKey]*cellData)
 	}
 
+	// Precompute sorted global boundary planes per axis.
+	// A plane at coordinate val on axis A is a boundary if ANY pair of adjacent
+	// cells across that plane has different color assignments.
+	var globalPlanes [3][]float32
+	if !simplify {
+		var globalPlaneSets [3]map[float32]struct{}
+		for ck, ci := range patchMap {
+			myAssign := patchAssignment[ci]
+			neighbors := [3]CellKey{
+				{ck.Col + 1, ck.Row, ck.Layer},
+				{ck.Col, ck.Row + 1, ck.Layer},
+				{ck.Col, ck.Row, ck.Layer + 1},
+			}
+			for axis, nk := range neighbors {
+				ni, ok := patchMap[nk]
+				if !ok || patchAssignment[ni] == myAssign {
+					continue
+				}
+				cellCoords := [3]int{ck.Col, ck.Row, ck.Layer}
+				val := minV[axis] + (float32(cellCoords[axis])+0.5)*cellSteps[axis]
+				if globalPlaneSets[axis] == nil {
+					globalPlaneSets[axis] = make(map[float32]struct{})
+				}
+				globalPlaneSets[axis][val] = struct{}{}
+			}
+		}
+		for axis := 0; axis < 3; axis++ {
+			planes := make([]float32, 0, len(globalPlaneSets[axis]))
+			for v := range globalPlaneSets[axis] {
+				planes = append(planes, v)
+			}
+			sort.Slice(planes, func(a, b int) bool { return planes[a] < planes[b] })
+			globalPlanes[axis] = planes
+		}
+	}
+
 	for fi := range model.Faces {
 		// Skip translucent faces.
 		if FaceAlpha(fi, model) < 128 {
@@ -174,80 +219,40 @@ func ClipMeshByPatches(
 			Maxf(v0[2], Maxf(v1[2], v2[2])),
 		}
 
-		// Find cells overlapping this triangle's AABB.
-		colMin, colMax, rowMin, rowMax, layerMin, layerMax := AABBCellRange(tMin, tMax, minV, cellSize, layerH)
-
-		// Collect local boundary planes from cells in this region.
-		var localAxisPlanes [3]map[float32]struct{}
+		// Collect clip planes that intersect this triangle's AABB.
+		var sortedPlanes [3][]float32
 		if simplify {
-			// Clip at every cell boundary the triangle crosses.
+			// Find cells overlapping this triangle's AABB.
+			colMin, colMax, rowMin, rowMax, layerMin, layerMax := AABBCellRange(tMin, tMax, minV, cellSize, layerH)
 			ranges := [3][2]int{
 				{colMin, colMax},
 				{rowMin, rowMax},
 				{layerMin, layerMax},
 			}
+			// Clip at every cell boundary the triangle crosses.
 			for axis := 0; axis < 3; axis++ {
 				step := cellSteps[axis]
 				lo, hi := ranges[axis][0], ranges[axis][1]
+				var planes []float32
 				for n := lo; n < hi; n++ {
 					val := minV[axis] + (float32(n)+0.5)*step
 					if val > tMin[axis] && val < tMax[axis] {
-						if localAxisPlanes[axis] == nil {
-							localAxisPlanes[axis] = make(map[float32]struct{})
-						}
-						localAxisPlanes[axis][val] = struct{}{}
+						planes = append(planes, val)
 					}
 				}
+				sort.Slice(planes, func(a, b int) bool { return planes[a] < planes[b] })
+				sortedPlanes[axis] = planes
 			}
 		} else {
-			for col := colMin; col <= colMax; col++ {
-				for row := rowMin; row <= rowMax; row++ {
-					for layer := layerMin; layer <= layerMax; layer++ {
-						ck := CellKey{col, row, layer}
-						ci, ok := patchMap[ck]
-						if !ok {
-							continue
-						}
-						myAssign := patchAssignment[ci]
-
-						// Check 3 positive neighbors.
-						neighbors := [3]CellKey{
-							{col + 1, row, layer},
-							{col, row + 1, layer},
-							{col, row, layer + 1},
-						}
-						for axis, nk := range neighbors {
-							ni, ok := patchMap[nk]
-							if !ok || patchAssignment[ni] == myAssign {
-								continue
-							}
-							cellCoords := [3]int{col, row, layer}
-							val := minV[axis] + (float32(cellCoords[axis])+0.5)*cellSteps[axis]
-							if val <= tMin[axis] || val >= tMax[axis] {
-								continue // plane outside triangle AABB
-							}
-							if localAxisPlanes[axis] == nil {
-								localAxisPlanes[axis] = make(map[float32]struct{})
-							}
-							localAxisPlanes[axis][val] = struct{}{}
-						}
-					}
+			// Use precomputed global boundary planes, filtered to this AABB.
+			for axis := 0; axis < 3; axis++ {
+				gp := globalPlanes[axis]
+				iLo := sort.Search(len(gp), func(i int) bool { return gp[i] > tMin[axis] })
+				iHi := sort.Search(len(gp), func(i int) bool { return gp[i] >= tMax[axis] })
+				if iLo < iHi {
+					sortedPlanes[axis] = gp[iLo:iHi]
 				}
 			}
-		}
-
-		// Sort local planes per axis.
-		var sortedPlanes [3][]float32
-		for axis := 0; axis < 3; axis++ {
-			if len(localAxisPlanes[axis]) == 0 {
-				continue
-			}
-			sorted := make([]float32, 0, len(localAxisPlanes[axis]))
-			for v := range localAxisPlanes[axis] {
-				sorted = append(sorted, v)
-			}
-			sort.Slice(sorted, func(a, b int) bool { return sorted[a] < sorted[b] })
-			sortedPlanes[axis] = sorted
 		}
 
 		// Start with this triangle as the only fragment.

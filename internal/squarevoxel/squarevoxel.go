@@ -59,6 +59,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		return nil, nil, nil, nil, fmt.Errorf("empty model")
 	}
 
+	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
+
 	// Cell edge length. At 1.0× nozzle diameter the slicer can't fill the
 	// bottom layer reliably. Empirically 1.275× (0.51mm for a 0.4mm nozzle)
 	// is the minimum that produces solid first layers.
@@ -253,6 +255,8 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		targetFaces := len(cells) * 2
 		if targetFaces < len(opaqueFaces) {
 			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
+			wr := voxel.CheckWatertight(decFaces)
+			fmt.Printf("  Decimated mesh: %s\n", wr)
 			decimModel = &loader.LoadedModel{
 				Vertices: decVerts,
 				Faces:    decFaces,
@@ -279,6 +283,10 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
 		decimModel, patchMap, patchAssignment, minV, cellSize, layerH, false)
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
+	{
+		wr := voxel.CheckWatertight(shellFaces)
+		fmt.Printf("  After clip: %s\n", wr)
+	}
 
 	// 8. Optional coplanar merge.
 	if !cfg.NoMerge {
@@ -288,6 +296,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(shellVerts, shellFaces, shellAssignments)
 		finishBar(barMerge, "Merged shell", fmt.Sprintf("%d -> %d faces", before, len(shellFaces)), time.Since(tMerge))
 	}
+	fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
 
 	// Build output model.
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
