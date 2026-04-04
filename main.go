@@ -22,7 +22,7 @@ func main() {
 
 	err := wails.Run(&options.App{
 		Title:            "DitherForge",
-		Width:            900,
+		Width:            1400,
 		Height:           700,
 		MinWidth:         600,
 		MinHeight:        500,

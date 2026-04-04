@@ -1,5 +1,21 @@
 export namespace pipeline {
 	
+	export class MeshData {
+	    Vertices: number[];
+	    Faces: number[];
+	    FaceColors: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MeshData(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Vertices = source["Vertices"];
+	        this.Faces = source["Faces"];
+	        this.FaceColors = source["FaceColors"];
+	    }
+	}
 	export class Options {
 	    Input: string;
 	    Palette: string;
@@ -48,6 +64,7 @@ export namespace pipeline {
 	    OutputPath: string;
 	    FaceCount: number;
 	    Duration: number;
+	    OutputMesh?: MeshData;
 	
 	    static createFrom(source: any = {}) {
 	        return new Result(source);
@@ -58,7 +75,26 @@ export namespace pipeline {
 	        this.OutputPath = source["OutputPath"];
 	        this.FaceCount = source["FaceCount"];
 	        this.Duration = source["Duration"];
+	        this.OutputMesh = this.convertValues(source["OutputMesh"], MeshData);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

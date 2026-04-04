@@ -13,10 +13,14 @@
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc -p tsconfig.node.json"
   },
   "dependencies": {
+    "@threlte/core": "^8.5.5",
+    "@threlte/extras": "^9.14.3",
+    "@types/three": "^0.183.1",
     "bits-ui": "^2.16.3",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.5.0",
-    "tailwind-variants": "^3.2.2"
+    "tailwind-variants": "^3.2.2",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@internationalized/date": "^3.12.0",

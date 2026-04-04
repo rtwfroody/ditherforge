@@ -36,11 +36,19 @@ type Options struct {
 	NoCache        bool
 }
 
+// MeshData holds flat arrays for 3D preview rendering.
+type MeshData struct {
+	Vertices   []float32 `json:"Vertices"`   // flat [x,y,z, x,y,z, ...]
+	Faces      []uint32  `json:"Faces"`      // flat [i,j,k, i,j,k, ...]
+	FaceColors []uint16  `json:"FaceColors"` // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
+}
+
 // Result summarizes a completed pipeline run.
 type Result struct {
 	OutputPath string
 	FaceCount  int
 	Duration   time.Duration
+	OutputMesh *MeshData
 }
 
 // Run executes the full pipeline: load → validate → remesh → export.
@@ -53,31 +61,13 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("output must be .3mf, got %q", outputExt)
 	}
 
-	// Dispatch loader based on input extension.
-	const unitScale = float32(1000.0)
+	// Compute scale: unit conversion (GLB meters→mm) * user scale.
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
-	var baseScale float32
-	switch inputExt {
-	case ".glb":
-		baseScale = unitScale * opts.Scale
-	case ".3mf":
-		baseScale = opts.Scale
-	default:
-		return nil, fmt.Errorf("unsupported input format %q (use .glb or .3mf)", inputExt)
-	}
-	loadModel := func(scale float32) (*loader.LoadedModel, error) {
-		switch inputExt {
-		case ".glb":
-			return loader.LoadGLB(opts.Input, scale)
-		default:
-			return loader.Load3MF(opts.Input, scale)
-		}
-	}
-	scale := baseScale
+	scale := unitScaleForExt(inputExt) * opts.Scale
 
 	fmt.Printf("Loading %s...", opts.Input)
 	tLoad := time.Now()
-	model, err := loadModel(scale)
+	model, err := loadModel(opts.Input, scale)
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", inputExt, err)
 	}
@@ -90,7 +80,7 @@ func Run(opts Options) (*Result, error) {
 			rescale := *opts.Size / ext
 			fmt.Printf("  Rescaling to %.0f mm...", *opts.Size)
 			tRescale := time.Now()
-			model, err = loadModel(scale * rescale)
+			model, err = loadModel(opts.Input, scale*rescale)
 			if err != nil {
 				return nil, fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
 			}
@@ -194,6 +184,7 @@ func Run(opts Options) (*Result, error) {
 		OutputPath: opts.Output,
 		FaceCount:  len(outModel.Faces),
 		Duration:   time.Since(start),
+		OutputMesh: buildMeshData(outModel, assignments, paletteRGB),
 	}, nil
 }
 

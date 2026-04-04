@@ -50,6 +50,11 @@ func (a *App) RunPipeline(opts pipeline.Options) (*pipeline.Result, error) {
 	return pipeline.Run(opts)
 }
 
+// LoadModelPreview loads a model file and returns mesh data for 3D preview.
+func (a *App) LoadModelPreview(path string) (*pipeline.MeshData, error) {
+	return pipeline.LoadPreview(path)
+}
+
 // Version returns the application version string.
 func (a *App) Version() string {
 	return pipeline.Version
