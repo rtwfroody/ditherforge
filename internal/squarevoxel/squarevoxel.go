@@ -281,7 +281,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 	tClip := time.Now()
 	barClip := newBar(-1, "  Clipping mesh")
 	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
-		decimModel, patchMap, patchAssignment, minV, cellSize, layerH, false)
+		decimModel, patchMap, patchAssignment, minV, cellSize, layerH)
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
 	{
 		wr := voxel.CheckWatertight(shellFaces)

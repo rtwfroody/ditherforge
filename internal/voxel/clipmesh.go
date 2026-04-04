@@ -1,19 +1,11 @@
 package voxel
 
 import (
-	"fmt"
 	"math"
 	"sort"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
-
-// isOnCellBoundary checks whether coordinate v lies on a cell boundary
-// for the given axis: minV + (N + 0.5) * step for some integer N.
-func isOnCellBoundary(v float32, minV float32, step float32) bool {
-	rel := float64(v-minV)/float64(step) - 0.5
-	return math.Abs(rel-math.Round(rel)) < 1e-4
-}
 
 // ClipTriangleByPlane clips a single triangle against an axis-aligned plane.
 // Returns triangles on the negative side (<=) and positive side (>).
@@ -113,58 +105,26 @@ func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 
 // ClipMeshByPatches clips the original model's triangles against patch
 // boundary planes and assigns each fragment the palette color of its
-// enclosing patch. Only clips against boundaries that are local to each
-// triangle's footprint, avoiding unnecessary splits from distant color
-// transitions.
+// enclosing patch. Clips against all global color boundary planes to
+// ensure adjacent triangles sharing an edge get identical clip points.
 func ClipMeshByPatches(
 	model *loader.LoadedModel,
 	patchMap map[CellKey]int,
 	patchAssignment []int32,
 	minV [3]float32,
 	cellSize, layerH float32,
-	simplify bool,
 ) ([][3]float32, [][3]uint32, []int32) {
-	type cellFrag struct {
-		tri        [3][3]float32
-		ck         CellKey
-		assignment int32
-	}
-
 	cellSteps := [3]float32{cellSize, cellSize, layerH}
 
 	vd := NewVertexDedup()
 	var faces [][3]uint32
 	var assignments []int32
 
-	emitDirect := func(frags []cellFrag) {
-		for _, cf := range frags {
-			vi0 := vd.GetVertex(cf.tri[0])
-			vi1 := vd.GetVertex(cf.tri[1])
-			vi2 := vd.GetVertex(cf.tri[2])
-			if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-				continue // degenerate after dedup
-			}
-			faces = append(faces, [3]uint32{vi0, vi1, vi2})
-			assignments = append(assignments, cf.assignment)
-		}
-	}
-
-	// Per-cell data for face contour simplification.
-	type cellData struct {
-		frags      [][3][3]float32 // clipped fragment triangles
-		normalSum  [3]float64      // area-weighted normal (for winding)
-		assignment int32
-	}
-	var cellDataMap map[CellKey]*cellData
-	if simplify {
-		cellDataMap = make(map[CellKey]*cellData)
-	}
-
 	// Precompute sorted global boundary planes per axis.
 	// A plane at coordinate val on axis A is a boundary if ANY pair of adjacent
 	// cells across that plane has different color assignments.
 	var globalPlanes [3][]float32
-	if !simplify {
+	{
 		var globalPlaneSets [3]map[float32]struct{}
 		for ck, ci := range patchMap {
 			myAssign := patchAssignment[ci]
@@ -219,39 +179,14 @@ func ClipMeshByPatches(
 			Maxf(v0[2], Maxf(v1[2], v2[2])),
 		}
 
-		// Collect clip planes that intersect this triangle's AABB.
+		// Filter global boundary planes to this triangle's AABB.
 		var sortedPlanes [3][]float32
-		if simplify {
-			// Find cells overlapping this triangle's AABB.
-			colMin, colMax, rowMin, rowMax, layerMin, layerMax := AABBCellRange(tMin, tMax, minV, cellSize, layerH)
-			ranges := [3][2]int{
-				{colMin, colMax},
-				{rowMin, rowMax},
-				{layerMin, layerMax},
-			}
-			// Clip at every cell boundary the triangle crosses.
-			for axis := 0; axis < 3; axis++ {
-				step := cellSteps[axis]
-				lo, hi := ranges[axis][0], ranges[axis][1]
-				var planes []float32
-				for n := lo; n < hi; n++ {
-					val := minV[axis] + (float32(n)+0.5)*step
-					if val > tMin[axis] && val < tMax[axis] {
-						planes = append(planes, val)
-					}
-				}
-				sort.Slice(planes, func(a, b int) bool { return planes[a] < planes[b] })
-				sortedPlanes[axis] = planes
-			}
-		} else {
-			// Use precomputed global boundary planes, filtered to this AABB.
-			for axis := 0; axis < 3; axis++ {
-				gp := globalPlanes[axis]
-				iLo := sort.Search(len(gp), func(i int) bool { return gp[i] > tMin[axis] })
-				iHi := sort.Search(len(gp), func(i int) bool { return gp[i] >= tMax[axis] })
-				if iLo < iHi {
-					sortedPlanes[axis] = gp[iLo:iHi]
-				}
+		for axis := 0; axis < 3; axis++ {
+			gp := globalPlanes[axis]
+			iLo := sort.Search(len(gp), func(i int) bool { return gp[i] > tMin[axis] })
+			iHi := sort.Search(len(gp), func(i int) bool { return gp[i] >= tMax[axis] })
+			if iLo < iHi {
+				sortedPlanes[axis] = gp[iLo:iHi]
 			}
 		}
 
@@ -294,7 +229,6 @@ func ClipMeshByPatches(
 		}
 
 		// Assign each fragment a color by mapping its centroid to a cell.
-		var cellFrags []cellFrag
 		for _, tri := range fragments {
 			if triArea(tri) < 1e-8 {
 				continue
@@ -317,360 +251,16 @@ func ClipMeshByPatches(
 				}
 				assignment = a
 			}
-			cellFrags = append(cellFrags, cellFrag{tri, ck, assignment})
+
+			vi0 := vd.GetVertex(tri[0])
+			vi1 := vd.GetVertex(tri[1])
+			vi2 := vd.GetVertex(tri[2])
+			if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+				continue // degenerate after dedup
+			}
+			faces = append(faces, [3]uint32{vi0, vi1, vi2})
+			assignments = append(assignments, assignment)
 		}
-
-		if !simplify {
-			emitDirect(cellFrags)
-			continue
-		}
-
-		// Store fragments and accumulate normals for face contour simplification.
-		for _, cf := range cellFrags {
-			e1 := [3]float32{cf.tri[1][0] - cf.tri[0][0], cf.tri[1][1] - cf.tri[0][1], cf.tri[1][2] - cf.tri[0][2]}
-			e2 := [3]float32{cf.tri[2][0] - cf.tri[0][0], cf.tri[2][1] - cf.tri[0][1], cf.tri[2][2] - cf.tri[0][2]}
-			nx := float64(e1[1]*e2[2] - e1[2]*e2[1])
-			ny := float64(e1[2]*e2[0] - e1[0]*e2[2])
-			nz := float64(e1[0]*e2[1] - e1[1]*e2[0])
-			if math.Sqrt(nx*nx+ny*ny+nz*nz)/2 < 1e-12 {
-				continue
-			}
-
-			cd, ok := cellDataMap[cf.ck]
-			if !ok {
-				cd = &cellData{assignment: cf.assignment}
-				cellDataMap[cf.ck] = cd
-			}
-			cd.frags = append(cd.frags, cf.tri)
-			cd.normalSum[0] += nx
-			cd.normalSum[1] += ny
-			cd.normalSum[2] += nz
-		}
-	}
-
-	// Pass 2: per-face simplification, then per-cell assembly.
-	if simplify {
-		type vertKey struct {
-			x, y, z int64
-		}
-		snapCoord := func(v float32) int64 {
-			return int64(math.Round(float64(v) * 1e4))
-		}
-
-		// Phase 2a: Collect fragment vertices per voxel face.
-		// A voxel face is identified by (axis, boundary_index, b_coord, c_coord)
-		// where b and c are cell coords on the axes perpendicular to `axis`.
-		// The face at boundary n separates cells n and n+1 along `axis`.
-		type faceKey struct {
-			axis    int
-			n, b, c int
-		}
-		type faceData struct {
-			verts   [][3]float32
-			vertSet map[vertKey]bool
-		}
-		faceMap := make(map[faceKey]*faceData)
-
-		for ck, cd := range cellDataMap {
-			coords := [3]int{ck.Col, ck.Row, ck.Layer}
-			for _, tri := range cd.frags {
-				for _, v := range tri {
-					for axis := 0; axis < 3; axis++ {
-						if !isOnCellBoundary(v[axis], minV[axis], cellSteps[axis]) {
-							continue
-						}
-						n := int(math.Round(float64(v[axis]-minV[axis])/float64(cellSteps[axis]) - 0.5))
-						bAxis := (axis + 1) % 3
-						cAxis := (axis + 2) % 3
-						fk := faceKey{axis, n, coords[bAxis], coords[cAxis]}
-						vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
-						fd := faceMap[fk]
-						if fd == nil {
-							fd = &faceData{vertSet: make(map[vertKey]bool)}
-							faceMap[fk] = fd
-						}
-						if !fd.vertSet[vk] {
-							fd.vertSet[vk] = true
-							fd.verts = append(fd.verts, v)
-						}
-					}
-				}
-			}
-		}
-
-		// Compute 2D convex hull for each face. The hull is computed
-		// once per face and shared by both adjacent cells.
-		faceHulls := make(map[faceKey][][3]float32)
-		for fk, fd := range faceMap {
-			if len(fd.verts) < 2 {
-				continue
-			}
-			bAxis := (fk.axis + 1) % 3
-			cAxis := (fk.axis + 2) % 3
-			pts2D := make([][2]float64, len(fd.verts))
-			for i, v := range fd.verts {
-				pts2D[i] = [2]float64{float64(v[bAxis]), float64(v[cAxis])}
-			}
-			hullIdx := convexHull2D(pts2D)
-			hull := make([][3]float32, len(hullIdx))
-			for i, idx := range hullIdx {
-				hull[i] = fd.verts[idx]
-			}
-
-			// Re-insert cell-edge vertices that the convex hull
-			// eliminated (collinear with hull edges). The boundary
-			// tracing algorithm needs these as transition points.
-			hullSet := make(map[vertKey]bool, len(hull))
-			for _, v := range hull {
-				hullSet[vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}] = true
-			}
-			for _, v := range fd.verts {
-				vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
-				if hullSet[vk] {
-					continue
-				}
-				onBound := 0
-				for a := 0; a < 3; a++ {
-					if isOnCellBoundary(v[a], minV[a], cellSteps[a]) {
-						onBound++
-					}
-				}
-				if onBound < 2 {
-					continue
-				}
-				// Find hull edge this vertex lies on and insert it.
-				p2 := [2]float64{float64(v[bAxis]), float64(v[cAxis])}
-				for ei := range hull {
-					ej := (ei + 1) % len(hull)
-					a2 := [2]float64{float64(hull[ei][bAxis]), float64(hull[ei][cAxis])}
-					b2 := [2]float64{float64(hull[ej][bAxis]), float64(hull[ej][cAxis])}
-					dx, dy := b2[0]-a2[0], b2[1]-a2[1]
-					edgeLen2 := dx*dx + dy*dy
-					if edgeLen2 < 1e-20 {
-						continue
-					}
-					t := ((p2[0]-a2[0])*dx + (p2[1]-a2[1])*dy) / edgeLen2
-					if t < 0.01 || t > 0.99 {
-						continue
-					}
-					proj := [2]float64{a2[0] + t*dx, a2[1] + t*dy}
-					dist2 := (p2[0]-proj[0])*(p2[0]-proj[0]) + (p2[1]-proj[1])*(p2[1]-proj[1])
-					if dist2 < 1e-6 {
-						pos := ei + 1
-						hull = append(hull, [3]float32{})
-						copy(hull[pos+1:], hull[pos:])
-						hull[pos] = v
-						hullSet[vk] = true
-						break
-					}
-				}
-			}
-			faceHulls[fk] = hull
-		}
-
-		// Phase 2b: Trace boundary polygon per cell using face hull edges.
-		// Each face hull is shared between 2 adjacent cells, traversed in
-		// opposite directions. This ensures edges on shared faces are exactly
-		// reversed, making the mesh watertight by construction.
-		//
-		// Convention:
-		//   HIGH face (n = coords[axis]):   hull as-is  (CCW from +axis = outward)
-		//   LOW  face (n = coords[axis]-1): hull reversed (CW from +axis = outward)
-		//
-		// At cell-edge vertices (2+ coords on boundaries), the polygon
-		// transitions from one face hull to another. Walking hull→transition→
-		// hull→transition forms the closed boundary polygon.
-		type hullEntry struct {
-			hull         [][3]float32
-			isTransition []bool
-		}
-		type transRef struct{ hi, vi int }
-
-		var dbgTraced, dbgFallbackNoTrans, dbgFallbackFail int
-
-		for ck, cd := range cellDataMap {
-			coords := [3]int{ck.Col, ck.Row, ck.Layer}
-
-			// Collect face hulls oriented for this cell.
-			var hulls []hullEntry
-			for axis := 0; axis < 3; axis++ {
-				bAxis := (axis + 1) % 3
-				cAxis := (axis + 2) % 3
-				for _, side := range []int{0, 1} { // 0=low, 1=high
-					var n int
-					if side == 0 {
-						n = coords[axis] - 1
-					} else {
-						n = coords[axis]
-					}
-					fk := faceKey{axis, n, coords[bAxis], coords[cAxis]}
-					fhull, ok := faceHulls[fk]
-					if !ok || len(fhull) < 2 {
-						continue
-					}
-					h := make([][3]float32, len(fhull))
-					if side == 0 {
-						for i := range fhull {
-							h[len(fhull)-1-i] = fhull[i]
-						}
-					} else {
-						copy(h, fhull)
-					}
-					isT := make([]bool, len(h))
-					for i, v := range h {
-						onBound := 0
-						for a := 0; a < 3; a++ {
-							if isOnCellBoundary(v[a], minV[a], cellSteps[a]) {
-								onBound++
-							}
-						}
-						isT[i] = onBound >= 2
-					}
-					hulls = append(hulls, hullEntry{h, isT})
-				}
-			}
-
-			// Build transition vertex → hull references.
-			transMap := make(map[vertKey][]transRef)
-			for hi, he := range hulls {
-				for vi, isT := range he.isTransition {
-					if isT {
-						v := he.hull[vi]
-						vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
-						transMap[vk] = append(transMap[vk], transRef{hi, vi})
-					}
-				}
-			}
-
-			// Find starting transition vertex.
-			startH, startV := -1, -1
-			for hi, he := range hulls {
-				for vi, isT := range he.isTransition {
-					if isT {
-						startH, startV = hi, vi
-						break
-					}
-				}
-				if startH >= 0 {
-					break
-				}
-			}
-			if startH < 0 {
-				dbgFallbackNoTrans++
-				for _, tri := range cd.frags {
-					vi0 := vd.GetVertex(tri[0])
-					vi1 := vd.GetVertex(tri[1])
-					vi2 := vd.GetVertex(tri[2])
-					if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-						continue
-					}
-					faces = append(faces, [3]uint32{vi0, vi1, vi2})
-					assignments = append(assignments, cd.assignment)
-				}
-				continue
-			}
-
-			// Trace boundary polygon by following face hull edges.
-			var polygon [][3]float32
-			curH, curV := startH, startV
-			polygon = append(polygon, hulls[curH].hull[curV])
-
-			maxIter := 10
-			for _, he := range hulls {
-				maxIter += len(he.hull)
-			}
-
-			traceOK := true
-			for step := 0; step < maxIter; step++ {
-				he := hulls[curH]
-				hn := len(he.hull)
-
-				// Walk forward to next transition vertex.
-				idx := (curV + 1) % hn
-				found := false
-				for idx != curV {
-					if he.isTransition[idx] {
-						found = true
-						break
-					}
-					polygon = append(polygon, he.hull[idx])
-					idx = (idx + 1) % hn
-				}
-				if !found {
-					break // single-face polygon, hull IS the polygon
-				}
-
-				// Check if we returned to the start.
-				v := he.hull[idx]
-				vk := vertKey{snapCoord(v[0]), snapCoord(v[1]), snapCoord(v[2])}
-				sv := hulls[startH].hull[startV]
-				svk := vertKey{snapCoord(sv[0]), snapCoord(sv[1]), snapCoord(sv[2])}
-				if vk == svk {
-					break
-				}
-
-				// Switch to another hull at this transition vertex.
-				refs := transMap[vk]
-				switched := false
-				for _, ref := range refs {
-					if ref.hi != curH {
-						curH, curV = ref.hi, ref.vi
-						polygon = append(polygon, hulls[curH].hull[curV])
-						switched = true
-						break
-					}
-				}
-				if !switched {
-					traceOK = false
-					break
-				}
-			}
-
-			if !traceOK || len(polygon) < 3 {
-				dbgFallbackFail++
-				if dbgFallbackFail <= 5 {
-					fmt.Printf("  TRACE FAIL cell(%d,%d,%d): traceOK=%v polyLen=%d hulls=%d\n",
-						ck.Col, ck.Row, ck.Layer, traceOK, len(polygon), len(hulls))
-					for hi, he := range hulls {
-						transCount := 0
-						for _, t := range he.isTransition {
-							if t {
-								transCount++
-							}
-						}
-						fmt.Printf("    hull[%d]: %d verts, %d transitions\n", hi, len(he.hull), transCount)
-					}
-				}
-				for _, tri := range cd.frags {
-					vi0 := vd.GetVertex(tri[0])
-					vi1 := vd.GetVertex(tri[1])
-					vi2 := vd.GetVertex(tri[2])
-					if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-						continue
-					}
-					faces = append(faces, [3]uint32{vi0, vi1, vi2})
-					assignments = append(assignments, cd.assignment)
-				}
-				continue
-			}
-
-			dbgTraced++
-			// Fan-triangulate. Winding is determined by the face hull
-			// traversal convention and matches the surface orientation
-			// for valid input meshes.
-			for i := 1; i < len(polygon)-1; i++ {
-				vi0 := vd.GetVertex(polygon[0])
-				vi1 := vd.GetVertex(polygon[i])
-				vi2 := vd.GetVertex(polygon[i+1])
-				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-					continue
-				}
-				faces = append(faces, [3]uint32{vi0, vi1, vi2})
-				assignments = append(assignments, cd.assignment)
-			}
-		}
-		fmt.Printf("  Trace stats: %d traced, %d fallback(no trans), %d fallback(fail)\n",
-			dbgTraced, dbgFallbackNoTrans, dbgFallbackFail)
 	}
 
 	return vd.Verts, faces, assignments
@@ -712,56 +302,6 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 		}
 	}
 	return bestAssign, found
-}
-
-// convexHull2D returns the convex hull of a set of 2D points as indices
-// into the input slice, in counter-clockwise order. Uses Andrew's monotone chain.
-func convexHull2D(pts [][2]float64) []int {
-	n := len(pts)
-	if n < 3 {
-		idx := make([]int, n)
-		for i := range idx {
-			idx[i] = i
-		}
-		return idx
-	}
-
-	// Sort indices by x, then y.
-	idx := make([]int, n)
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.Slice(idx, func(a, b int) bool {
-		pa, pb := pts[idx[a]], pts[idx[b]]
-		if pa[0] != pb[0] {
-			return pa[0] < pb[0]
-		}
-		return pa[1] < pb[1]
-	})
-
-	cross := func(o, a, b int) float64 {
-		return (pts[a][0]-pts[o][0])*(pts[b][1]-pts[o][1]) -
-			(pts[a][1]-pts[o][1])*(pts[b][0]-pts[o][0])
-	}
-
-	// Build lower hull.
-	hull := make([]int, 0, n+1)
-	for _, i := range idx {
-		for len(hull) >= 2 && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
-			hull = hull[:len(hull)-1]
-		}
-		hull = append(hull, i)
-	}
-	// Build upper hull.
-	lower := len(hull) + 1
-	for j := n - 2; j >= 0; j-- {
-		i := idx[j]
-		for len(hull) >= lower && cross(hull[len(hull)-2], hull[len(hull)-1], i) <= 0 {
-			hull = hull[:len(hull)-1]
-		}
-		hull = append(hull, i)
-	}
-	return hull[:len(hull)-1] // remove last (duplicate of first)
 }
 
 // triArea returns the area of a triangle defined by 3 vertices.
