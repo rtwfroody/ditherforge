@@ -215,6 +215,93 @@ func TestLoad3MF_NoColor(t *testing.T) {
 	}
 }
 
+func TestParseMixedFilaments(t *testing.T) {
+	physical := [][4]uint8{
+		{255, 0, 0, 255},   // filament 1: red
+		{0, 0, 255, 255},   // filament 2: blue
+		{255, 255, 0, 255}, // filament 3: yellow
+	}
+
+	// Two rows: one enabled (50% blend of red+blue), one deleted (should be skipped).
+	defs := "1,2,1,0,50,0,g,w,m2,d0,o1,u1;1,3,1,0,50,0,g,w,m2,d1,o1,u2"
+	result := parseMixedFilaments(defs, physical)
+
+	if len(result) != 1 {
+		t.Fatalf("got %d mixed colors, want 1", len(result))
+	}
+	// 50% red + 50% blue = (127, 0, 127)
+	got := result[0]
+	want := [4]uint8{127, 0, 127, 255}
+	if got != want {
+		t.Errorf("mixed color = %v, want %v", got, want)
+	}
+}
+
+func TestParseMixedFilaments_Weights(t *testing.T) {
+	physical := [][4]uint8{
+		{200, 0, 0, 255}, // filament 1
+		{0, 100, 0, 255}, // filament 2
+	}
+
+	// mix_b_percent=25 → 75% A + 25% B
+	defs := "1,2,1,0,25,0,g,w,m2,d0,o1,u1"
+	result := parseMixedFilaments(defs, physical)
+
+	if len(result) != 1 {
+		t.Fatalf("got %d mixed colors, want 1", len(result))
+	}
+	got := result[0]
+	// 75% of 200 + 25% of 0 = 150, 75% of 0 + 25% of 100 = 25
+	want := [4]uint8{150, 25, 0, 255}
+	if got != want {
+		t.Errorf("mixed color = %v, want %v", got, want)
+	}
+}
+
+func TestLoad3MF_MixedFilaments(t *testing.T) {
+	modelXML := `<?xml version="1.0" encoding="UTF-8"?>
+<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" unit="millimeter">
+ <resources>
+  <object id="1" type="model">
+   <mesh>
+    <vertices>
+     <vertex x="0" y="0" z="0"/>
+     <vertex x="10" y="0" z="0"/>
+     <vertex x="0" y="10" z="0"/>
+    </vertices>
+    <triangles>
+     <triangle v1="0" v2="1" v3="2" paint_color="2C"/>
+    </triangles>
+   </mesh>
+  </object>
+ </resources>
+</model>`
+
+	// 4 physical filaments + 1 active mixed = 5 total.
+	// paint_color "2C" → filament 5 → index 4 → mixed(red+blue, 50%).
+	projectSettings := `{
+  "filament_colour": ["#FF0000", "#0000FF", "#00FF00", "#FFFFFF"],
+  "mixed_filament_definitions": "1,2,1,0,50,0,g,w,m2,d0,o1,u1"
+}`
+
+	path := writeTestZip(t, map[string]string{
+		"3D/3dmodel.model":                 modelXML,
+		"Metadata/project_settings.config": projectSettings,
+	})
+
+	model, err := Load3MF(path, 1.0)
+	if err != nil {
+		t.Fatalf("Load3MF: %v", err)
+	}
+
+	// paint_color "2C" → filament 5 → index 4 → mixed(red+blue, 50%) = (127,0,127)
+	got := model.FaceBaseColor[0]
+	want := [4]uint8{127, 0, 127, 255}
+	if got != want {
+		t.Errorf("face 0 color = %v, want %v", got, want)
+	}
+}
+
 func TestParseHexColor(t *testing.T) {
 	tests := []struct {
 		input string

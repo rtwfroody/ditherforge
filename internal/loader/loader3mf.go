@@ -143,7 +143,9 @@ func readDefaultExtruder(f *zip.File) (int, error) {
 	return 1, nil
 }
 
-// readFilamentColors reads the filament_colour array from a project_settings.config ZIP entry.
+// readFilamentColors reads filament_colour and mixed_filament_definitions from
+// project_settings.config. Returns the complete color table: physical colors
+// followed by blended mixed filament colors (FullSpectrum OrcaSlicer extension).
 func readFilamentColors(f *zip.File) ([][4]uint8, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -178,7 +180,82 @@ func readFilamentColors(f *zip.File) ([][4]uint8, error) {
 		}
 		colors = append(colors, c)
 	}
+
+	// Parse mixed_filament_definitions (FullSpectrum extension).
+	// Each enabled, non-deleted row produces a blended color appended after
+	// the physical colors.
+	if mfd, ok := settings["mixed_filament_definitions"]; ok {
+		if mfdStr, ok := mfd.(string); ok && mfdStr != "" {
+			mixed := parseMixedFilaments(mfdStr, colors)
+			colors = append(colors, mixed...)
+		}
+	}
+
 	return colors, nil
+}
+
+// parseMixedFilaments parses the mixed_filament_definitions string and returns
+// blended colors for each enabled, non-deleted mixed filament.
+func parseMixedFilaments(defs string, physicalColors [][4]uint8) [][4]uint8 {
+	var result [][4]uint8
+	for _, row := range strings.Split(defs, ";") {
+		if row == "" {
+			continue
+		}
+		fields := strings.Split(row, ",")
+		if len(fields) < 5 {
+			continue
+		}
+		compA, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		compB, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		enabled, err := strconv.Atoi(fields[2])
+		if err != nil || enabled == 0 {
+			continue
+		}
+		mixBPct, err := strconv.Atoi(fields[4])
+		if err != nil {
+			continue
+		}
+
+		// Check deleted flag (field starting with 'd').
+		deleted := false
+		for _, f := range fields[5:] {
+			if strings.HasPrefix(f, "d") {
+				deleted = f[1:] == "1"
+				break
+			}
+		}
+		if deleted {
+			continue
+		}
+
+		// Blend the two component colors.
+		if compA < 1 || compA > len(physicalColors) || compB < 1 || compB > len(physicalColors) {
+			continue
+		}
+		ca := physicalColors[compA-1]
+		cb := physicalColors[compB-1]
+		wA := 100 - mixBPct
+		wB := mixBPct
+		total := wA + wB
+		if total == 0 {
+			total = 1
+		}
+		blended := [4]uint8{
+			uint8((int(ca[0])*wA + int(cb[0])*wB) / total),
+			uint8((int(ca[1])*wA + int(cb[1])*wB) / total),
+			uint8((int(ca[2])*wA + int(cb[2])*wB) / total),
+			255,
+		}
+		result = append(result, blended)
+	}
+	return result
 }
 
 // Load3MF loads a 3MF file and returns a LoadedModel.
