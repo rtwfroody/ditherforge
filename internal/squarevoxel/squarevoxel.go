@@ -252,9 +252,9 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 				opaqueFaces = append(opaqueFaces, model.Faces[fi])
 			}
 		}
-		// Target ~2 triangles per surface cell. This preserves enough
-		// geometry for accurate clipping while removing sub-voxel detail.
-		targetFaces := len(cells) * 2
+		// Target ~1 triangle per surface cell. Clipping recreates geometry
+		// at voxel boundaries, so the decimated mesh just needs a rough hull.
+		targetFaces := len(cells)
 		if targetFaces < len(opaqueFaces) {
 			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
 			wr := voxel.CheckWatertight(decFaces)
