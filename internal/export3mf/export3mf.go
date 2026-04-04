@@ -74,16 +74,9 @@ func newUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
- <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
- <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
-</Types>`
+const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>`
 
-const rels = `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
- <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
-</Relationships>`
+const rels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`
 
 // Export writes a single mesh with per-face palette assignments to a 3MF file.
 func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
@@ -122,24 +115,15 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	tz := -float64(minZ)
 	transform := fmt.Sprintf("1 0 0 0 1 0 0 0 1 %.4f %.4f %.4f", tx, ty, tz)
 
-	objectRels := `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
- <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
-</Relationships>`
+	objectRels := `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`
 
-	mainModel := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" unit="millimeter" xml:lang="en-US" requiredextensions="p">
- <resources>
-  <object id="2" p:UUID="%s" type="model">
-   <components>
-    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="%s"/>
-   </components>
-  </object>
- </resources>
- <build p:UUID="%s">
-  <item objectid="2" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
- </build>
-</model>`, objUUID, newUUID(), transform, buildUUID, instUUID)
+	mainModel := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
+		`<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" unit="millimeter" xml:lang="en-US" requiredextensions="p">`+
+		`<resources><object id="2" p:UUID="%s" type="model">`+
+		`<components><component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="%s"/></components>`+
+		`</object></resources>`+
+		`<build p:UUID="%s"><item objectid="2" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/></build>`+
+		`</model>`, objUUID, newUUID(), transform, buildUUID, instUUID)
 
 	modelSettings := buildModelSettings(model)
 
@@ -203,22 +187,21 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	objUUID := newUUID()
 	var sb strings.Builder
 
-	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	sb.WriteString(`<model unit="millimeter" xml:lang="en-US"`)
 	sb.WriteString(` xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"`)
 	sb.WriteString(` xmlns:BambuStudio="http://schemas.bambulab.com/package/2021"`)
 	sb.WriteString(` xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"`)
-	sb.WriteString(` requiredextensions="p">` + "\n")
-	sb.WriteString(` <metadata name="BambuStudio:3mfVersion">1</metadata>` + "\n")
-	sb.WriteString(` <resources>` + "\n")
-	fmt.Fprintf(&sb, `  <object id="1" p:UUID="%s" type="model">`+"\n", objUUID)
-	sb.WriteString(`   <mesh>` + "\n")
+	sb.WriteString(` requiredextensions="p">`)
+	sb.WriteString(`<metadata name="BambuStudio:3mfVersion">1</metadata>`)
+	sb.WriteString(`<resources>`)
+	fmt.Fprintf(&sb, `<object id="1" p:UUID="%s" type="model">`, objUUID)
+	sb.WriteString(`<mesh><vertices>`)
 
-	sb.WriteString(`    <vertices>` + "\n")
 	for _, v := range model.Vertices {
-		fmt.Fprintf(&sb, `     <vertex x="%.6f" y="%.6f" z="%.6f"/>`+"\n", v[0], v[1], v[2])
+		fmt.Fprintf(&sb, `<vertex x="%.6f" y="%.6f" z="%.6f"/>`, v[0], v[1], v[2])
 	}
-	sb.WriteString(`    </vertices>` + "\n")
+	sb.WriteString(`</vertices>`)
 
 	// Snap vertices to export precision for degenerate detection.
 	type snapV struct{ x, y, z int32 }
@@ -231,7 +214,7 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 		}
 	}
 
-	sb.WriteString(`    <triangles>` + "\n")
+	sb.WriteString(`<triangles>`)
 	for fi, face := range model.Faces {
 		// Skip degenerate triangles (vertices identical at export precision).
 		s0, s1, s2 := snapped[face[0]], snapped[face[1]], snapped[face[2]]
@@ -239,16 +222,12 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 			continue
 		}
 		pc := paintColor(int(assignments[fi]))
-		fmt.Fprintf(&sb, `     <triangle v1="%d" v2="%d" v3="%d" paint_color="%s"/>`+"\n",
+		fmt.Fprintf(&sb, `<triangle v1="%d" v2="%d" v3="%d" paint_color="%s"/>`,
 			face[0], face[1], face[2], pc)
 	}
-	sb.WriteString(`    </triangles>` + "\n")
+	sb.WriteString(`</triangles>`)
 
-	sb.WriteString(`   </mesh>` + "\n")
-	sb.WriteString(`  </object>` + "\n")
-	sb.WriteString(` </resources>` + "\n")
-	sb.WriteString(` <build/>` + "\n")
-	sb.WriteString(`</model>`)
+	sb.WriteString(`</mesh></object></resources><build/></model>`)
 
 	return sb.String(), nil
 }
@@ -323,17 +302,14 @@ func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, e
 
 func buildModelSettings(model *loader.LoadedModel) string {
 	var sb strings.Builder
-	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	sb.WriteString(`<config>` + "\n")
-	sb.WriteString("  <object id=\"2\">\n")
-	sb.WriteString(`    <metadata key="name" value="ditherforge_output"/>` + "\n")
-	sb.WriteString(`    <metadata key="extruder" value="1"/>` + "\n")
-	fmt.Fprintf(&sb, "    <metadata face_count=\"%d\"/>\n", len(model.Faces))
-	sb.WriteString("    <part id=\"1\" subtype=\"normal_part\">\n")
-	sb.WriteString("      <metadata key=\"name\" value=\"shell\"/>\n")
-	sb.WriteString("      <metadata key=\"extruder\" value=\"1\"/>\n")
-	sb.WriteString("    </part>\n")
-	sb.WriteString(`  </object>` + "\n")
-	sb.WriteString(`</config>`)
+	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	sb.WriteString(`<config><object id="2">`)
+	sb.WriteString(`<metadata key="name" value="ditherforge_output"/>`)
+	sb.WriteString(`<metadata key="extruder" value="1"/>`)
+	fmt.Fprintf(&sb, `<metadata face_count="%d"/>`, len(model.Faces))
+	sb.WriteString(`<part id="1" subtype="normal_part">`)
+	sb.WriteString(`<metadata key="name" value="shell"/>`)
+	sb.WriteString(`<metadata key="extruder" value="1"/>`)
+	sb.WriteString(`</part></object></config>`)
 	return sb.String()
 }
