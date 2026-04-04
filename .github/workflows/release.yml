@@ -45,10 +45,10 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep 'return "ditherforge' main.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build
+      - name: Build CLI
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -56,13 +56,13 @@ jobs:
         run: |
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          go build -o "ditherforge${EXT}" .
+          go build -o "ditherforge${EXT}" ./cmd/ditherforge
 
       - name: Smoke test
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           ./ditherforge --version
-          go test -timeout 2m ./...
+          go test -timeout 2m ./internal/...
 
       - name: Package
         run: |
@@ -94,7 +94,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep 'return "ditherforge' main.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4

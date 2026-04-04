@@ -1,5 +1,10 @@
 # Build output
-ditherforge
+/ditherforge
+build/bin/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
 
 # Output files
 *.3mf
