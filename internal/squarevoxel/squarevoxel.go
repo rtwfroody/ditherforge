@@ -239,7 +239,28 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		fmt.Printf("    #%02X%02X%02X: %d cells (%.1f%%)\n", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
 	}
 
-	// 5. Flood fill to merge same-color cells into patches.
+	// 5. Decimate the input mesh. All color info has been extracted into
+	// the voxel grid, so we can simplify purely for geometry. Filter
+	// transparent faces first since they won't be clipped.
+	decimModel := model
+	if !cfg.NoSimplify {
+		var opaqueFaces [][3]uint32
+		for fi := range model.Faces {
+			if voxel.FaceAlpha(fi, model) >= 128 {
+				opaqueFaces = append(opaqueFaces, model.Faces[fi])
+			}
+		}
+		targetFaces := len(cells) * 2
+		if targetFaces < len(opaqueFaces) {
+			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces)
+			decimModel = &loader.LoadedModel{
+				Vertices: decVerts,
+				Faces:    decFaces,
+			}
+		}
+	}
+
+	// 6. Flood fill to merge same-color cells into patches.
 	tFlood := time.Now()
 	patchMap, numPatches := voxel.FloodFillPatches(cells, assignments)
 	fmt.Printf("  Flood fill: %d patches in %.1fs\n", numPatches, time.Since(tFlood).Seconds())
@@ -252,11 +273,11 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		patchAssignment[pid] = assignments[i]
 	}
 
-	// 6. Clip original mesh along patch boundaries.
+	// 7. Clip mesh along patch boundaries.
 	tClip := time.Now()
 	barClip := newBar(-1, "  Clipping mesh")
 	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
-		model, patchMap, patchAssignment, minV, cellSize, layerH, !cfg.NoSimplify)
+		decimModel, patchMap, patchAssignment, minV, cellSize, layerH, false)
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
 
 	// 8. Optional coplanar merge.
