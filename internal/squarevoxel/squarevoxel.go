@@ -252,7 +252,7 @@ func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, dit
 		}
 		targetFaces := len(cells) * 2
 		if targetFaces < len(opaqueFaces) {
-			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces)
+			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
 			decimModel = &loader.LoadedModel{
 				Vertices: decVerts,
 				Faces:    decFaces,

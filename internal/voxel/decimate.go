@@ -134,13 +134,16 @@ type decimator struct {
 	vertAlive   []bool
 	vertVersion []int
 	activeFaces int
+	cellSize    float64 // used to scale cost by edge length
 	h           collapseHeap
 }
 
 // Decimate reduces mesh face count using QEM edge collapse.
 // Preserves topology (manifoldness/watertightness). Stops at targetFaces
-// or when no more safe collapses exist.
-func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int) ([][3]float32, [][3]uint32) {
+// or when no more safe collapses exist. cellSize is used to prioritize
+// collapsing edges shorter than a voxel — their cost is scaled down so
+// sub-voxel detail is removed first regardless of QEM error.
+func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64) ([][3]float32, [][3]uint32) {
 	if len(faces) <= targetFaces {
 		return verts, faces
 	}
@@ -156,6 +159,7 @@ func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int) ([][3]floa
 		vertAlive:   make([]bool, len(verts)),
 		vertVersion: make([]int, len(verts)),
 		activeFaces: len(faces),
+		cellSize:    cellSize,
 	}
 	copy(d.verts, verts)
 	copy(d.faces, faces)
@@ -232,6 +236,8 @@ func (d *decimator) faceQuadric(fi uint32) quadric {
 }
 
 // pushEdge computes the collapse cost for an edge and adds it to the heap.
+// Cost is scaled by min(edgeLength/cellSize, 1) so that edges shorter than
+// a voxel cell are collapsed first regardless of QEM error.
 func (d *decimator) pushEdge(ek decimEdgeKey) {
 	var q quadric
 	q = d.quadrics[ek.v1]
@@ -241,6 +247,17 @@ func (d *decimator) pushEdge(ek decimEdgeKey) {
 	if cost < 0 {
 		cost = 0
 	}
+	// Scale cost by edge length relative to cell size.
+	v1, v2 := d.verts[ek.v1], d.verts[ek.v2]
+	dx := float64(v2[0] - v1[0])
+	dy := float64(v2[1] - v1[1])
+	dz := float64(v2[2] - v1[2])
+	edgeLen := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	scale := edgeLen / d.cellSize
+	if scale > 1 {
+		scale = 1
+	}
+	cost *= scale
 	heap.Push(&d.h, &collapseEntry{
 		edge:  ek,
 		cost:  cost,
