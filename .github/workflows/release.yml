@@ -1,0 +1,115 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "1"
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "1"
+            packages: gcc-aarch64-linux-gnu
+            cc: aarch64-linux-gnu-gcc
+          - os: ubuntu-latest
+            goos: darwin
+            goarch: amd64
+            cgo: "0"
+          - os: ubuntu-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "0"
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install cross-compiler
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep 'return "ditherforge' main.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+          CC: ${{ matrix.cc || '' }}
+        run: |
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          go build -o "ditherforge${EXT}" .
+
+      - name: Package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          ARCHIVE="ditherforge-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir "$ARCHIVE"
+          cp "ditherforge${EXT}" README.md LICENSE "$ARCHIVE/" 2>/dev/null || cp "ditherforge${EXT}" README.md "$ARCHIVE/"
+          tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
+          echo "archive=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ditherforge-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.archive }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep 'return "ditherforge' main.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete existing "latest" release if present.
+          gh release delete latest --yes 2>/dev/null || true
+          git tag -f latest
+          git push -f origin latest
+
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create latest \
+            --title "Latest build (v${VERSION})" \
+            --notes "Automated build from main branch (v${VERSION}, commit ${GITHUB_SHA::8})." \
+            --prerelease \
+            artifacts/*.tar.gz
