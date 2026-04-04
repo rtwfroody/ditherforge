@@ -249,50 +249,90 @@ func percentile(vals []float64, p float64) float64 {
 	return vals[lo]*(1-frac) + vals[hi]*frac
 }
 
-func TestMeshRender(t *testing.T) {
-	// Auto-discover all GLB files in objects/.
-	glbs, err := filepath.Glob("objects/*.glb")
+// loadTestModel loads a GLB or 3MF file, scaling to maxExtentMM.
+func loadTestModel(t *testing.T, path string) *loader.LoadedModel {
+	t.Helper()
+	ext := strings.ToLower(filepath.Ext(path))
+
+	load := func(scale float32) (*loader.LoadedModel, error) {
+		switch ext {
+		case ".glb":
+			return loader.LoadGLB(path, 1000*scale) // meters → mm
+		case ".3mf":
+			return loader.Load3MF(path, scale)
+		default:
+			t.Fatalf("unsupported extension %q", ext)
+			return nil, nil
+		}
+	}
+
+	t.Logf("Loading %s...", path)
+	model, err := load(1.0)
 	if err != nil {
-		t.Fatalf("globbing objects/*.glb: %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if len(glbs) == 0 {
-		t.Skip("no .glb files in objects/")
+
+	me := modelExtent(model)
+	if me != maxExtentMM {
+		scale := maxExtentMM / me
+		t.Logf("  Extent %.1fmm, target %.0fmm, scaling by %.4f", me, maxExtentMM, scale)
+		model, err = load(scale)
+		if err != nil {
+			t.Fatalf("load (rescaled): %v", err)
+		}
 	}
+	return model
+}
+
+// discoverTestModels finds all GLB and 3MF files in objects/.
+func discoverTestModels(t *testing.T) []string {
+	t.Helper()
+	var paths []string
+	for _, pattern := range []string{"objects/*.glb", "objects/*.3mf"} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("globbing %s: %v", pattern, err)
+		}
+		paths = append(paths, matches...)
+	}
+	if len(paths) == 0 {
+		t.Skip("no model files in objects/")
+	}
+	return paths
+}
+
+func TestMeshRender(t *testing.T) {
+	modelPaths := discoverTestModels(t)
 
 	outdir := filepath.Join("tests", "output")
 
-	for _, glbPath := range glbs {
-		glbPath := glbPath
-		name := strings.TrimSuffix(filepath.Base(glbPath), ".glb")
+	for _, modelPath := range modelPaths {
+		modelPath := modelPath
+		base := filepath.Base(modelPath)
+		name := strings.TrimSuffix(base, filepath.Ext(base))
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			// Load with default GLB unit (meters → mm).
-			const unitScale = float32(1000)
 
-			t.Logf("Loading %s...", glbPath)
-			model, err := loader.LoadGLB(glbPath, unitScale)
-			if err != nil {
-				t.Fatalf("LoadGLB: %v", err)
-			}
-
-			// Auto-scale to target maxExtentMM.
+			model := loadTestModel(t, modelPath)
 			ext := modelExtent(model)
-			scale := float32(1.0)
-			if ext != maxExtentMM {
-				scale = maxExtentMM / ext
-				t.Logf("  Extent %.1fmm, target %.0fmm, scaling by %.4f", ext, maxExtentMM, scale)
-				// Reload with adjusted scale.
-				model, err = loader.LoadGLB(glbPath, unitScale*scale)
-				if err != nil {
-					t.Fatalf("LoadGLB (rescaled): %v", err)
-				}
-				ext = modelExtent(model)
-			}
 			t.Logf("  Input: %d verts, %d faces, extent %.1fmm",
 				len(model.Vertices), len(model.Faces), ext)
 
 			outModel, _, _ := getOrRunRemesh(t, name, model, defaultPaletteConfig())
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
+
+			// If the input mesh is watertight, the output must be too.
+			inWt := voxel.CheckWatertight(model.Faces)
+			outWt := voxel.CheckWatertight(outModel.Faces)
+			if inWt.IsWatertight() {
+				if !outWt.IsWatertight() {
+					t.Errorf("  input is watertight but output is not: %s", outWt)
+				} else {
+					t.Logf("  watertight: yes (input and output)")
+				}
+			} else {
+				t.Logf("  input not watertight (%s), skipping output watertight check", inWt)
+			}
 
 			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
 			t.Logf("  Tolerance: %dpx", dilatePx)
