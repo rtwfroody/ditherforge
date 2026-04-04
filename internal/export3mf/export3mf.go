@@ -303,9 +303,9 @@ func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, e
 	data["filament_colour"] = hexColors
 	data["filament_type"] = filamentTypes
 	data["filament_settings_id"] = filamentIDs
-	// Limit painted color depth from surface to 2mm so the slicer doesn't
+	// Limit painted color depth from surface to 1.5mm so the slicer doesn't
 	// flood-fill entire regions with a single filament.
-	data["mmu_segmented_region_max_width"] = "2"
+	data["mmu_segmented_region_max_width"] = "1.5"
 
 	// Tell OrcaSlicer which settings differ from the system defaults.
 	// Without this, OrcaSlicer ignores customized values.
