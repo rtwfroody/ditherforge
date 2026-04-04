@@ -7,72 +7,46 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// ClipTriangleByPlane clips a single triangle against an axis-aligned plane.
-// Returns triangles on the negative side (<=) and positive side (>).
-// Preserves winding order.
-func ClipTriangleByPlane(
-	v0, v1, v2 [3]float32,
+// ClipPolygonByPlane clips a convex polygon against an axis-aligned plane.
+// Returns the polygon on the negative side (<= value) and the polygon on the
+// positive side (> value). Preserves winding order.
+func ClipPolygonByPlane(
+	poly [][3]float32,
 	axis int,
 	value float32,
-) (neg, pos [][3][3]float32) {
-	verts := [3][3]float32{v0, v1, v2}
-	sides := [3]int{} // -1 = neg, +1 = pos
-	for i := range verts {
-		if verts[i][axis] <= value {
-			sides[i] = -1
+) (neg, pos [][3]float32) {
+	n := len(poly)
+	if n < 3 {
+		return poly, nil
+	}
+
+	for i := 0; i < n; i++ {
+		a := poly[i]
+		b := poly[(i+1)%n]
+		aNeg := a[axis] <= value
+		bNeg := b[axis] <= value
+
+		if aNeg && bNeg {
+			// Both on neg side: add B to neg.
+			neg = append(neg, b)
+		} else if !aNeg && !bNeg {
+			// Both on pos side: add B to pos.
+			pos = append(pos, b)
 		} else {
-			sides[i] = 1
+			// Crossing: compute intersection, add to both sides.
+			m := edgePlaneIntersect(a, b, axis, value)
+			if aNeg {
+				// A neg, B pos: finish neg with m, start pos with m then B.
+				neg = append(neg, m)
+				pos = append(pos, m, b)
+			} else {
+				// A pos, B neg: finish pos with m, start neg with m then B.
+				pos = append(pos, m)
+				neg = append(neg, m, b)
+			}
 		}
 	}
-
-	// Count vertices on each side.
-	negCount := 0
-	for _, s := range sides {
-		if s < 0 {
-			negCount++
-		}
-	}
-
-	switch negCount {
-	case 3:
-		// All on negative side.
-		return [][3][3]float32{{v0, v1, v2}}, nil
-	case 0:
-		// All on positive side.
-		return nil, [][3][3]float32{{v0, v1, v2}}
-	}
-
-	// Find the lone vertex (the one on the side with 1 vertex).
-	// Rotate so that verts[0] is the lone vertex.
-	loneIsNeg := negCount == 1
-	loneIdx := -1
-	for i, s := range sides {
-		if (loneIsNeg && s < 0) || (!loneIsNeg && s > 0) {
-			loneIdx = i
-			break
-		}
-	}
-	// Rotate vertices so lone vertex is at index 0, preserving winding.
-	for i := 0; i < loneIdx; i++ {
-		verts[0], verts[1], verts[2] = verts[1], verts[2], verts[0]
-	}
-
-	// verts[0] is alone on one side; verts[1] and verts[2] are on the other.
-	// Find intersection points on edges 0→1 and 0→2.
-	m1 := edgePlaneIntersect(verts[0], verts[1], axis, value)
-	m2 := edgePlaneIntersect(verts[0], verts[2], axis, value)
-
-	// Lone side: 1 triangle (verts[0], m1, m2)
-	loneTri := [3][3]float32{verts[0], m1, m2}
-
-	// Other side: 2 triangles (m1, verts[1], verts[2]) and (m1, verts[2], m2)
-	otherTri1 := [3][3]float32{m1, verts[1], verts[2]}
-	otherTri2 := [3][3]float32{m1, verts[2], m2}
-
-	if loneIsNeg {
-		return [][3][3]float32{loneTri}, [][3][3]float32{otherTri1, otherTri2}
-	}
-	return [][3][3]float32{otherTri1, otherTri2}, [][3][3]float32{loneTri}
+	return neg, pos
 }
 
 // edgePlaneIntersect returns the point where the edge from a to b
@@ -195,55 +169,66 @@ func ClipMeshByPatches(
 			}
 		}
 
-		// Start with this triangle as the only fragment.
-		fragments := [][3][3]float32{{v0, v1, v2}}
+		// Start with this triangle as the only fragment (polygon).
+		fragments := [][][3]float32{{v0, v1, v2}}
 
-		// Clip against each axis's local planes.
+		// Clip against each axis's planes.
 		for axis := 0; axis < 3; axis++ {
 			pvals := sortedPlanes[axis]
 			if len(pvals) == 0 {
 				continue
 			}
 
-			var next [][3][3]float32
-			for _, tri := range fragments {
-				lo := Minf(tri[0][axis], Minf(tri[1][axis], tri[2][axis]))
-				hi := Maxf(tri[0][axis], Maxf(tri[1][axis], tri[2][axis]))
+			var next [][][3]float32
+			for _, poly := range fragments {
+				lo, hi := poly[0][axis], poly[0][axis]
+				for _, v := range poly[1:] {
+					if v[axis] < lo {
+						lo = v[axis]
+					}
+					if v[axis] > hi {
+						hi = v[axis]
+					}
+				}
 
 				iLo := sort.Search(len(pvals), func(i int) bool { return pvals[i] > lo })
 				iHi := sort.Search(len(pvals), func(i int) bool { return pvals[i] >= hi })
 
 				if iLo >= iHi {
-					next = append(next, tri)
+					next = append(next, poly)
 					continue
 				}
 
-				current := [][3][3]float32{tri}
+				current := [][][3]float32{poly}
 				for pi := iLo; pi < iHi; pi++ {
-					var remaining [][3][3]float32
-					for _, t := range current {
-						neg, pos := ClipTriangleByPlane(t[0], t[1], t[2], axis, pvals[pi])
-						next = append(next, neg...)
-						remaining = append(remaining, pos...)
+					var remaining [][][3]float32
+					for _, p := range current {
+						neg, pos := ClipPolygonByPlane(p, axis, pvals[pi])
+						if len(neg) >= 3 {
+							next = append(next, neg)
+						}
+						if len(pos) >= 3 {
+							remaining = append(remaining, pos)
+						}
 					}
 					current = remaining
 				}
-				next = append(next, current...)
+				for _, p := range current {
+					if len(p) >= 3 {
+						next = append(next, p)
+					}
+				}
 			}
 			fragments = next
 		}
 
-		// Assign each fragment a color by mapping its centroid to a cell.
-		for _, tri := range fragments {
-			if triArea(tri) < 1e-8 {
+		// Assign each fragment a color and fan-triangulate.
+		for _, poly := range fragments {
+			if polyArea(poly) < 1e-8 {
 				continue
 			}
 
-			centroid := [3]float32{
-				(tri[0][0] + tri[1][0] + tri[2][0]) / 3,
-				(tri[0][1] + tri[1][1] + tri[2][1]) / 3,
-				(tri[0][2] + tri[1][2] + tri[2][2]) / 3,
-			}
+			centroid := polyCentroid(poly)
 
 			ck := CentroidToCell(centroid, minV, cellSize, layerH)
 			var assignment int32
@@ -257,14 +242,17 @@ func ClipMeshByPatches(
 				assignment = a
 			}
 
-			vi0 := vd.GetVertex(tri[0])
-			vi1 := vd.GetVertex(tri[1])
-			vi2 := vd.GetVertex(tri[2])
-			if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
-				continue // degenerate after dedup
+			// Fan-triangulate the convex polygon.
+			for i := 1; i < len(poly)-1; i++ {
+				vi0 := vd.GetVertex(poly[0])
+				vi1 := vd.GetVertex(poly[i])
+				vi2 := vd.GetVertex(poly[i+1])
+				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+					continue // degenerate after dedup
+				}
+				faces = append(faces, [3]uint32{vi0, vi1, vi2})
+				assignments = append(assignments, assignment)
 			}
-			faces = append(faces, [3]uint32{vi0, vi1, vi2})
-			assignments = append(assignments, assignment)
 		}
 	}
 
@@ -309,13 +297,39 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 	return bestAssign, found
 }
 
-// triArea returns the area of a triangle defined by 3 vertices.
-func triArea(tri [3][3]float32) float32 {
-	e1 := [3]float32{tri[1][0] - tri[0][0], tri[1][1] - tri[0][1], tri[1][2] - tri[0][2]}
-	e2 := [3]float32{tri[2][0] - tri[0][0], tri[2][1] - tri[0][1], tri[2][2] - tri[0][2]}
-	cx := e1[1]*e2[2] - e1[2]*e2[1]
-	cy := e1[2]*e2[0] - e1[0]*e2[2]
-	cz := e1[0]*e2[1] - e1[1]*e2[0]
-	return float32(math.Sqrt(float64(cx*cx+cy*cy+cz*cz))) / 2
+// polyArea returns the area of a convex polygon using the triangle fan method.
+func polyArea(poly [][3]float32) float32 {
+	if len(poly) < 3 {
+		return 0
+	}
+	var cx, cy, cz float64
+	for i := 1; i < len(poly)-1; i++ {
+		e1 := [3]float64{
+			float64(poly[i][0] - poly[0][0]),
+			float64(poly[i][1] - poly[0][1]),
+			float64(poly[i][2] - poly[0][2]),
+		}
+		e2 := [3]float64{
+			float64(poly[i+1][0] - poly[0][0]),
+			float64(poly[i+1][1] - poly[0][1]),
+			float64(poly[i+1][2] - poly[0][2]),
+		}
+		cx += e1[1]*e2[2] - e1[2]*e2[1]
+		cy += e1[2]*e2[0] - e1[0]*e2[2]
+		cz += e1[0]*e2[1] - e1[1]*e2[0]
+	}
+	return float32(math.Sqrt(cx*cx+cy*cy+cz*cz)) / 2
+}
+
+// polyCentroid returns the centroid of a polygon (average of vertices).
+func polyCentroid(poly [][3]float32) [3]float32 {
+	var sx, sy, sz float32
+	for _, v := range poly {
+		sx += v[0]
+		sy += v[1]
+		sz += v[2]
+	}
+	n := float32(len(poly))
+	return [3]float32{sx / n, sy / n, sz / n}
 }
 
