@@ -2,8 +2,8 @@
 
 ![Golden Pheasant printed with ditherforge](images/golden_pheasant.jpg)
 
-Convert textured 3D models (GLB) into multi-color 3D-printable files (3MF) for
-multi-filament printers.
+Convert textured 3D models (GLB or 3MF) into multi-color 3D-printable files
+(3MF) for multi-filament printers.
 
 ## Quick Start
 
@@ -22,13 +22,14 @@ matching it to your print settings produces the best results.
 
 ## How It Works
 
-1. **Load** a textured GLB model and scale to millimeters.
+1. **Load** a textured GLB or 3MF model and scale to millimeters.
 2. **Voxelize** onto a square grid matching the printer's nozzle diameter and
-   layer height.
-3. **Extract** a smooth isosurface via marching cubes.
-4. **Sample** the original texture color at each output face.
-5. **Dither** to approximate the full-color texture with the available filament
+   layer height, sampling colors from the original texture.
+3. **Decimate** the input mesh to reduce triangle count before clipping.
+4. **Dither** to approximate the full-color texture with the available filament
    palette.
+5. **Clip** the mesh along voxel color boundaries, assigning each fragment a
+   palette color.
 6. **Export** a 3MF file with per-face material assignments.
 
 ## Color Palette Selection
@@ -64,8 +65,6 @@ The `--dither` flag controls how colors are distributed across faces:
 
 - **`dizzy`** (default) — Random traversal order with error diffusion to
   spatial neighbors. Produces blue-noise-like patterns without directional bias.
-- **`fs`** — Floyd-Steinberg error diffusion in scanline order. Classic
-  dithering, but can show directional artifacts.
 - **`none`** — Each face gets the nearest palette color with no dithering.
 
 ## Installation
@@ -93,12 +92,15 @@ go build .
 | `--auto-palette N` | — | Compute N dominant colors from texture |
 | `--inventory-file` | — | File with one filament color per line |
 | `--inventory N` | — | Pick best N colors from inventory file |
-| `--dither` | `dizzy` | Dithering mode: `none`, `fs`, `dizzy` |
+| `--dither` | `dizzy` | Dithering mode: `none`, `dizzy` |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
 | `--scale` | `1.0` | Additional scale multiplier |
 | `--output` | `output.3mf` | Output 3MF file path |
 | `--no-merge` | — | Skip coplanar triangle merging |
+| `--no-simplify` | — | Skip QEM mesh decimation before clipping |
+| `--color-snap` | `5` | Shift cell colors toward nearest palette color by this many delta E units (0 to disable) |
+| `--no-cache` | — | Disable voxelization cache |
 | `--stats` | — | Print face counts per material |
 | `--force` | — | Bypass the 300mm extent size check |
 
@@ -122,10 +124,6 @@ silhouettes and depth against the original model.
 ## Known Issues
 
 - Sometimes generates features too thin for the slicer to print.
-- Slicers like OrcaSlicer preserve per-face colors through to the infill,
-  making infill very slow due to unnecessary filament changes. The
-  `--infill` flag attempts to generate a separate single-color infill object,
-  but OrcaSlicer does not yet interpret the hollow shell correctly.
 
 ## Status
 
