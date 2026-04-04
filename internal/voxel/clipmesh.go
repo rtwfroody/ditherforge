@@ -243,8 +243,8 @@ func ClipMeshByPatches(
 			}
 
 			// Fan-triangulate the convex polygon.
+			vi0 := vd.GetVertex(poly[0])
 			for i := 1; i < len(poly)-1; i++ {
-				vi0 := vd.GetVertex(poly[0])
 				vi1 := vd.GetVertex(poly[i])
 				vi2 := vd.GetVertex(poly[i+1])
 				if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
@@ -321,7 +321,9 @@ func polyArea(poly [][3]float32) float32 {
 	return float32(math.Sqrt(cx*cx+cy*cy+cz*cz)) / 2
 }
 
-// polyCentroid returns the centroid of a polygon (average of vertices).
+// polyCentroid returns the vertex-average position of a polygon.
+// This is not the area-weighted centroid, but for convex polygons it is
+// always interior, which is sufficient for cell assignment.
 func polyCentroid(poly [][3]float32) [3]float32 {
 	var sx, sy, sz float32
 	for _, v := range poly {
