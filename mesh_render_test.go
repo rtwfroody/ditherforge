@@ -622,40 +622,21 @@ func saveDeltaEImage(t *testing.T, outdir, name string, blockDeltaEs [][]float64
 }
 
 func TestTextureRender(t *testing.T) {
-	glbs, err := filepath.Glob("objects/*.glb")
-	if err != nil {
-		t.Fatalf("globbing objects/*.glb: %v", err)
-	}
-	if len(glbs) == 0 {
-		t.Skip("no .glb files in objects/")
-	}
+	modelPaths := discoverTestModels(t)
 
 	outdir := filepath.Join("tests", "output")
 
-	for _, glbPath := range glbs {
-		glbPath := glbPath
-		name := strings.TrimSuffix(filepath.Base(glbPath), ".glb")
+	for _, modelPath := range modelPaths {
+		modelPath := modelPath
+		base := filepath.Base(modelPath)
+		name := strings.TrimSuffix(base, filepath.Ext(base))
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			const unitScale = float32(1000)
 
-			t.Logf("Loading %s...", glbPath)
-			model, err := loader.LoadGLB(glbPath, unitScale)
-			if err != nil {
-				t.Fatalf("LoadGLB: %v", err)
-			}
-
+			model := loadTestModel(t, modelPath)
 			ext := modelExtent(model)
-			if ext != maxExtentMM {
-				scale := maxExtentMM / ext
-				model, err = loader.LoadGLB(glbPath, unitScale*scale)
-				if err != nil {
-					t.Fatalf("LoadGLB (rescaled): %v", err)
-				}
-				ext = modelExtent(model)
-			}
 
-			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, glbPath, model, defaultPaletteConfig())
+			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, modelPath, model, defaultPaletteConfig())
 
 			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
 
