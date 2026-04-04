@@ -1,17 +1,15 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/gob"
 	"fmt"
 	"image"
 	"image/png"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -21,11 +19,6 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
-
-// sourceHash is computed once in TestMain from all Go source files.
-var sourceHash string
-
-const cacheDir = "tests/cache"
 
 const (
 	defaultNozzle      = float32(0.4)
@@ -48,56 +41,6 @@ var views = []struct {
 	{"top", 0, 90},
 }
 
-func TestMain(m *testing.M) {
-	h, err := computeSourceHash()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "computing source hash: %v\n", err)
-		os.Exit(1)
-	}
-	sourceHash = h
-	os.MkdirAll(cacheDir, 0755)
-	os.Exit(m.Run())
-}
-
-func computeSourceHash() (string, error) {
-	h := sha256.New()
-	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if path == ".git" || path == "vendor" || path == "tests" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if _, err := io.Copy(h, f); err != nil {
-			return err
-		}
-		h.Write([]byte(path))
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))[:16], nil
-}
-
-type cachedRemeshOutput struct {
-	Vertices    [][3]float32
-	Faces       [][3]uint32
-	Assignments []int32
-	PaletteRGB  [][3]uint8
-}
-
 func defaultPaletteConfig() voxel.PaletteConfig {
 	defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
 	var pcfg voxel.PaletteConfig
@@ -109,58 +52,53 @@ func defaultPaletteConfig() voxel.PaletteConfig {
 	return pcfg
 }
 
-func getOrRunRemesh(t *testing.T, name string, modelPath string, model *loader.LoadedModel, pcfg voxel.PaletteConfig) (*loader.LoadedModel, []int32, [][3]uint8) {
+type remeshResult struct {
+	model       *loader.LoadedModel
+	outModel    *loader.LoadedModel
+	assignments []int32
+	paletteRGB  [][3]uint8
+	err         error
+}
+
+type remeshEntry struct {
+	once   sync.Once
+	result *remeshResult
+}
+
+var (
+	remeshCache   = map[string]*remeshEntry{}
+	remeshCacheMu sync.Mutex
+)
+
+// getRemeshResult loads the model and returns a shared remesh result for the
+// given model path. The first caller runs the load+remesh; concurrent and
+// subsequent callers block on sync.Once and reuse the result.
+func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 	t.Helper()
-	// Include model file mod time in cache key so edits invalidate cache.
-	modelHash := ""
-	if info, err := os.Stat(modelPath); err == nil {
-		modelHash = fmt.Sprintf("_%x", info.ModTime().UnixNano())
-	}
-	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s_%s%s.gob", name, sourceHash, modelHash))
 
-	if f, err := os.Open(cacheFile); err == nil {
-		defer f.Close()
-		var cached cachedRemeshOutput
-		if err := gob.NewDecoder(f).Decode(&cached); err == nil {
-			t.Log("Using cached remesh output")
-			return &loader.LoadedModel{
-				Vertices: cached.Vertices,
-				Faces:    cached.Faces,
-			}, cached.Assignments, cached.PaletteRGB
+	remeshCacheMu.Lock()
+	entry, ok := remeshCache[modelPath]
+	if !ok {
+		entry = &remeshEntry{}
+		remeshCache[modelPath] = entry
+	}
+	remeshCacheMu.Unlock()
+
+	entry.once.Do(func() {
+		model := loadTestModel(t, modelPath)
+		cfg := squarevoxel.Config{
+			NozzleDiameter: defaultNozzle,
+			LayerHeight:    defaultLayerHeight,
 		}
-	}
+		t.Log("Running squarevoxel remesh...")
+		outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(model, defaultPaletteConfig(), cfg, "dizzy", nil)
+		entry.result = &remeshResult{model, outModel, assignments, paletteRGB, err}
+	})
 
-	cfg := squarevoxel.Config{
-		NozzleDiameter: defaultNozzle,
-		LayerHeight:    defaultLayerHeight,
+	if entry.result.err != nil {
+		t.Fatalf("Remesh: %v", entry.result.err)
 	}
-
-	t.Log("Running squarevoxel remesh...")
-	outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(model, pcfg, cfg, "dizzy", nil)
-	if err != nil {
-		t.Fatalf("Remesh: %v", err)
-	}
-
-	if f, err := os.Create(cacheFile); err == nil {
-		gob.NewEncoder(f).Encode(cachedRemeshOutput{
-			Vertices:    outModel.Vertices,
-			Faces:       outModel.Faces,
-			Assignments: assignments,
-			PaletteRGB:  paletteRGB,
-		})
-		f.Close()
-	}
-
-	// Clean stale cache for this model.
-	prefix := name + "_"
-	entries, _ := os.ReadDir(cacheDir)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) && e.Name() != filepath.Base(cacheFile) {
-			os.Remove(filepath.Join(cacheDir, e.Name()))
-		}
-	}
-
-	return outModel, assignments, paletteRGB
+	return entry.result
 }
 
 // modelExtent returns the max bounding box extent in mm.
@@ -318,12 +256,11 @@ func TestMeshRender(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			model := loadTestModel(t, modelPath)
+			r := getRemeshResult(t, modelPath)
+			model, outModel := r.model, r.outModel
 			ext := modelExtent(model)
 			t.Logf("  Input: %d verts, %d faces, extent %.1fmm",
 				len(model.Vertices), len(model.Faces), ext)
-
-			outModel, _, _ := getOrRunRemesh(t, name, modelPath, model, defaultPaletteConfig())
 			t.Logf("  Output: %d verts, %d faces", len(outModel.Vertices), len(outModel.Faces))
 
 			// If the input mesh is watertight, the output must be too.
@@ -633,10 +570,10 @@ func TestTextureRender(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			model := loadTestModel(t, modelPath)
+			r := getRemeshResult(t, modelPath)
+			model, outModel := r.model, r.outModel
+			assignments, paletteRGB := r.assignments, r.paletteRGB
 			ext := modelExtent(model)
-
-			outModel, assignments, paletteRGB := getOrRunRemesh(t, name, modelPath, model, defaultPaletteConfig())
 
 			dilatePx := computeDilatePx(float64(defaultNozzle), float64(defaultLayerHeight), float64(ext))
 
