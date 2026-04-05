@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Canvas, T } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
   import * as THREE from 'three';
@@ -68,10 +69,11 @@
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
 
   $effect(() => {
-    const prev = geometry;
-    if (meshData) {
-      geometry = buildGeometry(meshData);
-      cameraSetup = computeCameraSetup(meshData);
+    const data = meshData;
+    const prev = untrack(() => geometry);
+    if (data) {
+      geometry = buildGeometry(data);
+      cameraSetup = computeCameraSetup(data);
     } else {
       geometry = null;
       cameraSetup = null;
