@@ -196,6 +196,14 @@
     }
   }
 
+  let faceCount = $derived(meshData ? meshData.Faces.length / 3 : 0);
+
+  function formatSI(n: number): string {
+    if (n >= 1e6) return (n / 1e6).toPrecision(3) + 'M';
+    if (n >= 1e3) return (n / 1e3).toPrecision(3) + 'k';
+    return n.toString();
+  }
+
   let scene = $state<SceneData | null>(null);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
   let modelSize = $state(1);
@@ -267,7 +275,12 @@
 
 <div class="flex flex-col h-full">
   <div class="text-xs font-medium text-muted-foreground px-2 py-1">{label}</div>
-  <div class="flex-1 rounded-md border bg-muted/30 overflow-hidden">
+  <div class="flex-1 rounded-md border bg-muted/30 overflow-hidden relative">
+    {#if faceCount > 0}
+      <div class="absolute top-2 left-2 z-10 bg-black/50 text-white text-xs px-2 py-1 rounded pointer-events-none">
+        {formatSI(faceCount)} triangles
+      </div>
+    {/if}
     {#if scene && cameraSetup}
       <Canvas>
         <T.PerspectiveCamera
