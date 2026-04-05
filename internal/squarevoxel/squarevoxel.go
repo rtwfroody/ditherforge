@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -125,33 +127,75 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	}
 	finishBar(bar, "Voxelized", fmt.Sprintf("%d cells", len(cellSet)), time.Since(tVoxelize))
 
-	// Color each active cell.
+	// Color each active cell (parallelized).
 	tColor := time.Now()
-	colorBuf := voxel.NewSearchBuf(len(model.Faces))
 	colorRadius := cellSize * 3
 	barColor := newBar(len(cellSet), "  Coloring cells")
-	colorCount := 0
-	var cells []voxel.ActiveCell
+
+	// Convert map to slice for indexed partitioning.
+	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
 	for k := range cellSet {
-		if colorCount%1000 == 0 && ctx.Err() != nil {
-			return nil, nil, [3]float32{}, ctx.Err()
+		cellKeys = append(cellKeys, k)
+	}
+
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(cellKeys) {
+		numWorkers = len(cellKeys)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	workerCells := make([][]voxel.ActiveCell, numWorkers)
+	var wg sync.WaitGroup
+	chunkSize := (len(cellKeys) + numWorkers - 1) / numWorkers
+
+	for w := range numWorkers {
+		lo := w * chunkSize
+		hi := lo + chunkSize
+		if hi > len(cellKeys) {
+			hi = len(cellKeys)
 		}
-		colorCount++
-		barColor.Add(1)
-		cx := minV[0] + float32(k.Col)*cellSize
-		cy := minV[1] + float32(k.Row)*cellSize
-		cz := minV[2] + float32(k.Layer)*layerH
-		rgba := voxel.SampleNearestColor(
-			[3]float32{cx, cy, cz},
-			model, si, colorRadius, colorBuf)
-		if rgba[3] < 128 {
-			continue // skip translucent voxels
+		if lo >= hi {
+			continue
 		}
-		cells = append(cells, voxel.ActiveCell{
-			Col: k.Col, Row: k.Row, Layer: k.Layer,
-			Cx: cx, Cy: cy, Cz: cz,
-			Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
-		})
+		wg.Add(1)
+		go func(workerIdx int, keys []voxel.CellKey) {
+			defer wg.Done()
+			buf := voxel.NewSearchBuf(len(model.Faces))
+			local := make([]voxel.ActiveCell, 0, len(keys))
+			for i, k := range keys {
+				if i%1000 == 0 && ctx.Err() != nil {
+					return
+				}
+				barColor.Add(1)
+				cx := minV[0] + float32(k.Col)*cellSize
+				cy := minV[1] + float32(k.Row)*cellSize
+				cz := minV[2] + float32(k.Layer)*layerH
+				rgba := voxel.SampleNearestColor(
+					[3]float32{cx, cy, cz},
+					model, si, colorRadius, buf)
+				if rgba[3] < 128 {
+					continue
+				}
+				local = append(local, voxel.ActiveCell{
+					Col: k.Col, Row: k.Row, Layer: k.Layer,
+					Cx: cx, Cy: cy, Cz: cz,
+					Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
+				})
+			}
+			workerCells[workerIdx] = local
+		}(w, cellKeys[lo:hi])
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, nil, [3]float32{}, ctx.Err()
+	}
+
+	// Concatenate per-worker results.
+	var cells []voxel.ActiveCell
+	for _, wc := range workerCells {
+		cells = append(cells, wc...)
 	}
 	finishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
