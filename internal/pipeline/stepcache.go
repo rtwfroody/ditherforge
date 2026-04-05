@@ -5,7 +5,6 @@ import (
 	"hash"
 	"hash/fnv"
 	"math"
-	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -22,7 +21,6 @@ const (
 	StageDither
 	StageClip
 	StageMerge
-	StageExport
 	numStages
 )
 
@@ -88,13 +86,6 @@ type mergeOutput struct {
 	ShellAssignments []int32
 }
 
-type exportOutput struct {
-	OutputPath string
-	FaceCount  int
-	Duration   time.Duration
-	OutputMesh *MeshData
-}
-
 // --- Per-stage settings structs for cache key computation ---
 //
 // Each struct contains exactly the Options fields that affect that stage.
@@ -136,11 +127,6 @@ type clipSettings struct{}
 
 type mergeSettings struct {
 	NoMerge bool
-}
-
-type exportSettings struct {
-	Output      string
-	LayerHeight float32
 }
 
 // hashSettings computes an FNV-1a hash for a stage's settings.
@@ -200,8 +186,6 @@ func settingsForStage(stage StageID, opts Options) any {
 		return clipSettings{}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
-	case StageExport:
-		return exportSettings{Output: opts.Output, LayerHeight: opts.LayerHeight}
 	}
 	return nil
 }
@@ -235,9 +219,6 @@ func stageKey(stage StageID, opts Options) uint64 {
 		// No independent settings.
 	case mergeSettings:
 		writeBool(h, v.NoMerge)
-	case exportSettings:
-		writeString(h, v.Output)
-		writeFloat32(h, v.LayerHeight)
 	}
 	return h.Sum64()
 }
@@ -308,13 +289,6 @@ func (c *StageCache) getMerge() *mergeOutput {
 		return nil
 	}
 	return c.stages[StageMerge].output.(*mergeOutput)
-}
-
-func (c *StageCache) getExport() *exportOutput {
-	if c.stages[StageExport] == nil {
-		return nil
-	}
-	return c.stages[StageExport].output.(*exportOutput)
 }
 
 // Typed setter.

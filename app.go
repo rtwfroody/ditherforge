@@ -11,10 +11,11 @@ import (
 
 // App is the Wails application backend.
 type App struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	cancel context.CancelFunc       // cancels in-flight pipeline work
-	cache  *pipeline.StageCache     // per-stage cache across runs
+	ctx      context.Context
+	mu       sync.Mutex
+	cancel   context.CancelFunc       // cancels in-flight pipeline work
+	cache    *pipeline.StageCache     // per-stage cache across runs
+	lastOpts pipeline.Options         // last successfully processed options
 }
 
 // NewApp creates a new App instance.
@@ -41,15 +42,41 @@ func (a *App) SelectInputFile() (string, error) {
 	})
 }
 
-// SelectOutputFile opens a native save dialog.
-func (a *App) SelectOutputFile() (string, error) {
-	return wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+// IsBusy returns true if the pipeline mutex is held (processing in progress).
+func (a *App) IsBusy() bool {
+	if a.mu.TryLock() {
+		a.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+// SaveFile acquires the pipeline mutex, opens a native save dialog, and
+// exports the 3MF file using cached pipeline results. Returns the saved
+// path, or empty if the user cancelled.
+func (a *App) SaveFile() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
 		Title:           "Save Output",
 		DefaultFilename: "output.3mf",
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},
 		},
 	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+
+	_, err = pipeline.ExportFile(a.cache, path, a.lastOpts.LayerHeight)
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // ProcessPipeline runs the full pipeline with per-stage caching.
@@ -72,6 +99,7 @@ func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, e
 		}
 		return nil, err
 	}
+	a.lastOpts = opts
 	return result, nil
 }
 

@@ -69,8 +69,6 @@ export namespace pipeline {
 	    ModelExtentMM: number;
 	    InputMesh?: MeshData;
 	    OutputMesh?: MeshData;
-	    OutputPath: string;
-	    FaceCount: number;
 	    Duration: number;
 	
 	    static createFrom(source: any = {}) {
@@ -83,8 +81,6 @@ export namespace pipeline {
 	        this.ModelExtentMM = source["ModelExtentMM"];
 	        this.InputMesh = this.convertValues(source["InputMesh"], MeshData);
 	        this.OutputMesh = this.convertValues(source["OutputMesh"], MeshData);
-	        this.OutputPath = source["OutputPath"];
-	        this.FaceCount = source["FaceCount"];
 	        this.Duration = source["Duration"];
 	    }
 	

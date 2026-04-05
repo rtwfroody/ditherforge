@@ -9,12 +9,11 @@
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
-  import { SelectInputFile, SelectOutputFile, ProcessPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
+  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version } from '../wailsjs/go/main/App';
   import type { pipeline } from '../wailsjs/go/models';
 
   // Form state with defaults matching CLI.
   let inputFile = $state('');
-  let outputFile = $state('output.3mf');
   let sizeMode: 'size' | 'scale' = $state('size');
   let sizeValue = $state('100');
   let scaleValue = $state('1.0');
@@ -73,7 +72,7 @@
   let initialized = false;
   $effect(() => {
     // Read all form values to establish tracking.
-    void [inputFile, outputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
+    void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
           layerHeight, palette, autoPalette, dither, colorSnap,
           inventoryFile, inventory, noMerge, noSimplify, stats];
     if (!initialized) {
@@ -100,15 +99,9 @@
     }
   }
 
-  async function browseOutput() {
-    const path = await SelectOutputFile();
-    if (path) outputFile = path;
-  }
-
   function buildOpts(force: boolean): pipeline.Options {
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
-      Output: outputFile,
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
@@ -161,7 +154,7 @@
       }
 
       const secs = (result.Duration / 1e9).toFixed(1);
-      statusMessage = `Done! Wrote ${result.OutputPath} (${result.FaceCount} faces, ${secs}s)`;
+      statusMessage = `Done! (${secs}s)`;
       statusType = 'success';
     } catch (err: any) {
       if (myGen !== processGeneration) return;
@@ -171,6 +164,24 @@
       if (myGen === processGeneration) {
         running = false;
       }
+    }
+  }
+
+  let saving = $state(false);
+
+  async function saveToFile() {
+    saving = true;
+    try {
+      const path = await SaveFile();
+      if (path) {
+        statusMessage = `Saved to ${path}`;
+        statusType = 'success';
+      }
+    } catch (err: any) {
+      statusMessage = `Save error: ${err}`;
+      statusType = 'error';
+    } finally {
+      saving = false;
     }
   }
 </script>
@@ -183,20 +194,12 @@
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-4">
-        <!-- Input / Output -->
+        <!-- Input file -->
         <div class="space-y-2">
           <Label for="input">Input file</Label>
           <div class="flex gap-2">
             <Input id="input" bind:value={inputFile} placeholder="Select a .glb or .3mf file" class="flex-1" />
             <Button variant="outline" onclick={browseInput}>Browse</Button>
-          </div>
-        </div>
-
-        <div class="space-y-2">
-          <Label for="output">Output file</Label>
-          <div class="flex gap-2">
-            <Input id="output" bind:value={outputFile} placeholder="output.3mf" class="flex-1" />
-            <Button variant="outline" onclick={browseOutput}>Browse</Button>
           </div>
         </div>
 
@@ -325,8 +328,8 @@
 
     <!-- Action -->
     <div class="mt-4 flex items-center gap-4">
-      <Button onclick={() => runPipeline()} disabled={running} size="lg">
-        {running ? 'Processing...' : 'Go'}
+      <Button onclick={saveToFile} disabled={!outputMesh || running || saving} size="lg">
+        {saving ? 'Saving...' : 'Save'}
       </Button>
 
       {#if statusMessage}

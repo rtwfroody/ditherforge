@@ -49,14 +49,12 @@ type MeshData struct {
 	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
 }
 
-// ProcessResult summarizes a completed pipeline run.
+// ProcessResult summarizes a completed pipeline run (stages 0–6, no file export).
 type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
 	InputMesh     *MeshData // always set (from cache or fresh)
-	OutputMesh    *MeshData // set when export ran
-	OutputPath    string
-	FaceCount     int
+	OutputMesh    *MeshData // preview of the output model
 	Duration      time.Duration
 }
 
@@ -79,10 +77,6 @@ type Result struct {
 // settings changed (or whose dependencies changed) are re-executed.
 func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
-	outputExt := strings.ToLower(filepath.Ext(opts.Output))
-	if outputExt != ".3mf" {
-		return nil, fmt.Errorf("output must be .3mf, got %q", outputExt)
-	}
 	if opts.Inventory != nil && opts.InventoryFile == "" {
 		return nil, fmt.Errorf("--inventory requires --inventory-file")
 	}
@@ -160,33 +154,32 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 		}
 	}
 
-	// Stage 7: Export
-	if startFrom <= StageExport {
-		if err := runExport(ctx, cache, opts, lo, po); err != nil {
-			return nil, err
-		}
-	}
-	eo := cache.getExport()
+	mo := cache.getMerge()
 
-	result := &ProcessResult{
-		InputMesh:  lo.InputMesh,
-		OutputMesh: eo.OutputMesh,
-		OutputPath: eo.OutputPath,
-		FaceCount:  eo.FaceCount,
-		Duration:   time.Since(start),
-	}
+	// Build output preview mesh from merge result + palette.
+	outModel := buildOutputModel(lo.Model, mo)
+	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
 
 	if opts.Stats {
-		mo := cache.getMerge()
 		printStats(mo.ShellAssignments, po.Palette)
 	}
 
-	return result, nil
+	return &ProcessResult{
+		InputMesh:  lo.InputMesh,
+		OutputMesh: outputMesh,
+		Duration:   time.Since(start),
+	}, nil
 }
 
-// Run executes the full pipeline with a fresh cache. Convenience wrapper
-// for CLI and simple callers.
+// Run executes the full pipeline with a fresh cache, then exports the file.
+// Convenience wrapper for CLI.
 func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
+	// Validate output before doing any work.
+	outputExt := strings.ToLower(filepath.Ext(opts.Output))
+	if outputExt != ".3mf" {
+		return nil, nil, fmt.Errorf("output must be .3mf, got %q", outputExt)
+	}
+
 	cache := NewStageCache()
 	pr, err := RunCached(ctx, cache, opts)
 	if err != nil {
@@ -199,16 +192,65 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 			InputMesh:     pr.InputMesh,
 		}, nil, nil
 	}
+
+	faceCount, err := ExportFile(cache, opts.Output, opts.LayerHeight)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	prepResult := &PrepareResult{
 		InputMesh: pr.InputMesh,
 	}
 	result := &Result{
-		OutputPath: pr.OutputPath,
-		FaceCount:  pr.FaceCount,
+		OutputPath: opts.Output,
+		FaceCount:  faceCount,
 		Duration:   pr.Duration,
 		OutputMesh: pr.OutputMesh,
 	}
 	return prepResult, result, nil
+}
+
+// ExportFile writes a 3MF file using cached pipeline results.
+// Returns the number of faces in the output.
+func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int, error) {
+	lo := cache.getLoad()
+	po := cache.getPalette()
+	mo := cache.getMerge()
+	if lo == nil || po == nil || mo == nil {
+		return 0, fmt.Errorf("pipeline has not been run yet")
+	}
+
+	outModel := buildOutputModel(lo.Model, mo)
+
+	fmt.Printf("Exporting %s...", outputPath)
+	tExport := time.Now()
+	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, layerHeight); err != nil {
+		return 0, fmt.Errorf("exporting 3MF: %w", err)
+	}
+	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())
+
+	return len(outModel.Faces), nil
+}
+
+// buildOutputModel constructs a LoadedModel from merge output, suitable for
+// export or preview mesh building.
+func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
+	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
+	var textures []image.Image
+	if len(srcModel.Textures) > 0 {
+		textures = srcModel.Textures[:1]
+	} else {
+		textures = []image.Image{placeholder}
+	}
+
+	return &loader.LoadedModel{
+		Vertices:       mo.ShellVerts,
+		Faces:          mo.ShellFaces,
+		UVs:            make([][2]float32, len(mo.ShellVerts)),
+		Textures:       textures,
+		FaceTextureIdx: make([]int32, len(mo.ShellFaces)),
+	}
 }
 
 // --- Per-stage helpers ---
@@ -424,44 +466,6 @@ func runMerge(ctx context.Context, cache *StageCache, opts Options) error {
 		ShellVerts:       shellVerts,
 		ShellFaces:       shellFaces,
 		ShellAssignments: shellAssignments,
-	})
-	return nil
-}
-
-func runExport(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, po *paletteOutput) error {
-	mo := cache.getMerge()
-
-	// Build output model.
-	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
-	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
-	var textures []image.Image
-	if len(lo.Model.Textures) > 0 {
-		textures = lo.Model.Textures[:1]
-	} else {
-		textures = []image.Image{placeholder}
-	}
-
-	outModel := &loader.LoadedModel{
-		Vertices:       mo.ShellVerts,
-		Faces:          mo.ShellFaces,
-		UVs:            make([][2]float32, len(mo.ShellVerts)),
-		Textures:       textures,
-		FaceTextureIdx: make([]int32, len(mo.ShellFaces)),
-	}
-
-	fmt.Printf("Exporting %s...", opts.Output)
-	tExport := time.Now()
-	if err := export3mf.Export(outModel, mo.ShellAssignments, opts.Output, po.Palette, opts.LayerHeight); err != nil {
-		return fmt.Errorf("exporting 3MF: %w", err)
-	}
-	exportDuration := time.Since(tExport)
-	fmt.Printf(" done in %.1fs\n", exportDuration.Seconds())
-
-	cache.setStage(StageExport, stageKey(StageExport, opts), &exportOutput{
-		OutputPath: opts.Output,
-		FaceCount:  len(outModel.Faces),
-		Duration:   exportDuration,
-		OutputMesh: buildMeshData(outModel, mo.ShellAssignments, po.Palette),
 	})
 	return nil
 }
