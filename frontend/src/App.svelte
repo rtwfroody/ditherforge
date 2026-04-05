@@ -9,8 +9,14 @@
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
-  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version } from '../wailsjs/go/main/App';
+  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
+  import { EventsOn } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
+
+  // Log to Go stdout so it appears in the wails dev terminal as plain text.
+  function log(msg: string) {
+    LogMessage('info', msg);
+  }
 
   // Form state with defaults matching CLI.
   let inputFile = $state('');
@@ -37,9 +43,9 @@
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
 
-  // Mesh data for 3D viewers.
-  let inputMesh: pipeline.MeshData | undefined = $state(undefined);
-  let outputMesh: pipeline.MeshData | undefined = $state(undefined);
+  // Binary mesh URLs for 3D viewers.
+  let inputMeshUrl: string | undefined = $state(undefined);
+  let outputMeshUrl: string | undefined = $state(undefined);
 
   // Shared camera angles to sync both viewers.
   let sharedAngles: CameraAngles | undefined = $state(undefined);
@@ -48,11 +54,29 @@
   let processTimer: number | undefined;
   let processGeneration = 0;
 
+  // Generation counter for mesh events, tracks the latest pipeline run.
+  // Mesh events with an older generation are ignored.
+  let meshGeneration = 0;
+
   function onCameraChange(angles: CameraAngles) {
     sharedAngles = angles;
   }
 
   Version().then(v => version = v);
+
+  // Listen for binary mesh URLs from the backend.
+  EventsOn('input-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen >= meshGeneration) {
+      meshGeneration = event.gen;
+      inputMeshUrl = event.url;
+    }
+  });
+  EventsOn('output-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen >= meshGeneration) {
+      meshGeneration = event.gen;
+      outputMeshUrl = event.url;
+    }
+  });
 
   // Increments processGeneration to invalidate any in-flight pipeline run,
   // then schedules a new one. runPipeline increments again to establish its
@@ -92,10 +116,9 @@
 
   async function loadInputPreview(path: string) {
     try {
-      inputMesh = await LoadModelPreview(path);
+      await LoadModelPreview(path);
     } catch (err) {
       console.error('Failed to load preview:', err);
-      inputMesh = undefined;
     }
   }
 
@@ -132,7 +155,7 @@
     running = true;
     statusMessage = 'Processing...';
     statusType = 'idle';
-    outputMesh = undefined;
+    outputMeshUrl = undefined;
 
     try {
       const result = await ProcessPipeline(buildOpts(force));
@@ -146,13 +169,7 @@
         return;
       }
 
-      if (result.InputMesh) {
-        inputMesh = result.InputMesh;
-      }
-      if (result.OutputMesh) {
-        outputMesh = result.OutputMesh;
-      }
-
+      // Mesh data arrives asynchronously via events.
       const secs = (result.Duration / 1e9).toFixed(1);
       statusMessage = `Done! (${secs}s)`;
       statusType = 'success';
@@ -328,7 +345,7 @@
 
     <!-- Action -->
     <div class="mt-4 flex items-center gap-4">
-      <Button onclick={saveToFile} disabled={!outputMesh || running || saving} size="lg">
+      <Button onclick={saveToFile} disabled={!outputMeshUrl || running || saving} size="lg">
         {saving ? 'Saving...' : 'Save'}
       </Button>
 
@@ -347,10 +364,10 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshData={inputMesh} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} />
+      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} />
     </div>
     <div class="flex-1 min-h-0">
-      <ModelViewer meshData={outputMesh} label="Output Model" viewerId="output" cameraAngles={sharedAngles} {onCameraChange} />
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" cameraAngles={sharedAngles} {onCameraChange} />
     </div>
   </div>
 </main>

@@ -16,12 +16,17 @@ type App struct {
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
 	lastOpts pipeline.Options         // last successfully processed options
+	pipeGen     int                   // incremented per ProcessPipeline call
+	meshes      *meshHandler          // serves binary mesh data over HTTP
+	lastInputID  string               // mesh handler ID for last input mesh
+	lastOutputID string               // mesh handler ID for last output mesh
 }
 
 // NewApp creates a new App instance.
 func NewApp() *App {
 	return &App{
-		cache: pipeline.NewStageCache(),
+		cache:  pipeline.NewStageCache(),
+		meshes: newMeshHandler(),
 	}
 }
 
@@ -79,10 +84,19 @@ func (a *App) SaveFile() (string, error) {
 	return path, nil
 }
 
+// meshEvent is the payload sent via Wails events for mesh data.
+// URL points to a binary mesh endpoint served by meshHandler.
+type meshEvent struct {
+	Gen int    `json:"gen"`
+	URL string `json:"url"`
+}
+
 // ProcessPipeline runs the full pipeline with per-stage caching.
 // Only stages whose settings changed are re-executed.
 // The mutex is held for the entire call to prevent concurrent access to the
 // stage cache. The previous run is cancelled first so it returns quickly.
+// Mesh data is stored in the mesh handler and a URL is sent via events,
+// so the frontend can fetch binary data without JSON serialization overhead.
 func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -91,6 +105,8 @@ func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, e
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancel = cancel
+	a.pipeGen++
+	gen := a.pipeGen
 
 	result, err := pipeline.RunCached(ctx, a.cache, opts)
 	if err != nil {
@@ -100,12 +116,41 @@ func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, e
 		return nil, err
 	}
 	a.lastOpts = opts
+
+	if result.InputMesh != nil {
+		if a.lastInputID != "" {
+			a.meshes.Remove(a.lastInputID)
+		}
+		a.lastInputID = a.meshes.Store(result.InputMesh)
+		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
+	}
+	if result.OutputMesh != nil {
+		if a.lastOutputID != "" {
+			a.meshes.Remove(a.lastOutputID)
+		}
+		a.lastOutputID = a.meshes.Store(result.OutputMesh)
+		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastOutputID})
+	}
+
 	return result, nil
 }
 
-// LoadModelPreview loads a model file and returns mesh data for 3D preview.
-func (a *App) LoadModelPreview(path string) (*pipeline.MeshData, error) {
-	return pipeline.LoadPreview(path)
+// LoadModelPreview loads a model file and sends a binary mesh URL via the
+// "input-mesh" event.
+func (a *App) LoadModelPreview(path string) error {
+	mesh, err := pipeline.LoadPreview(path)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	gen := a.pipeGen
+	if a.lastInputID != "" {
+		a.meshes.Remove(a.lastInputID)
+	}
+	a.lastInputID = a.meshes.Store(mesh)
+	a.mu.Unlock()
+	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
+	return nil
 }
 
 // LogMessage prints a message from the frontend to stdout.

@@ -53,8 +53,8 @@ type MeshData struct {
 type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
-	InputMesh     *MeshData // always set (from cache or fresh)
-	OutputMesh    *MeshData // preview of the output model
+	InputMesh     *MeshData `json:"-"` // sent async via events, not in JSON response
+	OutputMesh    *MeshData `json:"-"` // sent async via events, not in JSON response
 	Duration      time.Duration
 }
 

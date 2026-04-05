@@ -4,7 +4,7 @@ import {pipeline} from '../models';
 
 export function IsBusy():Promise<boolean>;
 
-export function LoadModelPreview(arg1:string):Promise<pipeline.MeshData>;
+export function LoadModelPreview(arg1:string):Promise<void>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 

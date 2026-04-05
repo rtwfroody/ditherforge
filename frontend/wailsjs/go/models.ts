@@ -67,8 +67,6 @@ export namespace pipeline {
 	export class ProcessResult {
 	    NeedsForce: boolean;
 	    ModelExtentMM: number;
-	    InputMesh?: MeshData;
-	    OutputMesh?: MeshData;
 	    Duration: number;
 	
 	    static createFrom(source: any = {}) {
@@ -79,28 +77,8 @@ export namespace pipeline {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.NeedsForce = source["NeedsForce"];
 	        this.ModelExtentMM = source["ModelExtentMM"];
-	        this.InputMesh = this.convertValues(source["InputMesh"], MeshData);
-	        this.OutputMesh = this.convertValues(source["OutputMesh"], MeshData);
 	        this.Duration = source["Duration"];
 	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
 
 }
