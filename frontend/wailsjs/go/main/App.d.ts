@@ -4,6 +4,8 @@ import {pipeline} from '../models';
 
 export function LoadModelPreview(arg1:string):Promise<pipeline.MeshData>;
 
+export function LogMessage(arg1:string,arg2:string):Promise<void>;
+
 export function RunPipeline(arg1:pipeline.Options):Promise<pipeline.Result>;
 
 export function SelectInputFile():Promise<string>;

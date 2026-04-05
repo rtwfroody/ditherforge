@@ -4,6 +4,9 @@ export namespace pipeline {
 	    Vertices: number[];
 	    Faces: number[];
 	    FaceColors: number[];
+	    UVs?: number[];
+	    Textures?: string[];
+	    FaceTextureIdx?: number[];
 	
 	    static createFrom(source: any = {}) {
 	        return new MeshData(source);
@@ -14,6 +17,9 @@ export namespace pipeline {
 	        this.Vertices = source["Vertices"];
 	        this.Faces = source["Faces"];
 	        this.FaceColors = source["FaceColors"];
+	        this.UVs = source["UVs"];
+	        this.Textures = source["Textures"];
+	        this.FaceTextureIdx = source["FaceTextureIdx"];
 	    }
 	}
 	export class Options {

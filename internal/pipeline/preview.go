@@ -1,12 +1,15 @@
 package pipeline
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"image/jpeg"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
 const defaultGray = 180
@@ -80,34 +83,60 @@ func flattenMesh(model *loader.LoadedModel, colorFn func(fi int) (uint8, uint8, 
 	}
 }
 
-// buildInputMeshData creates a MeshData from a loaded model, sampling per-face
-// colors from textures, vertex colors, or base colors.
+// buildInputMeshData creates a MeshData from a loaded model, including texture
+// and UV data when available for proper texture-mapped rendering.
 func buildInputMeshData(model *loader.LoadedModel) *MeshData {
-	return flattenMesh(model, func(fi int) (uint8, uint8, uint8) {
+	md := flattenMesh(model, func(fi int) (uint8, uint8, uint8) {
 		return sampleFaceColor(model, fi)
 	})
-}
 
-// sampleFaceColor returns an RGB color for a face by sampling the texture at
-// the face centroid UV, averaging vertex colors, or using the base color.
-func sampleFaceColor(model *loader.LoadedModel, fi int) (uint8, uint8, uint8) {
-	face := model.Faces[fi]
-
-	// Try texture sampling at face centroid UV.
-	// Use NoTextureMask to skip faces that don't have texture data.
-	if model.FaceTextureIdx != nil && model.UVs != nil &&
-		(model.NoTextureMask == nil || !model.NoTextureMask[fi]) {
-		texIdx := model.FaceTextureIdx[fi]
-		if int(texIdx) < len(model.Textures) && model.Textures[texIdx] != nil {
-			uv0 := model.UVs[face[0]]
-			uv1 := model.UVs[face[1]]
-			uv2 := model.UVs[face[2]]
-			cu := (uv0[0] + uv1[0] + uv2[0]) / 3
-			cv := (uv0[1] + uv1[1] + uv2[1]) / 3
-			c := voxel.BilinearSample(model.Textures[texIdx], cu, cv)
-			return c[0], c[1], c[2]
+	// Include UVs if available.
+	if model.UVs != nil {
+		md.UVs = make([]float32, len(model.UVs)*2)
+		for i, uv := range model.UVs {
+			md.UVs[i*2] = uv[0]
+			md.UVs[i*2+1] = uv[1]
 		}
 	}
+
+	// Encode textures as base64 JPEG.
+	if len(model.Textures) > 0 {
+		md.Textures = make([]string, len(model.Textures))
+		for i, img := range model.Textures {
+			if img == nil {
+				continue
+			}
+			var buf bytes.Buffer
+			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to encode texture %d: %v\n", i, err)
+				continue
+			}
+			md.Textures[i] = base64.StdEncoding.EncodeToString(buf.Bytes())
+		}
+	}
+
+	// Include per-face texture index.
+	if model.FaceTextureIdx != nil {
+		md.FaceTextureIdx = make([]int32, len(model.FaceTextureIdx))
+		for fi, idx := range model.FaceTextureIdx {
+			// Mark faces without texture as -1.
+			if model.NoTextureMask != nil && model.NoTextureMask[fi] {
+				md.FaceTextureIdx[fi] = -1
+			} else if int(idx) >= len(model.Textures) || model.Textures[idx] == nil {
+				md.FaceTextureIdx[fi] = -1
+			} else {
+				md.FaceTextureIdx[fi] = idx
+			}
+		}
+	}
+
+	return md
+}
+
+// sampleFaceColor returns an RGB color for a face using vertex colors, base
+// color, or a fallback gray. Used for non-textured faces and output previews.
+func sampleFaceColor(model *loader.LoadedModel, fi int) (uint8, uint8, uint8) {
+	face := model.Faces[fi]
 
 	// Try vertex colors (average the 3 vertices).
 	if model.VertexColors != nil &&

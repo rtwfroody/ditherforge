@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -53,6 +54,11 @@ func (a *App) RunPipeline(opts pipeline.Options) (*pipeline.Result, error) {
 // LoadModelPreview loads a model file and returns mesh data for 3D preview.
 func (a *App) LoadModelPreview(path string) (*pipeline.MeshData, error) {
 	return pipeline.LoadPreview(path)
+}
+
+// LogMessage prints a message from the frontend to stdout.
+func (a *App) LogMessage(level, msg string) {
+	fmt.Printf("[JS %s] %s\n", level, msg)
 }
 
 // Version returns the application version string.

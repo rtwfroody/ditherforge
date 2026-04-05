@@ -38,9 +38,12 @@ type Options struct {
 
 // MeshData holds flat arrays for 3D preview rendering.
 type MeshData struct {
-	Vertices   []float32 `json:"Vertices"`   // flat [x,y,z, x,y,z, ...]
-	Faces      []uint32  `json:"Faces"`      // flat [i,j,k, i,j,k, ...]
-	FaceColors []uint16  `json:"FaceColors"` // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
+	Vertices       []float32 `json:"Vertices"`                 // flat [x,y,z, x,y,z, ...]
+	Faces          []uint32  `json:"Faces"`                    // flat [i,j,k, i,j,k, ...]
+	FaceColors     []uint16  `json:"FaceColors"`               // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
+	UVs            []float32 `json:"UVs,omitempty"`            // flat [u,v, u,v, ...] per vertex, optional
+	Textures       []string  `json:"Textures,omitempty"`       // base64 JPEG images, optional
+	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
 }
 
 // Result summarizes a completed pipeline run.
