@@ -48,10 +48,12 @@ type MeshData struct {
 
 // Result summarizes a completed pipeline run.
 type Result struct {
-	OutputPath string
-	FaceCount  int
-	Duration   time.Duration
-	OutputMesh *MeshData
+	OutputPath    string
+	FaceCount     int
+	Duration      time.Duration
+	OutputMesh    *MeshData
+	NeedsForce    bool    // true if model exceeds size limit and Force was not set
+	ModelExtentMM float32 // actual extent when NeedsForce is true
 }
 
 // Run executes the full pipeline: load → validate → remesh → export.
@@ -98,7 +100,7 @@ func Run(opts Options) (*Result, error) {
 	if !opts.Force {
 		ext := modelMaxExtent(model)
 		if ext > 300 {
-			return nil, fmt.Errorf("model extent %.0f mm exceeds 300 mm; use --scale or --size to reduce size (or --force to bypass)", ext)
+			return &Result{NeedsForce: true, ModelExtentMM: ext}, nil
 		}
 	}
 

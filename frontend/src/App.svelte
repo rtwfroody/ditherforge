@@ -5,6 +5,7 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Card from '$lib/components/ui/card';
   import * as Select from '$lib/components/ui/select';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
@@ -28,7 +29,6 @@
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let noCache = $state(false);
-  let force = $state(false);
   let stats = $state(false);
 
   // UI state.
@@ -36,6 +36,8 @@
   let statusMessage = $state('');
   let statusType: 'idle' | 'success' | 'error' = $state('idle');
   let version = $state('');
+  let forceDialogOpen = $state(false);
+  let forceExtentMM = $state(0);
 
   // Mesh data for 3D viewers.
   let inputMesh: pipeline.MeshData | undefined = $state(undefined);
@@ -72,7 +74,32 @@
     if (path) outputFile = path;
   }
 
-  async function runPipeline() {
+  function buildOpts(force: boolean): pipeline.Options {
+    const opts: Partial<pipeline.Options> = {
+      Input: inputFile,
+      Output: outputFile,
+      Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
+      NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
+      LayerHeight: parseFloat(layerHeight) || 0.2,
+      Dither: dither,
+      NoMerge: noMerge,
+      NoSimplify: noSimplify,
+      NoCache: noCache,
+      Force: force,
+      Stats: stats,
+      ColorSnap: parseFloat(colorSnap) || 5,
+      Palette: palette,
+    };
+
+    if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
+    if (autoPalette) opts.AutoPalette = parseInt(autoPalette);
+    if (inventoryFile) opts.InventoryFile = inventoryFile;
+    if (inventory) opts.Inventory = parseInt(inventory);
+
+    return opts as pipeline.Options;
+  }
+
+  async function runPipeline(force = false) {
     if (!inputFile) {
       statusMessage = 'Please select an input file.';
       statusType = 'error';
@@ -84,28 +111,16 @@
     outputMesh = undefined;
 
     try {
-      const opts: Partial<pipeline.Options> = {
-        Input: inputFile,
-        Output: outputFile,
-        Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
-        NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
-        LayerHeight: parseFloat(layerHeight) || 0.2,
-        Dither: dither,
-        NoMerge: noMerge,
-        NoSimplify: noSimplify,
-        NoCache: noCache,
-        Force: force,
-        Stats: stats,
-        ColorSnap: parseFloat(colorSnap) || 5,
-        Palette: palette,
-      };
+      const result = await RunPipeline(buildOpts(force));
 
-      if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
-      if (autoPalette) opts.AutoPalette = parseInt(autoPalette);
-      if (inventoryFile) opts.InventoryFile = inventoryFile;
-      if (inventory) opts.Inventory = parseInt(inventory);
+      if (result.NeedsForce) {
+        forceExtentMM = result.ModelExtentMM;
+        forceDialogOpen = true;
+        statusMessage = '';
+        statusType = 'idle';
+        return;
+      }
 
-      const result = await RunPipeline(opts as pipeline.Options);
       const secs = (result.Duration / 1e9).toFixed(1);
       statusMessage = `Done! Wrote ${result.OutputPath} (${result.FaceCount} faces, ${secs}s)`;
       statusType = 'success';
@@ -217,23 +232,6 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-2">
-            <Label for="dither">Dither mode</Label>
-            <Select.Root type="single" bind:value={dither}>
-              <Select.Trigger class="w-full">
-                {dither || 'Select...'}
-              </Select.Trigger>
-              <Select.Content>
-                <Select.Item value="dizzy">dizzy</Select.Item>
-                <Select.Item value="none">none</Select.Item>
-              </Select.Content>
-            </Select.Root>
-          </div>
-        </div>
-
-        <Separator />
-
         <!-- Inventory -->
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-2">
@@ -248,35 +246,51 @@
 
         <Separator />
 
-        <!-- Flags -->
-        <div class="flex flex-wrap gap-x-6 gap-y-3">
-          <label class="flex items-center gap-2 text-sm">
-            <Checkbox bind:checked={noMerge} />
-            No merge
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <Checkbox bind:checked={noSimplify} />
-            No simplify
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <Checkbox bind:checked={noCache} />
-            No cache
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <Checkbox bind:checked={force} />
-            Force
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <Checkbox bind:checked={stats} />
-            Stats
-          </label>
-        </div>
+        <!-- Advanced (collapsed) -->
+        <details>
+          <summary class="text-sm font-medium cursor-pointer select-none">Advanced</summary>
+          <div class="mt-3 space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+              <div class="space-y-2">
+                <Label for="dither">Dither mode</Label>
+                <Select.Root type="single" bind:value={dither}>
+                  <Select.Trigger class="w-full">
+                    {dither || 'Select...'}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="dizzy">dizzy</Select.Item>
+                    <Select.Item value="none">none</Select.Item>
+                  </Select.Content>
+                </Select.Root>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap gap-x-6 gap-y-3">
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={noMerge} />
+                No merge
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={noSimplify} />
+                No simplify
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={noCache} />
+                No cache
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={stats} />
+                Stats
+              </label>
+            </div>
+          </div>
+        </details>
       </Card.Content>
     </Card.Root>
 
     <!-- Action -->
     <div class="mt-4 flex items-center gap-4">
-      <Button onclick={runPipeline} disabled={running} size="lg">
+      <Button onclick={() => runPipeline()} disabled={running} size="lg">
         {running ? 'Processing...' : 'Go'}
       </Button>
 
@@ -302,3 +316,18 @@
     </div>
   </div>
 </main>
+
+<AlertDialog.Root bind:open={forceDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Model is very large</AlertDialog.Title>
+      <AlertDialog.Description>
+        The model extent is {Math.round(forceExtentMM)} mm, which exceeds the 300 mm safety limit. Continue anyway?
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action onclick={() => { forceDialogOpen = false; runPipeline(true); }}>Continue</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

@@ -61,8 +61,13 @@ func main() {
 		NoCache:        args.NoCache,
 	}
 
-	if _, err := pipeline.Run(opts); err != nil {
+	result, err := pipeline.Run(opts)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if result.NeedsForce {
+		fmt.Fprintf(os.Stderr, "Error: model extent %.0f mm exceeds 300 mm; use --scale or --size to reduce size (or --force to bypass)\n", result.ModelExtentMM)
 		os.Exit(1)
 	}
 }
