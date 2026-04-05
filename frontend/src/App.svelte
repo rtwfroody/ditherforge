@@ -14,8 +14,9 @@
   // Form state with defaults matching CLI.
   let inputFile = $state('');
   let outputFile = $state('output.3mf');
-  let size = $state('100');
-  let scale = $state('1.0');
+  let sizeMode: 'size' | 'scale' = $state('size');
+  let sizeValue = $state('100');
+  let scaleValue = $state('1.0');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
   let palette = $state('');
@@ -86,7 +87,7 @@
       const opts: Partial<pipeline.Options> = {
         Input: inputFile,
         Output: outputFile,
-        Scale: parseFloat(scale) || 1.0,
+        Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
         NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
         LayerHeight: parseFloat(layerHeight) || 0.2,
         Dither: dither,
@@ -99,7 +100,7 @@
         Palette: palette,
       };
 
-      if (size) opts.Size = parseFloat(size);
+      if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
       if (autoPalette) opts.AutoPalette = parseInt(autoPalette);
       if (inventoryFile) opts.InventoryFile = inventoryFile;
       if (inventory) opts.Inventory = parseInt(inventory);
@@ -150,12 +151,21 @@
         <!-- Core settings -->
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-2">
-            <Label for="size">Size (mm)</Label>
-            <Input id="size" bind:value={size} placeholder="Auto" type="number" />
-          </div>
-          <div class="space-y-2">
-            <Label for="scale">Scale</Label>
-            <Input id="scale" bind:value={scale} type="number" step="0.1" />
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-1.5 text-sm font-medium">
+                <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
+                Size (mm)
+              </label>
+              <label class="flex items-center gap-1.5 text-sm font-medium">
+                <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
+                Scale
+              </label>
+            </div>
+            {#if sizeMode === 'size'}
+              <Input id="size" bind:value={sizeValue} type="number" step={1} />
+            {:else}
+              <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
+            {/if}
           </div>
           <PresetSelect
             bind:value={nozzleDiameter}
