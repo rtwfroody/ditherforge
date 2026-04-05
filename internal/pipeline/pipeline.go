@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,7 @@ type Result struct {
 
 // Prepare loads and voxelizes the model. The returned PreparedModel can
 // be passed to Render multiple times with different color options.
-func Prepare(opts Options) (*PreparedModel, *PrepareResult, error) {
+func Prepare(ctx context.Context, opts Options) (*PreparedModel, *PrepareResult, error) {
 	// Compute scale: unit conversion (GLB meters→mm) * user scale.
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
 	scale := unitScaleForExt(inputExt) * opts.Scale
@@ -125,7 +126,7 @@ func Prepare(opts Options) (*PreparedModel, *PrepareResult, error) {
 	}
 
 	fmt.Println("Preparing...")
-	prepared, newCache, err := squarevoxel.Prepare(model, cfg, cached)
+	prepared, newCache, err := squarevoxel.Prepare(ctx, model, cfg, cached)
 	if err != nil {
 		return nil, nil, fmt.Errorf("squarevoxel prepare: %w", err)
 	}
@@ -146,7 +147,7 @@ func Prepare(opts Options) (*PreparedModel, *PrepareResult, error) {
 }
 
 // Render applies color options to a PreparedModel and exports the result.
-func Render(pm *PreparedModel, opts Options) (*Result, error) {
+func Render(ctx context.Context, pm *PreparedModel, opts Options) (*Result, error) {
 	start := time.Now()
 
 	// Validate output extension.
@@ -182,7 +183,7 @@ func Render(pm *PreparedModel, opts Options) (*Result, error) {
 	}
 
 	fmt.Println("Rendering...")
-	outModel, assignments, paletteRGB, err := squarevoxel.Render(pm.Prepared, pm.Model, pcfg, cfg, opts.Dither)
+	outModel, assignments, paletteRGB, err := squarevoxel.Render(ctx, pm.Prepared, pm.Model, pcfg, cfg, opts.Dither)
 	if err != nil {
 		return nil, fmt.Errorf("squarevoxel render: %w", err)
 	}
@@ -208,15 +209,15 @@ func Render(pm *PreparedModel, opts Options) (*Result, error) {
 
 // Run executes the full pipeline: Prepare + Render. Convenience wrapper
 // for CLI and simple callers.
-func Run(opts Options) (*PrepareResult, *Result, error) {
-	pm, prepResult, err := Prepare(opts)
+func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
+	pm, prepResult, err := Prepare(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}
 	if prepResult.NeedsForce {
 		return prepResult, nil, nil
 	}
-	result, err := Render(pm, opts)
+	result, err := Render(ctx, pm, opts)
 	if err != nil {
 		return prepResult, nil, err
 	}

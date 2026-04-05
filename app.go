@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -11,6 +12,8 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
+	mu       sync.Mutex
+	cancel   context.CancelFunc      // cancels in-flight pipeline work
 	prepared *pipeline.PreparedModel // cached between Prepare and Render calls
 }
 
@@ -50,25 +53,55 @@ func (a *App) SelectOutputFile() (string, error) {
 // PreparePipeline loads and voxelizes the model. The result is cached
 // so that subsequent RenderPipeline calls skip the expensive geometry work.
 func (a *App) PreparePipeline(opts pipeline.Options) (*pipeline.PrepareResult, error) {
+	a.mu.Lock()
+	if a.cancel != nil {
+		a.cancel()
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.cancel = cancel
 	a.prepared = nil
-	pm, result, err := pipeline.Prepare(opts)
+	a.mu.Unlock()
+
+	pm, result, err := pipeline.Prepare(ctx, opts)
 	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Println("PreparePipeline cancelled")
+		}
 		return nil, err
 	}
 	if result.NeedsForce {
 		return result, nil
 	}
+
+	a.mu.Lock()
 	a.prepared = pm
+	a.mu.Unlock()
 	return result, nil
 }
 
 // RenderPipeline applies color options to the previously prepared model
 // and exports the result. Requires a prior PreparePipeline call.
 func (a *App) RenderPipeline(opts pipeline.Options) (*pipeline.Result, error) {
-	if a.prepared == nil {
+	a.mu.Lock()
+	if a.cancel != nil {
+		a.cancel()
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.cancel = cancel
+	prepared := a.prepared
+	a.mu.Unlock()
+
+	if prepared == nil {
 		return nil, fmt.Errorf("no prepared model; call PreparePipeline first")
 	}
-	return pipeline.Render(a.prepared, opts)
+	result, err := pipeline.Render(ctx, prepared, opts)
+	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Println("RenderPipeline cancelled")
+		}
+		return nil, err
+	}
+	return result, nil
 }
 
 // LoadModelPreview loads a model file and returns mesh data for 3D preview.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/png"
@@ -91,7 +92,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			LayerHeight:    defaultLayerHeight,
 		}
 		t.Log("Running squarevoxel remesh...")
-		outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(model, defaultPaletteConfig(), cfg, "dizzy", nil)
+		outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(context.Background(), model, defaultPaletteConfig(), cfg, "dizzy", nil)
 		entry.result = &remeshResult{model, outModel, assignments, paletteRGB, err}
 	})
 

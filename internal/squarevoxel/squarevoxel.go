@@ -4,6 +4,7 @@
 package squarevoxel
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -64,7 +65,7 @@ type PreparedData struct {
 // Prepare voxelizes the model and decimates the mesh. The result can be
 // reused across multiple Render calls with different color options.
 // If cached is non-nil, skips voxelization (but still decimates).
-func Prepare(model *loader.LoadedModel, cfg Config, cached *CacheData) (*PreparedData, *CacheData, error) {
+func Prepare(ctx context.Context, model *loader.LoadedModel, cfg Config, cached *CacheData) (*PreparedData, *CacheData, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, nil, fmt.Errorf("empty model")
 	}
@@ -113,6 +114,9 @@ func Prepare(model *loader.LoadedModel, cfg Config, cached *CacheData) (*Prepare
 		halfExtent := [3]float32{cellSize / 2, cellSize / 2, layerH / 2}
 		cellSet := make(map[voxel.CellKey]struct{})
 		for fi := range model.Faces {
+			if fi%1000 == 0 && ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			bar.Add(1)
 			f := model.Faces[fi]
 			v0 := model.Vertices[f[0]]
@@ -166,7 +170,12 @@ func Prepare(model *loader.LoadedModel, cfg Config, cached *CacheData) (*Prepare
 		colorBuf := voxel.NewSearchBuf(len(model.Faces))
 		colorRadius := cellSize * 3
 		barColor := newBar(len(cellSet), "  Coloring cells")
+		colorCount := 0
 		for k := range cellSet {
+			if colorCount%1000 == 0 && ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			colorCount++
 			barColor.Add(1)
 			cx := minV[0] + float32(k.Col)*cellSize
 			cy := minV[1] + float32(k.Row)*cellSize
@@ -222,7 +231,10 @@ func Prepare(model *loader.LoadedModel, cfg Config, cached *CacheData) (*Prepare
 		// at voxel boundaries, so the decimated mesh just needs a rough hull.
 		targetFaces := len(cells)
 		if targetFaces < len(opaqueFaces) {
-			decVerts, decFaces := voxel.Decimate(model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
+			decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
+			if err != nil {
+				return nil, nil, err
+			}
 			wr := voxel.CheckWatertight(decFaces)
 			fmt.Printf("  Decimated mesh: %s\n", wr)
 			decimModel = &loader.LoadedModel{
@@ -247,7 +259,7 @@ func Prepare(model *loader.LoadedModel, cfg Config, cached *CacheData) (*Prepare
 // Render applies palette resolution, dithering, and mesh clipping to a
 // PreparedData. It copies the cells so the original PreparedData can be
 // reused with different color options.
-func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, [][3]uint8, error) {
+func Render(ctx context.Context, prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string) (*loader.LoadedModel, []int32, [][3]uint8, error) {
 	// Copy cells so SnapColors doesn't mutate the original.
 	cells := make([]voxel.ActiveCell, len(prepared.Cells))
 	copy(cells, prepared.Cells)
@@ -261,17 +273,23 @@ func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.Palett
 		return nil, nil, nil, fmt.Errorf("no palette colors")
 	}
 	if cfg.ColorSnap > 0 {
-		voxel.SnapColors(cells, pal, cfg.ColorSnap)
+		if err := voxel.SnapColors(ctx, cells, pal, cfg.ColorSnap); err != nil {
+			return nil, nil, nil, err
+		}
 		fmt.Printf("  Snapped cell colors toward palette by ΔE %.1f\n", cfg.ColorSnap)
 	}
 	tDither := time.Now()
 	barDither := newBar(-1, fmt.Sprintf("  Dithering (%s)", ditherMode))
 	var assignments []int32
+	var err error
 	switch ditherMode {
 	case "dizzy":
-		assignments = voxel.DitherCellsDizzy(cells, pal)
+		assignments, err = voxel.DitherCellsDizzy(ctx, cells, pal)
 	default:
-		assignments = voxel.AssignColors(cells, pal)
+		assignments, err = voxel.AssignColors(ctx, cells, pal)
+	}
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	finishBar(barDither, fmt.Sprintf("Dithered (%s)", ditherMode), fmt.Sprintf("%d cells", len(cells)), time.Since(tDither))
 
@@ -293,7 +311,10 @@ func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.Palett
 
 	// Flood fill to merge same-color cells into patches.
 	tFlood := time.Now()
-	patchMap, numPatches := voxel.FloodFillPatches(cells, assignments)
+	patchMap, numPatches, err := voxel.FloodFillPatches(ctx, cells, assignments)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	fmt.Printf("  Flood fill: %d patches in %.1fs\n", numPatches, time.Since(tFlood).Seconds())
 
 	// Build per-patch palette assignment.
@@ -307,8 +328,11 @@ func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.Palett
 	// Clip mesh along patch boundaries.
 	tClip := time.Now()
 	barClip := newBar(-1, "  Clipping mesh")
-	shellVerts, shellFaces, shellAssignments := voxel.ClipMeshByPatches(
-		prepared.DecimModel, patchMap, patchAssignment, prepared.MinV, prepared.CellSize, prepared.LayerH)
+	shellVerts, shellFaces, shellAssignments, err := voxel.ClipMeshByPatches(
+		ctx, prepared.DecimModel, patchMap, patchAssignment, prepared.MinV, prepared.CellSize, prepared.LayerH)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	finishBar(barClip, "Clipped mesh", fmt.Sprintf("%d faces", len(shellFaces)), time.Since(tClip))
 	{
 		wr := voxel.CheckWatertight(shellFaces)
@@ -320,7 +344,10 @@ func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.Palett
 		tMerge := time.Now()
 		barMerge := newBar(-1, "  Merging shell")
 		before := len(shellFaces)
-		shellFaces, shellAssignments = voxel.MergeCoplanarTriangles(shellVerts, shellFaces, shellAssignments)
+		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		finishBar(barMerge, "Merged shell", fmt.Sprintf("%d -> %d faces", before, len(shellFaces)), time.Since(tMerge))
 	}
 	fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
@@ -349,12 +376,12 @@ func Render(prepared *PreparedData, model *loader.LoadedModel, pcfg voxel.Palett
 // Remesh voxelizes the model for color decisions, then clips the original
 // mesh along color patch boundaries. This is a convenience wrapper around
 // Prepare + Render.
-func Remesh(model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string, cached *CacheData) (*loader.LoadedModel, []int32, [][3]uint8, *CacheData, error) {
-	prepared, newCache, err := Prepare(model, cfg, cached)
+func Remesh(ctx context.Context, model *loader.LoadedModel, pcfg voxel.PaletteConfig, cfg Config, ditherMode string, cached *CacheData) (*loader.LoadedModel, []int32, [][3]uint8, *CacheData, error) {
+	prepared, newCache, err := Prepare(ctx, model, cfg, cached)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	outModel, assignments, pal, err := Render(prepared, model, pcfg, cfg, ditherMode)
+	outModel, assignments, pal, err := Render(ctx, prepared, model, pcfg, cfg, ditherMode)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

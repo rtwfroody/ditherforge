@@ -1,6 +1,7 @@
 package voxel
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"math"
@@ -325,7 +326,7 @@ type neighbor struct {
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.
-func DitherCellsDizzy(cells []ActiveCell, pal [][3]uint8) []int32 {
+func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
 	n := len(cells)
 
 	// Build cell lookup map.
@@ -383,7 +384,10 @@ func DitherCellsDizzy(cells []ActiveCell, pal [][3]uint8) []int32 {
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
 
-	for _, idx := range order {
+	for oi, idx := range order {
+		if oi%1000 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		r := ClampF(float32(cells[idx].Color[0])+errBuf[idx][0], 0, 255)
 		g := ClampF(float32(cells[idx].Color[1])+errBuf[idx][1], 0, 255)
 		b := ClampF(float32(cells[idx].Color[2])+errBuf[idx][2], 0, 255)
@@ -428,13 +432,13 @@ func DitherCellsDizzy(cells []ActiveCell, pal [][3]uint8) []int32 {
 		}
 	}
 
-	return assignments
+	return assignments, nil
 }
 
 // SnapColors moves each cell's color toward its nearest palette color by up
 // to deltaE units (standard CIE76 ΔE) in CIELAB space. If the cell is
 // already closer than deltaE, it snaps to the palette color exactly.
-func SnapColors(cells []ActiveCell, pal [][3]uint8, deltaE float64) {
+func SnapColors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, deltaE float64) error {
 	// go-colorful uses Lab values scaled by 1/100 relative to standard CIELAB,
 	// so distances are also 1/100 of standard ΔE.
 	scaledDE := deltaE / 100.0
@@ -451,6 +455,9 @@ func SnapColors(cells []ActiveCell, pal [][3]uint8, deltaE float64) {
 	}
 
 	for i := range cells {
+		if i%1000 == 0 && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		cc := cells[i].Color
 		c := colorful.Color{
 			R: float64(cc[0]) / 255.0,
@@ -488,13 +495,17 @@ func SnapColors(cells []ActiveCell, pal [][3]uint8, deltaE float64) {
 			}
 		}
 	}
+	return nil
 }
 
 // AssignColors assigns palette indices without dithering.
-func AssignColors(cells []ActiveCell, pal [][3]uint8) []int32 {
+func AssignColors(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	colors := make([][3]uint8, len(cells))
 	for i, c := range cells {
 		colors[i] = c.Color
 	}
-	return palette.AssignPalette(colors, pal)
+	return palette.AssignPalette(colors, pal), nil
 }

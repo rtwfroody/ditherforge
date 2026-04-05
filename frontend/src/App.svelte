@@ -49,12 +49,43 @@
   // Shared camera angles to sync both viewers.
   let sharedAngles: CameraAngles | undefined = $state(undefined);
 
+  // Auto-processing state (plain variables, not reactive — nothing in the template reads these).
+  let processTimer: number | undefined;
+  let processGeneration = 0;
+
   function onCameraChange(angles: CameraAngles) {
     sharedAngles = angles;
   }
 
   Version().then(v => version = v);
 
+  // Increments processGeneration to invalidate any in-flight pipeline run,
+  // then schedules a new one. runPipeline increments again to establish its
+  // own generation for stale detection after each await.
+  function scheduleProcess(delay = 300) {
+    clearTimeout(processTimer);
+    processGeneration++;
+    if (!inputFile) return;
+    if (delay > 0) {
+      processTimer = window.setTimeout(() => runPipeline(), delay);
+    } else {
+      runPipeline();
+    }
+  }
+
+  // Watch all form values and auto-trigger processing.
+  let initialized = false;
+  $effect(() => {
+    // Read all form values to establish tracking.
+    void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
+          layerHeight, palette, autoPalette, dither, colorSnap,
+          inventoryFile, inventory, noMerge, noSimplify, noCache, stats];
+    if (!initialized) {
+      initialized = true;
+      return;
+    }
+    scheduleProcess(300);
+  });
 
   async function browseInput() {
     const path = await SelectInputFile();
@@ -121,6 +152,7 @@
       statusType = 'error';
       return;
     }
+    const myGen = ++processGeneration;
     running = true;
     statusMessage = 'Processing...';
     statusType = 'idle';
@@ -130,6 +162,7 @@
       if (needsPrepare()) {
         statusMessage = 'Preparing...';
         const prepResult = await PreparePipeline(buildOpts(force));
+        if (myGen !== processGeneration) return;
 
         if (prepResult.NeedsForce) {
           forceExtentMM = prepResult.ModelExtentMM;
@@ -147,6 +180,8 @@
 
       statusMessage = 'Rendering...';
       const result = await RenderPipeline(buildOpts(force));
+      if (myGen !== processGeneration) return;
+
       const secs = (result.Duration / 1e9).toFixed(1);
       statusMessage = `Done! Wrote ${result.OutputPath} (${result.FaceCount} faces, ${secs}s)`;
       statusType = 'success';
@@ -154,10 +189,13 @@
         outputMesh = result.OutputMesh;
       }
     } catch (err: any) {
+      if (myGen !== processGeneration) return;
       statusMessage = `Error: ${err}`;
       statusType = 'error';
     } finally {
-      running = false;
+      if (myGen === processGeneration) {
+        running = false;
+      }
     }
   }
 </script>

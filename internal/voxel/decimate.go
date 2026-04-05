@@ -2,6 +2,7 @@ package voxel
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -143,9 +144,9 @@ type decimator struct {
 // or when no more safe collapses exist. cellSize is used to prioritize
 // collapsing edges shorter than a voxel — their cost is scaled down so
 // sub-voxel detail is removed first regardless of QEM error.
-func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64) ([][3]float32, [][3]uint32) {
+func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64) ([][3]float32, [][3]uint32, error) {
 	if len(faces) <= targetFaces {
-		return verts, faces
+		return verts, faces, nil
 	}
 
 	tStart := time.Now()
@@ -195,7 +196,12 @@ func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize f
 	heap.Init(&d.h)
 
 	// Collapse edges.
+	collapseCount := 0
 	for d.activeFaces > targetFaces && d.h.Len() > 0 {
+		if collapseCount%1000 == 0 && ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		collapseCount++
 		c := heap.Pop(&d.h).(*collapseEntry)
 		if !d.vertAlive[c.edge.v1] || !d.vertAlive[c.edge.v2] {
 			continue
@@ -212,7 +218,7 @@ func Decimate(verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize f
 	outVerts, outFaces := d.compact()
 	fmt.Printf("  Decimated %d -> %d faces in %.1fs\n",
 		len(faces), len(outFaces), time.Since(tStart).Seconds())
-	return outVerts, outFaces
+	return outVerts, outFaces, nil
 }
 
 // faceQuadric returns the quadric for a face's plane.

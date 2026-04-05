@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -61,7 +62,7 @@ func main() {
 		NoCache:        args.NoCache,
 	}
 
-	prepResult, _, err := pipeline.Run(opts)
+	prepResult, _, err := pipeline.Run(context.Background(), opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

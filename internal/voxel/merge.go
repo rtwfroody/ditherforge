@@ -1,11 +1,14 @@
 package voxel
 
-import "math"
+import (
+	"context"
+	"math"
+)
 
 // MergeCoplanarTriangles reduces triangle count by finding connected groups of
 // coplanar same-material triangles, extracting each group's boundary polygon,
 // and re-triangulating with ear clipping.
-func MergeCoplanarTriangles(verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]uint32, []int32) {
+func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]uint32, []int32, error) {
 	nFaces := len(faces)
 
 	type edgeKey struct{ a, b uint32 }
@@ -74,7 +77,10 @@ func MergeCoplanarTriangles(verts [][3]float32, faces [][3]uint32, assignments [
 	newAssignments := make([]int32, 0, nFaces)
 	replaced := make([]bool, nFaces)
 
-	for _, group := range groups {
+	for gi, group := range groups {
+		if gi%1000 == 0 && ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		if len(group) < 2 {
 			continue
 		}
@@ -193,7 +199,7 @@ func MergeCoplanarTriangles(verts [][3]float32, faces [][3]uint32, assignments [
 		}
 	}
 
-	return newFaces, newAssignments
+	return newFaces, newAssignments, nil
 }
 
 func earClip(pts [][2]float64) [][3]int {

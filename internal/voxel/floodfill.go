@@ -1,10 +1,12 @@
 package voxel
 
+import "context"
+
 // FloodFillPatches groups cells by dithered palette assignment using
 // 6-connected BFS. Two adjacent cells join the same patch if they have
 // the same palette assignment index.
 // Returns a map from CellKey to patch ID (0-based), and the total patch count.
-func FloodFillPatches(cells []ActiveCell, assignments []int32) (patchMap map[CellKey]int, numPatches int) {
+func FloodFillPatches(ctx context.Context, cells []ActiveCell, assignments []int32) (patchMap map[CellKey]int, numPatches int, err error) {
 	cellIdx := make(map[CellKey]int, len(cells))
 	for i, c := range cells {
 		cellIdx[CellKey{c.Col, c.Row, c.Layer}] = i
@@ -14,11 +16,17 @@ func FloodFillPatches(cells []ActiveCell, assignments []int32) (patchMap map[Cel
 	visited := make(map[CellKey]bool, len(cells))
 	patchID := 0
 
+	cellCount := 0
 	for i, c := range cells {
 		k := CellKey{c.Col, c.Row, c.Layer}
 		if visited[k] {
 			continue
 		}
+
+		if cellCount%1000 == 0 && ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		cellCount++
 
 		// BFS from this cell.
 		color := assignments[i]
@@ -54,5 +62,5 @@ func FloodFillPatches(cells []ActiveCell, assignments []int32) (patchMap map[Cel
 		}
 		patchID++
 	}
-	return patchMap, patchID
+	return patchMap, patchID, nil
 }

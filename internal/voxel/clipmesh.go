@@ -1,6 +1,7 @@
 package voxel
 
 import (
+	"context"
 	"math"
 	"sort"
 
@@ -87,12 +88,13 @@ func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 // enclosing patch. Clips against all global color boundary planes to
 // ensure adjacent triangles sharing an edge get identical clip points.
 func ClipMeshByPatches(
+	ctx context.Context,
 	model *loader.LoadedModel,
 	patchMap map[CellKey]int,
 	patchAssignment []int32,
 	minV [3]float32,
 	cellSize, layerH float32,
-) ([][3]float32, [][3]uint32, []int32) {
+) ([][3]float32, [][3]uint32, []int32, error) {
 	cellSteps := [3]float32{cellSize, cellSize, layerH}
 
 	vd := NewVertexDedup()
@@ -136,6 +138,9 @@ func ClipMeshByPatches(
 	}
 
 	for fi := range model.Faces {
+		if fi%1000 == 0 && ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
 		// Skip translucent faces.
 		if FaceAlpha(fi, model) < 128 {
 			continue
@@ -256,7 +261,7 @@ func ClipMeshByPatches(
 		}
 	}
 
-	return vd.Verts, faces, assignments
+	return vd.Verts, faces, assignments, nil
 }
 
 // CentroidToCell maps a 3D point to the nearest voxel grid cell.

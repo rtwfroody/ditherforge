@@ -1,6 +1,9 @@
 package voxel
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // A closed box: 8 vertices, 12 triangles (2 per face).
 func makeBox() ([][3]float32, [][3]uint32) {
@@ -27,7 +30,10 @@ func makeBox() ([][3]float32, [][3]uint32) {
 
 func TestDecimate_TargetAboveInput(t *testing.T) {
 	verts, faces := makeBox()
-	outVerts, outFaces := Decimate(verts, faces, 100, 1.0)
+	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 100, 1.0)
+	if err != nil {
+		t.Fatalf("Decimate: %v", err)
+	}
 	if len(outFaces) != len(faces) {
 		t.Errorf("expected %d faces (unchanged), got %d", len(faces), len(outFaces))
 	}
@@ -44,7 +50,10 @@ func TestDecimate_PreservesWatertight(t *testing.T) {
 	}
 
 	// Decimate to fewer faces.
-	_, outFaces := Decimate(verts, faces, 8, 1.0)
+	_, outFaces, err := Decimate(context.Background(), verts, faces, 8, 1.0)
+	if err != nil {
+		t.Fatalf("Decimate: %v", err)
+	}
 	r = CheckWatertight(outFaces)
 	if !r.IsWatertight() {
 		t.Errorf("decimated box not watertight: %s", r)
@@ -73,7 +82,10 @@ func TestDecimate_ReducesFaces(t *testing.T) {
 		}
 	}
 
-	_, outFaces := Decimate(verts, faces, 4, 10.0)
+	_, outFaces, err := Decimate(context.Background(), verts, faces, 4, 10.0)
+	if err != nil {
+		t.Fatalf("Decimate: %v", err)
+	}
 	if len(outFaces) >= len(faces) {
 		t.Errorf("expected fewer faces than %d, got %d", len(faces), len(outFaces))
 	}
@@ -82,7 +94,10 @@ func TestDecimate_ReducesFaces(t *testing.T) {
 func TestDecimate_SingleTriangle(t *testing.T) {
 	verts := [][3]float32{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}
 	faces := [][3]uint32{{0, 1, 2}}
-	outVerts, outFaces := Decimate(verts, faces, 0, 1.0)
+	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 0, 1.0)
+	if err != nil {
+		t.Fatalf("Decimate: %v", err)
+	}
 	// Can't decimate below the minimum — should return something valid.
 	if len(outFaces) == 0 && len(outVerts) == 0 {
 		// Acceptable: fully collapsed.
