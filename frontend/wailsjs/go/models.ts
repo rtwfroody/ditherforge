@@ -66,13 +66,45 @@ export namespace pipeline {
 	        this.NoCache = source["NoCache"];
 	    }
 	}
+	export class PrepareResult {
+	    NeedsForce: boolean;
+	    ModelExtentMM: number;
+	    InputMesh?: MeshData;
+	
+	    static createFrom(source: any = {}) {
+	        return new PrepareResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.NeedsForce = source["NeedsForce"];
+	        this.ModelExtentMM = source["ModelExtentMM"];
+	        this.InputMesh = this.convertValues(source["InputMesh"], MeshData);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Result {
 	    OutputPath: string;
 	    FaceCount: number;
 	    Duration: number;
 	    OutputMesh?: MeshData;
-	    NeedsForce: boolean;
-	    ModelExtentMM: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Result(source);
@@ -84,8 +116,6 @@ export namespace pipeline {
 	        this.FaceCount = source["FaceCount"];
 	        this.Duration = source["Duration"];
 	        this.OutputMesh = this.convertValues(source["OutputMesh"], MeshData);
-	        this.NeedsForce = source["NeedsForce"];
-	        this.ModelExtentMM = source["ModelExtentMM"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -10,8 +10,12 @@ export function LogMessage(arg1, arg2) {
   return window['go']['main']['App']['LogMessage'](arg1, arg2);
 }
 
-export function RunPipeline(arg1) {
-  return window['go']['main']['App']['RunPipeline'](arg1);
+export function PreparePipeline(arg1) {
+  return window['go']['main']['App']['PreparePipeline'](arg1);
+}
+
+export function RenderPipeline(arg1) {
+  return window['go']['main']['App']['RenderPipeline'](arg1);
 }
 
 export function SelectInputFile() {

@@ -10,7 +10,8 @@ import (
 
 // App is the Wails application backend.
 type App struct {
-	ctx context.Context
+	ctx      context.Context
+	prepared *pipeline.PreparedModel // cached between Prepare and Render calls
 }
 
 // NewApp creates a new App instance.
@@ -46,9 +47,28 @@ func (a *App) SelectOutputFile() (string, error) {
 	})
 }
 
-// RunPipeline executes the ditherforge pipeline with the given options.
-func (a *App) RunPipeline(opts pipeline.Options) (*pipeline.Result, error) {
-	return pipeline.Run(opts)
+// PreparePipeline loads and voxelizes the model. The result is cached
+// so that subsequent RenderPipeline calls skip the expensive geometry work.
+func (a *App) PreparePipeline(opts pipeline.Options) (*pipeline.PrepareResult, error) {
+	a.prepared = nil
+	pm, result, err := pipeline.Prepare(opts)
+	if err != nil {
+		return nil, err
+	}
+	if result.NeedsForce {
+		return result, nil
+	}
+	a.prepared = pm
+	return result, nil
+}
+
+// RenderPipeline applies color options to the previously prepared model
+// and exports the result. Requires a prior PreparePipeline call.
+func (a *App) RenderPipeline(opts pipeline.Options) (*pipeline.Result, error) {
+	if a.prepared == nil {
+		return nil, fmt.Errorf("no prepared model; call PreparePipeline first")
+	}
+	return pipeline.Render(a.prepared, opts)
 }
 
 // LoadModelPreview loads a model file and returns mesh data for 3D preview.

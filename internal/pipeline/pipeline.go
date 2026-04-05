@@ -46,26 +46,31 @@ type MeshData struct {
 	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
 }
 
-// Result summarizes a completed pipeline run.
-type Result struct {
-	OutputPath    string
-	FaceCount     int
-	Duration      time.Duration
-	OutputMesh    *MeshData
-	NeedsForce    bool    // true if model exceeds size limit and Force was not set
-	ModelExtentMM float32 // actual extent when NeedsForce is true
+// PreparedModel holds the intermediate state after Prepare, reusable
+// across multiple Render calls with different color options.
+type PreparedModel struct {
+	Model    *loader.LoadedModel      // original loaded model
+	Prepared *squarevoxel.PreparedData // voxelized cells + decimated model
 }
 
-// Run executes the full pipeline: load → validate → remesh → export.
-func Run(opts Options) (*Result, error) {
-	start := time.Now()
+// PrepareResult summarizes the Prepare phase.
+type PrepareResult struct {
+	NeedsForce    bool    // true if model exceeds size limit and Force was not set
+	ModelExtentMM float32 // actual extent when NeedsForce is true
+	InputMesh     *MeshData
+}
 
-	// Validate output extension.
-	outputExt := strings.ToLower(filepath.Ext(opts.Output))
-	if outputExt != ".3mf" {
-		return nil, fmt.Errorf("output must be .3mf, got %q", outputExt)
-	}
+// Result summarizes a completed pipeline run.
+type Result struct {
+	OutputPath string
+	FaceCount  int
+	Duration   time.Duration
+	OutputMesh *MeshData
+}
 
+// Prepare loads and voxelizes the model. The returned PreparedModel can
+// be passed to Render multiple times with different color options.
+func Prepare(opts Options) (*PreparedModel, *PrepareResult, error) {
 	// Compute scale: unit conversion (GLB meters→mm) * user scale.
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
 	scale := unitScaleForExt(inputExt) * opts.Scale
@@ -74,7 +79,7 @@ func Run(opts Options) (*Result, error) {
 	tLoad := time.Now()
 	model, err := loadModel(opts.Input, scale)
 	if err != nil {
-		return nil, fmt.Errorf("loading %s: %w", inputExt, err)
+		return nil, nil, fmt.Errorf("loading %s: %w", inputExt, err)
 	}
 	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
 
@@ -87,7 +92,7 @@ func Run(opts Options) (*Result, error) {
 			tRescale := time.Now()
 			model, err = loadModel(opts.Input, scale*rescale)
 			if err != nil {
-				return nil, fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
+				return nil, nil, fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
 			}
 			fmt.Printf(" done in %.1fs\n", time.Since(tRescale).Seconds())
 		}
@@ -100,8 +105,54 @@ func Run(opts Options) (*Result, error) {
 	if !opts.Force {
 		ext := modelMaxExtent(model)
 		if ext > 300 {
-			return &Result{NeedsForce: true, ModelExtentMM: ext}, nil
+			return nil, &PrepareResult{NeedsForce: true, ModelExtentMM: ext}, nil
 		}
+	}
+
+	cfg := squarevoxel.Config{
+		NozzleDiameter: opts.NozzleDiameter,
+		LayerHeight:    opts.LayerHeight,
+		NoSimplify:     opts.NoSimplify,
+	}
+
+	cacheOpts := squarevoxel.CacheOptions{
+		InputPath:  opts.Input,
+		ConfigHash: ConfigHash(opts),
+	}
+	var cached *squarevoxel.CacheData
+	if !opts.NoCache {
+		cached = squarevoxel.LoadCache(cacheOpts)
+	}
+
+	fmt.Println("Preparing...")
+	prepared, newCache, err := squarevoxel.Prepare(model, cfg, cached)
+	if err != nil {
+		return nil, nil, fmt.Errorf("squarevoxel prepare: %w", err)
+	}
+	if newCache != nil {
+		squarevoxel.SaveCache(newCache, cacheOpts)
+	}
+
+	pm := &PreparedModel{
+		Model:    model,
+		Prepared: prepared,
+	}
+
+	result := &PrepareResult{
+		InputMesh: buildInputMeshData(model),
+	}
+
+	return pm, result, nil
+}
+
+// Render applies color options to a PreparedModel and exports the result.
+func Render(pm *PreparedModel, opts Options) (*Result, error) {
+	start := time.Now()
+
+	// Validate output extension.
+	outputExt := strings.ToLower(filepath.Ext(opts.Output))
+	if outputExt != ".3mf" {
+		return nil, fmt.Errorf("output must be .3mf, got %q", outputExt)
 	}
 
 	// Validate flags.
@@ -115,63 +166,25 @@ func Run(opts Options) (*Result, error) {
 	}
 
 	// Build palette config.
-	var pcfg voxel.PaletteConfig
-	if opts.Inventory != nil {
-		inv, err := palette.ParseInventoryFile(opts.InventoryFile)
-		if err != nil {
-			return nil, err
-		}
-		pcfg.Inventory = inv
-		pcfg.InventoryN = *opts.Inventory
-	} else if opts.AutoPalette != nil {
-		pcfg.AutoPaletteN = *opts.AutoPalette
-	} else if opts.Palette == "" {
-		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
-		for _, name := range defaultColors {
-			rgb, _ := palette.ParsePalette([]string{name})
-			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
-		}
-		pcfg.InventoryN = 4
-	} else {
-		colorStrs := strings.Split(opts.Palette, ",")
-		for i := range colorStrs {
-			colorStrs[i] = strings.TrimSpace(colorStrs[i])
-		}
-		pcfg.Palette, err = palette.ParsePalette(colorStrs)
-		if err != nil {
-			return nil, err
-		}
+	pcfg, err := buildPaletteConfig(opts)
+	if err != nil {
+		return nil, err
 	}
 
 	if pcfg.Palette != nil && len(pcfg.Palette) > export3mf.MaxFilaments {
 		return nil, fmt.Errorf("palette has %d colors but max supported is %d", len(pcfg.Palette), export3mf.MaxFilaments)
 	}
 
-	// Remesh.
+	// Only color-relevant fields; geometry options are baked into PreparedData.
 	cfg := squarevoxel.Config{
-		NozzleDiameter: opts.NozzleDiameter,
-		LayerHeight:    opts.LayerHeight,
-		NoMerge:        opts.NoMerge,
-		NoSimplify:     opts.NoSimplify,
-		ColorSnap:      opts.ColorSnap,
+		NoMerge:   opts.NoMerge,
+		ColorSnap: opts.ColorSnap,
 	}
 
-	cacheOpts := squarevoxel.CacheOptions{
-		InputPath:  opts.Input,
-		ConfigHash: ConfigHash(opts),
-	}
-	var cached *squarevoxel.CacheData
-	if !opts.NoCache {
-		cached = squarevoxel.LoadCache(cacheOpts)
-	}
-
-	fmt.Println("Remeshing...")
-	outModel, assignments, paletteRGB, newCache, err := squarevoxel.Remesh(model, pcfg, cfg, opts.Dither, cached)
+	fmt.Println("Rendering...")
+	outModel, assignments, paletteRGB, err := squarevoxel.Render(pm.Prepared, pm.Model, pcfg, cfg, opts.Dither)
 	if err != nil {
-		return nil, fmt.Errorf("squarevoxel remesh: %w", err)
-	}
-	if newCache != nil {
-		squarevoxel.SaveCache(newCache, cacheOpts)
+		return nil, fmt.Errorf("squarevoxel render: %w", err)
 	}
 
 	if opts.Stats {
@@ -191,6 +204,55 @@ func Run(opts Options) (*Result, error) {
 		Duration:   time.Since(start),
 		OutputMesh: buildMeshData(outModel, assignments, paletteRGB),
 	}, nil
+}
+
+// Run executes the full pipeline: Prepare + Render. Convenience wrapper
+// for CLI and simple callers.
+func Run(opts Options) (*PrepareResult, *Result, error) {
+	pm, prepResult, err := Prepare(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if prepResult.NeedsForce {
+		return prepResult, nil, nil
+	}
+	result, err := Render(pm, opts)
+	if err != nil {
+		return prepResult, nil, err
+	}
+	return prepResult, result, nil
+}
+
+func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
+	var pcfg voxel.PaletteConfig
+	if opts.Inventory != nil {
+		inv, err := palette.ParseInventoryFile(opts.InventoryFile)
+		if err != nil {
+			return pcfg, err
+		}
+		pcfg.Inventory = inv
+		pcfg.InventoryN = *opts.Inventory
+	} else if opts.AutoPalette != nil {
+		pcfg.AutoPaletteN = *opts.AutoPalette
+	} else if opts.Palette == "" {
+		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
+		for _, name := range defaultColors {
+			rgb, _ := palette.ParsePalette([]string{name})
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
+		}
+		pcfg.InventoryN = 4
+	} else {
+		colorStrs := strings.Split(opts.Palette, ",")
+		for i := range colorStrs {
+			colorStrs[i] = strings.TrimSpace(colorStrs[i])
+		}
+		var err error
+		pcfg.Palette, err = palette.ParsePalette(colorStrs)
+		if err != nil {
+			return pcfg, err
+		}
+	}
+	return pcfg, nil
 }
 
 func modelExtents(model *loader.LoadedModel) [3]float32 {

@@ -9,7 +9,7 @@
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
-  import { SelectInputFile, SelectOutputFile, RunPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
+  import { SelectInputFile, SelectOutputFile, PreparePipeline, RenderPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
   import type { pipeline } from '../wailsjs/go/models';
 
   // Form state with defaults matching CLI.
@@ -38,6 +38,9 @@
   let version = $state('');
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
+
+  // Track geometry options to detect when re-prepare is needed.
+  let lastPrepareKey = $state('');
 
   // Mesh data for 3D viewers.
   let inputMesh: pipeline.MeshData | undefined = $state(undefined);
@@ -100,6 +103,18 @@
     return opts as pipeline.Options;
   }
 
+  // Key that changes when geometry options change (requiring re-prepare).
+  function prepareKey(): string {
+    return JSON.stringify({
+      inputFile, sizeMode, sizeValue, scaleValue,
+      nozzleDiameter, layerHeight, noSimplify,
+    });
+  }
+
+  function needsPrepare(): boolean {
+    return prepareKey() !== lastPrepareKey;
+  }
+
   async function runPipeline(force = false) {
     if (!inputFile) {
       statusMessage = 'Please select an input file.';
@@ -112,16 +127,26 @@
     outputMesh = undefined;
 
     try {
-      const result = await RunPipeline(buildOpts(force));
+      if (needsPrepare()) {
+        statusMessage = 'Preparing...';
+        const prepResult = await PreparePipeline(buildOpts(force));
 
-      if (result.NeedsForce) {
-        forceExtentMM = result.ModelExtentMM;
-        forceDialogOpen = true;
-        statusMessage = '';
-        statusType = 'idle';
-        return;
+        if (prepResult.NeedsForce) {
+          forceExtentMM = prepResult.ModelExtentMM;
+          forceDialogOpen = true;
+          statusMessage = '';
+          statusType = 'idle';
+          return;
+        }
+
+        if (prepResult.InputMesh) {
+          inputMesh = prepResult.InputMesh;
+        }
+        lastPrepareKey = prepareKey();
       }
 
+      statusMessage = 'Rendering...';
+      const result = await RenderPipeline(buildOpts(force));
       const secs = (result.Duration / 1e9).toFixed(1);
       statusMessage = `Done! Wrote ${result.OutputPath} (${result.FaceCount} faces, ${secs}s)`;
       statusType = 'success';
