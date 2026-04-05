@@ -6,7 +6,7 @@
   import * as Card from '$lib/components/ui/card';
   import * as Select from '$lib/components/ui/select';
   import { Separator } from '$lib/components/ui/separator';
-  import ModelViewer from '$lib/components/ModelViewer.svelte';
+  import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
   import { SelectInputFile, SelectOutputFile, RunPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -38,6 +38,13 @@
   // Mesh data for 3D viewers.
   let inputMesh: pipeline.MeshData | undefined = $state(undefined);
   let outputMesh: pipeline.MeshData | undefined = $state(undefined);
+
+  // Shared camera angles to sync both viewers.
+  let sharedAngles: CameraAngles | undefined = $state(undefined);
+
+  function onCameraChange(angles: CameraAngles) {
+    sharedAngles = angles;
+  }
 
   Version().then(v => version = v);
 
@@ -257,10 +264,10 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshData={inputMesh} label="Input Model" />
+      <ModelViewer meshData={inputMesh} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} />
     </div>
     <div class="flex-1 min-h-0">
-      <ModelViewer meshData={outputMesh} label="Output Model" />
+      <ModelViewer meshData={outputMesh} label="Output Model" viewerId="output" cameraAngles={sharedAngles} {onCameraChange} />
     </div>
   </div>
 </main>

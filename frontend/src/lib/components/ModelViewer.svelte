@@ -2,10 +2,30 @@
   import { untrack } from 'svelte';
   import { Canvas, T } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
+  import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import type { pipeline } from '../../../wailsjs/go/models';
 
-  let { meshData, label }: { meshData?: pipeline.MeshData; label: string } = $props();
+  export interface CameraAngles {
+    sourceId: string;
+    azimuth: number;
+    polar: number;
+    distanceRatio: number; // distance / model size
+  }
+
+  let {
+    meshData,
+    label,
+    viewerId,
+    cameraAngles,
+    onCameraChange,
+  }: {
+    meshData?: pipeline.MeshData;
+    label: string;
+    viewerId: string;
+    cameraAngles?: CameraAngles;
+    onCameraChange?: (angles: CameraAngles) => void;
+  } = $props();
 
   interface SceneData {
     meshes: { geometry: THREE.BufferGeometry; material: THREE.Material }[];
@@ -139,7 +159,7 @@
     return { meshes: [{ geometry: geo, material: mat }] };
   }
 
-  function computeCameraSetup(data: pipeline.MeshData): { position: [number, number, number]; target: [number, number, number] } {
+  function computeModelBounds(data: pipeline.MeshData) {
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     const verts = data.Vertices;
@@ -151,14 +171,17 @@
       minZ = Math.min(minZ, verts[i + 2]);
       maxZ = Math.max(maxZ, verts[i + 2]);
     }
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const cz = (minZ + maxZ) / 2;
+    const center: [number, number, number] = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
     const size = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+    return { center, size };
+  }
+
+  function computeCameraSetup(data: pipeline.MeshData): { position: [number, number, number]; target: [number, number, number] } {
+    const { center, size } = computeModelBounds(data);
     const dist = size * 1.5;
     return {
-      position: [cx + dist * 0.5, cy + dist * 0.5, cz + dist],
-      target: [cx, cy, cz],
+      position: [center[0] + dist * 0.5, center[1] + dist * 0.5, center[2] + dist],
+      target: center,
     };
   }
 
@@ -175,6 +198,9 @@
 
   let scene = $state<SceneData | null>(null);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
+  let modelSize = $state(1);
+  let modelCenter = $state<[number, number, number]>([0, 0, 0]);
+  let controlsRef = $state<OrbitControlsImpl | null>(null);
 
   let buildId = 0;
 
@@ -184,6 +210,9 @@
     const myId = ++buildId;
 
     if (data) {
+      const bounds = computeModelBounds(data);
+      modelSize = bounds.size;
+      modelCenter = bounds.center;
       cameraSetup = computeCameraSetup(data);
 
       if (hasTextures(data)) {
@@ -209,6 +238,31 @@
       disposeScene(untrack(() => scene));
     };
   });
+
+  // Apply camera angles from the other viewer. Skips if this viewer is the
+  // source of the change, or if no model is loaded yet.
+  $effect(() => {
+    const angles = cameraAngles;
+    if (!angles || !controlsRef || !scene) return;
+    if (angles.sourceId === viewerId) return;
+
+    const dist = angles.distanceRatio * modelSize;
+    const x = modelCenter[0] + dist * Math.sin(angles.polar) * Math.sin(angles.azimuth);
+    const y = modelCenter[1] + dist * Math.cos(angles.polar);
+    const z = modelCenter[2] + dist * Math.sin(angles.polar) * Math.cos(angles.azimuth);
+
+    controlsRef.object.position.set(x, y, z);
+    controlsRef.target.set(modelCenter[0], modelCenter[1], modelCenter[2]);
+    controlsRef.update();
+  });
+
+  function handleControlsChange() {
+    if (!controlsRef || !onCameraChange) return;
+    const azimuth = controlsRef.getAzimuthalAngle();
+    const polar = controlsRef.getPolarAngle();
+    const distance = controlsRef.getDistance();
+    onCameraChange({ sourceId: viewerId, azimuth, polar, distanceRatio: distance / modelSize });
+  }
 </script>
 
 <div class="flex flex-col h-full">
@@ -223,7 +277,12 @@
           near={0.1}
           far={10000}
         >
-          <OrbitControls target={cameraSetup.target} enableDamping />
+          <OrbitControls
+            bind:ref={controlsRef}
+            target={cameraSetup.target}
+            enableDamping
+            onchange={handleControlsChange}
+          />
         </T.PerspectiveCamera>
 
         <T.AmbientLight intensity={0.6} />
