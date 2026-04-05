@@ -35,6 +35,9 @@ type Args struct {
 	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
+	Brightness     float32  `arg:"--brightness" default:"0" help:"Brightness adjustment (-100 to +100)"`
+	Contrast       float32  `arg:"--contrast" default:"0" help:"Contrast adjustment (-100 to +100)"`
+	Saturation     float32  `arg:"--saturation" default:"0" help:"Saturation adjustment (-100 to +100)"`
 	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, dizzy"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify     bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
@@ -66,6 +69,9 @@ func main() {
 		Output:         args.Output,
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
+		Brightness:     args.Brightness,
+		Contrast:       args.Contrast,
+		Saturation:     args.Saturation,
 		Dither:         args.Dither,
 		NoMerge:        args.NoMerge,
 		NoSimplify:     args.NoSimplify,

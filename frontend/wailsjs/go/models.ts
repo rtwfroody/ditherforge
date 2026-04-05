@@ -32,6 +32,9 @@ export namespace pipeline {
 	    NozzleDiameter: number;
 	    LayerHeight: number;
 	    InventoryFile: string;
+	    Brightness: number;
+	    Contrast: number;
+	    Saturation: number;
 	    Dither: string;
 	    NoMerge: boolean;
 	    NoSimplify: boolean;
@@ -55,6 +58,9 @@ export namespace pipeline {
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
 	        this.InventoryFile = source["InventoryFile"];
+	        this.Brightness = source["Brightness"];
+	        this.Contrast = source["Contrast"];
+	        this.Saturation = source["Saturation"];
 	        this.Dither = source["Dither"];
 	        this.NoMerge = source["NoMerge"];
 	        this.NoSimplify = source["NoSimplify"];

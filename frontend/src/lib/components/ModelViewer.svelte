@@ -23,13 +23,59 @@
     viewerId,
     cameraAngles,
     onCameraChange,
+    brightness = 0,
+    contrast = 0,
+    saturation = 0,
   }: {
     meshUrl?: string;
     label: string;
     viewerId: string;
     cameraAngles?: CameraAngles;
     onCameraChange?: (angles: CameraAngles) => void;
+    brightness?: number;
+    contrast?: number;
+    saturation?: number;
   } = $props();
+
+  // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
+  const colorAdjustGLSL = `
+    uniform float uBrightness;
+    uniform float uContrast;
+    uniform float uSaturation;
+  `;
+  const colorAdjustApply = `
+    {
+      vec3 c = diffuseColor.rgb;
+      c = c + uBrightness;
+      c = (c - 0.5) * uContrast + 0.5;
+      float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(vec3(lum), c, uSaturation);
+      c = clamp(c, 0.0, 1.0);
+      diffuseColor.rgb = c;
+    }
+  `;
+
+  // Shared uniforms object so all materials update together.
+  const colorUniforms = {
+    uBrightness: { value: 0.0 },
+    uContrast: { value: 1.0 },
+    uSaturation: { value: 1.0 },
+  };
+
+  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters): THREE.MeshStandardMaterial {
+    const mat = new THREE.MeshStandardMaterial(opts);
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uBrightness = colorUniforms.uBrightness;
+      shader.uniforms.uContrast = colorUniforms.uContrast;
+      shader.uniforms.uSaturation = colorUniforms.uSaturation;
+      shader.fragmentShader = colorAdjustGLSL + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\n' + colorAdjustApply,
+      );
+    };
+    return mat;
+  }
 
   interface SceneData {
     meshes: { geometry: THREE.BufferGeometry; material: THREE.Material }[];
@@ -205,7 +251,7 @@
         geo.computeVertexNormals();
 
         const tex = await loadTexture(textures[texId]);
-        const mat = new THREE.MeshStandardMaterial({ map: tex });
+        const mat = createAdjustedMaterial({ map: tex });
         meshes.push({ geometry: geo, material: mat });
       } else {
         // Untextured group: use face colors.
@@ -216,7 +262,7 @@
         geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         geo.computeVertexNormals();
 
-        const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true });
+        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true });
         meshes.push({ geometry: geo, material: mat });
       }
     }
@@ -235,7 +281,7 @@
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
 
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true });
+    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true });
     return { meshes: [{ geometry: geo, material: mat }] };
   }
 
@@ -334,6 +380,13 @@
     return () => {
       disposeScene(untrack(() => scene));
     };
+  });
+
+  // Update color adjustment uniforms when props change.
+  $effect(() => {
+    colorUniforms.uBrightness.value = brightness / 100.0;
+    colorUniforms.uContrast.value = (100.0 + contrast) / 100.0;
+    colorUniforms.uSaturation.value = (100.0 + saturation) / 100.0;
   });
 
   // Apply camera angles from the other viewer. Skips if this viewer is the

@@ -16,9 +16,10 @@ import (
 type StageID int
 
 const (
-	StageLoad     StageID = iota
+	StageLoad        StageID = iota
 	StageVoxelize
 	StageDecimate
+	StageColorAdjust
 	StagePalette
 	StageDither
 	StageClip
@@ -55,6 +56,10 @@ type voxelizeOutput struct {
 	MinV          [3]float32
 	CellSize      float32
 	LayerH        float32
+}
+
+type colorAdjustOutput struct {
+	Cells []voxel.ActiveCell
 }
 
 type decimateOutput struct {
@@ -104,6 +109,12 @@ type loadSettings struct {
 type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
+}
+
+type colorAdjustSettings struct {
+	Brightness float32
+	Contrast   float32
+	Saturation float32
 }
 
 type decimateSettings struct {
@@ -168,6 +179,8 @@ func settingsForStage(stage StageID, opts Options) any {
 		return s
 	case StageVoxelize:
 		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
+	case StageColorAdjust:
+		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify}
 	case StagePalette:
@@ -208,6 +221,10 @@ func stageKey(stage StageID, opts Options) uint64 {
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
+	case colorAdjustSettings:
+		writeFloat32(h, v.Brightness)
+		writeFloat32(h, v.Contrast)
+		writeFloat32(h, v.Saturation)
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 	case paletteSettings:
@@ -258,6 +275,13 @@ func (c *StageCache) getVoxelize() *voxelizeOutput {
 		return nil
 	}
 	return c.stages[StageVoxelize].output.(*voxelizeOutput)
+}
+
+func (c *StageCache) getColorAdjust() *colorAdjustOutput {
+	if c.stages[StageColorAdjust] == nil {
+		return nil
+	}
+	return c.stages[StageColorAdjust].output.(*colorAdjustOutput)
 }
 
 func (c *StageCache) getDecimate() *decimateOutput {

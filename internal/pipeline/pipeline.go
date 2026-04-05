@@ -30,6 +30,9 @@ type Options struct {
 	NozzleDiameter float32
 	LayerHeight    float32
 	InventoryFile  string
+	Brightness     float32
+	Contrast       float32
+	Saturation     float32
 	Dither         string
 	NoMerge        bool
 	NoSimplify     bool
@@ -121,30 +124,38 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 		}
 	}
 
-	// Stage 3: Palette + snap colors
+	// Stage 3: Color adjustment
+	if startFrom <= StageColorAdjust {
+		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
+			return nil, err
+		}
+	}
+	cao := cache.getColorAdjust()
+
+	// Stage 4: Palette + snap colors
 	if startFrom <= StagePalette {
-		if err := runPalette(ctx, cache, opts, vo); err != nil {
+		if err := runPalette(ctx, cache, opts, cao); err != nil {
 			return nil, err
 		}
 	}
 	po := cache.getPalette()
 
-	// Stage 4: Dither + flood fill
+	// Stage 5: Dither + flood fill
 	if startFrom <= StageDither {
-		if err := runDither(ctx, cache, opts, vo, po); err != nil {
+		if err := runDither(ctx, cache, opts, po); err != nil {
 			return nil, err
 		}
 	}
 	do := cache.getDither()
 
-	// Stage 5: Clip
+	// Stage 6: Clip
 	if startFrom <= StageClip {
 		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo); err != nil {
 			return nil, err
 		}
 	}
 
-	// Stage 6: Merge
+	// Stage 7: Merge
 	if startFrom <= StageMerge {
 		if err := runMerge(ctx, cache, opts); err != nil {
 			return nil, err
@@ -313,6 +324,28 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
+func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+	adj := voxel.ColorAdjustment{
+		Brightness: opts.Brightness,
+		Contrast:   opts.Contrast,
+		Saturation: opts.Saturation,
+	}
+	tAdj := time.Now()
+	cells, err := voxel.AdjustCellColors(ctx, vo.Cells, adj)
+	if err != nil {
+		return err
+	}
+	if !adj.IsIdentity() {
+		fmt.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs\n",
+			opts.Brightness, opts.Contrast, opts.Saturation, time.Since(tAdj).Seconds())
+	}
+
+	cache.setStage(StageColorAdjust, stageKey(StageColorAdjust, opts), &colorAdjustOutput{
+		Cells: cells,
+	})
+	return nil
+}
+
 func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, vo *voxelizeOutput) error {
 	fmt.Println("Decimating...")
 	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, vo.Cells, vo.CellSize, opts.NoSimplify)
@@ -326,7 +359,7 @@ func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runPalette(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *colorAdjustOutput) error {
 	pcfg, err := buildPaletteConfig(opts)
 	if err != nil {
 		return err
@@ -336,9 +369,9 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, vo *voxeli
 		return fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
 	}
 
-	// Copy cells so SnapColors doesn't mutate the voxelize output.
-	cells := make([]voxel.ActiveCell, len(vo.Cells))
-	copy(cells, vo.Cells)
+	// Copy cells so SnapColors doesn't mutate the color-adjust output.
+	cells := make([]voxel.ActiveCell, len(cao.Cells))
+	copy(cells, cao.Cells)
 
 	ditherMode := opts.Dither
 	pal, palDisplay, err := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
@@ -366,7 +399,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, vo *voxeli
 	return nil
 }
 
-func runDither(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput, po *paletteOutput) error {
+func runDither(ctx context.Context, cache *StageCache, opts Options, po *paletteOutput) error {
 	ditherMode := opts.Dither
 	cells := po.Cells
 	pal := po.Palette

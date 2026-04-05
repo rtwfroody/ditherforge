@@ -29,6 +29,9 @@
   let lockedColors = $state<string[]>([]);
   let colorSource: 'defaults' | 'inventory' | 'auto' = $state('defaults');
   let inventoryFile = $state('');
+  let brightness = $state(0);
+  let contrast = $state(0);
+  let saturation = $state(0);
   let dither = $state('dizzy');
   let colorSnap = $state('5');
   let noMerge = $state(false);
@@ -113,6 +116,7 @@
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
           layerHeight, numColors, lockedColors, colorSource, inventoryFile,
+          brightness, contrast, saturation,
           dither, colorSnap, noMerge, noSimplify, stats];
     if (!initialized) {
       initialized = true;
@@ -147,6 +151,9 @@
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
       InventoryFile: colorSource === 'inventory' ? inventoryFile : '',
+      Brightness: brightness,
+      Contrast: contrast,
+      Saturation: saturation,
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
@@ -288,6 +295,33 @@
 
         <Separator />
 
+        <!-- Color adjustments -->
+        <div class="space-y-3">
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <Label for="brightness">Brightness</Label>
+              <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
+            </div>
+            <input id="brightness" type="range" min="-100" max="100" step="1" bind:value={brightness} class="w-full" />
+          </div>
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <Label for="contrast">Contrast</Label>
+              <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
+            </div>
+            <input id="contrast" type="range" min="-100" max="100" step="1" bind:value={contrast} class="w-full" />
+          </div>
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <Label for="saturation">Saturation</Label>
+              <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
+            </div>
+            <input id="saturation" type="range" min="-100" max="100" step="1" bind:value={saturation} class="w-full" />
+          </div>
+        </div>
+
+        <Separator />
+
         <!-- Color settings -->
         <div class="space-y-4">
           <div class="grid grid-cols-2 gap-4">
@@ -407,7 +441,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} />
+      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} {brightness} {contrast} {saturation} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" cameraAngles={sharedAngles} {onCameraChange} />
