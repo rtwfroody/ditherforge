@@ -6,6 +6,7 @@
   import * as Card from '$lib/components/ui/card';
   import * as Select from '$lib/components/ui/select';
   import { Separator } from '$lib/components/ui/separator';
+  import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
   import { SelectInputFile, SelectOutputFile, RunPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
   import type { pipeline } from '../wailsjs/go/models';
@@ -16,7 +17,7 @@
   let size = $state('100');
   let scale = $state('1.0');
   let nozzleDiameter = $state('0.4');
-  let layerHeight = $state('0.2');
+  let layerHeight = $state('0.20');
   let palette = $state('');
   let autoPalette = $state('');
   let dither = $state('dizzy');
@@ -156,14 +157,34 @@
             <Label for="scale">Scale</Label>
             <Input id="scale" bind:value={scale} type="number" step="0.1" />
           </div>
-          <div class="space-y-2">
-            <Label for="nozzle">Nozzle diameter (mm)</Label>
-            <Input id="nozzle" bind:value={nozzleDiameter} type="number" step="0.1" />
-          </div>
-          <div class="space-y-2">
-            <Label for="layer">Layer height (mm)</Label>
-            <Input id="layer" bind:value={layerHeight} type="number" step="0.04" />
-          </div>
+          <PresetSelect
+            bind:value={nozzleDiameter}
+            label="Nozzle diameter (mm)"
+            id="nozzle"
+            unit="mm"
+            step={0.1}
+            presets={[
+              { value: '0.2', label: '0.2 mm' },
+              { value: '0.4', label: '0.4 mm' },
+              { value: '0.6', label: '0.6 mm' },
+              { value: '0.8', label: '0.8 mm' },
+            ]}
+          />
+          <PresetSelect
+            bind:value={layerHeight}
+            label="Layer height (mm)"
+            id="layer"
+            unit="mm"
+            step={0.04}
+            presets={[
+              { value: '0.08', label: '0.08 mm' },
+              { value: '0.12', label: '0.12 mm' },
+              { value: '0.16', label: '0.16 mm' },
+              { value: '0.20', label: '0.20 mm' },
+              { value: '0.24', label: '0.24 mm' },
+              { value: '0.28', label: '0.28 mm' },
+            ]}
+          />
         </div>
 
         <Separator />
