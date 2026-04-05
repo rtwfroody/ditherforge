@@ -87,13 +87,60 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 
 	entry.once.Do(func() {
 		model := loadTestModel(t, modelPath)
-		cfg := squarevoxel.Config{
-			NozzleDiameter: defaultNozzle,
-			LayerHeight:    defaultLayerHeight,
+		ctx := context.Background()
+		cellSize := defaultNozzle * 1.275
+		layerH := defaultLayerHeight
+
+		t.Log("Running pipeline stages...")
+		cells, _, minV, err := squarevoxel.Voxelize(ctx, model, cellSize, layerH)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
 		}
-		t.Log("Running squarevoxel remesh...")
-		outModel, assignments, paletteRGB, _, err := squarevoxel.Remesh(context.Background(), model, defaultPaletteConfig(), cfg, "dizzy", nil)
-		entry.result = &remeshResult{model, outModel, assignments, paletteRGB, err}
+
+		decimModel, err := squarevoxel.DecimateMesh(ctx, model, cells, cellSize, false)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
+
+		pal, _ := voxel.ResolvePalette(cells, defaultPaletteConfig(), true)
+		assignments, err := voxel.DitherCellsDizzy(ctx, cells, pal)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
+
+		patchMap, numPatches, err := voxel.FloodFillPatches(ctx, cells, assignments)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
+		patchAssignment := make([]int32, numPatches)
+		for i, c := range cells {
+			k := voxel.CellKey{Col: c.Col, Row: c.Row, Layer: c.Layer}
+			patchAssignment[patchMap[k]] = assignments[i]
+		}
+
+		shellVerts, shellFaces, shellAssignments, err := voxel.ClipMeshByPatches(
+			ctx, decimModel, patchMap, patchAssignment, minV, cellSize, layerH)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
+
+		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
+
+		outModel := &loader.LoadedModel{
+			Vertices: shellVerts,
+			Faces:    shellFaces,
+		}
+
+		entry.result = &remeshResult{model, outModel, shellAssignments, pal, nil}
 	})
 
 	if entry.result.err != nil {

@@ -9,7 +9,7 @@
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
-  import { SelectInputFile, SelectOutputFile, PreparePipeline, RenderPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
+  import { SelectInputFile, SelectOutputFile, ProcessPipeline, LoadModelPreview, Version } from '../wailsjs/go/main/App';
   import type { pipeline } from '../wailsjs/go/models';
 
   // Form state with defaults matching CLI.
@@ -28,7 +28,6 @@
   let inventory = $state('');
   let noMerge = $state(false);
   let noSimplify = $state(false);
-  let noCache = $state(false);
   let stats = $state(false);
 
   // UI state.
@@ -39,9 +38,6 @@
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
 
-  // Track geometry options to detect when re-prepare is needed.
-  let lastPrepareKey = $state('');
-
   // Mesh data for 3D viewers.
   let inputMesh: pipeline.MeshData | undefined = $state(undefined);
   let outputMesh: pipeline.MeshData | undefined = $state(undefined);
@@ -49,7 +45,7 @@
   // Shared camera angles to sync both viewers.
   let sharedAngles: CameraAngles | undefined = $state(undefined);
 
-  // Auto-processing state (plain variables, not reactive — nothing in the template reads these).
+  // Auto-processing state (plain variables, not reactive -- nothing in the template reads these).
   let processTimer: number | undefined;
   let processGeneration = 0;
 
@@ -77,9 +73,9 @@
   let initialized = false;
   $effect(() => {
     // Read all form values to establish tracking.
-    void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
+    void [inputFile, outputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
           layerHeight, palette, autoPalette, dither, colorSnap,
-          inventoryFile, inventory, noMerge, noSimplify, noCache, stats];
+          inventoryFile, inventory, noMerge, noSimplify, stats];
     if (!initialized) {
       initialized = true;
       return;
@@ -119,7 +115,6 @@
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
-      NoCache: noCache,
       Force: force,
       Stats: stats,
       ColorSnap: parseFloat(colorSnap) || 5,
@@ -132,18 +127,6 @@
     if (inventory) opts.Inventory = parseInt(inventory);
 
     return opts as pipeline.Options;
-  }
-
-  // Key that changes when geometry options change (requiring re-prepare).
-  function prepareKey(): string {
-    return JSON.stringify({
-      inputFile, sizeMode, sizeValue, scaleValue,
-      nozzleDiameter, layerHeight, noSimplify,
-    });
-  }
-
-  function needsPrepare(): boolean {
-    return prepareKey() !== lastPrepareKey;
   }
 
   async function runPipeline(force = false) {
@@ -159,35 +142,27 @@
     outputMesh = undefined;
 
     try {
-      if (needsPrepare()) {
-        statusMessage = 'Preparing...';
-        const prepResult = await PreparePipeline(buildOpts(force));
-        if (myGen !== processGeneration) return;
+      const result = await ProcessPipeline(buildOpts(force));
+      if (myGen !== processGeneration) return;
 
-        if (prepResult.NeedsForce) {
-          forceExtentMM = prepResult.ModelExtentMM;
-          forceDialogOpen = true;
-          statusMessage = '';
-          statusType = 'idle';
-          return;
-        }
-
-        if (prepResult.InputMesh) {
-          inputMesh = prepResult.InputMesh;
-        }
-        lastPrepareKey = prepareKey();
+      if (result.NeedsForce) {
+        forceExtentMM = result.ModelExtentMM;
+        forceDialogOpen = true;
+        statusMessage = '';
+        statusType = 'idle';
+        return;
       }
 
-      statusMessage = 'Rendering...';
-      const result = await RenderPipeline(buildOpts(force));
-      if (myGen !== processGeneration) return;
+      if (result.InputMesh) {
+        inputMesh = result.InputMesh;
+      }
+      if (result.OutputMesh) {
+        outputMesh = result.OutputMesh;
+      }
 
       const secs = (result.Duration / 1e9).toFixed(1);
       statusMessage = `Done! Wrote ${result.OutputPath} (${result.FaceCount} faces, ${secs}s)`;
       statusType = 'success';
-      if (result.OutputMesh) {
-        outputMesh = result.OutputMesh;
-      }
     } catch (err: any) {
       if (myGen !== processGeneration) return;
       statusMessage = `Error: ${err}`;
@@ -337,10 +312,6 @@
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noSimplify} />
                 No simplify
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={noCache} />
-                No cache
               </label>
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={stats} />

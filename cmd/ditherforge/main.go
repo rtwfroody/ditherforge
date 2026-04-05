@@ -27,7 +27,6 @@ type Args struct {
 	Force          bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
 	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)"`
-	NoCache        bool     `arg:"--no-cache" help:"Disable voxelization cache"`
 }
 
 func (Args) Description() string {
@@ -59,7 +58,6 @@ func main() {
 		Force:          args.Force,
 		Stats:          args.Stats,
 		ColorSnap:      args.ColorSnap,
-		NoCache:        args.NoCache,
 	}
 
 	prepResult, _, err := pipeline.Run(context.Background(), opts)

@@ -147,10 +147,13 @@ func TestColorSelection(t *testing.T) {
 			}
 
 			// Voxelize to get cell colors.
-			cfg := squarevoxel.Config{
-				NozzleDiameter: 0.4,
-				LayerHeight:    0.2,
+			cellSize := float32(0.4 * 1.275)
+			layerH := float32(0.2)
+			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, cellSize, layerH)
+			if err != nil {
+				t.Fatalf("Voxelize: %v", err)
 			}
+
 			inv := testInventory
 			if tc.inventory != nil {
 				inv = tc.inventory
@@ -159,10 +162,7 @@ func TestColorSelection(t *testing.T) {
 				Inventory:  inv,
 				InventoryN: tc.nColors,
 			}
-			_, _, paletteRGB, _, err := squarevoxel.Remesh(context.Background(), model, pcfg, cfg, "dizzy", nil)
-			if err != nil {
-				t.Fatalf("Remesh: %v", err)
-			}
+			paletteRGB, _ := voxel.ResolvePalette(cells, pcfg, true)
 
 			t.Logf("Selected palette:")
 			for i, p := range paletteRGB {
