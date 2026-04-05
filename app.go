@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -16,10 +17,11 @@ type App struct {
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
 	lastOpts pipeline.Options         // last successfully processed options
-	pipeGen     int                   // incremented per ProcessPipeline call
-	meshes      *meshHandler          // serves binary mesh data over HTTP
-	lastInputID  string               // mesh handler ID for last input mesh
-	lastOutputID string               // mesh handler ID for last output mesh
+	pipeGen      atomic.Int64         // incremented per ProcessPipeline call; atomic so LoadModelPreview can read without mutex
+	meshes       *meshHandler         // serves binary mesh data over HTTP
+	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
+	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
+	lastPreviewID string              // mesh handler ID for last preview mesh (only accessed from LoadModelPreview)
 }
 
 // NewApp creates a new App instance.
@@ -105,8 +107,7 @@ func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, e
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancel = cancel
-	a.pipeGen++
-	gen := a.pipeGen
+	gen := a.pipeGen.Add(1)
 
 	result, err := pipeline.RunCached(ctx, a.cache, opts)
 	if err != nil {
@@ -122,34 +123,34 @@ func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, e
 			a.meshes.Remove(a.lastInputID)
 		}
 		a.lastInputID = a.meshes.Store(result.InputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
+		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: int(gen), URL: "/mesh/" + a.lastInputID})
 	}
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
 			a.meshes.Remove(a.lastOutputID)
 		}
 		a.lastOutputID = a.meshes.Store(result.OutputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastOutputID})
+		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: int(gen), URL: "/mesh/" + a.lastOutputID})
 	}
 
 	return result, nil
 }
 
 // LoadModelPreview loads a model file and sends a binary mesh URL via the
-// "input-mesh" event.
+// "input-mesh" event. Does not acquire the pipeline mutex so the preview
+// appears while the pipeline is still running. The mesh stored here is not
+// tracked for cleanup; ProcessPipeline will replace it with its own input mesh.
 func (a *App) LoadModelPreview(path string) error {
 	mesh, err := pipeline.LoadPreview(path)
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	gen := a.pipeGen
-	if a.lastInputID != "" {
-		a.meshes.Remove(a.lastInputID)
+	if a.lastPreviewID != "" {
+		a.meshes.Remove(a.lastPreviewID)
 	}
-	a.lastInputID = a.meshes.Store(mesh)
-	a.mu.Unlock()
-	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
+	gen := int(a.pipeGen.Load())
+	a.lastPreviewID = a.meshes.Store(mesh)
+	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastPreviewID})
 	return nil
 }
 
