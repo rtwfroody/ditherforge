@@ -6,12 +6,14 @@ import (
 )
 
 // PaletteConfig specifies how to determine the color palette.
-// Exactly one of Palette, Inventory, or AutoPaletteN should be set.
+// NumColors sets the total palette size. Locked colors are always included;
+// remaining slots are filled from Inventory (if set), auto-computed (if
+// AutoColors is true), or selected from the default color set.
 type PaletteConfig struct {
-	Palette         [][3]uint8             // explicit colors (--palette or default)
-	Inventory       []palette.InventoryEntry // --inventory-file entries
-	InventoryN      int                    // --inventory N
-	AutoPaletteN    int                    // --auto-palette N (0 = disabled)
+	NumColors  int                      // total number of palette colors
+	Locked     [][3]uint8               // user-locked colors (always in palette)
+	Inventory  []palette.InventoryEntry // inventory entries for remaining slots
+	AutoColors bool                     // compute remaining colors via k-means
 }
 
 // Config holds parameters for voxel remeshing.

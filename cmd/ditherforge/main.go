@@ -4,22 +4,37 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/alexflint/go-arg"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 )
 
+// expandColors splits comma-separated --color values into individual color strings.
+func expandColors(colors []string) []string {
+	var result []string
+	for _, c := range colors {
+		for _, part := range strings.Split(c, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				result = append(result, part)
+			}
+		}
+	}
+	return result
+}
+
 // Args defines the CLI arguments.
 type Args struct {
 	Input          string   `arg:"positional,required" help:"Input .glb or .3mf file"`
-	Palette        string   `arg:"--palette" help:"Comma-separated colors (CSS names or hex). Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue"`
-	AutoPalette    *int     `arg:"--auto-palette" help:"Compute N dominant colors from mesh surface"`
+	NumColors      int      `arg:"-n" default:"4" help:"Number of palette colors"`
+	Color          []string `arg:"--color,separate" help:"Lock a color (CSS name or hex, repeatable, comma-separated)"`
+	Auto           bool     `arg:"--auto" help:"Compute remaining colors optimally via k-means"`
+	Inventory      string   `arg:"--inventory" help:"Inventory file for remaining colors"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
-	InventoryFile  string   `arg:"--inventory-file" help:"File with one filament color per line (CSS names or hex)"`
-	Inventory      *int     `arg:"--inventory" help:"Pick best N colors from inventory file (requires --inventory-file)"`
 	Dither         string   `arg:"--dither" default:"dizzy" help:"Dithering mode: none, dizzy"`
 	NoMerge        bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify     bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
@@ -43,14 +58,14 @@ func main() {
 
 	opts := pipeline.Options{
 		Input:          args.Input,
-		Palette:        args.Palette,
-		AutoPalette:    args.AutoPalette,
+		NumColors:      args.NumColors,
+		LockedColors:   expandColors(args.Color),
+		AutoColors:     args.Auto,
+		InventoryFile:  args.Inventory,
 		Scale:          args.Scale,
 		Output:         args.Output,
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
-		InventoryFile:  args.InventoryFile,
-		Inventory:      args.Inventory,
 		Dither:         args.Dither,
 		NoMerge:        args.NoMerge,
 		NoSimplify:     args.NoSimplify,

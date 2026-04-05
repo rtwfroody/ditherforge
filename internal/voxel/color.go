@@ -17,9 +17,10 @@ import (
 // dithering indicates whether dithering will be used, which affects
 // inventory color selection strategy.
 // Returns the palette RGB values and a display string for logging.
-func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, string) {
-	if pcfg.Palette != nil {
-		return pcfg.Palette, ""
+func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, string, error) {
+	remaining := pcfg.NumColors - len(pcfg.Locked)
+	if remaining <= 0 {
+		return pcfg.Locked, "", nil
 	}
 
 	cellColors := make([][3]uint8, len(cells))
@@ -28,34 +29,60 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][
 	}
 
 	if len(pcfg.Inventory) > 0 {
-		fmt.Printf("  Selecting %d colors from %d-color inventory...", pcfg.InventoryN, len(pcfg.Inventory))
-		selected := palette.SelectFromInventory(cellColors, pcfg.Inventory, pcfg.InventoryN, dithering)
-		pal := make([][3]uint8, len(selected))
-		strs := make([]string, len(selected))
-		for i, e := range selected {
-			pal[i] = e.Color
+		filtered := filterInventory(pcfg.Inventory, pcfg.Locked)
+		if len(filtered) == 0 {
+			return nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
+		}
+		fmt.Printf("  Selecting %d colors from %d-color inventory...", remaining, len(filtered))
+		selected := palette.SelectFromInventory(cellColors, filtered, remaining, dithering)
+		pal := make([][3]uint8, len(pcfg.Locked), pcfg.NumColors)
+		copy(pal, pcfg.Locked)
+		strs := make([]string, 0, len(selected))
+		for _, e := range selected {
+			pal = append(pal, e.Color)
 			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
 			if e.Label != "" {
 				s += " (" + e.Label + ")"
 			}
-			strs[i] = s
+			strs = append(strs, s)
 		}
 		display := " " + strings.Join(strs, ", ")
-		return pal, display
+		return pal, display, nil
 	}
 
-	if pcfg.AutoPaletteN > 0 {
-		fmt.Printf("  Computing %d-color palette from cell colors...", pcfg.AutoPaletteN)
-		pal := palette.ComputePalette(cellColors, pcfg.AutoPaletteN)
-		strs := make([]string, len(pal))
-		for i, p := range pal {
+	if pcfg.AutoColors {
+		fmt.Printf("  Computing %d-color palette from cell colors...", remaining)
+		computed := palette.ComputePaletteWithLocked(cellColors, remaining, pcfg.Locked)
+		pal := make([][3]uint8, len(pcfg.Locked), pcfg.NumColors)
+		copy(pal, pcfg.Locked)
+		pal = append(pal, computed...)
+		strs := make([]string, len(computed))
+		for i, p := range computed {
 			strs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		}
 		display := " " + strings.Join(strs, ", ")
-		return pal, display
+		return pal, display, nil
 	}
 
-	return nil, ""
+	return nil, "", fmt.Errorf("palette config has %d remaining slots but no color source (inventory or auto) is set", remaining)
+}
+
+// filterInventory returns inventory entries that don't match any locked color.
+func filterInventory(inv []palette.InventoryEntry, locked [][3]uint8) []palette.InventoryEntry {
+	if len(locked) == 0 {
+		return inv
+	}
+	lockedSet := make(map[[3]uint8]bool, len(locked))
+	for _, c := range locked {
+		lockedSet[c] = true
+	}
+	filtered := make([]palette.InventoryEntry, 0, len(inv))
+	for _, e := range inv {
+		if !lockedSet[e.Color] {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // BilinearSample samples a texture at normalized UV coordinates.

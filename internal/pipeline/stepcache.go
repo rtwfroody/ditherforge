@@ -5,6 +5,8 @@ import (
 	"hash"
 	"hash/fnv"
 	"math"
+	"os"
+	"strings"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -109,13 +111,12 @@ type decimateSettings struct {
 }
 
 type paletteSettings struct {
-	Palette        string
-	HasAutoPalette bool
-	AutoPalette    int
-	HasInventory   bool
-	Inventory      int
-	InventoryFile  string
-	ColorSnap      float64
+	NumColors         int
+	LockedColors      string // joined for hashing
+	InventoryFile     string
+	InventoryContents string // file contents for hashing; empty if no file
+	AutoColors        bool
+	ColorSnap         float64
 }
 
 type ditherSettings struct {
@@ -170,16 +171,20 @@ func settingsForStage(stage StageID, opts Options) any {
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify}
 	case StagePalette:
-		s := paletteSettings{Palette: opts.Palette, InventoryFile: opts.InventoryFile, ColorSnap: opts.ColorSnap}
-		if opts.AutoPalette != nil {
-			s.HasAutoPalette = true
-			s.AutoPalette = *opts.AutoPalette
+		var contents string
+		if opts.InventoryFile != "" {
+			if data, err := os.ReadFile(opts.InventoryFile); err == nil {
+				contents = string(data)
+			}
 		}
-		if opts.Inventory != nil {
-			s.HasInventory = true
-			s.Inventory = *opts.Inventory
+		return paletteSettings{
+			NumColors:         opts.NumColors,
+			LockedColors:      strings.Join(opts.LockedColors, ","),
+			InventoryFile:     opts.InventoryFile,
+			InventoryContents: contents,
+			AutoColors:        opts.AutoColors,
+			ColorSnap:         opts.ColorSnap,
 		}
-		return s
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither}
 	case StageClip:
@@ -206,12 +211,11 @@ func stageKey(stage StageID, opts Options) uint64 {
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 	case paletteSettings:
-		writeString(h, v.Palette)
-		writeBool(h, v.HasAutoPalette)
-		writeInt(h, v.AutoPalette)
-		writeBool(h, v.HasInventory)
-		writeInt(h, v.Inventory)
+		writeInt(h, v.NumColors)
+		writeString(h, v.LockedColors)
 		writeString(h, v.InventoryFile)
+		writeString(h, v.InventoryContents)
+		writeBool(h, v.AutoColors)
 		writeFloat64(h, v.ColorSnap)
 	case ditherSettings:
 		writeString(h, v.Dither)

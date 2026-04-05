@@ -25,15 +25,30 @@
   let scaleValue = $state('1.0');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
-  let palette = $state('');
-  let autoPalette = $state('');
+  let numColors = $state('4');
+  let lockedColors = $state<string[]>([]);
+  let colorSource: 'defaults' | 'inventory' | 'auto' = $state('defaults');
+  let inventoryFile = $state('');
   let dither = $state('dizzy');
   let colorSnap = $state('5');
-  let inventoryFile = $state('');
-  let inventory = $state('');
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
+
+  // Pending locked color input.
+  let newColorInput = $state('');
+
+  function addLockedColor() {
+    const c = newColorInput.trim();
+    if (c && lockedColors.length < parseInt(numColors)) {
+      lockedColors = [...lockedColors, c];
+      newColorInput = '';
+    }
+  }
+
+  function removeLockedColor(index: number) {
+    lockedColors = lockedColors.filter((_, i) => i !== index);
+  }
 
   // UI state.
   let running = $state(false);
@@ -97,8 +112,8 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, palette, autoPalette, dither, colorSnap,
-          inventoryFile, inventory, noMerge, noSimplify, stats];
+          layerHeight, numColors, lockedColors, colorSource, inventoryFile,
+          dither, colorSnap, noMerge, noSimplify, stats];
     if (!initialized) {
       initialized = true;
       return;
@@ -125,22 +140,22 @@
   function buildOpts(force: boolean): pipeline.Options {
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
+      NumColors: parseInt(numColors) || 4,
+      LockedColors: lockedColors.length > 0 ? lockedColors : [],
+      AutoColors: colorSource === 'auto',
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
+      InventoryFile: colorSource === 'inventory' ? inventoryFile : '',
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
       Force: force,
       Stats: stats,
       ColorSnap: parseFloat(colorSnap) || 5,
-      Palette: palette,
     };
 
     if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
-    if (autoPalette) opts.AutoPalette = parseInt(autoPalette);
-    if (inventoryFile) opts.InventoryFile = inventoryFile;
-    if (inventory) opts.Inventory = parseInt(inventory);
 
     return opts as pipeline.Options;
   }
@@ -275,31 +290,59 @@
 
         <!-- Color settings -->
         <div class="space-y-4">
-          <div class="space-y-2">
-            <Label for="palette">Palette (comma-separated colors)</Label>
-            <Input id="palette" bind:value={palette} placeholder="Default: best 4 of cyan,magenta,yellow,black,white,red,green,blue" />
-          </div>
           <div class="grid grid-cols-2 gap-4">
             <div class="space-y-2">
-              <Label for="autopalette">Auto palette (N colors)</Label>
-              <Input id="autopalette" bind:value={autoPalette} type="number" placeholder="Off" />
+              <Label for="numcolors">Number of colors</Label>
+              <Input id="numcolors" bind:value={numColors} type="number" min="1" max="16" step="1" />
             </div>
             <div class="space-y-2">
               <Label for="colorsnap">Color snap (delta E)</Label>
               <Input id="colorsnap" bind:value={colorSnap} type="number" step="1" />
             </div>
           </div>
-        </div>
 
-        <!-- Inventory -->
-        <div class="grid grid-cols-2 gap-4">
+          <!-- Locked colors -->
           <div class="space-y-2">
-            <Label for="invfile">Inventory file</Label>
-            <Input id="invfile" bind:value={inventoryFile} placeholder="None" />
+            <Label>Locked colors</Label>
+            {#if lockedColors.length > 0}
+              <div class="flex flex-wrap gap-2">
+                {#each lockedColors as color, i}
+                  <span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted text-sm">
+                    {color}
+                    <button class="text-muted-foreground hover:text-foreground" onclick={() => removeLockedColor(i)}>&times;</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+            {#if lockedColors.length < parseInt(numColors)}
+              <div class="flex gap-2">
+                <Input bind:value={newColorInput} placeholder="CSS name or hex (e.g. black, #FF0000)" class="flex-1"
+                  onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') addLockedColor(); }} />
+                <Button variant="outline" size="sm" onclick={addLockedColor}>+ Lock</Button>
+              </div>
+            {/if}
           </div>
+
+          <!-- Remaining color source -->
           <div class="space-y-2">
-            <Label for="invcount">Inventory pick N</Label>
-            <Input id="invcount" bind:value={inventory} type="number" placeholder="Off" />
+            <Label>Remaining colors from</Label>
+            <div class="flex gap-4">
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="defaults" checked={colorSource === 'defaults'} onchange={() => { colorSource = 'defaults'; }} />
+                Defaults
+              </label>
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="inventory" checked={colorSource === 'inventory'} onchange={() => { colorSource = 'inventory'; }} />
+                Inventory
+              </label>
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="auto" checked={colorSource === 'auto'} onchange={() => { colorSource = 'auto'; }} />
+                Optimal
+              </label>
+            </div>
+            {#if colorSource === 'inventory'}
+              <Input bind:value={inventoryFile} placeholder="Inventory file path" />
+            {/if}
           </div>
         </div>
 

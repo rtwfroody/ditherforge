@@ -340,6 +340,77 @@ func ComputePalette(cellColors [][3]uint8, n int) [][3]uint8 {
 	return result2
 }
 
+// ComputePaletteWithLocked computes n additional palette colors that complement
+// the locked colors. Runs k-means for (n + len(locked)) clusters, then drops
+// the clusters closest to locked colors, returning the remaining n.
+func ComputePaletteWithLocked(cellColors [][3]uint8, n int, locked [][3]uint8) [][3]uint8 {
+	if len(locked) == 0 {
+		return ComputePalette(cellColors, n)
+	}
+
+	// Compute more clusters than needed, then remove ones covered by locked.
+	total := n + len(locked)
+	all := ComputePalette(cellColors, total)
+
+	// Convert locked colors to Lab for distance comparison.
+	lockedLab := make([][3]float64, len(locked))
+	for i, c := range locked {
+		cf := colorful.Color{
+			R: float64(c[0]) / 255.0,
+			G: float64(c[1]) / 255.0,
+			B: float64(c[2]) / 255.0,
+		}
+		lockedLab[i][0], lockedLab[i][1], lockedLab[i][2] = cf.Lab()
+	}
+
+	// Convert computed colors to Lab.
+	allLab := make([][3]float64, len(all))
+	for i, c := range all {
+		cf := colorful.Color{
+			R: float64(c[0]) / 255.0,
+			G: float64(c[1]) / 255.0,
+			B: float64(c[2]) / 255.0,
+		}
+		allLab[i][0], allLab[i][1], allLab[i][2] = cf.Lab()
+	}
+
+	// Greedily remove len(locked) computed colors closest to any locked color.
+	removed := make([]bool, len(all))
+	for range locked {
+		bestIdx := -1
+		bestDist := math.MaxFloat64
+		for i, lab := range allLab {
+			if removed[i] {
+				continue
+			}
+			for _, ll := range lockedLab {
+				d0 := lab[0] - ll[0]
+				d1 := lab[1] - ll[1]
+				d2 := lab[2] - ll[2]
+				d := d0*d0 + d1*d1 + d2*d2
+				if d < bestDist {
+					bestDist = d
+					bestIdx = i
+				}
+			}
+		}
+		if bestIdx >= 0 {
+			removed[bestIdx] = true
+		}
+	}
+
+	result := make([][3]uint8, 0, n)
+	for i, c := range all {
+		if !removed[i] {
+			result = append(result, c)
+		}
+		if len(result) >= n {
+			break
+		}
+	}
+	return result
+}
+
 // ParseInventoryFile reads a file with one color per line.
 // Blank lines and lines starting with # are ignored.
 // InventoryEntry holds a color from an inventory file with an optional label.

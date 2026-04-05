@@ -22,14 +22,14 @@ import (
 // Options controls the pipeline behavior. Mirrors CLI flags.
 type Options struct {
 	Input          string
-	Palette        string
-	AutoPalette    *int
+	NumColors      int
+	LockedColors   []string
+	AutoColors     bool
 	Scale          float32
 	Output         string
 	NozzleDiameter float32
 	LayerHeight    float32
 	InventoryFile  string
-	Inventory      *int
 	Dither         string
 	NoMerge        bool
 	NoSimplify     bool
@@ -77,9 +77,6 @@ type Result struct {
 // settings changed (or whose dependencies changed) are re-executed.
 func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
-	if opts.Inventory != nil && opts.InventoryFile == "" {
-		return nil, fmt.Errorf("--inventory requires --inventory-file")
-	}
 	switch opts.Dither {
 	case "none", "dizzy":
 	default:
@@ -335,8 +332,8 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, vo *voxeli
 		return err
 	}
 
-	if pcfg.Palette != nil && len(pcfg.Palette) > export3mf.MaxFilaments {
-		return fmt.Errorf("palette has %d colors but max supported is %d", len(pcfg.Palette), export3mf.MaxFilaments)
+	if pcfg.NumColors > export3mf.MaxFilaments {
+		return fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
 	}
 
 	// Copy cells so SnapColors doesn't mutate the voxelize output.
@@ -344,7 +341,10 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, vo *voxeli
 	copy(cells, vo.Cells)
 
 	ditherMode := opts.Dither
-	pal, palDisplay := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
+	pal, palDisplay, err := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
+	if err != nil {
+		return err
+	}
 	if palDisplay != "" {
 		fmt.Printf("%s\n", palDisplay)
 	}
@@ -472,31 +472,37 @@ func runMerge(ctx context.Context, cache *StageCache, opts Options) error {
 
 func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 	var pcfg voxel.PaletteConfig
-	if opts.Inventory != nil {
+	pcfg.NumColors = opts.NumColors
+	if pcfg.NumColors <= 0 {
+		pcfg.NumColors = 4
+	}
+
+	// Parse locked colors.
+	if len(opts.LockedColors) > 0 {
+		locked, err := palette.ParsePalette(opts.LockedColors)
+		if err != nil {
+			return pcfg, err
+		}
+		pcfg.Locked = locked
+	}
+	if len(pcfg.Locked) > pcfg.NumColors {
+		return pcfg, fmt.Errorf("locked %d colors but only %d total requested", len(pcfg.Locked), pcfg.NumColors)
+	}
+
+	if opts.InventoryFile != "" {
 		inv, err := palette.ParseInventoryFile(opts.InventoryFile)
 		if err != nil {
 			return pcfg, err
 		}
 		pcfg.Inventory = inv
-		pcfg.InventoryN = *opts.Inventory
-	} else if opts.AutoPalette != nil {
-		pcfg.AutoPaletteN = *opts.AutoPalette
-	} else if opts.Palette == "" {
+	} else if opts.AutoColors {
+		pcfg.AutoColors = true
+	} else {
+		// Default: select from built-in color set.
 		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
 		for _, name := range defaultColors {
 			rgb, _ := palette.ParsePalette([]string{name})
 			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
-		}
-		pcfg.InventoryN = 4
-	} else {
-		colorStrs := strings.Split(opts.Palette, ",")
-		for i := range colorStrs {
-			colorStrs[i] = strings.TrimSpace(colorStrs[i])
-		}
-		var err error
-		pcfg.Palette, err = palette.ParsePalette(colorStrs)
-		if err != nil {
-			return pcfg, err
 		}
 	}
 	return pcfg, nil

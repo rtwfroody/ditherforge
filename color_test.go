@@ -159,10 +159,13 @@ func TestColorSelection(t *testing.T) {
 				inv = tc.inventory
 			}
 			pcfg := voxel.PaletteConfig{
-				Inventory:  inv,
-				InventoryN: tc.nColors,
+				NumColors: tc.nColors,
+				Inventory: inv,
 			}
-			paletteRGB, _ := voxel.ResolvePalette(cells, pcfg, true)
+			paletteRGB, _, err := voxel.ResolvePalette(cells, pcfg, true)
+			if err != nil {
+				t.Fatalf("ResolvePalette: %v", err)
+			}
 
 			t.Logf("Selected palette:")
 			for i, p := range paletteRGB {
@@ -205,4 +208,94 @@ func TestColorSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolvePaletteWithLockedColors(t *testing.T) {
+	// Use a small inventory to keep the test fast.
+	inv := []palette.InventoryEntry{
+		{Color: [3]uint8{0, 0, 0}, Label: "black"},
+		{Color: [3]uint8{255, 255, 255}, Label: "white"},
+		{Color: [3]uint8{255, 0, 0}, Label: "red"},
+		{Color: [3]uint8{0, 0, 255}, Label: "blue"},
+		{Color: [3]uint8{0, 255, 0}, Label: "green"},
+	}
+
+	// Fake cells with varied colors.
+	cells := []voxel.ActiveCell{
+		{Color: [3]uint8{200, 50, 50}},
+		{Color: [3]uint8{50, 50, 200}},
+		{Color: [3]uint8{10, 10, 10}},
+		{Color: [3]uint8{240, 240, 240}},
+	}
+
+	t.Run("locked colors appear in palette", func(t *testing.T) {
+		locked := [][3]uint8{{255, 0, 0}} // red
+		pcfg := voxel.PaletteConfig{
+			NumColors: 3,
+			Locked:    locked,
+			Inventory: inv,
+		}
+		pal, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		if err != nil {
+			t.Fatalf("ResolvePalette: %v", err)
+		}
+		if len(pal) != 3 {
+			t.Fatalf("expected 3 colors, got %d", len(pal))
+		}
+		// First color must be the locked red.
+		if pal[0] != locked[0] {
+			t.Errorf("first color should be locked red, got #%02X%02X%02X", pal[0][0], pal[0][1], pal[0][2])
+		}
+		// Red should not appear again in the remaining colors (filtered from inventory).
+		for _, p := range pal[1:] {
+			if p == locked[0] {
+				t.Errorf("locked color red appeared again in remaining slots")
+			}
+		}
+	})
+
+	t.Run("all colors locked", func(t *testing.T) {
+		locked := [][3]uint8{{255, 0, 0}, {0, 0, 255}}
+		pcfg := voxel.PaletteConfig{
+			NumColors: 2,
+			Locked:    locked,
+			Inventory: inv,
+		}
+		pal, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		if err != nil {
+			t.Fatalf("ResolvePalette: %v", err)
+		}
+		if len(pal) != 2 {
+			t.Fatalf("expected 2 colors, got %d", len(pal))
+		}
+		if pal[0] != locked[0] || pal[1] != locked[1] {
+			t.Errorf("palette should be exactly the locked colors")
+		}
+	})
+
+	t.Run("empty inventory after filtering errors", func(t *testing.T) {
+		// Inventory has only red; lock red. No colors left.
+		smallInv := []palette.InventoryEntry{
+			{Color: [3]uint8{255, 0, 0}, Label: "red"},
+		}
+		pcfg := voxel.PaletteConfig{
+			NumColors: 2,
+			Locked:    [][3]uint8{{255, 0, 0}},
+			Inventory: smallInv,
+		}
+		_, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		if err == nil {
+			t.Fatalf("expected error when inventory is exhausted after filtering")
+		}
+	})
+
+	t.Run("no source errors", func(t *testing.T) {
+		pcfg := voxel.PaletteConfig{
+			NumColors: 3,
+		}
+		_, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		if err == nil {
+			t.Fatalf("expected error when no color source is set")
+		}
+	})
 }

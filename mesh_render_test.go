@@ -45,11 +45,11 @@ var views = []struct {
 func defaultPaletteConfig() voxel.PaletteConfig {
 	defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
 	var pcfg voxel.PaletteConfig
+	pcfg.NumColors = 4
 	for _, name := range defaultColors {
 		rgb, _ := palette.ParsePalette([]string{name})
 		pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
 	}
-	pcfg.InventoryN = 4
 	return pcfg
 }
 
@@ -104,7 +104,11 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		pal, _ := voxel.ResolvePalette(cells, defaultPaletteConfig(), true)
+		pal, _, err := voxel.ResolvePalette(cells, defaultPaletteConfig(), true)
+		if err != nil {
+			entry.result = &remeshResult{err: err}
+			return
+		}
 		assignments, err := voxel.DitherCellsDizzy(ctx, cells, pal)
 		if err != nil {
 			entry.result = &remeshResult{err: err}
