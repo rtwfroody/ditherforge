@@ -52,6 +52,7 @@
 
   Version().then(v => version = v);
 
+
   async function browseInput() {
     const path = await SelectInputFile();
     if (path) {
@@ -138,11 +139,11 @@
 
 <main class="h-screen flex">
   <!-- Left column: options form -->
-  <div class="w-[480px] min-w-[400px] flex flex-col p-6 overflow-y-auto">
+  <div class="w-[480px] min-w-[400px] min-h-0 flex flex-col p-6 overflow-y-auto">
     <h1 class="text-2xl font-bold mb-1">DitherForge</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
 
-    <Card.Root>
+    <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-4">
         <!-- Input / Output -->
         <div class="space-y-2">

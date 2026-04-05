@@ -113,3 +113,18 @@
 #app {
   min-height: 100vh;
 }
+
+/* Force visible scrollbars in WebKit (Wails uses WebKit on Linux). */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 8px;
+}
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
