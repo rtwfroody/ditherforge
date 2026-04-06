@@ -13,25 +13,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            cgo: "1"
-          - os: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            cgo: "0"
-          - os: ubuntu-latest
-            goos: darwin
-            goarch: amd64
-            cgo: "0"
-          - os: ubuntu-latest
-            goos: darwin
-            goarch: arm64
-            cgo: "0"
-          - os: ubuntu-latest
-            goos: windows
-            goarch: amd64
-            cgo: "0"
+            platform: linux-amd64
+            wails_flags: "-tags webkit2_41"
+            cli_targets: "linux/amd64 linux/arm64"
+          - os: windows-latest
+            platform: windows-amd64
+            wails_flags: "-nsis"
+            cli_targets: "windows/amd64"
+          - os: macos-latest
+            platform: macos-universal
+            wails_flags: "-platform darwin/universal"
+            cli_targets: "darwin/amd64 darwin/arm64"
 
     runs-on: ${{ matrix.os }}
 
@@ -42,48 +34,123 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
+
       - name: Extract version
         id: version
+        shell: bash
         run: |
           VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          if [ -z "$VERSION" ]; then echo "::error::Failed to extract version"; exit 1; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # --- GUI binary ---
+
+      - name: Build GUI
+        shell: bash
+        run: wails build ${{ matrix.wails_flags }}
+
+      # --- CLI binaries ---
+
       - name: Build CLI
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.cgo }}
+        shell: bash
         run: |
-          EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          go build -o "ditherforge${EXT}" ./cmd/ditherforge
+          for target in ${{ matrix.cli_targets }}; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            echo "Building CLI for ${GOOS}/${GOARCH}..."
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+          done
+
+      # --- Smoke test (Linux only) ---
 
       - name: Smoke test
-        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        if: runner.os == 'Linux'
         run: |
-          ./ditherforge --version
+          ./ditherforge-cli-linux-amd64 --version
           go test -timeout 2m ./internal/...
 
-      - name: Package
+      # --- Package ---
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          EXT=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          ARCHIVE="ditherforge-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          mkdir "$ARCHIVE"
-          cp "ditherforge${EXT}" README.md LICENSE "$ARCHIVE/"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -r "${ARCHIVE}.zip" "$ARCHIVE"
-            echo "archive=${ARCHIVE}.zip" >> "$GITHUB_ENV"
-          else
-            tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
-            echo "archive=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
-          fi
+
+          # GUI: tar.gz the binary
+          mkdir -p pkg
+          cp build/bin/ditherforge pkg/
+          cp README.md LICENSE pkg/
+          tar czf "ditherforge-${VERSION}-linux-amd64.tar.gz" -C pkg .
+          rm -rf pkg
+
+          # CLI: tar.gz for each arch
+          for arch in amd64 arm64; do
+            mkdir -p pkg
+            cp "ditherforge-cli-linux-${arch}" pkg/ditherforge-cli
+            cp README.md LICENSE pkg/
+            tar czf "ditherforge-cli-${VERSION}-linux-${arch}.tar.gz" -C pkg .
+            rm -rf pkg
+          done
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # GUI: NSIS installer is already built by wails build -nsis
+          cp build/bin/ditherforge-amd64-installer.exe \
+             "ditherforge-${VERSION}-windows-amd64-installer.exe"
+
+          # CLI: zip
+          mkdir -p pkg
+          cp ditherforge-cli-windows-amd64.exe pkg/ditherforge-cli.exe
+          cp README.md LICENSE pkg/
+          7z a "ditherforge-cli-${VERSION}-windows-amd64.zip" ./pkg/*
+          rm -rf pkg
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # GUI: create DMG from .app bundle
+          hdiutil create -volname "DitherForge" \
+            -srcfolder build/bin/ditherforge.app \
+            -ov -format UDZO \
+            "ditherforge-${VERSION}-macos-universal.dmg"
+
+          # CLI: universal binary via lipo, then tar.gz
+          lipo -create -output ditherforge-cli \
+            ditherforge-cli-darwin-amd64 \
+            ditherforge-cli-darwin-arm64
+          mkdir -p pkg
+          cp ditherforge-cli pkg/
+          cp README.md LICENSE pkg/
+          tar czf "ditherforge-cli-${VERSION}-macos-universal.tar.gz" -C pkg .
+          rm -rf pkg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ditherforge-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ${{ env.archive }}
+          name: release-${{ matrix.platform }}
+          path: |
+            ditherforge-*.tar.gz
+            ditherforge-*.zip
+            ditherforge-*.exe
+            ditherforge-*.dmg
 
   release:
     needs: build
@@ -95,6 +162,7 @@ jobs:
         id: version
         run: |
           VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          if [ -z "$VERSION" ]; then echo "::error::Failed to extract version"; exit 1; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
@@ -102,18 +170,41 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: List artifacts
+        run: ls -la artifacts/
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Delete existing "latest" release if present.
-          gh release delete latest --yes 2>/dev/null || true
+          # Delete existing "latest" release and tag if present.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           git tag -f latest
           git push -f origin latest
 
           VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA:0:8}"
+          cat > notes.md <<EOF
+          Automated build from main branch (v${VERSION}, commit ${SHORT_SHA}).
+
+          ## Downloads
+
+          **GUI (desktop app):**
+          - Linux: \`ditherforge-${VERSION}-linux-amd64.tar.gz\`
+          - Windows: \`ditherforge-${VERSION}-windows-amd64-installer.exe\`
+          - macOS: \`ditherforge-${VERSION}-macos-universal.dmg\`
+
+          **CLI only:**
+          - Linux amd64: \`ditherforge-cli-${VERSION}-linux-amd64.tar.gz\`
+          - Linux arm64: \`ditherforge-cli-${VERSION}-linux-arm64.tar.gz\`
+          - Windows: \`ditherforge-cli-${VERSION}-windows-amd64.zip\`
+          - macOS universal: \`ditherforge-cli-${VERSION}-macos-universal.tar.gz\`
+          EOF
+          # Strip leading whitespace from heredoc (YAML indentation).
+          sed -i 's/^          //' notes.md
+
           gh release create latest \
             --title "Latest build (v${VERSION})" \
-            --notes "Automated build from main branch (v${VERSION}, commit ${GITHUB_SHA::8})." \
+            --notes-file notes.md \
             --prerelease \
             artifacts/*
