@@ -215,6 +215,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	// Walk the default scene's node graph, accumulating transforms.
 	var texturedPrims []primitiveData
 	var untexturedPrims []primitiveData
+	skippedDraco := 0
 	meshCounter := 0 // counts distinct mesh instances (node+mesh pairs)
 
 	var visitNode func(nodeIdx int, parentTransform mat4)
@@ -238,11 +239,15 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 				var indices []uint32
 
 				// Try Draco decoding first.
+				hasDraco := prim.Extensions["KHR_draco_mesh_compression"] != nil
 				if dracoPositions, dracoUVs, dracoColors, dracoIndices, ok := decodeDraco(doc, prim); ok {
 					positions = dracoPositions
 					uvs = dracoUVs
 					vertexColors = dracoColors
 					indices = dracoIndices
+				} else if hasDraco {
+					skippedDraco++
+					continue
 				} else {
 					// Standard (non-Draco) path.
 					posAccessor := doc.Accessors[prim.Attributes[gltf.POSITION]]
@@ -355,6 +360,9 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	}
 
 	if len(texturedPrims) == 0 && len(untexturedPrims) == 0 {
+		if skippedDraco > 0 {
+			return nil, fmt.Errorf("GLB contains no meshes (%d primitives use Draco compression; rebuild with -tags draco to support this)", skippedDraco)
+		}
 		return nil, fmt.Errorf("GLB contains no meshes")
 	}
 	if len(texturedPrims) > 0 && len(untexturedPrims) > 0 {

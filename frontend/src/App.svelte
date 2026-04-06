@@ -65,6 +65,7 @@
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
+  let inputError: string | undefined = $state(undefined);
 
   // Shared camera state — single source of truth for both viewers.
   const sharedCamera = new SharedCamera();
@@ -89,6 +90,7 @@
     if (event.gen >= meshGeneration) {
       meshGeneration = event.gen;
       inputMeshUrl = event.url;
+      inputError = undefined;
     }
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
@@ -155,9 +157,11 @@
 
   async function loadInputPreview(path: string) {
     try {
+      inputError = undefined;
       await LoadModelPreview(path);
     } catch (err) {
-      console.error('Failed to load preview:', err);
+      inputMeshUrl = undefined;
+      inputError = String(err);
     }
   }
 
@@ -437,7 +441,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} />
+      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} errorMessage={inputError} {brightness} {contrast} {saturation} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />

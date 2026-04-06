@@ -19,6 +19,7 @@
     label,
     viewerId,
     camera: sharedCamera,
+    errorMessage,
     brightness = 0,
     contrast = 0,
     saturation = 0,
@@ -27,6 +28,7 @@
     label: string;
     viewerId: string;
     camera: SharedCamera;
+    errorMessage?: string;
     brightness?: number;
     contrast?: number;
     saturation?: number;
@@ -471,6 +473,10 @@
         <Invalidator {brightness} {contrast} {saturation} />
         <AxesGizmo />
       </Canvas>
+    {:else if errorMessage}
+      <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
+        {errorMessage}
+      </div>
     {:else}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground">
         No model loaded
