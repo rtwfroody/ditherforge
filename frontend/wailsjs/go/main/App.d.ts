@@ -14,4 +14,6 @@ export function SaveFile():Promise<string>;
 
 export function SelectInputFile():Promise<string>;
 
+export function SelectInventoryFile():Promise<string>;
+
 export function Version():Promise<string>;

@@ -75,6 +75,17 @@ func (a *App) SelectInputFile() (string, error) {
 	})
 }
 
+// SelectInventoryFile opens a native file dialog for selecting an inventory file.
+func (a *App) SelectInventoryFile() (string, error) {
+	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Select Inventory File",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "All Files", Pattern: "*"},
+		},
+	})
+}
+
 // IsBusy returns true if the pipeline mutex is held (processing in progress).
 func (a *App) IsBusy() bool {
 	if a.mu.TryLock() {

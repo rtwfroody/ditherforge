@@ -26,6 +26,10 @@ export function SelectInputFile() {
   return window['go']['main']['App']['SelectInputFile']();
 }
 
+export function SelectInventoryFile() {
+  return window['go']['main']['App']['SelectInventoryFile']();
+}
+
 export function Version() {
   return window['go']['main']['App']['Version']();
 }

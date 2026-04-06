@@ -7,10 +7,11 @@
   import * as Select from '$lib/components/ui/select';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Separator } from '$lib/components/ui/separator';
+  import { Slider } from '$lib/components/ui/slider';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
+  import { SelectInputFile, SelectInventoryFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -34,7 +35,7 @@
   let contrast = $state(0);
   let saturation = $state(0);
   let dither = $state('dizzy');
-  let colorSnap = $state('5');
+  let colorSnap = $state(5);
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
@@ -155,6 +156,13 @@
     }
   }
 
+  async function browseInventory() {
+    const path = await SelectInventoryFile();
+    if (path) {
+      inventoryFile = path;
+    }
+  }
+
   async function loadInputPreview(path: string) {
     try {
       inputError = undefined;
@@ -183,7 +191,7 @@
       NoSimplify: noSimplify,
       Force: force,
       Stats: stats,
-      ColorSnap: parseFloat(colorSnap) || 5,
+      ColorSnap: colorSnap,
     };
 
     if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
@@ -302,24 +310,24 @@
         <div class="space-y-3">
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label for="brightness">Brightness</Label>
+              <Label>Brightness</Label>
               <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
             </div>
-            <input id="brightness" type="range" min="-100" max="100" step="1" bind:value={brightness} class="w-full" />
+            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label for="contrast">Contrast</Label>
+              <Label>Contrast</Label>
               <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
             </div>
-            <input id="contrast" type="range" min="-100" max="100" step="1" bind:value={contrast} class="w-full" />
+            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label for="saturation">Saturation</Label>
+              <Label>Saturation</Label>
               <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
             </div>
-            <input id="saturation" type="range" min="-100" max="100" step="1" bind:value={saturation} class="w-full" />
+            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
           </div>
         </div>
 
@@ -333,8 +341,11 @@
               <Input id="numcolors" bind:value={numColors} type="number" min="1" max="16" step="1" />
             </div>
             <div class="space-y-2">
-              <Label for="colorsnap">Color snap (delta E)</Label>
-              <Input id="colorsnap" bind:value={colorSnap} type="number" step="1" />
+              <div class="flex items-center justify-between">
+                <Label>Color snap (delta E)</Label>
+                <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+              </div>
+              <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} />
             </div>
           </div>
 
@@ -378,7 +389,10 @@
               </label>
             </div>
             {#if colorSource === 'inventory'}
-              <Input bind:value={inventoryFile} placeholder="Inventory file path" />
+              <div class="flex gap-2">
+                <Input bind:value={inventoryFile} placeholder="Inventory file path" class="flex-1" />
+                <Button variant="outline" size="sm" onclick={browseInventory}>Browse</Button>
+              </div>
             {/if}
           </div>
         </div>
