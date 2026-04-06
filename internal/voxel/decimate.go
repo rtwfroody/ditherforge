@@ -127,16 +127,17 @@ func (h *collapseHeap) Pop() any {
 }
 
 type decimator struct {
-	verts       [][3]float32
-	faces       [][3]uint32
-	quadrics    []quadric
-	vertFaces   [][]uint32 // vertex → face indices (may include dead faces)
-	faceAlive   []bool
-	vertAlive   []bool
-	vertVersion []int
-	activeFaces int
-	cellSize    float64 // used to scale cost by edge length
-	h           collapseHeap
+	verts        [][3]float32
+	faces        [][3]uint32
+	quadrics     []quadric
+	vertFaces    [][]uint32 // vertex → face indices (may include dead faces)
+	faceAlive    []bool
+	vertAlive    []bool
+	vertBoundary []bool // true if vertex is on a mesh boundary (open edge)
+	vertVersion  []int
+	activeFaces  int
+	cellSize     float64 // used to scale cost by edge length
+	h            collapseHeap
 }
 
 // Decimate reduces mesh face count using QEM edge collapse.
@@ -152,15 +153,16 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 	tStart := time.Now()
 
 	d := &decimator{
-		verts:       make([][3]float32, len(verts)),
-		faces:       make([][3]uint32, len(faces)),
-		quadrics:    make([]quadric, len(verts)),
-		vertFaces:   make([][]uint32, len(verts)),
-		faceAlive:   make([]bool, len(faces)),
-		vertAlive:   make([]bool, len(verts)),
-		vertVersion: make([]int, len(verts)),
-		activeFaces: len(faces),
-		cellSize:    cellSize,
+		verts:        make([][3]float32, len(verts)),
+		faces:        make([][3]uint32, len(faces)),
+		quadrics:     make([]quadric, len(verts)),
+		vertFaces:    make([][]uint32, len(verts)),
+		faceAlive:    make([]bool, len(faces)),
+		vertAlive:    make([]bool, len(verts)),
+		vertBoundary: make([]bool, len(verts)),
+		vertVersion:  make([]int, len(verts)),
+		activeFaces:  len(faces),
+		cellSize:     cellSize,
 	}
 	copy(d.verts, verts)
 	copy(d.faces, faces)
@@ -179,6 +181,21 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 		q := d.faceQuadric(uint32(fi))
 		for _, vi := range f {
 			d.quadrics[vi].add(q)
+		}
+	}
+
+	// Mark boundary vertices (on edges with only 1 adjacent face).
+	edgeFaceCount := make(map[decimEdgeKey]int)
+	for _, f := range d.faces {
+		for i := 0; i < 3; i++ {
+			ek := makeDecimEdgeKey(f[i], f[(i+1)%3])
+			edgeFaceCount[ek]++
+		}
+	}
+	for ek, count := range edgeFaceCount {
+		if count == 1 {
+			d.vertBoundary[ek.v1] = true
+			d.vertBoundary[ek.v2] = true
 		}
 	}
 
@@ -278,6 +295,12 @@ func (d *decimator) pushEdge(ek decimEdgeKey) {
 // canCollapse checks the link condition and triangle inversion.
 func (d *decimator) canCollapse(ek decimEdgeKey, newPos [3]float32) bool {
 	v1, v2 := ek.v1, ek.v2
+
+	// Never collapse edges touching boundary vertices. Moving boundary
+	// vertices creates or widens holes, producing visible seams.
+	if d.vertBoundary[v1] || d.vertBoundary[v2] {
+		return false
+	}
 
 	// Link condition: count vertices adjacent to both v1 and v2.
 	// Must equal the number of faces sharing the edge.
