@@ -12,19 +12,13 @@
     LogMessage('info', msg);
   }
 
-  export interface CameraAngles {
-    sourceId: string;
-    azimuth: number;
-    polar: number;
-    distanceRatio: number; // distance / model size
-  }
+  import { SharedCamera } from './SharedCamera.svelte';
 
   let {
     meshUrl,
     label,
     viewerId,
-    cameraAngles,
-    onCameraChange,
+    camera: sharedCamera,
     brightness = 0,
     contrast = 0,
     saturation = 0,
@@ -32,8 +26,7 @@
     meshUrl?: string;
     label: string;
     viewerId: string;
-    cameraAngles?: CameraAngles;
-    onCameraChange?: (angles: CameraAngles) => void;
+    camera: SharedCamera;
     brightness?: number;
     contrast?: number;
     saturation?: number;
@@ -400,29 +393,44 @@
     colorUniforms.uSaturation.value = (100.0 + saturation) / 100.0;
   });
 
-  // Apply camera angles from the other viewer. Skips if this viewer is the
-  // source of the change, or if no model is loaded yet.
+  // Track the last generation we applied so we don't re-apply our own updates.
+  let appliedGen = 0;
+  // Guards against re-entrant onchange during programmatic camera moves.
+  let syncing = false;
+
+  // Sync this viewer's camera to the shared camera state when it changes.
   $effect(() => {
-    const angles = cameraAngles;
-    if (!angles || !controlsRef || !scene) return;
-    if (angles.sourceId === viewerId) return;
+    const gen = sharedCamera.generation;
+    if (gen === appliedGen || !controlsRef || !scene) return;
+    appliedGen = gen;
 
-    const dist = angles.distanceRatio * modelSize;
-    const x = modelCenter[0] + dist * Math.sin(angles.polar) * Math.sin(angles.azimuth);
-    const y = modelCenter[1] + dist * Math.cos(angles.polar);
-    const z = modelCenter[2] + dist * Math.sin(angles.polar) * Math.cos(angles.azimuth);
+    const dist = sharedCamera.distanceRatio * modelSize;
+    const x = modelCenter[0] + sharedCamera.dirX * dist;
+    const y = modelCenter[1] + sharedCamera.dirY * dist;
+    const z = modelCenter[2] + sharedCamera.dirZ * dist;
 
+    syncing = true;
     controlsRef.object.position.set(x, y, z);
     controlsRef.target.set(modelCenter[0], modelCenter[1], modelCenter[2]);
     controlsRef.update();
+    syncing = false;
   });
 
+  // When the user interacts with this viewer, write to the shared camera.
   function handleControlsChange() {
-    if (!controlsRef || !onCameraChange) return;
-    const azimuth = controlsRef.getAzimuthalAngle();
-    const polar = controlsRef.getPolarAngle();
-    const distance = controlsRef.getDistance();
-    onCameraChange({ sourceId: viewerId, azimuth, polar, distanceRatio: distance / modelSize });
+    if (syncing || !controlsRef) return;
+    const pos = controlsRef.object.position;
+    const tgt = controlsRef.target;
+    const dx = pos.x - tgt.x;
+    const dy = pos.y - tgt.y;
+    const dz = pos.z - tgt.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 1e-8) return;
+    sharedCamera.dirX = dx / dist;
+    sharedCamera.dirY = dy / dist;
+    sharedCamera.dirZ = dz / dist;
+    sharedCamera.distanceRatio = dist / modelSize;
+    appliedGen = ++sharedCamera.generation;
   }
 </script>
 

@@ -17,6 +17,7 @@
   // Build a tiny scene with colored axes.
   const gizmoScene = new THREE.Scene();
   const gizmoCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 10);
+  gizmoCamera.up.set(0, 0, 1); // Match the main scene's Z-up orientation.
 
   const axisLength = 0.8;
   const axes = new THREE.Group();

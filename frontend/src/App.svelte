@@ -8,7 +8,8 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Separator } from '$lib/components/ui/separator';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
-  import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
+  import ModelViewer from '$lib/components/ModelViewer.svelte';
+  import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
@@ -65,8 +66,8 @@
   let inputMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
 
-  // Shared camera angles to sync both viewers.
-  let sharedAngles: CameraAngles | undefined = $state(undefined);
+  // Shared camera state — single source of truth for both viewers.
+  const sharedCamera = new SharedCamera();
 
   // Auto-processing state (plain variables, not reactive -- nothing in the template reads these).
   let processTimer: number | undefined;
@@ -80,9 +81,6 @@
   // racing with the pipeline worker) from overwriting newer data.
   let meshGeneration = 0;
 
-  function onCameraChange(angles: CameraAngles) {
-    sharedAngles = angles;
-  }
 
   Version().then(v => version = v);
 
@@ -439,10 +437,10 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" cameraAngles={sharedAngles} {onCameraChange} {brightness} {contrast} {saturation} />
+      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} />
     </div>
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" cameraAngles={sharedAngles} {onCameraChange} />
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
     </div>
   </div>
 </main>
