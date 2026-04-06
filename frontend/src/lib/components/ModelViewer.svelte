@@ -333,7 +333,7 @@
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
   let modelSize = $state(1);
   let modelCenter = $state<[number, number, number]>([0, 0, 0]);
-  let controlsRef = $state<OrbitControlsImpl | null>(null);
+  let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
   let hasHadCamera = false; // true once camera has been positioned
 
   let buildId = 0;
