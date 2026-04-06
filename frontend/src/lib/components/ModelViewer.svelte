@@ -333,6 +333,7 @@
   let modelSize = $state(1);
   let modelCenter = $state<[number, number, number]>([0, 0, 0]);
   let controlsRef = $state<OrbitControlsImpl | null>(null);
+  let hasHadCamera = false; // true once camera has been positioned
 
   let buildId = 0;
 
@@ -350,7 +351,11 @@
         const bounds = computeModelBounds(td);
         modelSize = bounds.size;
         modelCenter = bounds.center;
-        cameraSetup = computeCameraSetup(td);
+        // Only set camera on first load; keep current view on updates.
+        if (!hasHadCamera) {
+          cameraSetup = computeCameraSetup(td);
+          hasHadCamera = true;
+        }
 
         if (hasTextures(td)) {
           buildTexturedScene(td).then((s) => {
@@ -372,7 +377,9 @@
       });
     } else {
       scene = null;
-      cameraSetup = null;
+      // Keep cameraSetup so the Canvas stays mounted and OrbitControls
+      // retains the user's camera orientation across reprocessing.
+      if (!hasHadCamera) cameraSetup = null;
       faceCount = 0;
       disposeScene(prev);
     }
