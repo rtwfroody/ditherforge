@@ -305,8 +305,10 @@
   function computeCameraSetup(td: TypedMeshData): { position: [number, number, number]; target: [number, number, number] } {
     const { center, size } = computeModelBounds(td);
     const dist = size * 1.5;
+    // Camera looks with X left-to-right, Y front-to-back, Z bottom-to-top.
+    // Position: offset in +X, -Y (toward viewer), +Z (above).
     return {
-      position: [center[0] + dist * 0.5, center[1] + dist * 0.5, center[2] + dist],
+      position: [center[0] + dist * 0.3, center[1] - dist * 0.8, center[2] + dist * 0.5],
       target: center,
     };
   }
@@ -437,6 +439,7 @@
         <T.PerspectiveCamera
           makeDefault
           position={cameraSetup.position}
+          up={[0, 0, 1]}
           fov={45}
           near={0.1}
           far={10000}
