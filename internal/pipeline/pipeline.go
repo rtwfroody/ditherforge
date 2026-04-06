@@ -89,6 +89,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 	startFrom := cache.Invalidate(opts)
 	start := time.Now()
 
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	// Stage 0: Load
 	if startFrom <= StageLoad {
 		if err := runLoad(ctx, cache, opts); err != nil {
@@ -115,6 +119,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 			return nil, err
 		}
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	vo := cache.getVoxelize()
 
 	// Stage 2: Decimate
@@ -123,12 +130,18 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 			return nil, err
 		}
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	// Stage 3: Color adjustment
 	if startFrom <= StageColorAdjust {
 		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
 			return nil, err
 		}
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	cao := cache.getColorAdjust()
 
@@ -138,6 +151,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 			return nil, err
 		}
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	po := cache.getPalette()
 
 	// Stage 5: Dither + flood fill
@@ -146,6 +162,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 			return nil, err
 		}
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	do := cache.getDither()
 
 	// Stage 6: Clip
@@ -153,6 +172,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo); err != nil {
 			return nil, err
 		}
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// Stage 7: Merge

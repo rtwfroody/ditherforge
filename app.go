@@ -13,15 +13,38 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex
+	mu       sync.Mutex               // protects cache and lastOpts; held during pipeline execution and SaveFile
+	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
 	lastOpts pipeline.Options         // last successfully processed options
-	pipeGen      atomic.Int64         // incremented per ProcessPipeline call; atomic so LoadModelPreview can read without mutex
+	pipeGen      atomic.Int64         // generation counter for pipeline requests
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
 	lastPreviewID string              // mesh handler ID for last preview mesh (only accessed from LoadModelPreview)
+	reqCh         chan pipelineRequest // buffered channel for pipeline requests; worker drains to latest
+}
+
+// pipelineRequest is sent from ProcessPipeline to the worker goroutine.
+type pipelineRequest struct {
+	opts pipeline.Options
+	gen  int64
+}
+
+// pipelineEvent is emitted to the frontend via Wails events.
+type pipelineEvent struct {
+	Gen      int64   `json:"gen"`
+	Duration float64 `json:"duration,omitempty"` // seconds, for pipeline-done
+	Message  string  `json:"message,omitempty"`  // error text, for pipeline-error
+	ExtentMM float32 `json:"extentMM,omitempty"` // model extent, for pipeline-needs-force
+}
+
+// meshEvent is the payload sent via Wails events for mesh data.
+// URL points to a binary mesh endpoint served by meshHandler.
+type meshEvent struct {
+	Gen int64  `json:"gen"`
+	URL string `json:"url"`
 }
 
 // NewApp creates a new App instance.
@@ -29,14 +52,17 @@ func NewApp() *App {
 	return &App{
 		cache:  pipeline.NewStageCache(),
 		meshes: newMeshHandler(),
+		reqCh:  make(chan pipelineRequest, 1),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	go a.pipelineWorker()
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	close(a.reqCh)
 }
 
 // SelectInputFile opens a native file picker for .glb/.3mf files.
@@ -86,54 +112,105 @@ func (a *App) SaveFile() (string, error) {
 	return path, nil
 }
 
-// meshEvent is the payload sent via Wails events for mesh data.
-// URL points to a binary mesh endpoint served by meshHandler.
-type meshEvent struct {
-	Gen int    `json:"gen"`
-	URL string `json:"url"`
-}
+// ProcessPipeline enqueues a pipeline request and returns immediately.
+// The single pipelineWorker goroutine processes only the latest request.
+// Results are delivered via Wails events: pipeline-done, pipeline-error,
+// pipeline-needs-force, input-mesh, output-mesh.
+// Returns the generation number assigned to this request, which the frontend
+// uses to filter stale events.
+func (a *App) ProcessPipeline(opts pipeline.Options) int64 {
+	gen := a.pipeGen.Add(1)
 
-// ProcessPipeline runs the full pipeline with per-stage caching.
-// Only stages whose settings changed are re-executed.
-// The mutex is held for the entire call to prevent concurrent access to the
-// stage cache. The previous run is cancelled first so it returns quickly.
-// Mesh data is stored in the mesh handler and a URL is sent via events,
-// so the frontend can fetch binary data without JSON serialization overhead.
-func (a *App) ProcessPipeline(opts pipeline.Options) (*pipeline.ProcessResult, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// Cancel any in-flight pipeline immediately so it aborts early.
+	a.cancelMu.Lock()
 	if a.cancel != nil {
 		a.cancel()
 	}
-	ctx, cancel := context.WithCancel(a.ctx)
-	a.cancel = cancel
-	gen := a.pipeGen.Add(1)
+	a.cancelMu.Unlock()
 
-	result, err := pipeline.RunCached(ctx, a.cache, opts)
+	// Replace any pending request in the channel. Drain first (non-blocking),
+	// then send into the now-empty buffer-1 channel.
+	req := pipelineRequest{opts: opts, gen: gen}
+	select {
+	case <-a.reqCh:
+	default:
+	}
+	a.reqCh <- req
+
+	return gen
+}
+
+// pipelineWorker is the single goroutine that processes pipeline requests.
+// It drains the channel to keep only the latest request, avoiding the
+// goroutine pile-up that would occur if each Wails call ran the pipeline.
+func (a *App) pipelineWorker() {
+	for req := range a.reqCh {
+		// Drain any queued requests, keeping only the latest.
+		latest := req
+	drain:
+		for {
+			select {
+			case newer := <-a.reqCh:
+				latest = newer
+			default:
+				break drain
+			}
+		}
+		a.processOne(latest)
+	}
+}
+
+// processOne runs a single pipeline request under the mutex.
+func (a *App) processOne(req pipelineRequest) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.cancelMu.Lock()
+	a.cancel = cancel
+	a.cancelMu.Unlock()
+
+	result, err := pipeline.RunCached(ctx, a.cache, req.opts)
 	if err != nil {
 		if ctx.Err() != nil {
-			fmt.Println("ProcessPipeline cancelled")
+			fmt.Printf("Pipeline gen %d cancelled\n", req.gen)
+			wailsRuntime.EventsEmit(a.ctx, "pipeline-cancelled", pipelineEvent{Gen: req.gen})
+			return
 		}
-		return nil, err
+		wailsRuntime.EventsEmit(a.ctx, "pipeline-error", pipelineEvent{
+			Gen:     req.gen,
+			Message: err.Error(),
+		})
+		return
 	}
-	a.lastOpts = opts
+	a.lastOpts = req.opts
 
 	if result.InputMesh != nil {
 		if a.lastInputID != "" {
 			a.meshes.Remove(a.lastInputID)
 		}
 		a.lastInputID = a.meshes.Store(result.InputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: int(gen), URL: "/mesh/" + a.lastInputID})
+		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
 	}
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
 			a.meshes.Remove(a.lastOutputID)
 		}
 		a.lastOutputID = a.meshes.Store(result.OutputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: int(gen), URL: "/mesh/" + a.lastOutputID})
+		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastOutputID})
 	}
 
-	return result, nil
+	if result.NeedsForce {
+		wailsRuntime.EventsEmit(a.ctx, "pipeline-needs-force", pipelineEvent{
+			Gen:      req.gen,
+			ExtentMM: result.ModelExtentMM,
+		})
+	} else {
+		wailsRuntime.EventsEmit(a.ctx, "pipeline-done", pipelineEvent{
+			Gen:      req.gen,
+			Duration: result.Duration.Seconds(),
+		})
+	}
 }
 
 // LoadModelPreview loads a model file and sends a binary mesh URL via the
@@ -148,7 +225,7 @@ func (a *App) LoadModelPreview(path string) error {
 	if a.lastPreviewID != "" {
 		a.meshes.Remove(a.lastPreviewID)
 	}
-	gen := int(a.pipeGen.Load())
+	gen := a.pipeGen.Load()
 	a.lastPreviewID = a.meshes.Store(mesh)
 	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastPreviewID})
 	return nil

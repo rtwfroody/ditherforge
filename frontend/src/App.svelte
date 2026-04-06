@@ -70,10 +70,14 @@
 
   // Auto-processing state (plain variables, not reactive -- nothing in the template reads these).
   let processTimer: number | undefined;
-  let processGeneration = 0;
 
-  // Generation counter for mesh events, tracks the latest pipeline run.
-  // Mesh events with an older generation are ignored.
+  // Generation counter: tracks the latest pipeline request submitted.
+  // Pipeline result events with gen < latestGen are stale and ignored.
+  let latestGen = 0;
+
+  // Separate generation counter for mesh events. Mesh events use their own
+  // monotonic counter to prevent out-of-order delivery (e.g. LoadModelPreview
+  // racing with the pipeline worker) from overwriting newer data.
   let meshGeneration = 0;
 
   function onCameraChange(angles: CameraAngles) {
@@ -96,12 +100,30 @@
     }
   });
 
-  // Increments processGeneration to invalidate any in-flight pipeline run,
-  // then schedules a new one. runPipeline increments again to establish its
-  // own generation for stale detection after each await.
+  // Listen for pipeline result events from the backend worker.
+  EventsOn('pipeline-done', (event: { gen: number; duration: number }) => {
+    if (event.gen < latestGen) return;
+    running = false;
+    statusMessage = `Done! (${event.duration.toFixed(1)}s)`;
+    statusType = 'success';
+  });
+  EventsOn('pipeline-error', (event: { gen: number; message: string }) => {
+    if (event.gen < latestGen) return;
+    running = false;
+    statusMessage = `Error: ${event.message}`;
+    statusType = 'error';
+  });
+  EventsOn('pipeline-needs-force', (event: { gen: number; extentMM: number }) => {
+    if (event.gen < latestGen) return;
+    running = false;
+    forceExtentMM = event.extentMM;
+    forceDialogOpen = true;
+    statusMessage = '';
+    statusType = 'idle';
+  });
+
   function scheduleProcess(delay = 300) {
     clearTimeout(processTimer);
-    processGeneration++;
     if (!inputFile) return;
     if (delay > 0) {
       processTimer = window.setTimeout(() => runPipeline(), delay);
@@ -173,37 +195,16 @@
       statusType = 'error';
       return;
     }
-    const myGen = ++processGeneration;
     running = true;
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
 
-    try {
-      const result = await ProcessPipeline(buildOpts(force));
-      if (myGen !== processGeneration) return;
-
-      if (result.NeedsForce) {
-        forceExtentMM = result.ModelExtentMM;
-        forceDialogOpen = true;
-        statusMessage = '';
-        statusType = 'idle';
-        return;
-      }
-
-      // Mesh data arrives asynchronously via events.
-      const secs = (result.Duration / 1e9).toFixed(1);
-      statusMessage = `Done! (${secs}s)`;
-      statusType = 'success';
-    } catch (err: any) {
-      if (myGen !== processGeneration) return;
-      statusMessage = `Error: ${err}`;
-      statusType = 'error';
-    } finally {
-      if (myGen === processGeneration) {
-        running = false;
-      }
-    }
+    // ProcessPipeline enqueues the request and returns immediately.
+    // The backend worker processes only the latest request and delivers
+    // results via events (pipeline-done, pipeline-error, pipeline-needs-force).
+    const gen = await ProcessPipeline(buildOpts(force));
+    latestGen = gen;
   }
 
   let saving = $state(false);

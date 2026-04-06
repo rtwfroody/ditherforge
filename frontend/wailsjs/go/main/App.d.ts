@@ -8,7 +8,7 @@ export function LoadModelPreview(arg1:string):Promise<void>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
-export function ProcessPipeline(arg1:pipeline.Options):Promise<pipeline.ProcessResult>;
+export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
 export function SaveFile():Promise<string>;
 
