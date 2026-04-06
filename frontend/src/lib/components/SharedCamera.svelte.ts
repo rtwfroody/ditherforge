@@ -1,17 +1,15 @@
 // Shared camera state — single source of truth for synced 3D viewers.
-// Stores camera direction as a unit vector (from target toward camera)
-// plus distance as a ratio of model size.  Avoids spherical-coordinate
-// ambiguities with non-default up vectors.
-// The `generation` counter lets each viewer skip updates it caused itself.
-// Default camera offset — must match computeCameraSetup in ModelViewer.svelte.
-const _dx = 0.3, _dy = -0.8, _dz = 0.5;
-const _mag = Math.sqrt(_dx * _dx + _dy * _dy + _dz * _dz);
-
+// Stores absolute world-space camera position and target.
+// Both viewers show models in the same coordinate space, so absolute
+// coordinates work directly. The `generation` counter lets each viewer
+// skip updates it caused itself.
 export class SharedCamera {
-  // Unit vector: direction from target to camera.
-  dirX = $state(_dx / _mag);
-  dirY = $state(_dy / _mag);
-  dirZ = $state(_dz / _mag);
-  distanceRatio = $state(1.5 * _mag);
+  posX = $state(0);
+  posY = $state(0);
+  posZ = $state(0);
+  targetX = $state(0);
+  targetY = $state(0);
+  targetZ = $state(0);
+  initialized = $state(false);
   generation = $state(0);
 }

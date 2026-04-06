@@ -187,8 +187,15 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 	mo := cache.getMerge()
 
 	// Build output preview mesh from merge result + palette.
+	// Scale vertices to match the preview's coordinate space so both
+	// viewers use the same scale.
 	outModel := buildOutputModel(lo.Model, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
+	if lo.PreviewScale != 1 {
+		for i := range outputMesh.Vertices {
+			outputMesh.Vertices[i] *= lo.PreviewScale
+		}
+	}
 
 	if opts.Stats {
 		printStats(mo.ShellAssignments, po.Palette)
@@ -287,7 +294,8 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 
 func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
-	scale := unitScaleForExt(inputExt) * opts.Scale
+	unitScale := unitScaleForExt(inputExt)
+	scale := unitScale * opts.Scale
 
 	fmt.Printf("Loading %s...", opts.Input)
 	tLoad := time.Now()
@@ -297,14 +305,19 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	}
 	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
 
+	// Track the total scale applied so we can convert output mesh
+	// vertices back to preview scale (which uses unitScale only).
+	totalScale := scale
+
 	// Auto-scale to --size if specified.
 	if opts.Size != nil {
 		ext := modelMaxExtent(model)
 		if ext != *opts.Size {
 			rescale := *opts.Size / ext
+			totalScale = scale * rescale
 			fmt.Printf("  Rescaling to %.0f mm...", *opts.Size)
 			tRescale := time.Now()
-			model, err = loadModel(opts.Input, scale*rescale)
+			model, err = loadModel(opts.Input, totalScale)
 			if err != nil {
 				return fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
 			}
@@ -320,8 +333,9 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	}
 
 	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
-		Model:     model,
-		InputMesh: buildInputMeshData(model),
+		Model:        model,
+		InputMesh:    buildInputMeshData(model),
+		PreviewScale: unitScale / totalScale,
 	})
 	return nil
 }

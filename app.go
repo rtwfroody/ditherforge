@@ -22,7 +22,8 @@ type App struct {
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
-	lastPreviewID string              // mesh handler ID for last preview mesh (only accessed from LoadModelPreview)
+	lastPreviewID string              // mesh handler ID for last preview mesh (protected by mu)
+	hasPreview    atomic.Bool         // true after LoadModelPreview; read by processOne without mu
 	reqCh         chan pipelineRequest // buffered channel for pipeline requests; worker drains to latest
 }
 
@@ -196,7 +197,13 @@ func (a *App) processOne(req pipelineRequest) {
 	}
 	a.lastOpts = req.opts
 
-	if result.InputMesh != nil {
+	// Don't replace the input viewer's mesh — the preview is already
+	// showing the input at its native scale, and the pipeline's input
+	// mesh is rescaled. The output mesh vertices are converted to
+	// preview scale in the pipeline so both viewers use the same
+	// coordinate space.
+	if result.InputMesh != nil && !a.hasPreview.Load() {
+		// No preview exists (shouldn't happen in GUI, but be safe).
 		if a.lastInputID != "" {
 			a.meshes.Remove(a.lastInputID)
 		}
@@ -226,18 +233,20 @@ func (a *App) processOne(req pipelineRequest) {
 
 // LoadModelPreview loads a model file and sends a binary mesh URL via the
 // "input-mesh" event. Does not acquire the pipeline mutex so the preview
-// appears while the pipeline is still running. The mesh stored here is not
-// tracked for cleanup; ProcessPipeline will replace it with its own input mesh.
+// appears while the pipeline is still running.
 func (a *App) LoadModelPreview(path string) error {
 	mesh, err := pipeline.LoadPreview(path)
 	if err != nil {
 		return err
 	}
+	a.mu.Lock()
 	if a.lastPreviewID != "" {
 		a.meshes.Remove(a.lastPreviewID)
 	}
-	gen := a.pipeGen.Load()
 	a.lastPreviewID = a.meshes.Store(mesh)
+	a.mu.Unlock()
+	a.hasPreview.Store(true)
+	gen := a.pipeGen.Load()
 	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastPreviewID})
 	return nil
 }

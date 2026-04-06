@@ -33,8 +33,6 @@ get along, so we shut typescript up by casting `value` to `never`.
 			class={cn(
 				"rounded-full relative grow overflow-hidden"
 			)}
-			<!-- Inline styles: nova-style data-* Tailwind variants don't render
-			     with this project's "default" CSS setup. -->
 			style="background: var(--border); height: 6px; width: 100%;"
 		>
 			<SliderPrimitive.Range

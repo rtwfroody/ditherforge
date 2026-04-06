@@ -329,8 +329,6 @@
 
   let scene = $state<SceneData | null>(null);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
-  let modelSize = $state(1);
-  let modelCenter = $state<[number, number, number]>([0, 0, 0]);
   let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
   let hasHadCamera = false; // true once camera has been positioned
 
@@ -347,12 +345,28 @@
         if (myId !== buildId) return;
         faceCount = td.faces.length / 3;
 
-        const bounds = computeModelBounds(td);
-        modelSize = bounds.size;
-        modelCenter = bounds.center;
         // Only set camera on first load; keep current view on updates.
         if (!hasHadCamera) {
-          cameraSetup = computeCameraSetup(td);
+          if (sharedCamera.initialized) {
+            // Another viewer already set up the camera — use its state.
+            cameraSetup = {
+              position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
+              target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
+            };
+            appliedGen = sharedCamera.generation;
+          } else {
+            // First viewer to load — compute initial camera and share it.
+            const setup = computeCameraSetup(td);
+            cameraSetup = setup;
+            sharedCamera.posX = setup.position[0];
+            sharedCamera.posY = setup.position[1];
+            sharedCamera.posZ = setup.position[2];
+            sharedCamera.targetX = setup.target[0];
+            sharedCamera.targetY = setup.target[1];
+            sharedCamera.targetZ = setup.target[2];
+            sharedCamera.initialized = true;
+            appliedGen = ++sharedCamera.generation;
+          }
           hasHadCamera = true;
         }
 
@@ -406,32 +420,33 @@
     if (gen === appliedGen || !controlsRef || !scene) return;
     appliedGen = gen;
 
-    const dist = sharedCamera.distanceRatio * modelSize;
-    const x = modelCenter[0] + sharedCamera.dirX * dist;
-    const y = modelCenter[1] + sharedCamera.dirY * dist;
-    const z = modelCenter[2] + sharedCamera.dirZ * dist;
-
     syncing = true;
-    controlsRef.object.position.set(x, y, z);
-    controlsRef.target.set(modelCenter[0], modelCenter[1], modelCenter[2]);
+    controlsRef.object.position.set(sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ);
+    controlsRef.target.set(sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ);
     controlsRef.update();
     syncing = false;
   });
 
   // When the user interacts with this viewer, write to the shared camera.
+  // Skip if position/target haven't actually changed (e.g. OrbitControls
+  // firing onchange during mount with the same values we just set).
+  const EPS = 1e-6;
   function handleControlsChange() {
     if (syncing || !controlsRef) return;
     const pos = controlsRef.object.position;
     const tgt = controlsRef.target;
-    const dx = pos.x - tgt.x;
-    const dy = pos.y - tgt.y;
-    const dz = pos.z - tgt.z;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < 1e-8) return;
-    sharedCamera.dirX = dx / dist;
-    sharedCamera.dirY = dy / dist;
-    sharedCamera.dirZ = dz / dist;
-    sharedCamera.distanceRatio = dist / modelSize;
+    if (Math.abs(pos.x - sharedCamera.posX) < EPS &&
+        Math.abs(pos.y - sharedCamera.posY) < EPS &&
+        Math.abs(pos.z - sharedCamera.posZ) < EPS &&
+        Math.abs(tgt.x - sharedCamera.targetX) < EPS &&
+        Math.abs(tgt.y - sharedCamera.targetY) < EPS &&
+        Math.abs(tgt.z - sharedCamera.targetZ) < EPS) return;
+    sharedCamera.posX = pos.x;
+    sharedCamera.posY = pos.y;
+    sharedCamera.posZ = pos.z;
+    sharedCamera.targetX = tgt.x;
+    sharedCamera.targetY = tgt.y;
+    sharedCamera.targetZ = tgt.z;
     appliedGen = ++sharedCamera.generation;
   }
 </script>

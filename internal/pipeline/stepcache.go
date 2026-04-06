@@ -46,8 +46,9 @@ func NewStageCache() *StageCache {
 // Per-stage output types.
 
 type loadOutput struct {
-	Model     *loader.LoadedModel
-	InputMesh *MeshData
+	Model        *loader.LoadedModel
+	InputMesh    *MeshData
+	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 }
 
 type voxelizeOutput struct {
