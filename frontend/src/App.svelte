@@ -10,7 +10,7 @@
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer, { type CameraAngles } from '$lib/components/ModelViewer.svelte';
   import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
-  import { EventsOn } from '../wailsjs/runtime/runtime';
+  import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
@@ -229,7 +229,7 @@
 <main class="h-screen flex">
   <!-- Left column: options form -->
   <div class="w-[480px] min-w-[400px] min-h-0 flex flex-col p-6 overflow-y-auto">
-    <h1 class="text-2xl font-bold mb-1">DitherForge</h1>
+    <h1 class="text-2xl font-bold mb-1"><a href="https://github.com/rtwfroody/ditherforge" onclick={(e) => { e.preventDefault(); BrowserOpenURL('https://github.com/rtwfroody/ditherforge'); }} class="hover:underline">DitherForge</a> {#if version}<span class="text-base font-normal text-muted-foreground">{version.replace(/^ditherforge\s*/i, '')}</span>{/if}</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
 
     <Card.Root class="shrink-0">
@@ -434,9 +434,6 @@
       {/if}
     </div>
 
-    {#if version}
-      <p class="mt-6 text-xs text-muted-foreground">{version}</p>
-    {/if}
   </div>
 
   <!-- Right column: 3D viewers -->
