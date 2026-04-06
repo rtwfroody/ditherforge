@@ -27,8 +27,10 @@
   let scaleValue = $state('1.0');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
-  let numColors = $state('4');
-  let lockedColors = $state<string[]>([]);
+  // Color palette: each slot is either null (auto) or a locked CSS color string.
+  let colorSlots = $state<(string | null)[]>([null, null, null, null]);
+  let editingIndex = $state<number | null>(null);
+  let editInput = $state('');
   let colorSource: 'defaults' | 'inventory' | 'auto' = $state('defaults');
   let inventoryFile = $state('');
   let brightness = $state(0);
@@ -40,19 +42,36 @@
   let noSimplify = $state(false);
   let stats = $state(false);
 
-  // Pending locked color input.
-  let newColorInput = $state('');
-
-  function addLockedColor() {
-    const c = newColorInput.trim();
-    if (c && lockedColors.length < parseInt(numColors)) {
-      lockedColors = [...lockedColors, c];
-      newColorInput = '';
+  function addColorSlot() {
+    if (colorSlots.length < 16) {
+      colorSlots = [...colorSlots, null];
     }
   }
 
-  function removeLockedColor(index: number) {
-    lockedColors = lockedColors.filter((_, i) => i !== index);
+  function removeColorSlot(index: number) {
+    if (colorSlots.length > 1) {
+      colorSlots = colorSlots.filter((_, i) => i !== index);
+      if (editingIndex === index) editingIndex = null;
+      else if (editingIndex !== null && editingIndex > index) editingIndex--;
+    }
+  }
+
+  function startEditSlot(index: number) {
+    editingIndex = index;
+    editInput = colorSlots[index] ?? '';
+  }
+
+  function confirmEditSlot() {
+    if (editingIndex === null) return;
+    const c = editInput.trim();
+    colorSlots[editingIndex] = c || null;
+    editingIndex = null;
+    editInput = '';
+  }
+
+  function cancelEditSlot() {
+    editingIndex = null;
+    editInput = '';
   }
 
   // UI state.
@@ -138,7 +157,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, numColors, lockedColors, colorSource, inventoryFile,
+          layerHeight, colorSlots, colorSource, inventoryFile,
           brightness, contrast, saturation,
           dither, colorSnap, noMerge, noSimplify, stats];
     if (!initialized) {
@@ -176,8 +195,8 @@
   function buildOpts(force: boolean): pipeline.Options {
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
-      NumColors: parseInt(numColors) || 4,
-      LockedColors: lockedColors.length > 0 ? lockedColors : [],
+      NumColors: colorSlots.length,
+      LockedColors: colorSlots.filter((s): s is string => s !== null),
       AutoColors: colorSource === 'auto',
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
@@ -335,45 +354,9 @@
 
         <!-- Color settings -->
         <div class="space-y-4">
-          <div class="grid grid-cols-2 gap-4">
-            <div class="space-y-2">
-              <Label for="numcolors">Number of colors</Label>
-              <Input id="numcolors" bind:value={numColors} type="number" min="1" max="16" step="1" />
-            </div>
-            <div class="space-y-2">
-              <div class="flex items-center justify-between">
-                <Label>Color snap (delta E)</Label>
-                <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-              </div>
-              <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} />
-            </div>
-          </div>
-
-          <!-- Locked colors -->
-          <div class="space-y-2">
-            <Label>Locked colors</Label>
-            {#if lockedColors.length > 0}
-              <div class="flex flex-wrap gap-2">
-                {#each lockedColors as color, i}
-                  <span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted text-sm">
-                    {color}
-                    <button class="text-muted-foreground hover:text-foreground" onclick={() => removeLockedColor(i)}>&times;</button>
-                  </span>
-                {/each}
-              </div>
-            {/if}
-            {#if lockedColors.length < parseInt(numColors)}
-              <div class="flex gap-2">
-                <Input bind:value={newColorInput} placeholder="CSS name or hex (e.g. black, #FF0000)" class="flex-1"
-                  onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') addLockedColor(); }} />
-                <Button variant="outline" size="sm" onclick={addLockedColor}>+ Lock</Button>
-              </div>
-            {/if}
-          </div>
-
           <!-- Remaining color source -->
           <div class="space-y-2">
-            <Label>Remaining colors from</Label>
+            <Label>Unlocked colors from</Label>
             <div class="flex gap-4">
               <label class="flex items-center gap-1.5 text-sm">
                 <input type="radio" name="colorsource" value="defaults" checked={colorSource === 'defaults'} onchange={() => { colorSource = 'defaults'; }} />
@@ -394,6 +377,64 @@
                 <Button variant="outline" size="sm" onclick={browseInventory}>Browse</Button>
               </div>
             {/if}
+          </div>
+
+          <!-- Color palette grid -->
+          <div class="space-y-2">
+            <Label>Palette</Label>
+            <div class="grid grid-cols-4 gap-2">
+              {#each colorSlots as slot, i}
+                <div class="group relative">
+                  {#if editingIndex === i}
+                    <input
+                      class="w-full h-12 rounded border px-1 text-xs text-center bg-background"
+                      placeholder="e.g. black, #F00"
+                      bind:value={editInput}
+                      onkeydown={(e: KeyboardEvent) => {
+                        if (e.key === 'Enter') confirmEditSlot();
+                        if (e.key === 'Escape') cancelEditSlot();
+                      }}
+                      onblur={confirmEditSlot}
+                      autofocus
+                    />
+                  {:else}
+                    <button
+                      type="button"
+                      class="w-full h-12 rounded border cursor-pointer flex items-center justify-center text-xs select-none"
+                      style={slot ? `background: ${slot};` : 'background: var(--muted);'}
+                      onclick={() => startEditSlot(i)}
+                    >
+                      {#if slot}
+                        <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot}</span>
+                      {:else}
+                        <span class="text-muted-foreground">auto</span>
+                      {/if}
+                    </button>
+                    {#if colorSlots.length > 1}
+                      <button
+                        class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
+                      >&times;</button>
+                    {/if}
+                  {/if}
+                </div>
+              {/each}
+              {#if colorSlots.length < 16}
+                <button
+                  class="w-full h-12 rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
+                  onclick={addColorSlot}
+                >+</button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Color snap -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <Label>Color snap (delta E)</Label>
+              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+            </div>
+            <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} />
           </div>
         </div>
 
