@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { Canvas, T } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
+  import Invalidator from './Invalidator.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -454,6 +455,8 @@
         {#each scene.meshes as mesh}
           <T.Mesh geometry={mesh.geometry} material={mesh.material} />
         {/each}
+
+        <Invalidator {brightness} {contrast} {saturation} />
       </Canvas>
     {:else}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground">
