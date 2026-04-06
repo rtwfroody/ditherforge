@@ -18,7 +18,7 @@ jobs:
             cli_targets: "linux/amd64 linux/arm64"
           - os: windows-latest
             platform: windows-amd64
-            wails_flags: "-nsis"
+            wails_flags: ""
             cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
@@ -111,9 +111,12 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # GUI: NSIS installer is already built by wails build -nsis
-          cp build/bin/ditherforge-amd64-installer.exe \
-             "ditherforge-${VERSION}-windows-amd64-installer.exe"
+          # GUI: zip the exe
+          mkdir -p pkg
+          cp build/bin/ditherforge.exe pkg/
+          cp README.md LICENSE pkg/
+          7z a "ditherforge-${VERSION}-windows-amd64.zip" ./pkg/*
+          rm -rf pkg
 
           # CLI: zip
           mkdir -p pkg
@@ -191,7 +194,7 @@ jobs:
 
           **GUI (desktop app):**
           - Linux: \`ditherforge-${VERSION}-linux-amd64.tar.gz\`
-          - Windows: \`ditherforge-${VERSION}-windows-amd64-installer.exe\`
+          - Windows: \`ditherforge-${VERSION}-windows-amd64.zip\`
           - macOS: \`ditherforge-${VERSION}-macos-universal.dmg\`
 
           **CLI only:**
