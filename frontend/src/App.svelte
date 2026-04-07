@@ -131,25 +131,25 @@
   // Pipeline result events with gen < latestGen are stale and ignored.
   let latestGen = 0;
 
-  // Separate generation counter for mesh events. Mesh events use their own
-  // monotonic counter to prevent out-of-order delivery (e.g. LoadModelPreview
-  // racing with the pipeline worker) from overwriting newer data.
-  let meshGeneration = 0;
-
+  // Independent generation counters for input preview and output mesh.
+  // The preview is loaded outside the pipeline (LoadModelPreview), so its
+  // generation is independent of pipeline gen.
+  let previewGen = 0;
+  let outputMeshGen = 0;
 
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
   EventsOn('input-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen >= meshGeneration) {
-      meshGeneration = event.gen;
+    if (event.gen >= previewGen) {
+      previewGen = event.gen;
       inputMeshUrl = event.url;
       inputError = undefined;
     }
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen >= meshGeneration) {
-      meshGeneration = event.gen;
+    if (event.gen >= outputMeshGen) {
+      outputMeshGen = event.gen;
       outputMeshUrl = event.url;
     }
   });

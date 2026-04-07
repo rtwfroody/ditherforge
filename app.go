@@ -22,6 +22,7 @@ type App struct {
 	cache    *pipeline.StageCache     // per-stage cache across runs
 	lastOpts pipeline.Options         // last successfully processed options
 	pipeGen      atomic.Int64         // generation counter for pipeline requests
+	previewGen   atomic.Int64         // generation counter for preview loads (independent of pipeline)
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
@@ -260,7 +261,8 @@ func (a *App) processOne(req pipelineRequest) {
 			a.meshes.Remove(a.lastInputID)
 		}
 		a.lastInputID = a.meshes.Store(result.InputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
+		gen := a.previewGen.Add(1)
+		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
 	}
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
@@ -298,7 +300,7 @@ func (a *App) LoadModelPreview(path string) error {
 	a.lastPreviewID = a.meshes.Store(mesh)
 	a.mu.Unlock()
 	a.hasPreview.Store(true)
-	gen := a.pipeGen.Load()
+	gen := a.previewGen.Add(1)
 	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastPreviewID})
 	return nil
 }
