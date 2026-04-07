@@ -22,12 +22,9 @@ type App struct {
 	cache    *pipeline.StageCache     // per-stage cache across runs
 	lastOpts pipeline.Options         // last successfully processed options
 	pipeGen      atomic.Int64         // generation counter for pipeline requests
-	previewGen   atomic.Int64         // generation counter for preview loads (independent of pipeline)
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
-	lastPreviewID string              // mesh handler ID for last preview mesh (protected by mu)
-	hasPreview    atomic.Bool              // true after LoadModelPreview; read by processOne without mu
 	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
 	collections   *collection.Manager    // filament collection manager
 }
@@ -219,7 +216,15 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
-	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(pal [][3]uint8, labels []string) {
+	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(mesh *pipeline.MeshData) {
+		// Input mesh available — emit immediately so the preview appears
+		// before later pipeline stages finish.
+		if a.lastInputID != "" {
+			a.meshes.Remove(a.lastInputID)
+		}
+		a.lastInputID = a.meshes.Store(mesh)
+		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
+	}, func(pal [][3]uint8, labels []string) {
 		colors := make([]map[string]string, len(pal))
 		for i, c := range pal {
 			label := ""
@@ -250,20 +255,6 @@ func (a *App) processOne(req pipelineRequest) {
 	}
 	a.lastOpts = req.opts
 
-	// Don't replace the input viewer's mesh — the preview is already
-	// showing the input at its native scale, and the pipeline's input
-	// mesh is rescaled. The output mesh vertices are converted to
-	// preview scale in the pipeline so both viewers use the same
-	// coordinate space.
-	if result.InputMesh != nil && !a.hasPreview.Load() {
-		// No preview exists (shouldn't happen in GUI, but be safe).
-		if a.lastInputID != "" {
-			a.meshes.Remove(a.lastInputID)
-		}
-		a.lastInputID = a.meshes.Store(result.InputMesh)
-		gen := a.previewGen.Add(1)
-		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastInputID})
-	}
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
 			a.meshes.Remove(a.lastOutputID)
@@ -283,26 +274,6 @@ func (a *App) processOne(req pipelineRequest) {
 			Duration: result.Duration.Seconds(),
 		})
 	}
-}
-
-// LoadModelPreview loads a model file and sends a binary mesh URL via the
-// "input-mesh" event. Does not acquire the pipeline mutex so the preview
-// appears while the pipeline is still running.
-func (a *App) LoadModelPreview(path string) error {
-	mesh, err := pipeline.LoadPreview(path)
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	if a.lastPreviewID != "" {
-		a.meshes.Remove(a.lastPreviewID)
-	}
-	a.lastPreviewID = a.meshes.Store(mesh)
-	a.mu.Unlock()
-	a.hasPreview.Store(true)
-	gen := a.previewGen.Add(1)
-	wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: gen, URL: "/mesh/" + a.lastPreviewID})
-	return nil
 }
 
 // LogMessage prints a message from the frontend to stdout.

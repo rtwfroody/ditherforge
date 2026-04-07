@@ -15,8 +15,6 @@ export function IsBusy():Promise<boolean>;
 
 export function ListCollections():Promise<Array<main.CollectionInfo>>;
 
-export function LoadModelPreview(arg1:string):Promise<void>;
-
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;

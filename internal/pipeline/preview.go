@@ -37,18 +37,6 @@ func unitScaleForExt(ext string) float32 {
 	return 1.0
 }
 
-// LoadPreview loads a model using ditherforge's Go loader and returns a
-// MeshData suitable for 3D preview rendering.
-func LoadPreview(path string) (*MeshData, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	scale := unitScaleForExt(ext)
-	model, err := loadModel(path, scale)
-	if err != nil {
-		return nil, err
-	}
-	return buildInputMeshData(model), nil
-}
-
 // flattenMesh extracts flat vertex and face arrays from a loaded model, and
 // calls colorFn for each face to determine its RGB color.
 func flattenMesh(model *loader.LoadedModel, colorFn func(fi int) (uint8, uint8, uint8)) *MeshData {

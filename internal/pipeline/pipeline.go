@@ -58,7 +58,6 @@ type MeshData struct {
 type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
-	InputMesh     *MeshData `json:"-"` // sent async via events, not in JSON response
 	OutputMesh    *MeshData `json:"-"` // sent async via events, not in JSON response
 	Duration      time.Duration
 }
@@ -67,7 +66,6 @@ type ProcessResult struct {
 type PrepareResult struct {
 	NeedsForce    bool    // true if model exceeds size limit and Force was not set
 	ModelExtentMM float32 // actual extent when NeedsForce is true
-	InputMesh     *MeshData
 }
 
 // Result summarizes a completed pipeline run (kept for CLI backward compat).
@@ -83,7 +81,7 @@ type Result struct {
 // The optional onPalette callback is called with the resolved palette colors
 // on every run (including when the palette stage is served from cache),
 // allowing callers to update the UI before later stages finish.
-func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette func([][3]uint8, []string)) (*ProcessResult, error) {
+func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh func(*MeshData), onPalette func([][3]uint8, []string)) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
 	case "none", "dizzy":
@@ -106,6 +104,22 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette f
 	}
 	lo := cache.getLoad()
 
+	if onInputMesh != nil && lo.InputMesh != nil {
+		// Send input mesh at preview scale so it matches the input viewer's
+		// coordinate space. We copy and rescale rather than mutating the cache.
+		mesh := lo.InputMesh
+		if lo.PreviewScale != 1 {
+			scaled := *mesh
+			scaled.Vertices = make([]float32, len(mesh.Vertices))
+			copy(scaled.Vertices, mesh.Vertices)
+			for i := range scaled.Vertices {
+				scaled.Vertices[i] *= lo.PreviewScale
+			}
+			mesh = &scaled
+		}
+		onInputMesh(mesh)
+	}
+
 	// Force check (between load and voxelize).
 	if !opts.Force {
 		ext := modelMaxExtent(lo.Model)
@@ -113,7 +127,6 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette f
 			return &ProcessResult{
 				NeedsForce:    true,
 				ModelExtentMM: ext,
-				InputMesh:     lo.InputMesh,
 			}, nil
 		}
 	}
@@ -211,7 +224,6 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette f
 	}
 
 	return &ProcessResult{
-		InputMesh:  lo.InputMesh,
 		OutputMesh: outputMesh,
 		Duration:   time.Since(start),
 	}, nil
@@ -227,7 +239,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 	}
 
 	cache := NewStageCache()
-	pr, err := RunCached(ctx, cache, opts, nil)
+	pr, err := RunCached(ctx, cache, opts, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -235,7 +247,6 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 		return &PrepareResult{
 			NeedsForce:    true,
 			ModelExtentMM: pr.ModelExtentMM,
-			InputMesh:     pr.InputMesh,
 		}, nil, nil
 	}
 
@@ -244,9 +255,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 		return nil, nil, err
 	}
 
-	prepResult := &PrepareResult{
-		InputMesh: pr.InputMesh,
-	}
+	prepResult := &PrepareResult{}
 	result := &Result{
 		OutputPath: opts.Output,
 		FaceCount:  faceCount,

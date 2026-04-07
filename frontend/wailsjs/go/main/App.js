@@ -26,10 +26,6 @@ export function ListCollections() {
   return window['go']['main']['App']['ListCollections']();
 }
 
-export function LoadModelPreview(arg1) {
-  return window['go']['main']['App']['LoadModelPreview'](arg1);
-}
-
 export function LogMessage(arg1, arg2) {
   return window['go']['main']['App']['LogMessage'](arg1, arg2);
 }

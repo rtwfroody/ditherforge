@@ -15,7 +15,7 @@
   import CollectionSelect from '$lib/components/CollectionSelect.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
+  import { SelectInputFile, ProcessPipeline, SaveFile, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -108,7 +108,6 @@
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
-  let inputError: string | undefined = $state(undefined);
 
   // Resolved auto colors from the backend (the non-locked portion of the palette).
   let resolvedAutoColors = $state<ColorInfo[]>([]);
@@ -131,27 +130,18 @@
   // Pipeline result events with gen < latestGen are stale and ignored.
   let latestGen = 0;
 
-  // Independent generation counters for input preview and output mesh.
-  // The preview is loaded outside the pipeline (LoadModelPreview), so its
-  // generation is independent of pipeline gen.
-  let previewGen = 0;
-  let outputMeshGen = 0;
+  // All mesh and pipeline events use latestGen for staleness checks.
 
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
   EventsOn('input-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen >= previewGen) {
-      previewGen = event.gen;
-      inputMeshUrl = event.url;
-      inputError = undefined;
-    }
+    if (event.gen < latestGen) return;
+    inputMeshUrl = event.url;
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen >= outputMeshGen) {
-      outputMeshGen = event.gen;
-      outputMeshUrl = event.url;
-    }
+    if (event.gen < latestGen) return;
+    outputMeshUrl = event.url;
   });
 
   // Listen for pipeline result events from the backend worker.
@@ -213,7 +203,6 @@
     const path = await SelectInputFile();
     if (path) {
       inputFile = path;
-      loadInputPreview(path);
     }
   }
 
@@ -234,16 +223,6 @@
   function hexToRgb(hex: string): number[] {
     const h = hex.replace('#', '');
     return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-  }
-
-  async function loadInputPreview(path: string) {
-    try {
-      inputError = undefined;
-      await LoadModelPreview(path);
-    } catch (err) {
-      inputMeshUrl = undefined;
-      inputError = String(err);
-    }
   }
 
   function buildOpts(force: boolean): pipeline.Options {
@@ -588,7 +567,7 @@
   {#if activeTab === 'model'}
     <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
       <div class="flex-1 min-h-0">
-        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} errorMessage={inputError} {brightness} {contrast} {saturation} />
+        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} />
       </div>
       <div class="flex-1 min-h-0">
         <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
