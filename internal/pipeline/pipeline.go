@@ -79,7 +79,10 @@ type Result struct {
 
 // RunCached executes the pipeline using per-stage caching. Only stages whose
 // settings changed (or whose dependencies changed) are re-executed.
-func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessResult, error) {
+// The optional onPalette callback is called with the resolved palette colors
+// on every run (including when the palette stage is served from cache),
+// allowing callers to update the UI before later stages finish.
+func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette func([][3]uint8)) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
 	case "none", "dizzy":
@@ -157,6 +160,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options) (*ProcessRe
 	}
 	po := cache.getPalette()
 
+	if onPalette != nil {
+		onPalette(po.Palette)
+	}
+
 	// Stage 5: Dither + flood fill
 	if startFrom <= StageDither {
 		if err := runDither(ctx, cache, opts, po); err != nil {
@@ -219,7 +226,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 	}
 
 	cache := NewStageCache()
-	pr, err := RunCached(ctx, cache, opts)
+	pr, err := RunCached(ctx, cache, opts, nil)
 	if err != nil {
 		return nil, nil, err
 	}

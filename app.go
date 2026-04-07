@@ -189,7 +189,16 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
-	result, err := pipeline.RunCached(ctx, a.cache, req.opts)
+	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(pal [][3]uint8) {
+		colors := make([]string, len(pal))
+		for i, c := range pal {
+			colors[i] = fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2])
+		}
+		wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{
+			"gen":    req.gen,
+			"colors": colors,
+		})
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Printf("Pipeline gen %d cancelled\n", req.gen)

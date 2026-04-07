@@ -86,6 +86,17 @@
   let outputMeshUrl: string | undefined = $state(undefined);
   let inputError: string | undefined = $state(undefined);
 
+  // Resolved auto colors from the backend (the non-locked portion of the palette).
+  let resolvedAutoColors = $state<string[]>([]);
+
+  // Per-slot resolved color: maps auto colors back to their slot positions.
+  let resolvedBySlot = $derived.by(() => {
+    let autoIdx = 0;
+    return colorSlots.map(slot =>
+      slot !== null ? null : (resolvedAutoColors[autoIdx++] ?? null)
+    );
+  });
+
   // Shared camera state — single source of truth for both viewers.
   const sharedCamera = new SharedCamera();
 
@@ -139,6 +150,12 @@
     forceDialogOpen = true;
     statusMessage = '';
     statusType = 'idle';
+  });
+  EventsOn('palette-resolved', (event: { gen: number; colors: string[] }) => {
+    if (event.gen < latestGen) return;
+    // The palette is [locked..., auto...]. Extract the auto portion.
+    const numLocked = colorSlots.filter(s => s !== null).length;
+    resolvedAutoColors = event.colors.slice(numLocked);
   });
 
   function scheduleProcess(delay = 300) {
@@ -242,6 +259,7 @@
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
+    resolvedAutoColors = [];
 
     // ProcessPipeline enqueues the request and returns immediately.
     // The backend worker processes only the latest request and delivers
@@ -373,15 +391,18 @@
             <Label>Palette</Label>
             <div class="grid grid-cols-4 gap-2">
               {#each colorSlots as slot, i}
+                {@const resolved = resolvedBySlot[i]}
                 <div class="group relative">
                   <button
                     type="button"
-                    class="w-full h-12 rounded border cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''}"
-                    style={slot ? `background: ${slot};` : 'background: var(--muted);'}
+                    class="w-full h-12 rounded cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
+                    style={slot ? `background: ${slot};` : resolved ? `background: ${resolved}; opacity: 0.7;` : 'background: var(--muted);'}
                     onclick={() => openPicker(i)}
                   >
                     {#if slot}
                       <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot}</span>
+                    {:else if resolved}
+                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{resolved}</span>
                     {:else}
                       <span class="text-muted-foreground">auto</span>
                     {/if}
