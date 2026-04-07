@@ -156,7 +156,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, colorSlots, colorSource,
+          layerHeight, ...colorSlots, colorSource,
           inventoryCollectionColors,
           brightness, contrast, saturation,
           dither, colorSnap, noMerge, noSimplify, stats];
