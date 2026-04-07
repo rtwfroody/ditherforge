@@ -3,6 +3,8 @@
 import {main} from '../models';
 import {pipeline} from '../models';
 
+export function CreateCollection(arg1:string):Promise<void>;
+
 export function DeleteCollection(arg1:string):Promise<void>;
 
 export function GetCollectionColors(arg1:string):Promise<Array<main.ColorEntry>>;
@@ -21,10 +23,12 @@ export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
 export function RenameCollection(arg1:string,arg2:string):Promise<void>;
 
+export function ResolveColor(arg1:string):Promise<main.ColorEntry>;
+
+export function SaveCollectionColors(arg1:string,arg2:Array<main.ColorEntry>):Promise<void>;
+
 export function SaveFile():Promise<string>;
 
 export function SelectInputFile():Promise<string>;
-
-export function SelectInventoryFile():Promise<string>;
 
 export function Version():Promise<string>;

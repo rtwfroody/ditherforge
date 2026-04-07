@@ -34,9 +34,9 @@
   // Color palette: each slot is either null (auto) or a locked CSS color string.
   let colorSlots = $state<(string | null)[]>([null, null, null, null]);
   let pickerIndex = $state<number | null>(null);
-  let colorSource: 'defaults' | 'inventory' | 'auto' = $state('defaults');
+  let colorSource: 'inventory' | 'auto' = $state('inventory');
   // For collection-based inventory source:
-  let inventoryCollection = $state('');
+  let inventoryCollection = $state('Inventory');
   let inventoryCollectionColors = $state<string[]>([]);
   let brightness = $state(0);
   let contrast = $state(0);
@@ -206,6 +206,9 @@
     const colors = (await GetCollectionColors(name)) ?? [];
     inventoryCollectionColors = colors.map(c => c.hex);
   }
+
+  // Load initial inventory collection colors.
+  loadInventoryCollectionColors(inventoryCollection);
 
   // Parse hex "#RRGGBB" to [r, g, b] array.
   function hexToRgb(hex: string): number[] {
@@ -463,10 +466,6 @@
           <div class="space-y-2">
             <Label>Unlocked colors from</Label>
             <div class="flex gap-4">
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="defaults" checked={colorSource === 'defaults'} onchange={() => { colorSource = 'defaults'; }} />
-                Defaults
-              </label>
               <label class="flex items-center gap-1.5 text-sm">
                 <input type="radio" name="colorsource" value="inventory" checked={colorSource === 'inventory'} onchange={() => { colorSource = 'inventory'; }} />
                 Collection

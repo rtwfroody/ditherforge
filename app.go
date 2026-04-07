@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
+	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -54,7 +56,8 @@ type meshEvent struct {
 func NewApp() *App {
 	cm, err := collection.NewManager()
 	if err != nil {
-		fmt.Printf("Warning: failed to initialize collection manager: %v\n", err)
+		// Fatal: collections are required for the GUI to function.
+		panic(fmt.Sprintf("failed to initialize collection manager: %v", err))
 	}
 	return &App{
 		cache:       pipeline.NewStageCache(),
@@ -83,15 +86,41 @@ func (a *App) SelectInputFile() (string, error) {
 	})
 }
 
-// SelectInventoryFile opens a native file dialog for selecting an inventory file.
-func (a *App) SelectInventoryFile() (string, error) {
-	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Select Inventory File",
-		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
-			{DisplayName: "All Files", Pattern: "*"},
-		},
-	})
+// CreateCollection creates a new empty user collection.
+func (a *App) CreateCollection(name string) error {
+	return a.collections.Create(name, nil)
+}
+
+// SaveCollectionColors replaces all colors in a user collection.
+func (a *App) SaveCollectionColors(name string, colors []ColorEntry) error {
+	entries := make([]palette.InventoryEntry, len(colors))
+	for i, c := range colors {
+		rgb, err := palette.ParsePalette([]string{c.Hex})
+		if err != nil {
+			return fmt.Errorf("invalid color %q: %w", c.Hex, err)
+		}
+		entries[i] = palette.InventoryEntry{Color: rgb[0], Label: c.Label}
+	}
+	return a.collections.Save(name, entries)
+}
+
+// ResolveColor parses a color string (hex or CSS name) and returns a ColorEntry.
+// CSS color names are used as the label.
+func (a *App) ResolveColor(input string) (*ColorEntry, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, fmt.Errorf("empty color input")
+	}
+	rgb, err := palette.ParsePalette([]string{input})
+	if err != nil {
+		return nil, err
+	}
+	hex := fmt.Sprintf("#%02X%02X%02X", rgb[0][0], rgb[0][1], rgb[0][2])
+	label := ""
+	if !strings.HasPrefix(input, "#") {
+		label = input
+	}
+	return &ColorEntry{Hex: hex, Label: label}, nil
 }
 
 // IsBusy returns true if the pipeline mutex is held (processing in progress).
@@ -292,9 +321,6 @@ type ColorEntry struct {
 
 // ListCollections returns all available filament collections.
 func (a *App) ListCollections() []CollectionInfo {
-	if a.collections == nil {
-		return nil
-	}
 	cols := a.collections.List()
 	result := make([]CollectionInfo, len(cols))
 	for i, c := range cols {
@@ -309,9 +335,6 @@ func (a *App) ListCollections() []CollectionInfo {
 
 // GetCollectionColors returns the colors in a named collection.
 func (a *App) GetCollectionColors(name string) []ColorEntry {
-	if a.collections == nil {
-		return nil
-	}
 	col, ok := a.collections.Get(name)
 	if !ok {
 		return nil
@@ -328,18 +351,12 @@ func (a *App) GetCollectionColors(name string) []ColorEntry {
 
 // DeleteCollection removes a user collection by name.
 func (a *App) DeleteCollection(name string) error {
-	if a.collections == nil {
-		return fmt.Errorf("collection manager not initialized")
-	}
 	return a.collections.Delete(name)
 }
 
 // ImportCollection copies an inventory file into the user collections
 // directory and returns the new collection name.
 func (a *App) ImportCollection() (string, error) {
-	if a.collections == nil {
-		return "", fmt.Errorf("collection manager not initialized")
-	}
 	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Import Filament Collection",
 		Filters: []wailsRuntime.FileFilter{
@@ -362,8 +379,5 @@ func (a *App) ImportCollection() (string, error) {
 
 // RenameCollection renames a user collection.
 func (a *App) RenameCollection(oldName, newName string) error {
-	if a.collections == nil {
-		return fmt.Errorf("collection manager not initialized")
-	}
 	return a.collections.Rename(oldName, newName)
 }

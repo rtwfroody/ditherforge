@@ -13,6 +13,10 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/palette"
 )
 
+// InventoryName is the reserved name for the user's inventory collection.
+// It is auto-created with default colors and cannot be deleted.
+const InventoryName = "Inventory"
+
 //go:embed builtins/*.txt
 var builtinFS embed.FS
 
@@ -79,7 +83,35 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("creating collections directory: %w", err)
 	}
 
+	// Ensure the Inventory collection exists with default colors.
+	if err := m.ensureInventory(); err != nil {
+		return nil, fmt.Errorf("creating inventory collection: %w", err)
+	}
+
 	return m, nil
+}
+
+// ensureInventory creates the Inventory collection if it doesn't exist,
+// populated with the 8 default colors.
+func (m *Manager) ensureInventory() error {
+	path := filepath.Join(m.dir, InventoryName+".txt")
+	if _, err := os.Stat(path); err == nil {
+		return nil // already exists
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking inventory file: %w", err)
+	}
+	defaultColors := []string{
+		"#00FFFF cyan",
+		"#FF00FF magenta",
+		"#FFFF00 yellow",
+		"#000000 black",
+		"#FFFFFF white",
+		"#FF0000 red",
+		"#008000 green",
+		"#0000FF blue",
+	}
+	data := strings.Join(defaultColors, "\n") + "\n"
+	return os.WriteFile(path, []byte(data), 0o644)
 }
 
 // List returns all collections (built-ins first, then user).
@@ -101,7 +133,7 @@ func (m *Manager) List() []Collection {
 			continue
 		}
 		inv, err := palette.ParseInventoryData(data)
-		if err != nil || len(inv) == 0 {
+		if err != nil {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".txt")
@@ -164,8 +196,11 @@ func (m *Manager) Import(path string) (Collection, error) {
 	}, nil
 }
 
-// Delete removes a user collection. Returns an error for built-in collections.
+// Delete removes a user collection. Returns an error for built-in or protected collections.
 func (m *Manager) Delete(name string) error {
+	if name == InventoryName {
+		return fmt.Errorf("cannot delete the %s collection", InventoryName)
+	}
 	for _, b := range m.builtins {
 		if b.Name == name {
 			return fmt.Errorf("cannot delete built-in collection %q", name)
@@ -178,8 +213,11 @@ func (m *Manager) Delete(name string) error {
 	return os.Remove(path)
 }
 
-// Rename renames a user collection. Returns an error for built-in collections.
+// Rename renames a user collection. Returns an error for built-in or protected collections.
 func (m *Manager) Rename(oldName, newName string) error {
+	if oldName == InventoryName || newName == InventoryName {
+		return fmt.Errorf("cannot rename the %s collection", InventoryName)
+	}
 	for _, b := range m.builtins {
 		if b.Name == oldName {
 			return fmt.Errorf("cannot rename built-in collection %q", oldName)
@@ -196,12 +234,32 @@ func (m *Manager) Rename(oldName, newName string) error {
 	return os.Rename(oldPath, newPath)
 }
 
+// Save writes entries to an existing user collection, replacing all colors.
+// Returns an error for built-in collections.
+func (m *Manager) Save(name string, entries []palette.InventoryEntry) error {
+	for _, b := range m.builtins {
+		if b.Name == name {
+			return fmt.Errorf("cannot modify built-in collection %q", name)
+		}
+	}
+	path := filepath.Join(m.dir, name+".txt")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("collection %q not found", name)
+	}
+	return m.writeFile(path, entries)
+}
+
 // Create creates a new empty user collection file.
 func (m *Manager) Create(name string, entries []palette.InventoryEntry) error {
 	path := filepath.Join(m.dir, name+".txt")
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("collection %q already exists", name)
 	}
+	return m.writeFile(path, entries)
+}
+
+// writeFile writes inventory entries to a file in "#RRGGBB Label" format.
+func (m *Manager) writeFile(path string, entries []palette.InventoryEntry) error {
 	var lines []string
 	for _, e := range entries {
 		line := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
@@ -210,6 +268,9 @@ func (m *Manager) Create(name string, entries []palette.InventoryEntry) error {
 		}
 		lines = append(lines, line)
 	}
-	data := strings.Join(lines, "\n") + "\n"
+	data := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		data += "\n"
+	}
 	return os.WriteFile(path, []byte(data), 0o644)
 }
