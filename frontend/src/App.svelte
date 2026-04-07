@@ -8,10 +8,12 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
+  import { SlidersHorizontalIcon, PaletteIcon } from '@lucide/svelte';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
   import CollectionSelect from '$lib/components/CollectionSelect.svelte';
+  import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -44,6 +46,9 @@
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
+
+  // Tab navigation.
+  let activeTab: 'model' | 'collections' = $state('model');
 
   function addColorSlot() {
     if (colorSlots.length < 16) {
@@ -288,8 +293,28 @@
 </script>
 
 <main class="h-screen flex">
-  <!-- Left column: options form -->
-  <div class="w-[480px] min-w-[400px] min-h-0 flex flex-col p-6 overflow-y-auto">
+  <!-- Icon rail -->
+  <div class="w-12 min-w-12 flex flex-col items-center py-4 gap-2 border-r bg-muted/30">
+    <button
+      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'model' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+      title="Model Settings"
+      onclick={() => activeTab = 'model'}
+    >
+      <SlidersHorizontalIcon size={18} />
+    </button>
+    <button
+      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'collections' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+      title="Filament Collections"
+      onclick={() => activeTab = 'collections'}
+    >
+      <PaletteIcon size={18} />
+    </button>
+  </div>
+
+  <!-- Left panel: fixed width for model settings, full width for collections -->
+  <div class="{activeTab === 'model' ? 'w-[480px] min-w-[400px]' : 'flex-1'} min-h-0 flex flex-col">
+  {#if activeTab === 'model'}
+    <div class="flex-1 flex flex-col p-6 overflow-y-auto">
     <h1 class="text-2xl font-bold mb-1"><a href="https://github.com/rtwfroody/ditherforge" onclick={(e) => { e.preventDefault(); BrowserOpenURL('https://github.com/rtwfroody/ditherforge'); }} class="hover:underline">DitherForge</a> {#if version}<span class="text-base font-normal text-muted-foreground">{version.replace(/^ditherforge\s*/i, '')}</span>{/if}</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
 
@@ -522,17 +547,23 @@
       {/if}
     </div>
 
+    </div>
+  {:else}
+    <CollectionManager />
+  {/if}
   </div>
 
-  <!-- Right column: 3D viewers -->
-  <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} errorMessage={inputError} {brightness} {contrast} {saturation} />
+  <!-- Right column: 3D viewers (only shown on model tab) -->
+  {#if activeTab === 'model'}
+    <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
+      <div class="flex-1 min-h-0">
+        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} errorMessage={inputError} {brightness} {contrast} {saturation} />
+      </div>
+      <div class="flex-1 min-h-0">
+        <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
+      </div>
     </div>
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
-    </div>
-  </div>
+  {/if}
 </main>
 
 <AlertDialog.Root bind:open={forceDialogOpen}>
