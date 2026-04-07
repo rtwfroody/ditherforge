@@ -8,7 +8,7 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { SlidersHorizontalIcon, PaletteIcon } from '@lucide/svelte';
+  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon } from '@lucide/svelte';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
@@ -78,6 +78,16 @@
 
   function closePicker() {
     pickerIndex = null;
+  }
+
+  function toggleLock(index: number) {
+    if (colorSlots[index] !== null) {
+      // Unlock: set to auto.
+      colorSlots[index] = null;
+    } else if (resolvedBySlot[index]) {
+      // Lock to the resolved color.
+      colorSlots[index] = resolvedBySlot[index];
+    }
   }
 
   function colorTooltip(c: ColorInfo): string {
@@ -447,6 +457,20 @@
                       <span class="text-muted-foreground">auto</span>
                     {/if}
                   </button>
+                  <!-- Lock toggle -->
+                  {#if slot || resolved}
+                    <button
+                      class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
+                      title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
+                      onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
+                    >
+                      {#if slot}
+                        <LockIcon size={10} class="text-white" />
+                      {:else}
+                        <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
+                      {/if}
+                    </button>
+                  {/if}
                   {#if colorSlots.length > 1}
                     <button
                       class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
@@ -463,24 +487,10 @@
               {/if}
             </div>
             {#if pickerIndex !== null}
-              {#if colorSlots[pickerIndex] === null && resolvedBySlot[pickerIndex]}
-                {@const res = resolvedBySlot[pickerIndex]}
-                <button
-                  class="flex items-center gap-2 text-sm hover:bg-muted rounded px-2 py-1 transition-colors cursor-pointer"
-                  onclick={() => { if (pickerIndex !== null) { colorSlots[pickerIndex] = resolvedBySlot[pickerIndex]; pickerIndex = null; } }}
-                >
-                  <span class="inline-block w-5 h-5 rounded border" style="background: {res.hex};"></span>
-                  Lock to {res.label || res.hex}
-                </button>
-              {/if}
               <CollectionPicker
                 onselect={pickColor}
                 onclose={closePicker}
               />
-              <button
-                class="text-xs text-muted-foreground hover:underline"
-                onclick={() => { if (pickerIndex !== null) { colorSlots[pickerIndex] = null; pickerIndex = null; } }}
-              >Clear (set to auto)</button>
             {/if}
           </div>
 
