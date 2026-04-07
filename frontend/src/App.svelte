@@ -451,6 +451,15 @@
               {/if}
             </div>
             {#if pickerIndex !== null}
+              {#if colorSlots[pickerIndex] === null && resolvedBySlot[pickerIndex]}
+                <button
+                  class="flex items-center gap-2 text-sm hover:bg-muted rounded px-2 py-1 transition-colors cursor-pointer"
+                  onclick={() => { if (pickerIndex !== null) { colorSlots[pickerIndex] = resolvedBySlot[pickerIndex]; pickerIndex = null; } }}
+                >
+                  <span class="inline-block w-5 h-5 rounded border" style="background: {resolvedBySlot[pickerIndex]};"></span>
+                  Lock to {resolvedBySlot[pickerIndex]}
+                </button>
+              {/if}
               <CollectionPicker
                 onselect={pickColor}
                 onclose={closePicker}
