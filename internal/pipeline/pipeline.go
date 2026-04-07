@@ -31,6 +31,7 @@ type Options struct {
 	LayerHeight    float32
 	InventoryFile    string
 	InventoryColors  [][3]uint8 `json:"InventoryColors,omitempty"`
+	InventoryLabels  []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
 	Brightness     float32
 	Contrast       float32
 	Saturation     float32
@@ -82,7 +83,7 @@ type Result struct {
 // The optional onPalette callback is called with the resolved palette colors
 // on every run (including when the palette stage is served from cache),
 // allowing callers to update the UI before later stages finish.
-func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette func([][3]uint8)) (*ProcessResult, error) {
+func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette func([][3]uint8, []string)) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
 	case "none", "dizzy":
@@ -161,7 +162,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onPalette f
 	po := cache.getPalette()
 
 	if onPalette != nil {
-		onPalette(po.Palette)
+		onPalette(po.Palette, po.PaletteLabels)
 	}
 
 	// Stage 5: Dither + flood fill
@@ -418,7 +419,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *color
 	copy(cells, cao.Cells)
 
 	ditherMode := opts.Dither
-	pal, palDisplay, err := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
+	pal, palLabels, palDisplay, err := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
 	if err != nil {
 		return err
 	}
@@ -437,8 +438,9 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *color
 	}
 
 	cache.setStage(StagePalette, stageKey(StagePalette, opts), &paletteOutput{
-		Palette: pal,
-		Cells:   cells,
+		Palette:       pal,
+		PaletteLabels: palLabels,
+		Cells:         cells,
 	})
 	return nil
 }
@@ -554,13 +556,17 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 		pcfg.NumColors = 4
 	}
 
-	// Parse locked colors.
+	// Parse locked colors. Labels are managed by the frontend and not
+	// included in LockedColors, so locked entries have empty labels here.
 	if len(opts.LockedColors) > 0 {
-		locked, err := palette.ParsePalette(opts.LockedColors)
+		colors, err := palette.ParsePalette(opts.LockedColors)
 		if err != nil {
 			return pcfg, err
 		}
-		pcfg.Locked = locked
+		pcfg.Locked = make([]palette.InventoryEntry, len(colors))
+		for i, c := range colors {
+			pcfg.Locked[i] = palette.InventoryEntry{Color: c}
+		}
 	}
 	if len(pcfg.Locked) > pcfg.NumColors {
 		return pcfg, fmt.Errorf("locked %d colors but only %d total requested", len(pcfg.Locked), pcfg.NumColors)
@@ -573,8 +579,12 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 		}
 		pcfg.Inventory = inv
 	} else if len(opts.InventoryColors) > 0 {
-		for _, c := range opts.InventoryColors {
-			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c})
+		for i, c := range opts.InventoryColors {
+			label := ""
+			if i < len(opts.InventoryLabels) {
+				label = opts.InventoryLabels[i]
+			}
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c, Label: label})
 		}
 	} else if opts.AutoColors {
 		pcfg.AutoColors = true

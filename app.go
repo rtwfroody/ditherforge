@@ -218,10 +218,17 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
-	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(pal [][3]uint8) {
-		colors := make([]string, len(pal))
+	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(pal [][3]uint8, labels []string) {
+		colors := make([]map[string]string, len(pal))
 		for i, c := range pal {
-			colors[i] = fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2])
+			label := ""
+			if i < len(labels) {
+				label = labels[i]
+			}
+			colors[i] = map[string]string{
+				"hex":   fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
+				"label": label,
+			}
 		}
 		wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{
 			"gen":    req.gen,

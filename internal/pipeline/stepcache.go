@@ -68,8 +68,9 @@ type decimateOutput struct {
 }
 
 type paletteOutput struct {
-	Palette [][3]uint8
-	Cells   []voxel.ActiveCell // copy with snapped colors
+	Palette       [][3]uint8
+	PaletteLabels []string           // parallel to Palette; label from inventory (empty for locked/computed)
+	Cells         []voxel.ActiveCell // copy with snapped colors
 }
 
 type ditherOutput struct {
@@ -128,6 +129,7 @@ type paletteSettings struct {
 	InventoryFile     string
 	InventoryContents string   // file contents for hashing; empty if no file
 	InventoryColors   [][3]uint8
+	InventoryLabels   []string
 	AutoColors        bool
 	ColorSnap         float64
 }
@@ -198,6 +200,7 @@ func settingsForStage(stage StageID, opts Options) any {
 			InventoryFile:     opts.InventoryFile,
 			InventoryContents: contents,
 			InventoryColors:   opts.InventoryColors,
+			InventoryLabels:   opts.InventoryLabels,
 			AutoColors:        opts.AutoColors,
 			ColorSnap:         opts.ColorSnap,
 		}
@@ -238,6 +241,12 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeInt(h, len(v.InventoryColors))
 		for _, c := range v.InventoryColors {
 			h.Write(c[:])
+		}
+		// Labels are length-prefixed strings, so a shorter InventoryLabels
+		// slice produces a different hash than a longer one even without an
+		// explicit count. This is intentional — label count tracks color count.
+		for _, l := range v.InventoryLabels {
+			writeString(h, l)
 		}
 		writeBool(h, v.AutoColors)
 		writeFloat64(h, v.ColorSnap)

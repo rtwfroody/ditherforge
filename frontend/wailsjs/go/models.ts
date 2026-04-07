@@ -46,6 +46,7 @@ export namespace pipeline {
 	    LayerHeight: number;
 	    InventoryFile: string;
 	    InventoryColors?: number[][];
+	    InventoryLabels?: string[];
 	    Brightness: number;
 	    Contrast: number;
 	    Saturation: number;
@@ -73,6 +74,7 @@ export namespace pipeline {
 	        this.LayerHeight = source["LayerHeight"];
 	        this.InventoryFile = source["InventoryFile"];
 	        this.InventoryColors = source["InventoryColors"];
+	        this.InventoryLabels = source["InventoryLabels"];
 	        this.Brightness = source["Brightness"];
 	        this.Contrast = source["Contrast"];
 	        this.Saturation = source["Saturation"];

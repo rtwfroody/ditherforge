@@ -11,7 +11,7 @@ import (
 // AutoColors is true), or selected from the default color set.
 type PaletteConfig struct {
 	NumColors  int                      // total number of palette colors
-	Locked     [][3]uint8               // user-locked colors (always in palette)
+	Locked     []palette.InventoryEntry // user-locked colors (always in palette); labels may be empty
 	Inventory  []palette.InventoryEntry // inventory entries for remaining slots
 	AutoColors bool                     // compute remaining colors via k-means
 }

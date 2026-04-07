@@ -8,7 +8,7 @@
     onselect,
     onclose,
   }: {
-    onselect: (hex: string) => void;
+    onselect: (hex: string, label: string, collection: string) => void;
     onclose: () => void;
   } = $props();
 
@@ -36,7 +36,7 @@
         class="h-8 rounded border cursor-pointer flex items-center justify-center text-[10px] leading-tight select-none hover:ring-2 hover:ring-primary transition-shadow"
         style="background: {color.hex}; color: {contrastColor(color.hex)};"
         title="{color.label || color.hex}"
-        onclick={() => onselect(color.hex)}
+        onclick={() => onselect(color.hex, color.label, collectionStore.activeCollection)}
       >
         {color.label || color.hex}
       </button>

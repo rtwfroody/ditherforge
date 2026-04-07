@@ -31,13 +31,15 @@
   let scaleValue = $state('1.0');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
-  // Color palette: each slot is either null (auto) or a locked CSS color string.
-  let colorSlots = $state<(string | null)[]>([null, null, null, null]);
+  // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
+  type ColorInfo = { hex: string; label: string; collection?: string };
+  type ColorSlot = ColorInfo | null;
+  let colorSlots = $state<ColorSlot[]>([null, null, null, null]);
   let pickerIndex = $state<number | null>(null);
   let colorSource: 'inventory' | 'auto' = $state('inventory');
   // For collection-based inventory source:
   let inventoryCollection = $state('Inventory');
-  let inventoryCollectionColors = $state<string[]>([]);
+  let inventoryCollectionColors = $state<{ hex: string; label: string }[]>([]);
   let brightness = $state(0);
   let contrast = $state(0);
   let saturation = $state(0);
@@ -68,14 +70,21 @@
     pickerIndex = pickerIndex === index ? null : index;
   }
 
-  function pickColor(hex: string) {
+  function pickColor(hex: string, label: string, collection: string) {
     if (pickerIndex === null) return;
-    colorSlots[pickerIndex] = hex;
+    colorSlots[pickerIndex] = { hex, label, collection };
     pickerIndex = null;
   }
 
   function closePicker() {
     pickerIndex = null;
+  }
+
+  function colorTooltip(c: ColorInfo): string {
+    const parts = [c.hex];
+    if (c.label) parts.push(c.label);
+    if (c.collection) parts.push(`from ${c.collection}`);
+    return parts.join('\n');
   }
 
   // UI state.
@@ -92,10 +101,10 @@
   let inputError: string | undefined = $state(undefined);
 
   // Resolved auto colors from the backend (the non-locked portion of the palette).
-  let resolvedAutoColors = $state<string[]>([]);
+  let resolvedAutoColors = $state<ColorInfo[]>([]);
 
   // Per-slot resolved color: maps auto colors back to their slot positions.
-  let resolvedBySlot = $derived.by(() => {
+  let resolvedBySlot = $derived.by((): (ColorInfo | null)[] => {
     let autoIdx = 0;
     return colorSlots.map(slot =>
       slot !== null ? null : (resolvedAutoColors[autoIdx++] ?? null)
@@ -156,11 +165,12 @@
     statusMessage = '';
     statusType = 'idle';
   });
-  EventsOn('palette-resolved', (event: { gen: number; colors: string[] }) => {
+  EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string }[] }) => {
     if (event.gen < latestGen) return;
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;
-    resolvedAutoColors = event.colors.slice(numLocked);
+    const collName = colorSource === 'inventory' ? inventoryCollection : '';
+    resolvedAutoColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
   });
 
   function scheduleProcess(delay = 300) {
@@ -204,7 +214,7 @@
       return;
     }
     const colors = (await GetCollectionColors(name)) ?? [];
-    inventoryCollectionColors = colors.map(c => c.hex);
+    inventoryCollectionColors = colors.map(c => ({ hex: c.hex, label: c.label }));
   }
 
   // Load initial inventory collection colors.
@@ -227,20 +237,21 @@
   }
 
   function buildOpts(force: boolean): pipeline.Options {
-    const invColors = (colorSource === 'inventory')
-      ? inventoryCollectionColors.map(hexToRgb)
-      : [];
+    const invEntries = (colorSource === 'inventory') ? inventoryCollectionColors : [];
+    const invColors = invEntries.map(c => hexToRgb(c.hex));
+    const invLabels = invEntries.map(c => c.label);
 
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
       NumColors: colorSlots.length,
-      LockedColors: colorSlots.filter((s): s is string => s !== null),
+      LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
       AutoColors: colorSource === 'auto',
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
       InventoryFile: '',
       InventoryColors: invColors,
+      InventoryLabels: invLabels,
       Brightness: brightness,
       Contrast: contrast,
       Saturation: saturation,
@@ -267,7 +278,7 @@
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
-    resolvedAutoColors = [];
+    resolvedAutoColors = [] as ColorInfo[];
 
     // ProcessPipeline enqueues the request and returns immediately.
     // The backend worker processes only the latest request and delivers
@@ -424,13 +435,14 @@
                   <button
                     type="button"
                     class="w-full h-12 rounded cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                    style={slot ? `background: ${slot};` : resolved ? `background: ${resolved}; opacity: 0.7;` : 'background: var(--muted);'}
+                    style={slot ? `background: ${slot.hex};` : resolved ? `background: ${resolved.hex}; opacity: 0.7;` : 'background: var(--muted);'}
+                    title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
                     onclick={() => openPicker(i)}
                   >
                     {#if slot}
-                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot}</span>
+                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot.label || slot.hex}</span>
                     {:else if resolved}
-                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{resolved}</span>
+                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{resolved.label || resolved.hex}</span>
                     {:else}
                       <span class="text-muted-foreground">auto</span>
                     {/if}
@@ -452,12 +464,13 @@
             </div>
             {#if pickerIndex !== null}
               {#if colorSlots[pickerIndex] === null && resolvedBySlot[pickerIndex]}
+                {@const res = resolvedBySlot[pickerIndex]}
                 <button
                   class="flex items-center gap-2 text-sm hover:bg-muted rounded px-2 py-1 transition-colors cursor-pointer"
                   onclick={() => { if (pickerIndex !== null) { colorSlots[pickerIndex] = resolvedBySlot[pickerIndex]; pickerIndex = null; } }}
                 >
-                  <span class="inline-block w-5 h-5 rounded border" style="background: {resolvedBySlot[pickerIndex]};"></span>
-                  Lock to {resolvedBySlot[pickerIndex]}
+                  <span class="inline-block w-5 h-5 rounded border" style="background: {res.hex};"></span>
+                  Lock to {res.label || res.hex}
                 </button>
               {/if}
               <CollectionPicker

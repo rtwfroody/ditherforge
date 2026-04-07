@@ -16,11 +16,20 @@ import (
 // ResolvePalette determines the final palette from cells and config.
 // dithering indicates whether dithering will be used, which affects
 // inventory color selection strategy.
-// Returns the palette RGB values and a display string for logging.
-func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, string, error) {
+// Returns the palette RGB values, parallel labels, and a display string
+// for logging. Labels come from inventory entries; locked entries carry
+// whatever label was set in PaletteConfig.Locked.
+func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, []string, string, error) {
+	lockedColors := make([][3]uint8, len(pcfg.Locked))
+	lockedLabels := make([]string, len(pcfg.Locked))
+	for i, e := range pcfg.Locked {
+		lockedColors[i] = e.Color
+		lockedLabels[i] = e.Label
+	}
+
 	remaining := pcfg.NumColors - len(pcfg.Locked)
 	if remaining <= 0 {
-		return pcfg.Locked, "", nil
+		return lockedColors, lockedLabels, "", nil
 	}
 
 	cellColors := make([][3]uint8, len(cells))
@@ -31,15 +40,18 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][
 	if len(pcfg.Inventory) > 0 {
 		filtered := filterInventory(pcfg.Inventory, pcfg.Locked)
 		if len(filtered) == 0 {
-			return nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
+			return nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
 		fmt.Printf("  Selecting %d colors from %d-color inventory...", remaining, len(filtered))
 		selected := palette.SelectFromInventory(cellColors, filtered, remaining, dithering)
-		pal := make([][3]uint8, len(pcfg.Locked), pcfg.NumColors)
-		copy(pal, pcfg.Locked)
+		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
+		copy(pal, lockedColors)
+		labels := make([]string, len(lockedLabels), pcfg.NumColors)
+		copy(labels, lockedLabels)
 		strs := make([]string, 0, len(selected))
 		for _, e := range selected {
 			pal = append(pal, e.Color)
+			labels = append(labels, e.Label)
 			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
 			if e.Label != "" {
 				s += " (" + e.Label + ")"
@@ -47,34 +59,36 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][
 			strs = append(strs, s)
 		}
 		display := " " + strings.Join(strs, ", ")
-		return pal, display, nil
+		return pal, labels, display, nil
 	}
 
 	if pcfg.AutoColors {
 		fmt.Printf("  Computing %d-color palette from cell colors...", remaining)
-		computed := palette.ComputePaletteWithLocked(cellColors, remaining, pcfg.Locked)
-		pal := make([][3]uint8, len(pcfg.Locked), pcfg.NumColors)
-		copy(pal, pcfg.Locked)
+		computed := palette.ComputePaletteWithLocked(cellColors, remaining, lockedColors)
+		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
+		copy(pal, lockedColors)
 		pal = append(pal, computed...)
+		labels := make([]string, len(pal))
+		copy(labels, lockedLabels)
 		strs := make([]string, len(computed))
 		for i, p := range computed {
 			strs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		}
 		display := " " + strings.Join(strs, ", ")
-		return pal, display, nil
+		return pal, labels, display, nil
 	}
 
-	return nil, "", fmt.Errorf("palette config has %d remaining slots but no color source (inventory or auto) is set", remaining)
+	return nil, nil, "", fmt.Errorf("palette config has %d remaining slots but no color source (inventory or auto) is set", remaining)
 }
 
 // filterInventory returns inventory entries that don't match any locked color.
-func filterInventory(inv []palette.InventoryEntry, locked [][3]uint8) []palette.InventoryEntry {
+func filterInventory(inv []palette.InventoryEntry, locked []palette.InventoryEntry) []palette.InventoryEntry {
 	if len(locked) == 0 {
 		return inv
 	}
 	lockedSet := make(map[[3]uint8]bool, len(locked))
-	for _, c := range locked {
-		lockedSet[c] = true
+	for _, e := range locked {
+		lockedSet[e.Color] = true
 	}
 	filtered := make([]palette.InventoryEntry, 0, len(inv))
 	for _, e := range inv {
