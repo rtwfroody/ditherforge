@@ -470,11 +470,13 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 	return entries, nil
 }
 
-// SelectFromInventory picks the best n colors from inventory for the given
-// cell colors. When dithering is true, uses hull-based scoring that accounts
-// for dithering's ability to mix colors. When false, uses nearest-color
-// scoring that minimizes the error when each cell gets exactly one color.
-func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, dithering bool) []InventoryEntry {
+// SelectFromInventory picks the best n colors from inventory that, together
+// with the locked colors, best cover the cell colors. Locked colors are
+// included in scoring so candidates complement them rather than duplicate.
+// When dithering is true, uses hull-based scoring that accounts for
+// dithering's ability to mix colors. When false, uses nearest-color scoring
+// that minimizes the error when each cell gets exactly one color.
+func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool) []InventoryEntry {
 	if n >= len(inventory) {
 		return inventory
 	}
@@ -493,6 +495,17 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
 	}
 
+	// Convert locked colors to Lab so scoring includes them.
+	lockedLab := make([][3]float64, len(locked))
+	for i, c := range locked {
+		cf := colorful.Color{
+			R: float64(c[0]) / 255.0,
+			G: float64(c[1]) / 255.0,
+			B: float64(c[2]) / 255.0,
+		}
+		lockedLab[i][0], lockedLab[i][1], lockedLab[i][2] = cf.Lab()
+	}
+
 	var scorer scoreFunc
 	if dithering {
 		scorer = weightedHullScore
@@ -502,9 +515,9 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 
 	var bestSubset []int
 	if combinationsCount(len(inventory), n) <= 50000 {
-		bestSubset = exhaustiveSearch(invLab, samples, n, scorer)
+		bestSubset = exhaustiveSearch(invLab, lockedLab, samples, n, scorer)
 	} else {
-		bestSubset = randomSearch(invLab, samples, n, 50000, scorer)
+		bestSubset = randomSearch(invLab, lockedLab, samples, n, 50000, scorer)
 	}
 
 	result := make([]InventoryEntry, n)
@@ -515,7 +528,8 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 }
 
 // scoreFunc is the signature for palette subset scoring functions.
-type scoreFunc func(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64
+// fixedLab contains locked colors that are always part of the palette.
+type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64
 
 // ditherSpreadFactor controls how much the nearest-vertex distance penalizes
 // colors that are inside the hull but far from any palette color. This
@@ -539,15 +553,24 @@ func nearestVertexDist(p [3]float64, verts [][3]float64) float64 {
 	return math.Sqrt(best)
 }
 
-// weightedHullScore computes total weighted distance from each sample to the
-// palette subset. Uses hull distance plus a dithering spread penalty based on
-// nearest-vertex distance, so colors that require mixing distant palette
-// entries are penalized even when geometrically inside the hull.
-func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
-	verts := make([][3]float64, len(indices))
+// buildVerts combines candidate inventory colors with fixed (locked) colors
+// into a single vertex slice for scoring.
+func buildVerts(indices []int, invLab [][3]float64, fixedLab [][3]float64) [][3]float64 {
+	verts := make([][3]float64, len(fixedLab)+len(indices))
+	copy(verts, fixedLab)
 	for i, idx := range indices {
-		verts[i] = invLab[idx]
+		verts[len(fixedLab)+i] = invLab[idx]
 	}
+	return verts
+}
+
+// weightedHullScore computes total weighted distance from each sample to the
+// full palette (locked + candidate). Uses hull distance plus a dithering
+// spread penalty based on nearest-vertex distance, so colors that require
+// mixing distant palette entries are penalized even when geometrically
+// inside the hull.
+func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
+	verts := buildVerts(indices, invLab, fixedLab)
 	total := 0.0
 	for _, s := range samples {
 		hullDist := distToConvexHull(s.Lab, verts)
@@ -559,13 +582,10 @@ func weightedHullScore(indices []int, invLab [][3]float64, samples []WeightedLab
 }
 
 // weightedNearestScore computes total weighted squared distance from each
-// sample to the nearest palette color. Used when dithering is disabled,
-// since each cell gets exactly one color.
-func weightedNearestScore(indices []int, invLab [][3]float64, samples []WeightedLabSample) float64 {
-	verts := make([][3]float64, len(indices))
-	for i, idx := range indices {
-		verts[i] = invLab[idx]
-	}
+// sample to the nearest color in the full palette (locked + candidate).
+// Used when dithering is disabled, since each cell gets exactly one color.
+func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
+	verts := buildVerts(indices, invLab, fixedLab)
 	total := 0.0
 	for _, s := range samples {
 		d := nearestVertexDist(s.Lab, verts)
@@ -576,7 +596,7 @@ func weightedNearestScore(indices []int, invLab [][3]float64, samples []Weighted
 
 // exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
 // minimizes the given scoring function. Uses parallel workers.
-func exhaustiveSearch(invLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) []int {
+func exhaustiveSearch(invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) []int {
 	if n < 1 {
 		return nil
 	}
@@ -599,7 +619,7 @@ func exhaustiveSearch(invLab [][3]float64, samples []WeightedLabSample, n int, s
 			localBest := math.MaxFloat64
 			var localSubset []int
 			for subset := range jobs {
-				s := score(subset, invLab, samples)
+				s := score(subset, invLab, lockedLab, samples)
 				if s < localBest {
 					localBest = s
 					localSubset = make([]int, len(subset))
@@ -647,7 +667,7 @@ func exhaustiveSearch(invLab [][3]float64, samples []WeightedLabSample, n int, s
 }
 
 // randomSearch evaluates numTrials random n-color subsets and returns the best.
-func randomSearch(invLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) []int {
+func randomSearch(invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) []int {
 	rng := rand.New(rand.NewSource(42))
 	invN := len(invLab)
 
@@ -672,7 +692,7 @@ func randomSearch(invLab [][3]float64, samples []WeightedLabSample, n int, numTr
 			}
 		}
 
-		s := score(indices, invLab, samples)
+		s := score(indices, invLab, lockedLab, samples)
 		if s < bestScore {
 			bestScore = s
 			bestSubset = make([]int, n)

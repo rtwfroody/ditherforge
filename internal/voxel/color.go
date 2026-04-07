@@ -43,7 +43,7 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][
 			return nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
 		fmt.Printf("  Selecting %d colors from %d-color inventory...", remaining, len(filtered))
-		selected := palette.SelectFromInventory(cellColors, filtered, remaining, dithering)
+		selected := palette.SelectFromInventory(cellColors, filtered, remaining, lockedColors, dithering)
 		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
 		copy(pal, lockedColors)
 		labels := make([]string, len(lockedLabels), pcfg.NumColors)
