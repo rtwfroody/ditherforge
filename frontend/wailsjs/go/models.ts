@@ -1,3 +1,38 @@
+export namespace main {
+	
+	export class CollectionInfo {
+	    name: string;
+	    count: number;
+	    builtIn: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CollectionInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.count = source["count"];
+	        this.builtIn = source["builtIn"];
+	    }
+	}
+	export class ColorEntry {
+	    hex: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ColorEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hex = source["hex"];
+	        this.label = source["label"];
+	    }
+	}
+
+}
+
 export namespace pipeline {
 	
 	export class Options {
@@ -10,6 +45,7 @@ export namespace pipeline {
 	    NozzleDiameter: number;
 	    LayerHeight: number;
 	    InventoryFile: string;
+	    InventoryColors?: number[][];
 	    Brightness: number;
 	    Contrast: number;
 	    Saturation: number;
@@ -36,6 +72,7 @@ export namespace pipeline {
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
 	        this.InventoryFile = source["InventoryFile"];
+	        this.InventoryColors = source["InventoryColors"];
 	        this.Brightness = source["Brightness"];
 	        this.Contrast = source["Contrast"];
 	        this.Saturation = source["Saturation"];

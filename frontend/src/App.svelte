@@ -10,8 +10,10 @@
   import { Slider } from '$lib/components/ui/slider';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
+  import CollectionPicker from '$lib/components/CollectionPicker.svelte';
+  import CollectionSelect from '$lib/components/CollectionSelect.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { SelectInputFile, SelectInventoryFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage } from '../wailsjs/go/main/App';
+  import { SelectInputFile, ProcessPipeline, SaveFile, LoadModelPreview, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -29,10 +31,11 @@
   let layerHeight = $state('0.20');
   // Color palette: each slot is either null (auto) or a locked CSS color string.
   let colorSlots = $state<(string | null)[]>([null, null, null, null]);
-  let editingIndex = $state<number | null>(null);
-  let editInput = $state('');
+  let pickerIndex = $state<number | null>(null);
   let colorSource: 'defaults' | 'inventory' | 'auto' = $state('defaults');
-  let inventoryFile = $state('');
+  // For collection-based inventory source:
+  let inventoryCollection = $state('');
+  let inventoryCollectionColors = $state<string[]>([]);
   let brightness = $state(0);
   let contrast = $state(0);
   let saturation = $state(0);
@@ -51,27 +54,23 @@
   function removeColorSlot(index: number) {
     if (colorSlots.length > 1) {
       colorSlots = colorSlots.filter((_, i) => i !== index);
-      if (editingIndex === index) editingIndex = null;
-      else if (editingIndex !== null && editingIndex > index) editingIndex--;
+      if (pickerIndex === index) pickerIndex = null;
+      else if (pickerIndex !== null && pickerIndex > index) pickerIndex--;
     }
   }
 
-  function startEditSlot(index: number) {
-    editingIndex = index;
-    editInput = colorSlots[index] ?? '';
+  function openPicker(index: number) {
+    pickerIndex = pickerIndex === index ? null : index;
   }
 
-  function confirmEditSlot() {
-    if (editingIndex === null) return;
-    const c = editInput.trim();
-    colorSlots[editingIndex] = c || null;
-    editingIndex = null;
-    editInput = '';
+  function pickColor(hex: string) {
+    if (pickerIndex === null) return;
+    colorSlots[pickerIndex] = hex;
+    pickerIndex = null;
   }
 
-  function cancelEditSlot() {
-    editingIndex = null;
-    editInput = '';
+  function closePicker() {
+    pickerIndex = null;
   }
 
   // UI state.
@@ -157,7 +156,8 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, colorSlots, colorSource, inventoryFile,
+          layerHeight, colorSlots, colorSource,
+          inventoryCollectionColors,
           brightness, contrast, saturation,
           dither, colorSnap, noMerge, noSimplify, stats];
     if (!initialized) {
@@ -175,11 +175,20 @@
     }
   }
 
-  async function browseInventory() {
-    const path = await SelectInventoryFile();
-    if (path) {
-      inventoryFile = path;
+  // Load collection colors for inventory source.
+  async function loadInventoryCollectionColors(name: string) {
+    if (!name) {
+      inventoryCollectionColors = [];
+      return;
     }
+    const colors = (await GetCollectionColors(name)) ?? [];
+    inventoryCollectionColors = colors.map(c => c.hex);
+  }
+
+  // Parse hex "#RRGGBB" to [r, g, b] array.
+  function hexToRgb(hex: string): number[] {
+    const h = hex.replace('#', '');
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
   }
 
   async function loadInputPreview(path: string) {
@@ -193,6 +202,10 @@
   }
 
   function buildOpts(force: boolean): pipeline.Options {
+    const invColors = (colorSource === 'inventory')
+      ? inventoryCollectionColors.map(hexToRgb)
+      : [];
+
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
       NumColors: colorSlots.length,
@@ -201,7 +214,8 @@
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
-      InventoryFile: colorSource === 'inventory' ? inventoryFile : '',
+      InventoryFile: '',
+      InventoryColors: invColors,
       Brightness: brightness,
       Contrast: contrast,
       Saturation: saturation,
@@ -354,68 +368,29 @@
 
         <!-- Color settings -->
         <div class="space-y-4">
-          <!-- Remaining color source -->
-          <div class="space-y-2">
-            <Label>Unlocked colors from</Label>
-            <div class="flex gap-4">
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="defaults" checked={colorSource === 'defaults'} onchange={() => { colorSource = 'defaults'; }} />
-                Defaults
-              </label>
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="inventory" checked={colorSource === 'inventory'} onchange={() => { colorSource = 'inventory'; }} />
-                Inventory
-              </label>
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="auto" checked={colorSource === 'auto'} onchange={() => { colorSource = 'auto'; }} />
-                Optimal
-              </label>
-            </div>
-            {#if colorSource === 'inventory'}
-              <div class="flex gap-2">
-                <Input bind:value={inventoryFile} placeholder="Inventory file path" class="flex-1" />
-                <Button variant="outline" size="sm" onclick={browseInventory}>Browse</Button>
-              </div>
-            {/if}
-          </div>
-
           <!-- Color palette grid -->
           <div class="space-y-2">
             <Label>Palette</Label>
             <div class="grid grid-cols-4 gap-2">
               {#each colorSlots as slot, i}
                 <div class="group relative">
-                  {#if editingIndex === i}
-                    <input
-                      class="w-full h-12 rounded border px-1 text-xs text-center bg-background"
-                      placeholder="e.g. black, #F00"
-                      bind:value={editInput}
-                      onkeydown={(e: KeyboardEvent) => {
-                        if (e.key === 'Enter') confirmEditSlot();
-                        if (e.key === 'Escape') cancelEditSlot();
-                      }}
-                      onblur={confirmEditSlot}
-                      autofocus
-                    />
-                  {:else}
-                    <button
-                      type="button"
-                      class="w-full h-12 rounded border cursor-pointer flex items-center justify-center text-xs select-none"
-                      style={slot ? `background: ${slot};` : 'background: var(--muted);'}
-                      onclick={() => startEditSlot(i)}
-                    >
-                      {#if slot}
-                        <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot}</span>
-                      {:else}
-                        <span class="text-muted-foreground">auto</span>
-                      {/if}
-                    </button>
-                    {#if colorSlots.length > 1}
-                      <button
-                        class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
-                      >&times;</button>
+                  <button
+                    type="button"
+                    class="w-full h-12 rounded border cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''}"
+                    style={slot ? `background: ${slot};` : 'background: var(--muted);'}
+                    onclick={() => openPicker(i)}
+                  >
+                    {#if slot}
+                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot}</span>
+                    {:else}
+                      <span class="text-muted-foreground">auto</span>
                     {/if}
+                  </button>
+                  {#if colorSlots.length > 1}
+                    <button
+                      class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                      onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
+                    >&times;</button>
                   {/if}
                 </div>
               {/each}
@@ -426,6 +401,41 @@
                 >+</button>
               {/if}
             </div>
+            {#if pickerIndex !== null}
+              <CollectionPicker
+                onselect={pickColor}
+                onclose={closePicker}
+              />
+              <button
+                class="text-xs text-muted-foreground hover:underline"
+                onclick={() => { if (pickerIndex !== null) { colorSlots[pickerIndex] = null; pickerIndex = null; } }}
+              >Clear (set to auto)</button>
+            {/if}
+          </div>
+
+          <!-- Remaining color source -->
+          <div class="space-y-2">
+            <Label>Unlocked colors from</Label>
+            <div class="flex gap-4">
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="defaults" checked={colorSource === 'defaults'} onchange={() => { colorSource = 'defaults'; }} />
+                Defaults
+              </label>
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="inventory" checked={colorSource === 'inventory'} onchange={() => { colorSource = 'inventory'; }} />
+                Collection
+              </label>
+              <label class="flex items-center gap-1.5 text-sm">
+                <input type="radio" name="colorsource" value="auto" checked={colorSource === 'auto'} onchange={() => { colorSource = 'auto'; }} />
+                Optimal
+              </label>
+            </div>
+            {#if colorSource === 'inventory'}
+              <CollectionSelect
+                bind:selected={inventoryCollection}
+                onchange={loadInventoryCollectionColors}
+              />
+            {/if}
           </div>
 
           <!-- Color snap -->

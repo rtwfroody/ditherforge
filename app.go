@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/rtwfroody/ditherforge/internal/collection"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -23,8 +24,9 @@ type App struct {
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
 	lastPreviewID string              // mesh handler ID for last preview mesh (protected by mu)
-	hasPreview    atomic.Bool         // true after LoadModelPreview; read by processOne without mu
-	reqCh         chan pipelineRequest // buffered channel for pipeline requests; worker drains to latest
+	hasPreview    atomic.Bool              // true after LoadModelPreview; read by processOne without mu
+	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
+	collections   *collection.Manager    // filament collection manager
 }
 
 // pipelineRequest is sent from ProcessPipeline to the worker goroutine.
@@ -50,10 +52,15 @@ type meshEvent struct {
 
 // NewApp creates a new App instance.
 func NewApp() *App {
+	cm, err := collection.NewManager()
+	if err != nil {
+		fmt.Printf("Warning: failed to initialize collection manager: %v\n", err)
+	}
 	return &App{
-		cache:  pipeline.NewStageCache(),
-		meshes: newMeshHandler(),
-		reqCh:  make(chan pipelineRequest, 1),
+		cache:       pipeline.NewStageCache(),
+		meshes:      newMeshHandler(),
+		reqCh:       make(chan pipelineRequest, 1),
+		collections: cm,
 	}
 }
 
@@ -259,4 +266,95 @@ func (a *App) LogMessage(level, msg string) {
 // Version returns the application version string.
 func (a *App) Version() string {
 	return pipeline.Version
+}
+
+// CollectionInfo describes a collection for the frontend.
+type CollectionInfo struct {
+	Name    string `json:"name"`
+	Count   int    `json:"count"`
+	BuiltIn bool   `json:"builtIn"`
+}
+
+// ColorEntry is a single color from a collection.
+type ColorEntry struct {
+	Hex   string `json:"hex"`
+	Label string `json:"label"`
+}
+
+// ListCollections returns all available filament collections.
+func (a *App) ListCollections() []CollectionInfo {
+	if a.collections == nil {
+		return nil
+	}
+	cols := a.collections.List()
+	result := make([]CollectionInfo, len(cols))
+	for i, c := range cols {
+		result[i] = CollectionInfo{
+			Name:    c.Name,
+			Count:   len(c.Entries),
+			BuiltIn: c.BuiltIn,
+		}
+	}
+	return result
+}
+
+// GetCollectionColors returns the colors in a named collection.
+func (a *App) GetCollectionColors(name string) []ColorEntry {
+	if a.collections == nil {
+		return nil
+	}
+	col, ok := a.collections.Get(name)
+	if !ok {
+		return nil
+	}
+	result := make([]ColorEntry, len(col.Entries))
+	for i, e := range col.Entries {
+		result[i] = ColorEntry{
+			Hex:   fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2]),
+			Label: e.Label,
+		}
+	}
+	return result
+}
+
+// DeleteCollection removes a user collection by name.
+func (a *App) DeleteCollection(name string) error {
+	if a.collections == nil {
+		return fmt.Errorf("collection manager not initialized")
+	}
+	return a.collections.Delete(name)
+}
+
+// ImportCollection copies an inventory file into the user collections
+// directory and returns the new collection name.
+func (a *App) ImportCollection() (string, error) {
+	if a.collections == nil {
+		return "", fmt.Errorf("collection manager not initialized")
+	}
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Import Filament Collection",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "All Files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	col, err := a.collections.Import(path)
+	if err != nil {
+		return "", err
+	}
+	return col.Name, nil
+}
+
+// RenameCollection renames a user collection.
+func (a *App) RenameCollection(oldName, newName string) error {
+	if a.collections == nil {
+		return fmt.Errorf("collection manager not initialized")
+	}
+	return a.collections.Rename(oldName, newName)
 }

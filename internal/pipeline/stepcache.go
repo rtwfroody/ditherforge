@@ -124,9 +124,10 @@ type decimateSettings struct {
 
 type paletteSettings struct {
 	NumColors         int
-	LockedColors      string // joined for hashing
+	LockedColors      string   // joined for hashing
 	InventoryFile     string
-	InventoryContents string // file contents for hashing; empty if no file
+	InventoryContents string   // file contents for hashing; empty if no file
+	InventoryColors   [][3]uint8
 	AutoColors        bool
 	ColorSnap         float64
 }
@@ -196,6 +197,7 @@ func settingsForStage(stage StageID, opts Options) any {
 			LockedColors:      strings.Join(opts.LockedColors, ","),
 			InventoryFile:     opts.InventoryFile,
 			InventoryContents: contents,
+			InventoryColors:   opts.InventoryColors,
 			AutoColors:        opts.AutoColors,
 			ColorSnap:         opts.ColorSnap,
 		}
@@ -233,6 +235,10 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeString(h, v.LockedColors)
 		writeString(h, v.InventoryFile)
 		writeString(h, v.InventoryContents)
+		writeInt(h, len(v.InventoryColors))
+		for _, c := range v.InventoryColors {
+			h.Write(c[:])
+		}
 		writeBool(h, v.AutoColors)
 		writeFloat64(h, v.ColorSnap)
 	case ditherSettings:

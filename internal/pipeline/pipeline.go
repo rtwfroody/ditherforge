@@ -29,7 +29,8 @@ type Options struct {
 	Output         string
 	NozzleDiameter float32
 	LayerHeight    float32
-	InventoryFile  string
+	InventoryFile    string
+	InventoryColors  [][3]uint8 `json:"InventoryColors,omitempty"`
 	Brightness     float32
 	Contrast       float32
 	Saturation     float32
@@ -564,6 +565,10 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 			return pcfg, err
 		}
 		pcfg.Inventory = inv
+	} else if len(opts.InventoryColors) > 0 {
+		for _, c := range opts.InventoryColors {
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c})
+		}
 	} else if opts.AutoColors {
 		pcfg.AutoColors = true
 	} else {

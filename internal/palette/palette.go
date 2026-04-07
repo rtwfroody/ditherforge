@@ -3,6 +3,7 @@ package palette
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -411,23 +412,18 @@ func ComputePaletteWithLocked(cellColors [][3]uint8, n int, locked [][3]uint8) [
 	return result
 }
 
-// ParseInventoryFile reads a file with one color per line.
-// Blank lines and lines starting with # are ignored.
 // InventoryEntry holds a color from an inventory file with an optional label.
 type InventoryEntry struct {
 	Color [3]uint8
 	Label string // user comment after the color, empty if none
 }
 
-func ParseInventoryFile(path string) ([]InventoryEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
+// ParseInventoryData parses inventory entries from raw bytes.
+// Blank lines and lines starting with # (comment) are ignored.
+// Each non-comment line has a color (#RRGGBB or CSS name) and optional label.
+func ParseInventoryData(data []byte) ([]InventoryEntry, error) {
 	var entries []InventoryEntry
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -447,12 +443,26 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 		}
 		rgb, err := parseColor(colorStr)
 		if err != nil {
-			return nil, fmt.Errorf("in %s: %w", path, err)
+			return nil, err
 		}
 		entries = append(entries, InventoryEntry{Color: rgb, Label: label})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	return entries, nil
+}
+
+// ParseInventoryFile reads a file with one color per line.
+// Blank lines and lines starting with # are ignored.
+func ParseInventoryFile(path string) ([]InventoryEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := ParseInventoryData(data)
+	if err != nil {
+		return nil, fmt.Errorf("in %s: %w", path, err)
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("inventory file %s contains no colors", path)
