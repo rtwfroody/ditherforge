@@ -145,8 +145,16 @@
     return !!(td.textures && td.uvs && td.faceTextureIdx);
   }
 
-  async function loadTexture(base64: string): Promise<THREE.Texture> {
-    const dataUrl = `data:image/jpeg;base64,${base64}`;
+  async function loadTexture(encoded: string): Promise<THREE.Texture> {
+    let mime = 'image/jpeg';
+    let base64 = encoded;
+    if (encoded.startsWith('png:')) {
+      mime = 'image/png';
+      base64 = encoded.slice(4);
+    } else if (encoded.startsWith('jpeg:')) {
+      base64 = encoded.slice(5);
+    }
+    const dataUrl = `data:${mime};base64,${base64}`;
     const loader = new THREE.TextureLoader();
     const tex = await loader.loadAsync(dataUrl);
     tex.flipY = false;

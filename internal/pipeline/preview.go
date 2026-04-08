@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,7 +88,10 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 		}
 	}
 
-	// Encode textures as base64 JPEG.
+	// Encode textures for the frontend preview. Large textures are
+	// compressed to JPEG; small ones (under 128x128) are kept as PNG
+	// since compression saves little and some models rely on precise
+	// sampling of low-res textures.
 	if len(model.Textures) > 0 {
 		md.Textures = make([]string, len(model.Textures))
 		for i, img := range model.Textures {
@@ -95,11 +99,20 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 				continue
 			}
 			var buf bytes.Buffer
-			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to encode texture %d: %v\n", i, err)
-				continue
+			bounds := img.Bounds()
+			if bounds.Dx() >= 128 && bounds.Dy() >= 128 {
+				if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to encode texture %d: %v\n", i, err)
+					continue
+				}
+				md.Textures[i] = "jpeg:" + base64.StdEncoding.EncodeToString(buf.Bytes())
+			} else {
+				if err := png.Encode(&buf, img); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to encode texture %d: %v\n", i, err)
+					continue
+				}
+				md.Textures[i] = "png:" + base64.StdEncoding.EncodeToString(buf.Bytes())
 			}
-			md.Textures[i] = base64.StdEncoding.EncodeToString(buf.Bytes())
 		}
 	}
 
