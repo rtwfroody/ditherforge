@@ -291,10 +291,14 @@ func buildProjectSettings(paletteRGB [][3]uint8, paletteLabels []string, layerHe
 	data["mmu_segmented_region_max_width"] = "1.5"
 
 	// Tell OrcaSlicer which settings differ from the system defaults.
-	// Without this, OrcaSlicer ignores customized values.
+	// Without this, OrcaSlicer ignores customized values. The first element
+	// lists print settings (semicolon-separated); remaining elements are for
+	// per-filament and printer overrides (currently empty).
+	// Settings set here: mmu_segmented_region_max_width (above).
+	// Settings from process JSON: enable_support, prime_tower_width, prime_volume.
 	nFilaments := len(paletteRGB)
 	diffSettings := make([]string, 2+nFilaments) // print + filaments + printer
-	diffSettings[0] = "mmu_segmented_region_max_width"
+	diffSettings[0] = "mmu_segmented_region_max_width;enable_support;prime_tower_width;prime_volume"
 	data["different_settings_to_system"] = diffSettings
 
 	b, err := json.MarshalIndent(data, "", "  ")
