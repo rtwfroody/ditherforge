@@ -279,7 +279,7 @@ func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int,
 
 	fmt.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
-	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, po.PaletteLabels, layerHeight); err != nil {
+	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, layerHeight); err != nil {
 		return 0, fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())

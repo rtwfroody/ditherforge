@@ -79,7 +79,7 @@ const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http:/
 const rels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`
 
 // Export writes a single mesh with per-face palette assignments to a 3MF file.
-func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, paletteLabels []string, layerHeight float32) error {
+func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
 	objUUID := newUUID()
 	instUUID := newUUID()
 	buildUUID := newUUID()
@@ -171,7 +171,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 		return err
 	}
 	if paletteRGB != nil {
-		ps, err := buildProjectSettings(paletteRGB, paletteLabels, layerHeight)
+		ps, err := buildProjectSettings(paletteRGB, layerHeight)
 		if err != nil {
 			return err
 		}
@@ -232,7 +232,7 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	return sb.String(), nil
 }
 
-func buildProjectSettings(paletteRGB [][3]uint8, paletteLabels []string, layerHeight float32) (string, error) {
+func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, error) {
 	// Start with the embedded Snapmaker U1 (0.4mm nozzle) machine profile.
 	data := map[string]interface{}{}
 	if err := json.Unmarshal(snapmakerU1Profile, &data); err != nil {
@@ -277,11 +277,7 @@ func buildProjectSettings(paletteRGB [][3]uint8, paletteLabels []string, layerHe
 	}
 	filamentIDs := make([]string, len(paletteRGB))
 	for i := range filamentIDs {
-		if i < len(paletteLabels) && paletteLabels[i] != "" {
-			filamentIDs[i] = paletteLabels[i]
-		} else {
-			filamentIDs[i] = "Generic PLA"
-		}
+		filamentIDs[i] = "Generic PLA"
 	}
 	data["filament_colour"] = hexColors
 	data["filament_type"] = filamentTypes
