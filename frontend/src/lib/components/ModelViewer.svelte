@@ -178,15 +178,22 @@
     return positions;
   }
 
-  // Unpack per-face colors into a per-vertex color array.
+  // Convert sRGB [0,1] to linear [0,1]. Three.js treats vertex colors as
+  // linear, so we must do this conversion ourselves (unlike textures which
+  // have colorSpace = SRGBColorSpace and are converted by the GPU).
+  function srgbToLinear(c: number): number {
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  // Unpack per-face colors into a per-vertex color array (linear space).
   function unpackFaceColors(td: TypedMeshData, faceIndices: Uint32Array): Float32Array {
     const { faceColors } = td;
     const colors = new Float32Array(faceIndices.length * 9);
     for (let i = 0; i < faceIndices.length; i++) {
       const f = faceIndices[i];
-      const r = faceColors[f * 3] / 255;
-      const g = faceColors[f * 3 + 1] / 255;
-      const b = faceColors[f * 3 + 2] / 255;
+      const r = srgbToLinear(faceColors[f * 3] / 255);
+      const g = srgbToLinear(faceColors[f * 3 + 1] / 255);
+      const b = srgbToLinear(faceColors[f * 3 + 2] / 255);
       const o = i * 9;
       colors[o]     = r; colors[o + 1] = g; colors[o + 2] = b;
       colors[o + 3] = r; colors[o + 4] = g; colors[o + 5] = b;

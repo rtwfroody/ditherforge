@@ -185,11 +185,11 @@
             {#each collectionStore.colors as color, i}
               <div class="group relative">
                 <div
-                  class="h-10 rounded border flex items-center justify-center text-[10px] leading-tight select-none"
+                  class="h-10 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1"
                   style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                  title="{color.label || color.hex}"
+                  title="{color.hex}{color.label ? ' — ' + color.label : ''}"
                 >
-                  {color.label || color.hex}
+                  {#if color.label}{color.label}<br>{/if}{color.hex}
                 </div>
                 {#if isEditable}
                   <button
@@ -238,12 +238,12 @@
                       {#each pickSourceColors as color}
                         <button
                           type="button"
-                          class="h-8 rounded border cursor-pointer flex items-center justify-center text-[10px] leading-tight select-none hover:ring-2 hover:ring-primary transition-shadow"
+                          class="h-10 rounded border cursor-pointer flex items-center justify-center text-[10px] leading-tight select-none text-center px-1 hover:ring-2 hover:ring-primary transition-shadow"
                           style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                          title="{color.label || color.hex}"
+                          title="{color.hex}{color.label ? ' — ' + color.label : ''}"
                           onclick={() => addColorFromPicker(color.hex, color.label)}
                         >
-                          {color.label || color.hex}
+                          {#if color.label}{color.label}<br>{/if}{color.hex}
                         </button>
                       {/each}
                     </div>
