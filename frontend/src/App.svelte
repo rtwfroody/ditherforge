@@ -6,9 +6,10 @@
   import * as Card from '$lib/components/ui/card';
   import * as Select from '$lib/components/ui/select';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon } from '@lucide/svelte';
+  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
@@ -277,9 +278,11 @@
   }
 
   let saving = $state(false);
+  let saveError = $state('');
 
   async function saveToFile() {
     saving = true;
+    saveError = '';
     try {
       const path = await SaveFile();
       if (path) {
@@ -287,8 +290,7 @@
         statusType = 'success';
       }
     } catch (err: any) {
-      statusMessage = `Save error: ${err}`;
-      statusType = 'error';
+      saveError = String(err);
     } finally {
       saving = false;
     }
@@ -547,7 +549,7 @@
     <!-- Action -->
     <div class="mt-4 flex items-center gap-4">
       <Button onclick={saveToFile} disabled={!outputMeshUrl || running || saving} size="lg">
-        {saving ? 'Saving...' : 'Save'}
+        Save
       </Button>
 
       {#if statusMessage}
@@ -590,3 +592,30 @@
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<Dialog.Root open={saving || !!saveError} onOpenChange={(open) => { if (!open) saveError = ''; }}>
+  <Dialog.Content showCloseButton={!!saveError} onInteractOutside={(e) => { if (saving) e.preventDefault(); }} onEscapeKeydown={(e) => { if (saving) e.preventDefault(); }}>
+    <Dialog.Header>
+      <Dialog.Title>{saveError ? 'Save failed' : 'Saving...'}</Dialog.Title>
+      <Dialog.Description>
+        {#if saveError}
+          {saveError}
+        {:else}
+          <span class="flex items-center gap-2">
+            <LoaderCircleIcon class="w-4 h-4 animate-spin" />
+            Writing 3MF file...
+          </span>
+        {/if}
+      </Dialog.Description>
+    </Dialog.Header>
+    {#if saveError}
+      <Dialog.Footer>
+        <Dialog.Close>
+          {#snippet child({ props })}
+            <Button variant="outline" {...props}>Close</Button>
+          {/snippet}
+        </Dialog.Close>
+      </Dialog.Footer>
+    {/if}
+  </Dialog.Content>
+</Dialog.Root>
