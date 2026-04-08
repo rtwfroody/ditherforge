@@ -25,18 +25,28 @@ DitherForge includes a desktop GUI for interactive model processing.
 ### Features
 
 **Live 3D preview** -- Input and output models are displayed side by side with
-synchronized camera controls. Changes to any setting trigger a new pipeline
-run; cached stages are skipped so only the affected steps re-process.
+synchronized camera controls and an XYZ axes gizmo. Changes to any setting
+trigger a new pipeline run; cached stages are skipped so only the affected
+steps re-process. The input preview appears immediately while processing
+continues in the background.
 
 **Color adjustments** -- Brightness, contrast, and saturation sliders adjust
 the input model's colors before palette selection. The input preview updates
 instantly via GPU shaders; the output re-renders with the adjusted colors.
 
-**Flexible palette** -- Choose the number of colors (1--16), optionally lock
-specific colors, and select where the remaining colors come from:
-- **Defaults** -- best fit from cyan, magenta, yellow, black, white, red,
-  green, blue
-- **Inventory** -- pick from a file listing your available filaments
+**Palette grid** -- A visual grid shows all palette colors. Each swatch
+displays the color name and hex value. Lock icons on each swatch let you
+toggle colors between locked (user-chosen) and auto (algorithm-chosen).
+Auto-selected colors update in real time as the pipeline runs, and take
+locked colors into account so they complement rather than duplicate them.
+
+**Filament collections** -- Manage named sets of filament colors. A built-in
+"Panchroma Basic" collection (28 colors) is included. Create your own
+collections, import from text files (`#RRGGBB Label` format), and edit colors
+inline (click a swatch to change its hex or label). The "Inventory" collection
+is always present with sensible defaults. Choose where unlocked palette colors
+come from:
+- **Collection** -- best fit from a selected filament collection
 - **Optimal** -- compute dominant colors from the model's texture via k-means
 
 **Color snap** -- Shifts cell colors toward the nearest palette color by a
@@ -59,7 +69,8 @@ relative multiplier.
 3. **Decimate** the input mesh to reduce triangle count before clipping.
 4. **Adjust colors** -- apply brightness, contrast, and saturation.
 5. **Build palette** -- resolve locked colors and fill remaining slots from the
-   selected source.
+   selected collection or via k-means. Locked colors are included in scoring
+   so auto-picked colors complement them.
 6. **Dither** to approximate the full-color texture with the available palette.
    The default `dizzy` mode uses random traversal with error diffusion to
    spatial neighbors, producing blue-noise-like patterns without directional
@@ -80,8 +91,8 @@ The `ditherforge-cli` binary provides the same pipeline without a GUI.
 ditherforge-cli model.glb --size 100
 ```
 
-This loads `model.glb`, scales it to 100mm, picks 4 colors from the defaults,
-and writes `output.3mf`.
+This loads `model.glb`, scales it to 100mm, picks 4 colors from the default
+palette, and writes `output.3mf`.
 
 ### Options
 
@@ -92,7 +103,7 @@ and writes `output.3mf`.
 | `-n` | `4` | Number of palette colors |
 | `--color` | -- | Lock a color (CSS name or hex, repeatable) |
 | `--auto` | -- | Compute remaining colors optimally via k-means |
-| `--inventory` | -- | Inventory file for remaining colors |
+| `--inventory` | -- | Inventory file for remaining colors (`#RRGGBB Label` format) |
 | `--brightness` | `0` | Brightness adjustment (-100 to +100) |
 | `--contrast` | `0` | Contrast adjustment (-100 to +100) |
 | `--saturation` | `0` | Saturation adjustment (-100 to +100) |
