@@ -22,6 +22,12 @@
   let pickSourceCollection = $state('');
   let pickSourceColors = $state<main.ColorEntry[]>([]);
 
+  // Inline swatch editing state
+  let editIndex = $state(-1);
+  let editHex = $state('');
+  let editLabel = $state('');
+  let editError = $state('');
+
   async function handleImport() {
     const name = await ImportCollection();
     if (name) {
@@ -97,6 +103,10 @@
 
   async function removeColor(index: number) {
     if (!collectionStore.activeCollection) return;
+    if (editIndex >= 0) {
+      if (index === editIndex) editIndex = -1;
+      else if (index < editIndex) editIndex--;
+    }
     const newColors = collectionStore.colors.filter((_, i) => i !== index);
     try {
       await SaveCollectionColors(collectionStore.activeCollection, newColors);
@@ -115,10 +125,43 @@
     pickSourceColors = (await GetCollectionColors(name)) ?? [];
   }
 
+  function startEdit(index: number) {
+    const color = collectionStore.colors[index];
+    editIndex = index;
+    editHex = color.hex;
+    editLabel = color.label;
+    editError = '';
+  }
+
+  function cancelEdit() {
+    editIndex = -1;
+    editError = '';
+  }
+
+  async function saveEdit() {
+    if (editIndex < 0 || !collectionStore.activeCollection) return;
+    editError = '';
+    try {
+      const resolved = await ResolveColor(editHex.trim());
+      const newColors = [...collectionStore.colors];
+      newColors[editIndex] = { hex: resolved.hex, label: editLabel.trim() || resolved.label } as main.ColorEntry;
+      await SaveCollectionColors(collectionStore.activeCollection, newColors);
+      collectionStore.setColors(newColors);
+      editIndex = -1;
+    } catch (err: any) {
+      editError = String(err);
+    }
+  }
+
   function handleColorInputKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       addColor();
     }
+  }
+
+  function handleEditKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') saveEdit();
+    if (e.key === 'Escape') cancelEdit();
   }
 
   // Whether the active collection is editable (not built-in).
@@ -127,7 +170,7 @@
     !collectionStore.collections.find(c => c.name === collectionStore.activeCollection)?.builtIn
   );
 
-  // Reset picker state when active collection changes.
+  // Reset picker/edit state when active collection changes.
   $effect(() => {
     void collectionStore.activeCollection;
     pickFromCollection = false;
@@ -135,6 +178,8 @@
     pickSourceColors = [];
     colorInput = '';
     colorInputError = '';
+    editIndex = -1;
+    editError = '';
   });
 
   collectionStore.ensureLoaded();
@@ -184,22 +229,67 @@
           <div class="grid grid-cols-4 gap-2">
             {#each collectionStore.colors as color, i}
               <div class="group relative">
-                <div
-                  class="h-10 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1"
-                  style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                  title="{color.hex}{color.label ? ' — ' + color.label : ''}"
-                >
-                  {#if color.label}{color.label}<br>{/if}{color.hex}
-                </div>
+                {#if isEditable}
+                  <button
+                    type="button"
+                    class="w-full h-10 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1 cursor-pointer hover:ring-2 hover:ring-primary transition-shadow"
+                    style="background: {color.hex}; color: {contrastColor(color.hex)};"
+                    title="{color.hex}{color.label ? ' — ' + color.label : ''}"
+                    onclick={() => startEdit(i)}
+                  >
+                    {#if color.label}{color.label}<br>{/if}{color.hex}
+                  </button>
+                {:else}
+                  <div
+                    class="h-10 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1"
+                    style="background: {color.hex}; color: {contrastColor(color.hex)};"
+                    title="{color.hex}{color.label ? ' — ' + color.label : ''}"
+                  >
+                    {#if color.label}{color.label}<br>{/if}{color.hex}
+                  </div>
+                {/if}
                 {#if isEditable}
                   <button
                     class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer"
-                    onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColor(i); }}
+                    onclick={(e: MouseEvent) => { e.stopPropagation(); removeColor(i); }}
                   >&times;</button>
                 {/if}
               </div>
             {/each}
           </div>
+
+          <!-- Inline edit panel -->
+          {#if editIndex >= 0 && isEditable}
+            <div class="border rounded-lg bg-popover p-3 space-y-2">
+              <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded border shrink-0" style="background: {editHex || collectionStore.colors[editIndex]?.hex};"></div>
+                <span class="text-sm font-medium">Edit color</span>
+              </div>
+              <div class="flex gap-2">
+                <Input
+                  placeholder="Hex (#FF0000) or name"
+                  bind:value={editHex}
+                  onkeydown={handleEditKeydown}
+                  class="flex-1"
+                />
+              </div>
+              <div class="flex gap-2">
+                <Input
+                  placeholder="Label (optional)"
+                  bind:value={editLabel}
+                  onkeydown={handleEditKeydown}
+                  class="flex-1"
+                />
+              </div>
+              {#if editError}
+                <p class="text-xs text-destructive">{editError}</p>
+              {/if}
+              <div class="flex gap-2 justify-end">
+                <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
+                <Button variant="outline" size="sm" onclick={saveEdit}>Save</Button>
+              </div>
+            </div>
+          {/if}
 
           <!-- Add color (only for editable collections) -->
           {#if isEditable}
