@@ -6,6 +6,9 @@ build/bin/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/package.json.md5
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # Output files
 *.3mf
