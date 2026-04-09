@@ -37,7 +37,6 @@
   type ColorSlot = ColorInfo | null;
   let colorSlots = $state<ColorSlot[]>([null, null, null, null]);
   let pickerIndex = $state<number | null>(null);
-  let colorSource: 'inventory' | 'auto' = $state('inventory');
   // For collection-based inventory source:
   let inventoryCollection = $state('Inventory');
   let inventoryCollectionColors = $state<{ hex: string; label: string }[]>([]);
@@ -170,7 +169,7 @@
     if (event.gen < latestGen) return;
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;
-    const collName = colorSource === 'inventory' ? inventoryCollection : '';
+    const collName = inventoryCollection;
     resolvedAutoColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
   });
 
@@ -189,7 +188,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, ...colorSlots, colorSource,
+          layerHeight, ...colorSlots,
           inventoryCollectionColors,
           brightness, contrast, saturation,
           dither, colorSnap, noMerge, noSimplify, stats];
@@ -227,7 +226,7 @@
   }
 
   function buildOpts(force: boolean): pipeline.Options {
-    const invEntries = (colorSource === 'inventory') ? inventoryCollectionColors : [];
+    const invEntries = inventoryCollectionColors;
     const invColors = invEntries.map(c => hexToRgb(c.hex));
     const invLabels = invEntries.map(c => c.label);
 
@@ -235,7 +234,6 @@
       Input: inputFile,
       NumColors: colorSlots.length,
       LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
-      AutoColors: colorSource === 'auto',
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
@@ -478,22 +476,10 @@
           <!-- Remaining color source -->
           <div class="space-y-2">
             <Label>Unlocked colors from</Label>
-            <div class="flex gap-4">
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="inventory" checked={colorSource === 'inventory'} onchange={() => { colorSource = 'inventory'; }} />
-                Collection
-              </label>
-              <label class="flex items-center gap-1.5 text-sm">
-                <input type="radio" name="colorsource" value="auto" checked={colorSource === 'auto'} onchange={() => { colorSource = 'auto'; }} />
-                Optimal
-              </label>
-            </div>
-            {#if colorSource === 'inventory'}
-              <CollectionSelect
-                bind:selected={inventoryCollection}
-                onchange={loadInventoryCollectionColors}
-              />
-            {/if}
+            <CollectionSelect
+              bind:selected={inventoryCollection}
+              onchange={loadInventoryCollectionColors}
+            />
           </div>
 
           <!-- Color snap -->

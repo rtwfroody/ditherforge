@@ -64,23 +64,7 @@ func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig,
 		return pal, labels, display, nil
 	}
 
-	if pcfg.AutoColors {
-		fmt.Printf("  Computing %d-color palette from cell colors...", remaining)
-		computed := palette.ComputePaletteWithLocked(cellColors, remaining, lockedColors)
-		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
-		copy(pal, lockedColors)
-		pal = append(pal, computed...)
-		labels := make([]string, len(pal))
-		copy(labels, lockedLabels)
-		strs := make([]string, len(computed))
-		for i, p := range computed {
-			strs[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
-		}
-		display := " " + strings.Join(strs, ", ")
-		return pal, labels, display, nil
-	}
-
-	return nil, nil, "", fmt.Errorf("palette config has %d remaining slots but no color source (inventory or auto) is set", remaining)
+	return nil, nil, "", fmt.Errorf("palette config has %d remaining slots but no inventory is set", remaining)
 }
 
 // filterInventory returns inventory entries that don't match any locked color.

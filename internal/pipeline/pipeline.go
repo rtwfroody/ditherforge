@@ -24,7 +24,6 @@ type Options struct {
 	Input          string
 	NumColors      int
 	LockedColors   []string
-	AutoColors     bool
 	Scale          float32
 	Output         string
 	NozzleDiameter float32
@@ -595,8 +594,6 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 			}
 			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c, Label: label})
 		}
-	} else if opts.AutoColors {
-		pcfg.AutoColors = true
 	} else {
 		// Default: select from built-in color set.
 		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}

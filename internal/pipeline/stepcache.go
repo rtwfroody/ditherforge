@@ -130,7 +130,6 @@ type paletteSettings struct {
 	InventoryContents string   // file contents for hashing; empty if no file
 	InventoryColors   [][3]uint8
 	InventoryLabels   []string
-	AutoColors        bool
 	ColorSnap         float64
 }
 
@@ -201,7 +200,6 @@ func settingsForStage(stage StageID, opts Options) any {
 			InventoryContents: contents,
 			InventoryColors:   opts.InventoryColors,
 			InventoryLabels:   opts.InventoryLabels,
-			AutoColors:        opts.AutoColors,
 			ColorSnap:         opts.ColorSnap,
 		}
 	case StageDither:
@@ -248,7 +246,6 @@ func stageKey(stage StageID, opts Options) uint64 {
 		for _, l := range v.InventoryLabels {
 			writeString(h, l)
 		}
-		writeBool(h, v.AutoColors)
 		writeFloat64(h, v.ColorSnap)
 	case ditherSettings:
 		writeString(h, v.Dither)

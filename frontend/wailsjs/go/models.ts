@@ -39,7 +39,6 @@ export namespace pipeline {
 	    Input: string;
 	    NumColors: number;
 	    LockedColors: string[];
-	    AutoColors: boolean;
 	    Scale: number;
 	    Output: string;
 	    NozzleDiameter: number;
@@ -67,7 +66,6 @@ export namespace pipeline {
 	        this.Input = source["Input"];
 	        this.NumColors = source["NumColors"];
 	        this.LockedColors = source["LockedColors"];
-	        this.AutoColors = source["AutoColors"];
 	        this.Scale = source["Scale"];
 	        this.Output = source["Output"];
 	        this.NozzleDiameter = source["NozzleDiameter"];

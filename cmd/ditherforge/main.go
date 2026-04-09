@@ -29,7 +29,6 @@ type Args struct {
 	Input          string   `arg:"positional,required" help:"Input .glb or .3mf file"`
 	NumColors      int      `arg:"-n" default:"4" help:"Number of palette colors"`
 	Color          []string `arg:"--color,separate" help:"Lock a color (CSS name or hex, repeatable, comma-separated)"`
-	Auto           bool     `arg:"--auto" help:"Compute remaining colors optimally via k-means"`
 	Inventory      string   `arg:"--inventory" help:"Inventory file for remaining colors"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
@@ -63,7 +62,6 @@ func main() {
 		Input:          args.Input,
 		NumColors:      args.NumColors,
 		LockedColors:   expandColors(args.Color),
-		AutoColors:     args.Auto,
 		InventoryFile:  args.Inventory,
 		Scale:          args.Scale,
 		Output:         args.Output,
