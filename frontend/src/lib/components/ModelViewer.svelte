@@ -299,6 +299,9 @@
 
   function computeModelBounds(td: TypedMeshData) {
     const verts = td.vertices;
+    if (verts.length === 0) {
+      return { center: [0, 0, 0] as [number, number, number], size: 0 };
+    }
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < verts.length; i += 3) {
@@ -312,14 +315,17 @@
     return { center, size };
   }
 
-  function computeCameraSetup(td: TypedMeshData): { position: [number, number, number]; target: [number, number, number] } {
-    const { center, size } = computeModelBounds(td);
+  function computeCameraSetup(td: TypedMeshData): { position: [number, number, number]; target: [number, number, number]; near: number; far: number } {
+    const { center, size: rawSize } = computeModelBounds(td);
+    const size = Math.max(rawSize, 1e-4); // prevent degenerate camera for zero-size models
     const dist = size * 1.5;
     // Camera looks with X left-to-right, Y front-to-back, Z bottom-to-top.
     // Position: offset in +X, -Y (toward viewer), +Z (above).
     return {
       position: [center[0] + dist * 0.3, center[1] - dist * 0.8, center[2] + dist * 0.5],
       target: center,
+      near: size * 0.001,
+      far: size * 20,
     };
   }
 
@@ -343,7 +349,7 @@
   }
 
   let scene = $state<SceneData | null>(null);
-  let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
+  let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number]; near: number; far: number } | null>(null);
   let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
   let hasHadCamera = false; // true once camera has been positioned
 
@@ -367,6 +373,8 @@
             cameraSetup = {
               position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
               target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
+              near: sharedCamera.near,
+              far: sharedCamera.far,
             };
             appliedGen = sharedCamera.generation;
           } else {
@@ -376,6 +384,8 @@
             sharedCamera.posX = setup.position[0];
             sharedCamera.posY = setup.position[1];
             sharedCamera.posZ = setup.position[2];
+            sharedCamera.near = setup.near;
+            sharedCamera.far = setup.far;
             sharedCamera.targetX = setup.target[0];
             sharedCamera.targetY = setup.target[1];
             sharedCamera.targetZ = setup.target[2];
@@ -481,8 +491,8 @@
           position={cameraSetup.position}
           up={[0, 0, 1]}
           fov={45}
-          near={0.1}
-          far={10000}
+          near={cameraSetup.near}
+          far={cameraSetup.far}
         >
           <OrbitControls
             bind:ref={controlsRef}

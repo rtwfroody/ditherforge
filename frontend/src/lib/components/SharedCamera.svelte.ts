@@ -10,6 +10,8 @@ export class SharedCamera {
   targetX = $state(0);
   targetY = $state(0);
   targetZ = $state(0);
+  near = $state(0.1);
+  far = $state(10000);
   initialized = $state(false);
   generation = $state(0);
 }
