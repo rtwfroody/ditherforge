@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"math/rand"
 	"os"
 	"runtime"
 	"sort"
@@ -518,49 +517,47 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 	}
 
 	combos := combinationsCount(len(inventory), n)
-	exhaustive := combos <= 50000
-	total := 50000
-	if exhaustive {
-		total = combos
-	}
+	exhaustive := combos <= 2000
 
-	var counter atomic.Int64
-	bar := progress.NewBar(total, "  Selecting colors")
 	start := time.Now()
-
-	// Drive progress bar from a separate goroutine.
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				bar.Set64(counter.Load())
-			case <-done:
-				bar.Set64(counter.Load())
-				return
-			}
-		}
-	}()
-
 	var bestSubset []int
+	var evaluated int
 	var err error
 	if exhaustive {
+		var counter atomic.Int64
+		bar := progress.NewBar(combos, "  Selecting colors")
+		done := make(chan struct{})
+		exited := make(chan struct{})
+		go func() {
+			defer close(exited)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					bar.Set64(counter.Load())
+				case <-done:
+					bar.Set64(counter.Load())
+					return
+				}
+			}
+		}()
 		bestSubset, err = exhaustiveSearch(ctx, invLab, lockedLab, samples, n, scorer, &counter)
+		close(done)
+		<-exited
+		evaluated = int(counter.Load())
+		if err != nil {
+			bar.Finish()
+			return nil, err
+		}
+		progress.FinishBar(bar, "Selected colors", fmt.Sprintf("(%d evaluated)", evaluated), time.Since(start))
 	} else {
-		bestSubset, err = randomSearch(ctx, invLab, lockedLab, samples, n, 50000, scorer, &counter)
+		bestSubset, evaluated, err = greedySwapSearch(ctx, invLab, lockedLab, samples, n, scorer)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("  Selected colors (%d evaluated) in %.1fs\n", evaluated, time.Since(start).Seconds())
 	}
-	close(done)
-	<-exited
-	elapsed := time.Since(start)
-	if err != nil {
-		bar.Finish()
-		return nil, err
-	}
-	progress.FinishBar(bar, "Selected colors", fmt.Sprintf("(%d evaluated)", total), elapsed)
 
 	result := make([]InventoryEntry, n)
 	for i, idx := range bestSubset {
@@ -722,44 +719,76 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 	return bestSubset, nil
 }
 
-// randomSearch evaluates numTrials random n-color subsets and returns the best.
-func randomSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc, progress *atomic.Int64) ([]int, error) {
-	rng := rand.New(rand.NewSource(42))
+// greedySwapSearch builds an initial subset greedily, then refines with
+// pairwise swaps (the PAM k-medoids algorithm). Returns the best subset
+// found and the total number of scoring calls made.
+func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) ([]int, int, error) {
 	invN := len(invLab)
+	evaluated := 0
 
-	bestScore := math.MaxFloat64
-	var bestSubset []int
-	indices := make([]int, n)
-
-	for trial := 0; trial < numTrials; trial++ {
+	// Greedy construction: add one color at a time, picking the candidate
+	// that most reduces the score.
+	selected := make([]int, 0, n)
+	inSubset := make([]bool, invN)
+	for len(selected) < n {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, evaluated, ctx.Err()
 		}
-		progress.Add(1)
-		for i := 0; i < n; i++ {
-			for {
-				indices[i] = rng.Intn(invN)
-				dup := false
-				for j := 0; j < i; j++ {
-					if indices[j] == indices[i] {
-						dup = true
-						break
-					}
+		bestIdx := -1
+		bestScore := math.MaxFloat64
+		selected = append(selected, 0) // extend by one slot
+		for ci := 0; ci < invN; ci++ {
+			if inSubset[ci] {
+				continue
+			}
+			selected[len(selected)-1] = ci
+			evaluated++
+			s := score(selected, invLab, lockedLab, samples)
+			if s < bestScore {
+				bestScore = s
+				bestIdx = ci
+			}
+		}
+		selected[len(selected)-1] = bestIdx
+		inSubset[bestIdx] = true
+	}
+
+	// Swap refinement: try replacing each selected color with each
+	// unselected color. Repeat until no improvement found.
+	currentScore := score(selected, invLab, lockedLab, samples)
+	evaluated++
+	for {
+		improved := false
+		for si := 0; si < n; si++ {
+			if ctx.Err() != nil {
+				return nil, evaluated, ctx.Err()
+			}
+			old := selected[si]
+			for ci := 0; ci < invN; ci++ {
+				if inSubset[ci] {
+					continue
 				}
-				if !dup {
-					break
+				selected[si] = ci
+				evaluated++
+				s := score(selected, invLab, lockedLab, samples)
+				if s < currentScore {
+					// Accept the swap.
+					inSubset[old] = false
+					inSubset[ci] = true
+					currentScore = s
+					old = ci
+					improved = true
+				} else {
+					selected[si] = old
 				}
 			}
 		}
-
-		s := score(indices, invLab, lockedLab, samples)
-		if s < bestScore {
-			bestScore = s
-			bestSubset = make([]int, n)
-			copy(bestSubset, indices)
+		if !improved {
+			break
 		}
 	}
-	return bestSubset, nil
+
+	return selected, evaluated, nil
 }
 
 func combinationsCount(n, k int) int {
