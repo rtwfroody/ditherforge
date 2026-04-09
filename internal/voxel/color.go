@@ -19,7 +19,7 @@ import (
 // Returns the palette RGB values, parallel labels, and a display string
 // for logging. Labels come from inventory entries; locked entries carry
 // whatever label was set in PaletteConfig.Locked.
-func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, []string, string, error) {
+func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][3]uint8, []string, string, error) {
 	lockedColors := make([][3]uint8, len(pcfg.Locked))
 	lockedLabels := make([]string, len(pcfg.Locked))
 	for i, e := range pcfg.Locked {
@@ -43,7 +43,10 @@ func ResolvePalette(cells []ActiveCell, pcfg PaletteConfig, dithering bool) ([][
 			return nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
 		fmt.Printf("  Selecting %d colors from %d-color inventory...", remaining, len(filtered))
-		selected := palette.SelectFromInventory(cellColors, filtered, remaining, lockedColors, dithering)
+		selected, err := palette.SelectFromInventory(ctx, cellColors, filtered, remaining, lockedColors, dithering)
+		if err != nil {
+			return nil, nil, "", err
+		}
 		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
 		copy(pal, lockedColors)
 		labels := make([]string, len(lockedLabels), pcfg.NumColors)

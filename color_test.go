@@ -162,7 +162,7 @@ func TestColorSelection(t *testing.T) {
 				NumColors: tc.nColors,
 				Inventory: inv,
 			}
-			paletteRGB, _, _, err := voxel.ResolvePalette(cells, pcfg, true)
+			paletteRGB, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
 			if err != nil {
 				t.Fatalf("ResolvePalette: %v", err)
 			}
@@ -235,7 +235,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -261,7 +261,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -283,7 +283,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    []palette.InventoryEntry{{Color: [3]uint8{255, 0, 0}}},
 			Inventory: smallInv,
 		}
-		_, _, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
 		if err == nil {
 			t.Fatalf("expected error when inventory is exhausted after filtering")
 		}
@@ -293,7 +293,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 		pcfg := voxel.PaletteConfig{
 			NumColors: 3,
 		}
-		_, _, _, err := voxel.ResolvePalette(cells, pcfg, true)
+		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
 		if err == nil {
 			t.Fatalf("expected error when no color source is set")
 		}

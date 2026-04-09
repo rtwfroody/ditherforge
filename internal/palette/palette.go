@@ -4,6 +4,7 @@ package palette
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -476,9 +477,9 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 // When dithering is true, uses hull-based scoring that accounts for
 // dithering's ability to mix colors. When false, uses nearest-color scoring
 // that minimizes the error when each cell gets exactly one color.
-func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool) []InventoryEntry {
+func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool) ([]InventoryEntry, error) {
 	if n >= len(inventory) {
-		return inventory
+		return inventory, nil
 	}
 
 	samples := CellColorHistogram(cellColors)
@@ -514,17 +515,21 @@ func SelectFromInventory(cellColors [][3]uint8, inventory []InventoryEntry, n in
 	}
 
 	var bestSubset []int
+	var err error
 	if combinationsCount(len(inventory), n) <= 50000 {
-		bestSubset = exhaustiveSearch(invLab, lockedLab, samples, n, scorer)
+		bestSubset, err = exhaustiveSearch(ctx, invLab, lockedLab, samples, n, scorer)
 	} else {
-		bestSubset = randomSearch(invLab, lockedLab, samples, n, 50000, scorer)
+		bestSubset, err = randomSearch(ctx, invLab, lockedLab, samples, n, 50000, scorer)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	result := make([]InventoryEntry, n)
 	for i, idx := range bestSubset {
 		result[i] = inventory[idx]
 	}
-	return result
+	return result, nil
 }
 
 // scoreFunc is the signature for palette subset scoring functions.
@@ -596,9 +601,9 @@ func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]floa
 
 // exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
 // minimizes the given scoring function. Uses parallel workers.
-func exhaustiveSearch(invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) []int {
+func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) ([]int, error) {
 	if n < 1 {
-		return nil
+		return nil, nil
 	}
 
 	// Generate all subsets where the first index varies, and farm out to workers.
@@ -619,6 +624,9 @@ func exhaustiveSearch(invLab [][3]float64, lockedLab [][3]float64, samples []Wei
 			localBest := math.MaxFloat64
 			var localSubset []int
 			for subset := range jobs {
+				if ctx.Err() != nil {
+					break
+				}
 				s := score(subset, invLab, lockedLab, samples)
 				if s < localBest {
 					localBest = s
@@ -635,10 +643,17 @@ func exhaustiveSearch(invLab [][3]float64, lockedLab [][3]float64, samples []Wei
 		indices := make([]int, n)
 		var enumerate func(start, depth int)
 		enumerate = func(start, depth int) {
+			if ctx.Err() != nil {
+				return
+			}
 			if depth == n {
 				sub := make([]int, n)
 				copy(sub, indices)
-				jobs <- sub
+				select {
+				case jobs <- sub:
+				case <-ctx.Done():
+					return
+				}
 				return
 			}
 			for i := start; i <= len(invLab)-(n-depth); i++ {
@@ -663,11 +678,14 @@ func exhaustiveSearch(invLab [][3]float64, lockedLab [][3]float64, samples []Wei
 			bestSubset = r.subset
 		}
 	}
-	return bestSubset
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return bestSubset, nil
 }
 
 // randomSearch evaluates numTrials random n-color subsets and returns the best.
-func randomSearch(invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) []int {
+func randomSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) ([]int, error) {
 	rng := rand.New(rand.NewSource(42))
 	invN := len(invLab)
 
@@ -676,6 +694,9 @@ func randomSearch(invLab [][3]float64, lockedLab [][3]float64, samples []Weighte
 	indices := make([]int, n)
 
 	for trial := 0; trial < numTrials; trial++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		for i := 0; i < n; i++ {
 			for {
 				indices[i] = rng.Intn(invN)
@@ -699,7 +720,7 @@ func randomSearch(invLab [][3]float64, lockedLab [][3]float64, samples []Weighte
 			copy(bestSubset, indices)
 		}
 	}
-	return bestSubset
+	return bestSubset, nil
 }
 
 func combinationsCount(n, k int) int {

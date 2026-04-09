@@ -428,7 +428,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *color
 	copy(cells, cao.Cells)
 
 	ditherMode := opts.Dither
-	pal, palLabels, palDisplay, err := voxel.ResolvePalette(cells, pcfg, ditherMode != "none")
+	pal, palLabels, palDisplay, err := voxel.ResolvePalette(ctx, cells, pcfg, ditherMode != "none")
 	if err != nil {
 		return err
 	}

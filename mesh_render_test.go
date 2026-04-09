@@ -104,7 +104,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		pal, _, _, err := voxel.ResolvePalette(cells, defaultPaletteConfig(), true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, defaultPaletteConfig(), true)
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return
