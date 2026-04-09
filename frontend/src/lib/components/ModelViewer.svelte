@@ -377,6 +377,12 @@
               far: sharedCamera.far,
             };
             appliedGen = sharedCamera.generation;
+            // Suppress handleControlsChange during OrbitControls mount so
+            // it doesn't write stale cameraSetup values back to sharedCamera
+            // (the user may have moved the input camera since we captured
+            // these values).  Clear after two frames to allow normal interaction.
+            mountSyncing = true;
+            requestAnimationFrame(() => requestAnimationFrame(() => { mountSyncing = false; }));
           } else {
             // First viewer to load — compute initial camera and share it.
             const setup = computeCameraSetup(td);
@@ -438,6 +444,9 @@
   let appliedGen = 0;
   // Guards against re-entrant onchange during programmatic camera moves.
   let syncing = false;
+  // Suppresses handleControlsChange during OrbitControls mount (separate from
+  // syncing so the sync effect doesn't accidentally clear it).
+  let mountSyncing = false;
 
   // Sync this viewer's camera to the shared camera state when it changes.
   $effect(() => {
@@ -457,7 +466,7 @@
   // firing onchange during mount with the same values we just set).
   const EPS = 1e-6;
   function handleControlsChange() {
-    if (syncing || !controlsRef) return;
+    if (syncing || mountSyncing || !controlsRef) return;
     const pos = controlsRef.object.position;
     const tgt = controlsRef.target;
     if (Math.abs(pos.x - sharedCamera.posX) < EPS &&
