@@ -90,7 +90,7 @@ var colorTests = []colorTestCase{
 	},
 	{
 		name:      "earth",
-		glbPath:   "../objects/earth.glb",
+		glbPath:   "objects/earth.glb",
 		nColors:   4,
 		inventory: panchromaInventory,
 		anyOf: [][][3]uint8{
