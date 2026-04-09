@@ -14,10 +14,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/clusters"
 	"github.com/muesli/kmeans"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"golang.org/x/image/colornames"
 )
 
@@ -514,16 +517,50 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 		scorer = weightedNearestScore
 	}
 
+	combos := combinationsCount(len(inventory), n)
+	exhaustive := combos <= 50000
+	total := 50000
+	if exhaustive {
+		total = combos
+	}
+
+	var counter atomic.Int64
+	bar := progress.NewBar(total, "  Selecting colors")
+	start := time.Now()
+
+	// Drive progress bar from a separate goroutine.
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				bar.Set64(counter.Load())
+			case <-done:
+				bar.Set64(counter.Load())
+				return
+			}
+		}
+	}()
+
 	var bestSubset []int
 	var err error
-	if combinationsCount(len(inventory), n) <= 50000 {
-		bestSubset, err = exhaustiveSearch(ctx, invLab, lockedLab, samples, n, scorer)
+	if exhaustive {
+		bestSubset, err = exhaustiveSearch(ctx, invLab, lockedLab, samples, n, scorer, &counter)
 	} else {
-		bestSubset, err = randomSearch(ctx, invLab, lockedLab, samples, n, 50000, scorer)
+		bestSubset, err = randomSearch(ctx, invLab, lockedLab, samples, n, 50000, scorer, &counter)
 	}
+	close(done)
+	<-exited
+	elapsed := time.Since(start)
 	if err != nil {
+		bar.Finish()
 		return nil, err
 	}
+	progress.FinishBar(bar, "Selected colors", fmt.Sprintf("(%d evaluated)", total), elapsed)
 
 	result := make([]InventoryEntry, n)
 	for i, idx := range bestSubset {
@@ -601,7 +638,7 @@ func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]floa
 
 // exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
 // minimizes the given scoring function. Uses parallel workers.
-func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) ([]int, error) {
+func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, progress *atomic.Int64) ([]int, error) {
 	if n < 1 {
 		return nil, nil
 	}
@@ -627,6 +664,7 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 				if ctx.Err() != nil {
 					break
 				}
+				progress.Add(1)
 				s := score(subset, invLab, lockedLab, samples)
 				if s < localBest {
 					localBest = s
@@ -685,7 +723,7 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 }
 
 // randomSearch evaluates numTrials random n-color subsets and returns the best.
-func randomSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc) ([]int, error) {
+func randomSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, numTrials int, score scoreFunc, progress *atomic.Int64) ([]int, error) {
 	rng := rand.New(rand.NewSource(42))
 	invN := len(invLab)
 
@@ -697,6 +735,7 @@ func randomSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		progress.Add(1)
 		for i := 0; i < n; i++ {
 			for {
 				indices[i] = rng.Intn(invN)

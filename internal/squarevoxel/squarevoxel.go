@@ -7,39 +7,14 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
-	"github.com/schollz/progressbar/v3"
-	"golang.org/x/term"
 )
-
-var isTTY = term.IsTerminal(int(os.Stderr.Fd()))
-
-func newBar(total int, description string) *progressbar.ProgressBar {
-	if !isTTY {
-		// Non-interactive: return a silent bar.
-		return progressbar.NewOptions(total,
-			progressbar.OptionSetVisibility(false),
-		)
-	}
-	return progressbar.NewOptions(total,
-		progressbar.OptionSetDescription(description),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionShowCount(),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionThrottle(100*time.Millisecond),
-	)
-}
-
-func finishBar(bar *progressbar.ProgressBar, description string, detail string, elapsed time.Duration) {
-	bar.Finish()
-	fmt.Printf("  %s %s in %.1fs\n", description, detail, elapsed.Seconds())
-}
 
 // Voxelize performs voxelization and cell coloring on the input model.
 // Returns the active cells, a cell-key-to-index map, and the grid minimum
@@ -72,7 +47,7 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 
 	// 3. Triangle-overlap voxelization.
 	tVoxelize := time.Now()
-	bar := newBar(len(model.Faces), "  Voxelizing")
+	bar := progress.NewBar(len(model.Faces), "  Voxelizing")
 	halfExtent := [3]float32{cellSize / 2, cellSize / 2, layerH / 2}
 	cellSet := make(map[voxel.CellKey]struct{})
 	for fi := range model.Faces {
@@ -125,12 +100,12 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 			}
 		}
 	}
-	finishBar(bar, "Voxelized", fmt.Sprintf("%d cells", len(cellSet)), time.Since(tVoxelize))
+	progress.FinishBar(bar, "Voxelized", fmt.Sprintf("%d cells", len(cellSet)), time.Since(tVoxelize))
 
 	// Color each active cell (parallelized).
 	tColor := time.Now()
 	colorRadius := cellSize * 3
-	barColor := newBar(len(cellSet), "  Coloring cells")
+	barColor := progress.NewBar(len(cellSet), "  Coloring cells")
 
 	// Convert map to slice for indexed partitioning.
 	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
@@ -197,7 +172,7 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	for _, wc := range workerCells {
 		cells = append(cells, wc...)
 	}
-	finishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
+	progress.FinishBar(barColor, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
 	if len(cells) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("no active cells found")
 	}
