@@ -109,14 +109,14 @@
   let inputMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
 
-  // Resolved auto colors from the backend (the non-locked portion of the palette).
-  let resolvedAutoColors = $state<ColorInfo[]>([]);
+  // Resolved unlocked colors from the backend (the non-locked portion of the palette).
+  let resolvedUnlockedColors = $state<ColorInfo[]>([]);
 
-  // Per-slot resolved color: maps auto colors back to their slot positions.
+  // Per-slot resolved color: maps unlocked colors back to their slot positions.
   let resolvedBySlot = $derived.by((): (ColorInfo | null)[] => {
-    let autoIdx = 0;
+    let idx = 0;
     return colorSlots.map(slot =>
-      slot !== null ? null : (resolvedAutoColors[autoIdx++] ?? null)
+      slot !== null ? null : (resolvedUnlockedColors[idx++] ?? null)
     );
   });
 
@@ -170,7 +170,7 @@
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;
     const collName = inventoryCollection;
-    resolvedAutoColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
+    resolvedUnlockedColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
   });
 
   function scheduleProcess(delay = 300) {
@@ -266,7 +266,7 @@
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
-    resolvedAutoColors = [] as ColorInfo[];
+    resolvedUnlockedColors = [] as ColorInfo[];
 
     // ProcessPipeline enqueues the request and returns immediately.
     // The backend worker processes only the latest request and delivers
