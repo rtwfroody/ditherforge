@@ -1,4 +1,4 @@
-package main
+package tests
 
 import (
 	"context"
@@ -279,11 +279,11 @@ func loadTestModel(t *testing.T, path string) *loader.LoadedModel {
 	return model
 }
 
-// discoverTestModels finds all GLB and 3MF files in objects/.
+// discoverTestModels finds all GLB and 3MF files in ../objects/.
 func discoverTestModels(t *testing.T) []string {
 	t.Helper()
 	var paths []string
-	for _, pattern := range []string{"objects/*.glb", "objects/*.3mf"} {
+	for _, pattern := range []string{"../objects/*.glb", "../objects/*.3mf"} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatalf("globbing %s: %v", pattern, err)
@@ -291,7 +291,7 @@ func discoverTestModels(t *testing.T) []string {
 		paths = append(paths, matches...)
 	}
 	if len(paths) == 0 {
-		t.Skip("no model files in objects/")
+		t.Skip("no model files in ../objects/")
 	}
 	return paths
 }
@@ -299,7 +299,7 @@ func discoverTestModels(t *testing.T) []string {
 func TestMeshRender(t *testing.T) {
 	modelPaths := discoverTestModels(t)
 
-	outdir := filepath.Join("tests", "output")
+	outdir := "output"
 
 	for _, modelPath := range modelPaths {
 		modelPath := modelPath
@@ -626,7 +626,7 @@ func saveDeltaEImage(t *testing.T, outdir, name string, blockDeltaEs [][]float64
 func TestTextureRender(t *testing.T) {
 	modelPaths := discoverTestModels(t)
 
-	outdir := filepath.Join("tests", "output")
+	outdir := "output"
 
 	for _, modelPath := range modelPaths {
 		modelPath := modelPath
