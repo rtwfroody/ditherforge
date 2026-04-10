@@ -66,7 +66,10 @@
     targetPickerIndex = null;
   }
 
+  const MAX_PINS = 8;
+
   function addPin() {
+    if (pins.length >= MAX_PINS) return;
     pins = [...pins, { sourceHex: '', targetHex: '', targetLabel: '', sigma: 30 }];
   }
 
@@ -90,7 +93,7 @@
 <div class="space-y-2">
   <div class="flex items-center justify-between">
     <Label>Color Pins</Label>
-    <Button variant="ghost" size="sm" onclick={addPin} class="h-6 px-2">
+    <Button variant="ghost" size="sm" onclick={addPin} class="h-6 px-2" disabled={pins.length >= MAX_PINS}>
       <PlusIcon class="h-3 w-3 mr-1" />Add
     </Button>
   </div>

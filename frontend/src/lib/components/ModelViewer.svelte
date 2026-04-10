@@ -22,6 +22,8 @@
 
   import { SharedCamera } from './SharedCamera.svelte';
 
+  type WarpPin = { sourceHex: string; targetHex: string; sigma: number };
+
   let {
     meshUrl,
     label,
@@ -33,6 +35,7 @@
     saturation = 0,
     pickMode = false,
     onColorPick,
+    warpPins = [],
   }: {
     meshUrl?: string;
     label: string;
@@ -44,6 +47,7 @@
     saturation?: number;
     pickMode?: boolean;
     onColorPick?: (hex: string) => void;
+    warpPins?: WarpPin[];
   } = $props();
 
   // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
@@ -71,16 +75,209 @@
     uSaturation: { value: 1.0 },
   };
 
+  // --- Color Warp Preview (full RBF in GLSL) ---
+
+  const MAX_WARP_PINS = 8;
+
+  const warpUniforms = {
+    uWarpPinCount: { value: 0 },
+    uWarpSourceLab: { value: Array.from({length: MAX_WARP_PINS}, () => new THREE.Vector3()) },
+    uWarpWeights: { value: Array.from({length: MAX_WARP_PINS}, () => new THREE.Vector3()) },
+    uWarpSigmas: { value: new Array(MAX_WARP_PINS).fill(1.0) },
+  };
+
+  // GLSL declarations: uniforms + Lab conversion + RBF evaluation.
+  const warpGLSL = `
+    const int MAX_WARP_PINS = 8;
+    uniform int uWarpPinCount;
+    uniform vec3 uWarpSourceLab[MAX_WARP_PINS];
+    uniform vec3 uWarpWeights[MAX_WARP_PINS];
+    uniform float uWarpSigmas[MAX_WARP_PINS];
+
+    const vec3 WARP_D65 = vec3(0.95047, 1.0, 1.08883);
+
+    float warpLabF(float t) {
+      float delta3 = 0.00885645; // (6/29)^3
+      float scale = 7.787037;    // 1/(3*(6/29)^2)
+      return t > delta3 ? pow(t, 1.0 / 3.0) : t * scale + 4.0 / 29.0;
+    }
+
+    vec3 warpLinearRGBtoLab(vec3 rgb) {
+      float x = 0.4124564 * rgb.r + 0.3575761 * rgb.g + 0.1804375 * rgb.b;
+      float y = 0.2126729 * rgb.r + 0.7151522 * rgb.g + 0.0721750 * rgb.b;
+      float z = 0.0193339 * rgb.r + 0.1191920 * rgb.g + 0.9503041 * rgb.b;
+      float fx = warpLabF(x / WARP_D65.x);
+      float fy = warpLabF(y / WARP_D65.y);
+      float fz = warpLabF(z / WARP_D65.z);
+      return vec3(1.16 * fy - 0.16, 5.0 * (fx - fy), 2.0 * (fy - fz));
+    }
+
+    float warpLabFInv(float t) {
+      float delta = 6.0 / 29.0;
+      return t > delta ? t * t * t : 3.0 * delta * delta * (t - 4.0 / 29.0);
+    }
+
+    vec3 warpLabToLinearRGB(vec3 lab) {
+      float fy = (lab.x + 0.16) / 1.16;
+      float fx = fy + lab.y / 5.0;
+      float fz = fy - lab.z / 2.0;
+      float x = WARP_D65.x * warpLabFInv(fx);
+      float y = WARP_D65.y * warpLabFInv(fy);
+      float z = WARP_D65.z * warpLabFInv(fz);
+      float r =  3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+      float g = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+      float b =  0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+      return clamp(vec3(r, g, b), 0.0, 1.0);
+    }
+  `;
+
+  // Applied after brightness/contrast/saturation adjustment.
+  const warpApply = `
+    {
+      if (uWarpPinCount > 0) {
+        vec3 lab = warpLinearRGBtoLab(diffuseColor.rgb);
+        for (int i = 0; i < MAX_WARP_PINS; i++) {
+          if (i >= uWarpPinCount) break;
+          vec3 diff = lab - uWarpSourceLab[i];
+          float distSq = dot(diff, diff);
+          float twoSigmaSq = 2.0 * uWarpSigmas[i] * uWarpSigmas[i];
+          float phi = exp(-distSq / twoSigmaSq);
+          lab += uWarpWeights[i] * phi;
+        }
+        diffuseColor.rgb = warpLabToLinearRGB(lab);
+      }
+    }
+  `;
+
+  // --- JS-side RBF solver (mirrors Go's colorwarp.go) ---
+
+  function hexToLab(hex: string): [number, number, number] | null {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
+    const r = srgbToLinear(parseInt(hex.slice(1, 3), 16) / 255);
+    const g = srgbToLinear(parseInt(hex.slice(3, 5), 16) / 255);
+    const b = srgbToLinear(parseInt(hex.slice(5, 7), 16) / 255);
+    const x = 0.4124564*r + 0.3575761*g + 0.1804375*b;
+    const y = 0.2126729*r + 0.7151522*g + 0.0721750*b;
+    const z = 0.0193339*r + 0.1191920*g + 0.9503041*b;
+    const delta = 6/29;
+    const delta3 = delta*delta*delta;
+    const f = (t: number) => t > delta3 ? Math.cbrt(t) : t/(3*delta*delta) + 4/29;
+    const fx = f(x / 0.95047);
+    const fy = f(y / 1.0);
+    const fz = f(z / 1.08883);
+    return [1.16*fy - 0.16, 5.0*(fx - fy), 2.0*(fy - fz)];
+  }
+
+  function jsGaussElim(A: number[][], b: number[]): number[] | null {
+    const n = b.length;
+    const aug = A.map((row, i) => [...row, b[i]]);
+    for (let col = 0; col < n; col++) {
+      let maxRow = col, maxVal = Math.abs(aug[col][col]);
+      for (let row = col + 1; row < n; row++) {
+        const v = Math.abs(aug[row][col]);
+        if (v > maxVal) { maxVal = v; maxRow = row; }
+      }
+      if (maxVal < 1e-12) return null;
+      [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
+      const pivot = aug[col][col];
+      for (let row = col + 1; row < n; row++) {
+        const factor = aug[row][col] / pivot;
+        for (let j = col; j <= n; j++) aug[row][j] -= factor * aug[col][j];
+      }
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      x[i] = aug[i][n];
+      for (let j = i + 1; j < n; j++) x[i] -= aug[i][j] * x[j];
+      x[i] /= aug[i][i];
+    }
+    return x;
+  }
+
+  function computeAutoSigma(sources: [number, number, number][]): number {
+    if (sources.length <= 1) return 0.3; // 30 delta-E / 100
+    const dists: number[] = [];
+    for (let i = 0; i < sources.length; i++) {
+      for (let j = i + 1; j < sources.length; j++) {
+        const dL = sources[i][0] - sources[j][0];
+        const da = sources[i][1] - sources[j][1];
+        const db = sources[i][2] - sources[j][2];
+        dists.push(Math.sqrt(dL*dL + da*da + db*db));
+      }
+    }
+    dists.sort((a, b) => a - b);
+    let median = dists[Math.floor(dists.length / 2)];
+    if (median < 0.05) median = 0.05;
+    return median / 2;
+  }
+
+  function solveAndUpdateWarpUniforms(pins: WarpPin[]) {
+    const valid = pins.filter(p =>
+      /^#[0-9a-fA-F]{6}$/.test(p.sourceHex) && /^#[0-9a-fA-F]{6}$/.test(p.targetHex)
+    ).slice(0, MAX_WARP_PINS);
+
+    if (valid.length === 0) {
+      warpUniforms.uWarpPinCount.value = 0;
+      return;
+    }
+
+    const sources = valid.map(p => hexToLab(p.sourceHex)!);
+    const targets = valid.map(p => hexToLab(p.targetHex)!);
+    const deltas: [number, number, number][] = sources.map((s, i) => [
+      targets[i][0] - s[0], targets[i][1] - s[1], targets[i][2] - s[2],
+    ]);
+
+    const defaultSigma = computeAutoSigma(sources);
+    const sigmas = valid.map(p => p.sigma > 0 ? p.sigma / 100 : defaultSigma);
+
+    // Build Phi matrix: Phi[i][j] = exp(-||s_i - s_j||² / (2σ_j²))
+    const n = valid.length;
+    const phi: number[][] = [];
+    for (let i = 0; i < n; i++) {
+      phi[i] = [];
+      for (let j = 0; j < n; j++) {
+        const dL = sources[i][0] - sources[j][0];
+        const da = sources[i][1] - sources[j][1];
+        const db = sources[i][2] - sources[j][2];
+        const distSq = dL*dL + da*da + db*db;
+        phi[i][j] = Math.exp(-distSq / (2 * sigmas[j] * sigmas[j]));
+      }
+    }
+
+    // Solve for weights per channel.
+    const weights: [number, number, number][] = Array.from({length: n}, () => [0, 0, 0]);
+    for (let ch = 0; ch < 3; ch++) {
+      const rhs = deltas.map(d => d[ch]);
+      const w = jsGaussElim(phi, rhs);
+      if (!w) { warpUniforms.uWarpPinCount.value = 0; return; }
+      for (let i = 0; i < n; i++) weights[i][ch] = w[i];
+    }
+
+    // Update uniforms.
+    warpUniforms.uWarpPinCount.value = n;
+    for (let i = 0; i < MAX_WARP_PINS; i++) {
+      if (i < n) {
+        warpUniforms.uWarpSourceLab.value[i].set(sources[i][0], sources[i][1], sources[i][2]);
+        warpUniforms.uWarpWeights.value[i].set(weights[i][0], weights[i][1], weights[i][2]);
+        warpUniforms.uWarpSigmas.value[i] = sigmas[i];
+      }
+    }
+  }
+
   function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters): THREE.MeshStandardMaterial {
     const mat = new THREE.MeshStandardMaterial(opts);
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBrightness = colorUniforms.uBrightness;
       shader.uniforms.uContrast = colorUniforms.uContrast;
       shader.uniforms.uSaturation = colorUniforms.uSaturation;
-      shader.fragmentShader = colorAdjustGLSL + shader.fragmentShader;
+      shader.uniforms.uWarpPinCount = warpUniforms.uWarpPinCount;
+      shader.uniforms.uWarpSourceLab = warpUniforms.uWarpSourceLab;
+      shader.uniforms.uWarpWeights = warpUniforms.uWarpWeights;
+      shader.uniforms.uWarpSigmas = warpUniforms.uWarpSigmas;
+      shader.fragmentShader = colorAdjustGLSL + warpGLSL + shader.fragmentShader;
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <color_fragment>',
-        '#include <color_fragment>\n' + colorAdjustApply,
+        '#include <color_fragment>\n' + colorAdjustApply + '\n' + warpApply,
       );
     };
     return mat;
@@ -452,6 +649,11 @@
     colorUniforms.uSaturation.value = (100.0 + saturation) / 100.0;
   });
 
+  // Recompute RBF weights and update warp uniforms when pins change.
+  $effect(() => {
+    solveAndUpdateWarpUniforms(warpPins);
+  });
+
   // Track the last generation we applied so we don't re-apply our own updates.
   let appliedGen = 0;
   // Guards against re-entrant onchange during programmatic camera moves.
@@ -532,7 +734,7 @@
           <T.Mesh geometry={mesh.geometry} material={mesh.material} />
         {/each}
 
-        <Invalidator {brightness} {contrast} {saturation} />
+        <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} />
       </Canvas>
