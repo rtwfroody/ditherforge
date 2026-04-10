@@ -20,6 +20,7 @@ const (
 	StageVoxelize
 	StageDecimate
 	StageColorAdjust
+	StageColorWarp
 	StagePalette
 	StageDither
 	StageClip
@@ -60,6 +61,10 @@ type voxelizeOutput struct {
 }
 
 type colorAdjustOutput struct {
+	Cells []voxel.ActiveCell
+}
+
+type colorWarpOutput struct {
 	Cells []voxel.ActiveCell
 }
 
@@ -117,6 +122,11 @@ type colorAdjustSettings struct {
 	Brightness float32
 	Contrast   float32
 	Saturation float32
+}
+
+type colorWarpSettings struct {
+	WarpPins []WarpPin
+	Sigma    float64
 }
 
 type decimateSettings struct {
@@ -184,6 +194,8 @@ func settingsForStage(stage StageID, opts Options) any {
 		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
+	case StageColorWarp:
+		return colorWarpSettings{WarpPins: opts.WarpPins, Sigma: opts.WarpSigma}
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify}
 	case StagePalette:
@@ -229,6 +241,13 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.Brightness)
 		writeFloat32(h, v.Contrast)
 		writeFloat32(h, v.Saturation)
+	case colorWarpSettings:
+		writeInt(h, len(v.WarpPins))
+		for _, p := range v.WarpPins {
+			writeString(h, p.SourceHex)
+			writeString(h, p.TargetHex)
+		}
+		writeFloat64(h, v.Sigma)
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 	case paletteSettings:
@@ -295,6 +314,13 @@ func (c *StageCache) getColorAdjust() *colorAdjustOutput {
 		return nil
 	}
 	return c.stages[StageColorAdjust].output.(*colorAdjustOutput)
+}
+
+func (c *StageCache) getColorWarp() *colorWarpOutput {
+	if c.stages[StageColorWarp] == nil {
+		return nil
+	}
+	return c.stages[StageColorWarp].output.(*colorWarpOutput)
 }
 
 func (c *StageCache) getDecimate() *decimateOutput {

@@ -41,6 +41,14 @@ type Options struct {
 	Force          bool
 	Stats          bool
 	ColorSnap      float64
+	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
+	WarpSigma      float64   `json:"WarpSigma,omitempty"` // RBF falloff in delta-E units; 0 = auto
+}
+
+// WarpPin maps a source image color to a target filament color for RBF warping.
+type WarpPin struct {
+	SourceHex string `json:"sourceHex"` // e.g. "#FF0000"
+	TargetHex string `json:"targetHex"` // e.g. "#00FF00"
 }
 
 // MeshData holds flat arrays for 3D preview rendering.
@@ -162,9 +170,20 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 	}
 	cao := cache.getColorAdjust()
 
-	// Stage 4: Palette + snap colors
+	// Stage 4: Color warp (RBF-based color space warping)
+	if startFrom <= StageColorWarp {
+		if err := runColorWarp(ctx, cache, opts, cao); err != nil {
+			return nil, err
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	cwo := cache.getColorWarp()
+
+	// Stage 5: Palette + snap colors
 	if startFrom <= StagePalette {
-		if err := runPalette(ctx, cache, opts, cao); err != nil {
+		if err := runPalette(ctx, cache, opts, cwo); err != nil {
 			return nil, err
 		}
 	}
@@ -177,7 +196,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 		onPalette(po.Palette, po.PaletteLabels)
 	}
 
-	// Stage 5: Dither + flood fill
+	// Stage 6: Dither + flood fill
 	if startFrom <= StageDither {
 		if err := runDither(ctx, cache, opts, po); err != nil {
 			return nil, err
@@ -188,7 +207,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 	}
 	do := cache.getDither()
 
-	// Stage 6: Clip
+	// Stage 7: Clip
 	if startFrom <= StageClip {
 		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo); err != nil {
 			return nil, err
@@ -198,7 +217,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 		return nil, ctx.Err()
 	}
 
-	// Stage 7: Merge
+	// Stage 8: Merge
 	if startFrom <= StageMerge {
 		if err := runMerge(ctx, cache, opts); err != nil {
 			return nil, err
@@ -399,6 +418,39 @@ func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *vo
 	return nil
 }
 
+func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *colorAdjustOutput) error {
+	if len(opts.WarpPins) == 0 {
+		// Pass through — copy cells to avoid aliasing cached output.
+		out := make([]voxel.ActiveCell, len(cao.Cells))
+		copy(out, cao.Cells)
+		cache.setStage(StageColorWarp, stageKey(StageColorWarp, opts), &colorWarpOutput{Cells: out})
+		return nil
+	}
+
+	pins := make([]voxel.ColorWarpPin, len(opts.WarpPins))
+	for i, p := range opts.WarpPins {
+		src, err := palette.ParsePalette([]string{p.SourceHex})
+		if err != nil {
+			return fmt.Errorf("warp pin %d source: %w", i, err)
+		}
+		tgt, err := palette.ParsePalette([]string{p.TargetHex})
+		if err != nil {
+			return fmt.Errorf("warp pin %d target: %w", i, err)
+		}
+		pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0]}
+	}
+
+	tWarp := time.Now()
+	cells, err := voxel.WarpCellColors(ctx, cao.Cells, pins, opts.WarpSigma)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  Warped colors (%d pins) in %.1fs\n", len(pins), time.Since(tWarp).Seconds())
+
+	cache.setStage(StageColorWarp, stageKey(StageColorWarp, opts), &colorWarpOutput{Cells: cells})
+	return nil
+}
+
 func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, vo *voxelizeOutput) error {
 	fmt.Println("Decimating...")
 	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, vo.Cells, vo.CellSize, opts.NoSimplify)
@@ -412,7 +464,7 @@ func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *colorAdjustOutput) error {
+func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *colorWarpOutput) error {
 	pcfg, err := buildPaletteConfig(opts)
 	if err != nil {
 		return err
@@ -422,9 +474,9 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cao *color
 		return fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
 	}
 
-	// Copy cells so SnapColors doesn't mutate the color-adjust output.
-	cells := make([]voxel.ActiveCell, len(cao.Cells))
-	copy(cells, cao.Cells)
+	// Copy cells so SnapColors doesn't mutate the color-warp output.
+	cells := make([]voxel.ActiveCell, len(cwo.Cells))
+	copy(cells, cwo.Cells)
 
 	ditherMode := opts.Dither
 	pal, palLabels, palDisplay, err := voxel.ResolvePalette(ctx, cells, pcfg, ditherMode != "none")
