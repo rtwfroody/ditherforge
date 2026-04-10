@@ -46,6 +46,7 @@
   let saturation = $state(0);
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
+  let pickingPinIndex = $state(-1); // -1 = not picking
   let dither = $state('dizzy');
   let colorSnap = $state(5);
   let noMerge = $state(false);
@@ -202,6 +203,14 @@
     }
     scheduleProcess(300);
   });
+
+  function handleColorPick(hex: string) {
+    if (pickingPinIndex >= 0 && pickingPinIndex < warpPins.length) {
+      warpPins[pickingPinIndex] = { ...warpPins[pickingPinIndex], sourceHex: hex };
+      warpPins = warpPins;
+      pickingPinIndex = -1;
+    }
+  }
 
   async function browseInput() {
     const path = await SelectInputFile();
@@ -420,7 +429,12 @@
         <Separator />
 
         <!-- Color pins -->
-        <ColorPinEditor bind:pins={warpPins} loadCollectionColors={GetCollectionColors} />
+        <ColorPinEditor
+          bind:pins={warpPins}
+          loadCollectionColors={GetCollectionColors}
+          bind:pickingIndex={pickingPinIndex}
+          onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
+        />
 
         <Separator />
 
@@ -567,7 +581,7 @@
   {#if activeTab === 'model'}
     <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
       <div class="flex-1 min-h-0">
-        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} />
+        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} />
       </div>
       <div class="flex-1 min-h-0">
         <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />

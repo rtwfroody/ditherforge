@@ -6,7 +6,7 @@
   import * as Select from '$lib/components/ui/select';
   import { contrastColor } from '$lib/utils';
   import { collectionStore } from '$lib/stores/collections.svelte';
-  import { XIcon, PlusIcon } from '@lucide/svelte';
+  import { XIcon, PlusIcon, PipetteIcon } from '@lucide/svelte';
 
   type WarpPin = {
     sourceHex: string;
@@ -18,9 +18,13 @@
   let {
     pins = $bindable([]),
     loadCollectionColors,
+    pickingIndex = $bindable(-1),
+    onStartPick,
   }: {
     pins: WarpPin[];
     loadCollectionColors: (name: string) => Promise<{ hex: string; label: string }[]>;
+    pickingIndex?: number;
+    onStartPick?: (index: number) => void;
   } = $props();
 
   // Track which pin index has the target picker open, and which collection it shows.
@@ -94,12 +98,21 @@
   {#each pins as pin, i}
     <div class="border rounded-md p-2 space-y-2 bg-muted/30">
       <div class="flex items-center gap-2">
-        <!-- Source color hex input with preview swatch -->
+        <!-- Source color: swatch + eyedropper + hex input -->
         <div class="flex items-center gap-1 flex-1 min-w-0">
           <div
             class="w-6 h-6 rounded border shrink-0"
             style="background: {pin.sourceHex && /^#[0-9a-fA-F]{6}$/.test(pin.sourceHex) ? pin.sourceHex : '#888'};"
           ></div>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-7 w-7 p-0 shrink-0 {pickingIndex === i ? 'ring-2 ring-primary bg-primary/10' : ''}"
+            title="Pick color from input model"
+            onclick={() => onStartPick?.(i)}
+          >
+            <PipetteIcon class="h-3.5 w-3.5" />
+          </Button>
           <Input
             value={pin.sourceHex}
             oninput={(e: Event) => updateSourceHex(i, (e.target as HTMLInputElement).value)}

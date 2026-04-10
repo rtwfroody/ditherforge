@@ -4,9 +4,17 @@
   import { OrbitControls } from '@threlte/extras';
   import Invalidator from './Invalidator.svelte';
   import AxesGizmo from './AxesGizmo.svelte';
+  import ColorPicker3D from './ColorPicker3D.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
+  import { WebGLRenderer } from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
+
+  // Custom renderer factory that enables preserveDrawingBuffer for color picking.
+  // Only used when the viewer supports picking (onColorPick prop is set).
+  function createPickableRenderer(canvas: HTMLCanvasElement) {
+    return new WebGLRenderer({ canvas, preserveDrawingBuffer: true });
+  }
 
   function log(msg: string) {
     LogMessage('info', msg);
@@ -23,6 +31,8 @@
     brightness = 0,
     contrast = 0,
     saturation = 0,
+    pickMode = false,
+    onColorPick,
   }: {
     meshUrl?: string;
     label: string;
@@ -32,6 +42,8 @@
     brightness?: number;
     contrast?: number;
     saturation?: number;
+    pickMode?: boolean;
+    onColorPick?: (hex: string) => void;
   } = $props();
 
   // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
@@ -494,7 +506,7 @@
       </div>
     {/if}
     {#if scene && cameraSetup}
-      <Canvas>
+      <Canvas createRenderer={onColorPick ? createPickableRenderer : undefined}>
         <T.PerspectiveCamera
           makeDefault
           position={cameraSetup.position}
@@ -507,6 +519,7 @@
             bind:ref={controlsRef}
             target={cameraSetup.target}
             enableDamping
+            enabled={!pickMode}
             onchange={handleControlsChange}
           />
         </T.PerspectiveCamera>
@@ -521,6 +534,7 @@
 
         <Invalidator {brightness} {contrast} {saturation} />
         <AxesGizmo />
+        <ColorPicker3D {pickMode} onPick={onColorPick} />
       </Canvas>
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
