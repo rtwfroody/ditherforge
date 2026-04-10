@@ -42,13 +42,13 @@ type Options struct {
 	Stats          bool
 	ColorSnap      float64
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
-	WarpSigma      float64   `json:"WarpSigma,omitempty"` // RBF falloff in delta-E units; 0 = auto
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
 type WarpPin struct {
-	SourceHex string `json:"sourceHex"` // e.g. "#FF0000"
-	TargetHex string `json:"targetHex"` // e.g. "#00FF00"
+	SourceHex string  `json:"sourceHex"` // e.g. "#FF0000"
+	TargetHex string  `json:"targetHex"` // e.g. "#00FF00"
+	Sigma     float64 `json:"sigma"`     // falloff in delta-E units; 0 = auto
 }
 
 // MeshData holds flat arrays for 3D preview rendering.
@@ -437,11 +437,11 @@ func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *col
 		if err != nil {
 			return fmt.Errorf("warp pin %d target: %w", i, err)
 		}
-		pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0]}
+		pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0], Sigma: p.Sigma}
 	}
 
 	tWarp := time.Now()
-	cells, err := voxel.WarpCellColors(ctx, cao.Cells, pins, opts.WarpSigma)
+	cells, err := voxel.WarpCellColors(ctx, cao.Cells, pins)
 	if err != nil {
 		return err
 	}

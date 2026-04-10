@@ -126,7 +126,6 @@ type colorAdjustSettings struct {
 
 type colorWarpSettings struct {
 	WarpPins []WarpPin
-	Sigma    float64
 }
 
 type decimateSettings struct {
@@ -195,7 +194,7 @@ func settingsForStage(stage StageID, opts Options) any {
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
-		return colorWarpSettings{WarpPins: opts.WarpPins, Sigma: opts.WarpSigma}
+		return colorWarpSettings{WarpPins: opts.WarpPins}
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify}
 	case StagePalette:
@@ -246,8 +245,8 @@ func stageKey(stage StageID, opts Options) uint64 {
 		for _, p := range v.WarpPins {
 			writeString(h, p.SourceHex)
 			writeString(h, p.TargetHex)
+			writeFloat64(h, p.Sigma)
 		}
-		writeFloat64(h, v.Sigma)
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 	case paletteSettings:

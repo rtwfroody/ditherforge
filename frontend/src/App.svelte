@@ -14,6 +14,7 @@
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
   import CollectionSelect from '$lib/components/CollectionSelect.svelte';
+  import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { SelectInputFile, ProcessPipeline, SaveFile, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
@@ -43,6 +44,8 @@
   let brightness = $state(0);
   let contrast = $state(0);
   let saturation = $state(0);
+  type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
+  let warpPins = $state<WarpPinUI[]>([]);
   let dither = $state('dizzy');
   let colorSnap = $state(5);
   let noMerge = $state(false);
@@ -191,6 +194,7 @@
           layerHeight, ...colorSlots,
           inventoryCollectionColors,
           brightness, contrast, saturation,
+          JSON.stringify(warpPins),
           dither, colorSnap, noMerge, noSimplify, stats];
     if (!initialized) {
       initialized = true;
@@ -249,6 +253,9 @@
       Force: force,
       Stats: stats,
       ColorSnap: colorSnap,
+      WarpPins: warpPins
+        .filter(p => /^#[0-9a-fA-F]{6}$/.test(p.sourceHex) && /^#[0-9a-fA-F]{6}$/.test(p.targetHex))
+        .map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, sigma: p.sigma })),
     };
 
     if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
@@ -409,6 +416,11 @@
             <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
           </div>
         </div>
+
+        <Separator />
+
+        <!-- Color pins -->
+        <ColorPinEditor bind:pins={warpPins} loadCollectionColors={GetCollectionColors} />
 
         <Separator />
 

@@ -32,7 +32,7 @@ func TestWarpNoPins(t *testing.T) {
 		{Color: [3]uint8{100, 150, 200}},
 		{Color: [3]uint8{50, 50, 50}},
 	}
-	out, err := WarpCellColors(context.Background(), cells, nil, 0)
+	out, err := WarpCellColors(context.Background(), cells, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestWarpSinglePin(t *testing.T) {
 	cells := []ActiveCell{
 		{Color: red},
 	}
-	out, err := WarpCellColors(context.Background(), cells, pins, 0)
+	out, err := WarpCellColors(context.Background(), cells, pins)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,13 +78,13 @@ func TestWarpDistantColorUnchanged(t *testing.T) {
 	red := [3]uint8{255, 0, 0}
 	blue := [3]uint8{0, 0, 255}
 	green := [3]uint8{0, 255, 0}
-	pins := []ColorWarpPin{{Source: red, Target: blue}}
+	// Use a tight sigma so the effect is very local.
+	pins := []ColorWarpPin{{Source: red, Target: blue, Sigma: 10}}
 
 	cells := []ActiveCell{
 		{Color: green},
 	}
-	// Use a tight sigma so the effect is very local.
-	out, err := WarpCellColors(context.Background(), cells, pins, 10)
+	out, err := WarpCellColors(context.Background(), cells, pins)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestWarpTwoPins(t *testing.T) {
 		{Color: red},
 		{Color: green},
 	}
-	out, err := WarpCellColors(context.Background(), cells, pins, 0)
+	out, err := WarpCellColors(context.Background(), cells, pins)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +127,50 @@ func TestWarpTwoPins(t *testing.T) {
 	}
 }
 
+func TestWarpHeterogeneousSigmas(t *testing.T) {
+	// Two pins with different sigmas. Pin 0 (tight) should have local effect;
+	// pin 1 (wide) should affect a broader range.
+	red := [3]uint8{255, 0, 0}
+	blue := [3]uint8{0, 0, 255}
+	green := [3]uint8{0, 200, 0}
+	yellow := [3]uint8{255, 255, 0}
+	// A color between red and green.
+	olive := [3]uint8{128, 128, 0}
+
+	pins := []ColorWarpPin{
+		{Source: red, Target: blue, Sigma: 5},    // very tight
+		{Source: green, Target: yellow, Sigma: 80}, // very wide
+	}
+
+	cells := []ActiveCell{
+		{Color: red},
+		{Color: green},
+		{Color: olive},
+	}
+	out, err := WarpCellColors(context.Background(), cells, pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both pin sources should still land on their targets.
+	distRedBlue := colorDist(out[0].Color, blue)
+	if distRedBlue > 5 {
+		t.Errorf("red→blue: got %v, dist %.1f from target", out[0].Color, distRedBlue)
+	}
+	distGreenYellow := colorDist(out[1].Color, yellow)
+	if distGreenYellow > 5 {
+		t.Errorf("green→yellow: got %v, dist %.1f from target", out[1].Color, distGreenYellow)
+	}
+
+	// Olive is between red and green. The wide green pin (sigma=80) should
+	// affect it more than the tight red pin (sigma=5). So olive should shift
+	// noticeably toward yellow.
+	oliveDistToOriginal := colorDist(out[2].Color, olive)
+	if oliveDistToOriginal < 5 {
+		t.Errorf("olive should be shifted by wide green pin, but dist from original is only %.1f", oliveDistToOriginal)
+	}
+}
+
 func TestWarpContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -137,7 +181,7 @@ func TestWarpContextCancellation(t *testing.T) {
 	}
 	pins := []ColorWarpPin{{Source: [3]uint8{128, 128, 128}, Target: [3]uint8{0, 0, 0}}}
 
-	_, err := WarpCellColors(ctx, cells, pins, 0)
+	_, err := WarpCellColors(ctx, cells, pins)
 	if err == nil {
 		t.Error("expected error from cancelled context")
 	}

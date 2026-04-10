@@ -15,29 +15,33 @@ import (
 type ColorWarpPin struct {
 	Source [3]uint8
 	Target [3]uint8
+	Sigma  float64 // falloff in standard delta-E units; 0 = auto
 }
 
 // rbfSystem holds precomputed RBF weights for color warping.
 type rbfSystem struct {
-	sourceLab [][3]float64 // pin source colors in Lab
-	weights   [][3]float64 // solved weights per pin (L, a, b)
-	sigma     float64      // scaled sigma (go-colorful scale, i.e. /100)
+	sourceLab  [][3]float64 // pin source colors in Lab
+	weights    [][3]float64 // solved weights per pin (L, a, b)
+	sigmas     []float64    // per-pin scaled sigma (go-colorful scale)
 }
 
-// solveRBF builds the Gaussian RBF interpolation system.
-// Sources and deltas are in go-colorful Lab scale (i.e. standard CIELAB / 100).
-func solveRBF(sources [][3]float64, deltas [][3]float64, sigma float64) (*rbfSystem, error) {
+// solveRBF builds the Gaussian RBF interpolation system with per-pin sigmas.
+// Sources, deltas, and sigmas are in go-colorful Lab scale (standard CIELAB / 100).
+func solveRBF(sources [][3]float64, deltas [][3]float64, sigmas []float64) (*rbfSystem, error) {
 	n := len(sources)
 	if n == 0 {
 		return nil, fmt.Errorf("no warp pins")
 	}
-	if n != len(deltas) {
-		return nil, fmt.Errorf("sources/deltas length mismatch")
+	if n != len(deltas) || n != len(sigmas) {
+		return nil, fmt.Errorf("sources/deltas/sigmas length mismatch")
 	}
 
-	// Build the n×n Phi matrix: Phi[i][j] = exp(-||s_i - s_j||² / (2σ²))
+	// Build the n×n Phi matrix: Phi[i][j] = exp(-||s_i - s_j||² / (2σ_j²))
+	// Each basis function j uses its own sigma, so the matrix is NOT symmetric
+	// when pins have different sigmas. This is still a valid linear system —
+	// Gaussian elimination handles it — but loses the positive-definiteness
+	// guarantee of the symmetric case.
 	phi := make([][]float64, n)
-	twoSigmaSq := 2 * sigma * sigma
 	for i := range n {
 		phi[i] = make([]float64, n)
 		for j := range n {
@@ -45,6 +49,7 @@ func solveRBF(sources [][3]float64, deltas [][3]float64, sigma float64) (*rbfSys
 			da := sources[i][1] - sources[j][1]
 			db := sources[i][2] - sources[j][2]
 			distSq := dL*dL + da*da + db*db
+			twoSigmaSq := 2 * sigmas[j] * sigmas[j]
 			phi[i][j] = math.Exp(-distSq / twoSigmaSq)
 		}
 	}
@@ -68,19 +73,19 @@ func solveRBF(sources [][3]float64, deltas [][3]float64, sigma float64) (*rbfSys
 	return &rbfSystem{
 		sourceLab: sources,
 		weights:   weights,
-		sigma:     sigma,
+		sigmas:    sigmas,
 	}, nil
 }
 
 // eval computes the warped Lab color for a given input Lab color.
 func (sys *rbfSystem) eval(L, a, b float64) (float64, float64, float64) {
-	twoSigmaSq := 2 * sys.sigma * sys.sigma
 	var sumL, sumA, sumB float64
 	for i, src := range sys.sourceLab {
 		dL := L - src[0]
 		dA := a - src[1]
 		dB := b - src[2]
 		distSq := dL*dL + dA*dA + dB*dB
+		twoSigmaSq := 2 * sys.sigmas[i] * sys.sigmas[i]
 		phi := math.Exp(-distSq / twoSigmaSq)
 		sumL += sys.weights[i][0] * phi
 		sumA += sys.weights[i][1] * phi
@@ -185,10 +190,10 @@ func labToRGB(L, a, b float64) [3]uint8 {
 // WarpCellColors applies Gaussian RBF color warping to a slice of cells.
 // Each pin maps a source color to a target color; the warp is exact at pin
 // colors and decays smoothly with distance in CIELAB space.
-// Sigma controls falloff in standard delta-E units; 0 means auto-compute
-// from median pairwise distance between pin sources.
+// Each pin's Sigma controls its falloff in standard delta-E units; 0 means
+// auto-compute from median pairwise distance between pin sources.
 // Returns a new slice; the input is not modified.
-func WarpCellColors(ctx context.Context, cells []ActiveCell, pins []ColorWarpPin, sigma float64) ([]ActiveCell, error) {
+func WarpCellColors(ctx context.Context, cells []ActiveCell, pins []ColorWarpPin) ([]ActiveCell, error) {
 	if len(pins) == 0 {
 		out := make([]ActiveCell, len(cells))
 		copy(out, cells)
@@ -206,13 +211,18 @@ func WarpCellColors(ctx context.Context, cells []ActiveCell, pins []ColorWarpPin
 		deltas[i] = [3]float64{tL - sL, ta - sa, tb - sb}
 	}
 
-	// Scale sigma from standard delta-E to go-colorful scale, or auto-compute.
-	scaledSigma := autoSigma(sources)
-	if sigma > 0 {
-		scaledSigma = sigma / 100.0
+	// Build per-pin sigmas. Use auto for any pin with Sigma == 0.
+	defaultSigma := autoSigma(sources)
+	sigmas := make([]float64, len(pins))
+	for i, p := range pins {
+		if p.Sigma > 0 {
+			sigmas[i] = p.Sigma / 100.0 // scale from standard delta-E to go-colorful
+		} else {
+			sigmas[i] = defaultSigma
+		}
 	}
 
-	sys, err := solveRBF(sources, deltas, scaledSigma)
+	sys, err := solveRBF(sources, deltas, sigmas)
 	if err != nil {
 		return nil, fmt.Errorf("color warp: %w", err)
 	}
