@@ -576,7 +576,6 @@
   let scene = $state<SceneData | null>(null);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number]; near: number; far: number } | null>(null);
   let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
-  let hasHadCamera = false; // true once camera has been positioned
 
   let buildId = 0;
 
@@ -591,40 +590,32 @@
         if (myId !== buildId) return;
         faceCount = td.faces.length / 3;
 
-        // Only set camera on first load; keep current view on updates.
-        if (!hasHadCamera) {
-          if (sharedCamera.initialized) {
-            // Another viewer already set up the camera — use its state.
-            cameraSetup = {
-              position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
-              target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
-              near: sharedCamera.near,
-              far: sharedCamera.far,
-            };
-            appliedGen = sharedCamera.generation;
-            // Suppress handleControlsChange during OrbitControls mount so
-            // it doesn't write stale cameraSetup values back to sharedCamera
-            // (the user may have moved the input camera since we captured
-            // these values).  Clear after two frames to allow normal interaction.
-            mountSyncing = true;
-            requestAnimationFrame(() => requestAnimationFrame(() => { mountSyncing = false; }));
-          } else {
-            // First viewer to load — compute initial camera and share it.
-            const setup = computeCameraSetup(td);
-            cameraSetup = setup;
-            sharedCamera.posX = setup.position[0];
-            sharedCamera.posY = setup.position[1];
-            sharedCamera.posZ = setup.position[2];
-            sharedCamera.near = setup.near;
-            sharedCamera.far = setup.far;
-            sharedCamera.targetX = setup.target[0];
-            sharedCamera.targetY = setup.target[1];
-            sharedCamera.targetZ = setup.target[2];
-            sharedCamera.initialized = true;
-            appliedGen = ++sharedCamera.generation;
-          }
-          hasHadCamera = true;
+        // If no viewer has set up the camera yet, compute initial pose from
+        // this mesh's geometry. Otherwise, use the shared camera state.
+        if (!sharedCamera.initialized) {
+          const setup = computeCameraSetup(td);
+          sharedCamera.posX = setup.position[0];
+          sharedCamera.posY = setup.position[1];
+          sharedCamera.posZ = setup.position[2];
+          sharedCamera.near = setup.near;
+          sharedCamera.far = setup.far;
+          sharedCamera.targetX = setup.target[0];
+          sharedCamera.targetY = setup.target[1];
+          sharedCamera.targetZ = setup.target[2];
+          sharedCamera.initialized = true;
+          ++sharedCamera.generation;
         }
+        cameraSetup = {
+          position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
+          target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
+          near: sharedCamera.near,
+          far: sharedCamera.far,
+        };
+        appliedGen = sharedCamera.generation;
+        // Suppress handleControlsChange during OrbitControls mount so it
+        // doesn't write the freshly-applied values back to sharedCamera.
+        mountSyncing = true;
+        requestAnimationFrame(() => requestAnimationFrame(() => { mountSyncing = false; }));
 
         if (hasTextures(td)) {
           buildTexturedScene(td).then((s) => {
@@ -646,9 +637,9 @@
       });
     } else {
       scene = null;
-      // Keep cameraSetup so the Canvas stays mounted and OrbitControls
-      // retains the user's camera orientation across reprocessing.
-      if (!hasHadCamera) cameraSetup = null;
+      // Keep cameraSetup around so the Canvas can remount with the current
+      // shared camera state rather than re-deriving from mesh geometry.
+      if (!sharedCamera.initialized) cameraSetup = null;
       faceCount = 0;
       disposeScene(prev);
     }
