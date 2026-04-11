@@ -70,7 +70,7 @@
 
   function addPin() {
     if (pins.length >= MAX_PINS) return;
-    pins = [...pins, { sourceHex: '', targetHex: '', targetLabel: '', sigma: 30 }];
+    pins = [...pins, { sourceHex: '', targetHex: '', targetLabel: '', sigma: 5 }];
   }
 
   function removePin(index: number) {
@@ -146,7 +146,7 @@
         <span class="text-xs text-muted-foreground w-14 shrink-0">Reach</span>
         <Slider
           type="single"
-          min={5}
+          min={1}
           max={100}
           step={1}
           value={pin.sigma}

@@ -1,3 +1,7 @@
+// Color warp using Gaussian RBF interpolation with hard cutoff in CIELAB space.
+// The frontend has a real-time GLSL preview that must match this logic.
+// If you change the RBF kernel, Lab conversion, or sigma scaling here,
+// update the JS/GLSL mirror in frontend/src/lib/components/ModelViewer.svelte.
 package voxel
 
 import (
@@ -25,8 +29,21 @@ type rbfSystem struct {
 	sigmas     []float64    // per-pin scaled sigma (go-colorful scale)
 }
 
-// solveRBF builds the Gaussian RBF interpolation system with per-pin sigmas.
+// rbfKernel evaluates a Gaussian with hard cutoff at the reach radius.
+// phi(r) = exp(-4.5 * r²) for r < 1, else 0, where r = dist/sigma.
+// This is equivalent to a Gaussian with effective sigma = reach/3,
+// hard-clipped at 3 sigma (~1% value — invisible discontinuity).
+func rbfKernel(distSq, sigma float64) float64 {
+	rSq := distSq / (sigma * sigma)
+	if rSq >= 1 {
+		return 0
+	}
+	return math.Exp(-4.5 * rSq)
+}
+
+// solveRBF builds the RBF interpolation system with per-pin sigmas.
 // Sources, deltas, and sigmas are in go-colorful Lab scale (standard CIELAB / 100).
+// Sigma acts as a hard cutoff radius: colors beyond sigma distance are unaffected.
 func solveRBF(sources [][3]float64, deltas [][3]float64, sigmas []float64) (*rbfSystem, error) {
 	n := len(sources)
 	if n == 0 {
@@ -36,11 +53,9 @@ func solveRBF(sources [][3]float64, deltas [][3]float64, sigmas []float64) (*rbf
 		return nil, fmt.Errorf("sources/deltas/sigmas length mismatch")
 	}
 
-	// Build the n×n Phi matrix: Phi[i][j] = exp(-||s_i - s_j||² / (2σ_j²))
+	// Build the n×n Phi matrix.
 	// Each basis function j uses its own sigma, so the matrix is NOT symmetric
-	// when pins have different sigmas. This is still a valid linear system —
-	// Gaussian elimination handles it — but loses the positive-definiteness
-	// guarantee of the symmetric case.
+	// when pins have different sigmas. Gaussian elimination handles it.
 	phi := make([][]float64, n)
 	for i := range n {
 		phi[i] = make([]float64, n)
@@ -49,8 +64,7 @@ func solveRBF(sources [][3]float64, deltas [][3]float64, sigmas []float64) (*rbf
 			da := sources[i][1] - sources[j][1]
 			db := sources[i][2] - sources[j][2]
 			distSq := dL*dL + da*da + db*db
-			twoSigmaSq := 2 * sigmas[j] * sigmas[j]
-			phi[i][j] = math.Exp(-distSq / twoSigmaSq)
+			phi[i][j] = rbfKernel(distSq, sigmas[j])
 		}
 	}
 
@@ -85,8 +99,7 @@ func (sys *rbfSystem) eval(L, a, b float64) (float64, float64, float64) {
 		dA := a - src[1]
 		dB := b - src[2]
 		distSq := dL*dL + dA*dA + dB*dB
-		twoSigmaSq := 2 * sys.sigmas[i] * sys.sigmas[i]
-		phi := math.Exp(-distSq / twoSigmaSq)
+		phi := rbfKernel(distSq, sys.sigmas[i])
 		sumL += sys.weights[i][0] * phi
 		sumA += sys.weights[i][1] * phi
 		sumB += sys.weights[i][2] * phi

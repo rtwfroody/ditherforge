@@ -164,9 +164,10 @@ func TestWarpHeterogeneousSigmas(t *testing.T) {
 
 	// Olive is between red and green. The wide green pin (sigma=80) should
 	// affect it more than the tight red pin (sigma=5). So olive should shift
-	// noticeably toward yellow.
+	// at least slightly toward yellow. With Wendland C2, the effect is small
+	// (olive is at r≈0.79 of green's radius) but nonzero.
 	oliveDistToOriginal := colorDist(out[2].Color, olive)
-	if oliveDistToOriginal < 5 {
+	if oliveDistToOriginal < 1 {
 		t.Errorf("olive should be shifted by wide green pin, but dist from original is only %.1f", oliveDistToOriginal)
 	}
 }

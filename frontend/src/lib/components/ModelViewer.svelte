@@ -7,14 +7,8 @@
   import ColorPicker3D from './ColorPicker3D.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
-  import { WebGLRenderer } from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
 
-  // Custom renderer factory that enables preserveDrawingBuffer for color picking.
-  // Only used when the viewer supports picking (onColorPick prop is set).
-  function createPickableRenderer(canvas: HTMLCanvasElement) {
-    return new WebGLRenderer({ canvas, preserveDrawingBuffer: true });
-  }
 
   function log(msg: string) {
     LogMessage('info', msg);
@@ -76,6 +70,9 @@
   };
 
   // --- Color Warp Preview (full RBF in GLSL) ---
+  // This is a JS/GLSL mirror of the Go backend in internal/voxel/colorwarp.go.
+  // If you change the RBF kernel, Lab conversion, or sigma scaling here,
+  // update the Go implementation to match (and vice versa).
 
   const MAX_WARP_PINS = 8;
 
@@ -132,19 +129,23 @@
   `;
 
   // Applied after brightness/contrast/saturation adjustment.
+  // Accumulates the warp delta separately (matching Go's eval), so that
+  // each pin's distance is computed from the original Lab color.
   const warpApply = `
     {
       if (uWarpPinCount > 0) {
         vec3 lab = warpLinearRGBtoLab(diffuseColor.rgb);
+        vec3 warpDelta = vec3(0.0);
         for (int i = 0; i < MAX_WARP_PINS; i++) {
           if (i >= uWarpPinCount) break;
           vec3 diff = lab - uWarpSourceLab[i];
-          float distSq = dot(diff, diff);
-          float twoSigmaSq = 2.0 * uWarpSigmas[i] * uWarpSigmas[i];
-          float phi = exp(-distSq / twoSigmaSq);
-          lab += uWarpWeights[i] * phi;
+          float rSq = dot(diff, diff) / (uWarpSigmas[i] * uWarpSigmas[i]);
+          if (rSq < 1.0) {
+            float phi = exp(-4.5 * rSq);
+            warpDelta += uWarpWeights[i] * phi;
+          }
         }
-        diffuseColor.rgb = warpLabToLinearRGB(lab);
+        diffuseColor.rgb = warpLabToLinearRGB(lab + warpDelta);
       }
     }
   `;
@@ -230,7 +231,8 @@
     const defaultSigma = computeAutoSigma(sources);
     const sigmas = valid.map(p => p.sigma > 0 ? p.sigma / 100 : defaultSigma);
 
-    // Build Phi matrix: Phi[i][j] = exp(-||s_i - s_j||² / (2σ_j²))
+    // Build Phi matrix: Gaussian with hard cutoff at reach radius.
+    // phi(r) = exp(-4.5 * r²) for r < 1, else 0, where r = dist/sigma.
     const n = valid.length;
     const phi: number[][] = [];
     for (let i = 0; i < n; i++) {
@@ -239,8 +241,8 @@
         const dL = sources[i][0] - sources[j][0];
         const da = sources[i][1] - sources[j][1];
         const db = sources[i][2] - sources[j][2];
-        const distSq = dL*dL + da*da + db*db;
-        phi[i][j] = Math.exp(-distSq / (2 * sigmas[j] * sigmas[j]));
+        const rSq = (dL*dL + da*da + db*db) / (sigmas[j] * sigmas[j]);
+        phi[i][j] = rSq >= 1 ? 0 : Math.exp(-4.5 * rSq);
       }
     }
 
@@ -708,7 +710,7 @@
       </div>
     {/if}
     {#if scene && cameraSetup}
-      <Canvas createRenderer={onColorPick ? createPickableRenderer : undefined}>
+      <Canvas>
         <T.PerspectiveCamera
           makeDefault
           position={cameraSetup.position}
