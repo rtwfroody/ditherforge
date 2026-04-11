@@ -9,7 +9,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
+  import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
@@ -26,6 +26,18 @@
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
   function log(msg: string) {
     LogMessage('info', msg);
+  }
+
+  // Dark mode toggle — persisted in localStorage, falls back to system preference.
+  let darkMode = $state(
+    localStorage.getItem('theme')
+      ? localStorage.getItem('theme') === 'dark'
+      : window.matchMedia('(prefers-color-scheme: dark)').matches
+  );
+  function toggleDarkMode() {
+    darkMode = !darkMode;
+    document.documentElement.classList.toggle('dark', darkMode);
+    localStorage.setItem('theme', darkMode ? 'dark' : 'light');
   }
 
   // Form state with defaults matching CLI.
@@ -497,9 +509,18 @@
         <Menubar.Item onSelect={handleImportCollection}>Import...</Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
-    {#if settingsPath || inputFile}
-      <span class="ml-auto text-xs text-muted-foreground self-center pr-2 truncate max-w-64" title={settingsPath || inputFile}>{(settingsPath || inputFile).split('/').pop()}</span>
-    {/if}
+    <div class="ml-auto flex items-center gap-2 pr-2">
+      {#if settingsPath || inputFile}
+        <span class="text-xs text-muted-foreground truncate max-w-64" title={settingsPath || inputFile}>{(settingsPath || inputFile).split('/').pop()}</span>
+      {/if}
+      <button
+        class="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+        title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+        onclick={toggleDarkMode}
+      >
+        {#if darkMode}<SunIcon size={16} />{:else}<MoonIcon size={16} />{/if}
+      </button>
+    </div>
   </Menubar.Root>
 
   <div class="flex-1 flex min-h-0">
