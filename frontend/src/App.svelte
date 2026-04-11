@@ -9,7 +9,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
+  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon, FileIcon } from '@lucide/svelte';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
@@ -17,7 +17,7 @@
   import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { SelectInputFile, ProcessPipeline, SaveFile, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
+  import { SelectInputFile, ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, LoadSettingsDialog, DefaultSettingsPath, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -54,7 +54,10 @@
   let stats = $state(false);
 
   // Tab navigation.
-  let activeTab: 'model' | 'collections' = $state('model');
+  let activeTab: 'file' | 'model' | 'collections' = $state('model');
+
+  // Settings file state.
+  let settingsPath = $state('');  // current save path; empty = unsaved
 
   function addColorSlot() {
     if (colorSlots.length < 16) {
@@ -216,6 +219,100 @@
     const path = await SelectInputFile();
     if (path) {
       inputFile = path;
+      // Update default settings path when input file changes.
+      settingsPath = await DefaultSettingsPath(path);
+    }
+  }
+
+  function serializeSettings() {
+    return {
+      inputFile,
+      sizeMode,
+      sizeValue,
+      scaleValue,
+      nozzleDiameter,
+      layerHeight,
+      colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection } : null),
+      inventoryCollection,
+      brightness,
+      contrast,
+      saturation,
+      warpPins: warpPins.map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel, sigma: p.sigma })),
+      dither,
+      colorSnap,
+      noMerge,
+      noSimplify,
+      stats,
+    };
+  }
+
+  function applySettings(s: any) {
+    if (s.inputFile !== undefined) inputFile = s.inputFile;
+    if (s.sizeMode !== undefined) sizeMode = s.sizeMode;
+    if (s.sizeValue !== undefined) sizeValue = s.sizeValue;
+    if (s.scaleValue !== undefined) scaleValue = s.scaleValue;
+    if (s.nozzleDiameter !== undefined) nozzleDiameter = s.nozzleDiameter;
+    if (s.layerHeight !== undefined) layerHeight = s.layerHeight;
+    if (s.colorSlots !== undefined) {
+      colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
+    }
+    if (s.inventoryCollection !== undefined) {
+      inventoryCollection = s.inventoryCollection;
+      loadInventoryCollectionColors(inventoryCollection);
+    }
+    if (s.brightness !== undefined) brightness = s.brightness;
+    if (s.contrast !== undefined) contrast = s.contrast;
+    if (s.saturation !== undefined) saturation = s.saturation;
+    if (s.warpPins !== undefined) {
+      warpPins = s.warpPins.map((p: any) => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel || '', sigma: p.sigma }));
+    }
+    if (s.dither !== undefined) dither = s.dither;
+    if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
+    if (s.noMerge !== undefined) noMerge = s.noMerge;
+    if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
+    if (s.stats !== undefined) stats = s.stats;
+  }
+
+  async function handleSave() {
+    if (!settingsPath) {
+      return handleSaveAs();
+    }
+    try {
+      await SaveSettings(settingsPath, serializeSettings() as any);
+      statusMessage = `Saved settings to ${settingsPath}`;
+      statusType = 'success';
+    } catch (err: any) {
+      statusMessage = `Save error: ${err}`;
+      statusType = 'error';
+    }
+  }
+
+  async function handleSaveAs() {
+    try {
+      const path = await SaveSettingsDialog(serializeSettings() as any);
+      if (path) {
+        settingsPath = path;
+        statusMessage = `Saved settings to ${path}`;
+        statusType = 'success';
+      }
+    } catch (err: any) {
+      statusMessage = `Save error: ${err}`;
+      statusType = 'error';
+    }
+  }
+
+  async function handleOpen() {
+    try {
+      const result = await LoadSettingsDialog();
+      if (result && result.path) {
+        settingsPath = result.path;
+        applySettings(result.settings);
+        statusMessage = `Loaded settings from ${result.path}`;
+        statusType = 'success';
+      }
+    } catch (err: any) {
+      statusMessage = `Load error: ${err}`;
+      statusType = 'error';
     }
   }
 
@@ -294,13 +391,13 @@
   let saving = $state(false);
   let saveError = $state('');
 
-  async function saveToFile() {
+  async function exportTo3MF() {
     saving = true;
     saveError = '';
     try {
-      const path = await SaveFile();
+      const path = await Export3MF();
       if (path) {
-        statusMessage = `Saved to ${path}`;
+        statusMessage = `Exported to ${path}`;
         statusType = 'success';
       }
     } catch (err: any) {
@@ -314,6 +411,13 @@
 <main class="h-screen flex">
   <!-- Icon rail -->
   <div class="w-12 min-w-12 flex flex-col items-center py-4 gap-2 border-r bg-muted/30">
+    <button
+      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'file' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+      title="File"
+      onclick={() => activeTab = 'file'}
+    >
+      <FileIcon size={18} />
+    </button>
     <button
       class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'model' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
       title="Model Settings"
@@ -332,7 +436,25 @@
 
   <!-- Left panel: fixed width for model settings, full width for collections -->
   <div class="{activeTab === 'model' ? 'w-[480px] min-w-[400px]' : 'flex-1'} min-h-0 flex flex-col">
-  {#if activeTab === 'model'}
+  {#if activeTab === 'file'}
+    <div class="flex-1 flex flex-col p-6 overflow-y-auto">
+    <h1 class="text-2xl font-bold mb-4">File</h1>
+    <Card.Root class="shrink-0">
+      <Card.Content class="pt-6 space-y-4">
+        <div class="space-y-2">
+          <Button variant="outline" class="w-full justify-start" onclick={handleOpen}>Open Settings...</Button>
+          <Button variant="outline" class="w-full justify-start" onclick={handleSave}>Save Settings{settingsPath ? '' : '...'}</Button>
+          <Button variant="outline" class="w-full justify-start" onclick={handleSaveAs}>Save Settings As...</Button>
+          <Separator />
+          <Button variant="outline" class="w-full justify-start" onclick={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Button>
+        </div>
+        {#if settingsPath}
+          <p class="text-xs text-muted-foreground truncate" title={settingsPath}>Current: {settingsPath}</p>
+        {/if}
+      </Card.Content>
+    </Card.Root>
+    </div>
+  {:else if activeTab === 'model'}
     <div class="flex-1 flex flex-col p-6 overflow-y-auto">
     <h1 class="text-2xl font-bold mb-1"><a href="https://github.com/rtwfroody/ditherforge" onclick={(e) => { e.preventDefault(); BrowserOpenURL('https://github.com/rtwfroody/ditherforge'); }} class="hover:underline">DitherForge</a> {#if version}<span class="text-base font-normal text-muted-foreground">{version.replace(/^ditherforge\s*/i, '')}</span>{/if}</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
@@ -560,8 +682,8 @@
 
     <!-- Action -->
     <div class="mt-4 flex items-center gap-4">
-      <Button onclick={saveToFile} disabled={!outputMeshUrl || running || saving} size="lg">
-        Save
+      <Button onclick={exportTo3MF} disabled={!outputMeshUrl || running || saving} size="lg">
+        Export 3MF
       </Button>
 
       {#if statusMessage}
@@ -577,8 +699,8 @@
   {/if}
   </div>
 
-  <!-- Right column: 3D viewers (only shown on model tab) -->
-  {#if activeTab === 'model'}
+  <!-- Right column: 3D viewers (shown on model and file tabs) -->
+  {#if activeTab === 'model' || activeTab === 'file'}
     <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
       <div class="flex-1 min-h-0">
         <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} />
@@ -608,7 +730,7 @@
 <Dialog.Root open={saving || !!saveError} onOpenChange={(open) => { if (!open) saveError = ''; }}>
   <Dialog.Content showCloseButton={!!saveError} onInteractOutside={(e) => { if (saving) e.preventDefault(); }} onEscapeKeydown={(e) => { if (saving) e.preventDefault(); }}>
     <Dialog.Header>
-      <Dialog.Title>{saveError ? 'Save failed' : 'Saving...'}</Dialog.Title>
+      <Dialog.Title>{saveError ? 'Export failed' : 'Exporting...'}</Dialog.Title>
       <Dialog.Description>
         {#if saveError}
           {saveError}

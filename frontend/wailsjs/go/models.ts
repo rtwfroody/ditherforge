@@ -30,6 +30,135 @@ export namespace main {
 	        this.label = source["label"];
 	    }
 	}
+	export class ColorSlotSetting {
+	    hex: string;
+	    label?: string;
+	    collection?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ColorSlotSetting(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hex = source["hex"];
+	        this.label = source["label"];
+	        this.collection = source["collection"];
+	    }
+	}
+	export class WarpPinSetting {
+	    sourceHex: string;
+	    targetHex: string;
+	    targetLabel?: string;
+	    sigma: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new WarpPinSetting(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceHex = source["sourceHex"];
+	        this.targetHex = source["targetHex"];
+	        this.targetLabel = source["targetLabel"];
+	        this.sigma = source["sigma"];
+	    }
+	}
+	export class Settings {
+	    inputFile?: string;
+	    sizeMode: string;
+	    sizeValue: string;
+	    scaleValue: string;
+	    nozzleDiameter: string;
+	    layerHeight: string;
+	    colorSlots: ColorSlotSetting[];
+	    inventoryCollection: string;
+	    brightness: number;
+	    contrast: number;
+	    saturation: number;
+	    warpPins: WarpPinSetting[];
+	    dither: string;
+	    colorSnap: number;
+	    noMerge: boolean;
+	    noSimplify: boolean;
+	    stats: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.inputFile = source["inputFile"];
+	        this.sizeMode = source["sizeMode"];
+	        this.sizeValue = source["sizeValue"];
+	        this.scaleValue = source["scaleValue"];
+	        this.nozzleDiameter = source["nozzleDiameter"];
+	        this.layerHeight = source["layerHeight"];
+	        this.colorSlots = this.convertValues(source["colorSlots"], ColorSlotSetting);
+	        this.inventoryCollection = source["inventoryCollection"];
+	        this.brightness = source["brightness"];
+	        this.contrast = source["contrast"];
+	        this.saturation = source["saturation"];
+	        this.warpPins = this.convertValues(source["warpPins"], WarpPinSetting);
+	        this.dither = source["dither"];
+	        this.colorSnap = source["colorSnap"];
+	        this.noMerge = source["noMerge"];
+	        this.noSimplify = source["noSimplify"];
+	        this.stats = source["stats"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LoadSettingsResult {
+	    path: string;
+	    settings: Settings;
+	
+	    static createFrom(source: any = {}) {
+	        return new LoadSettingsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.settings = this.convertValues(source["settings"], Settings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 
 }
 

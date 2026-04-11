@@ -6,8 +6,16 @@ export function CreateCollection(arg1) {
   return window['go']['main']['App']['CreateCollection'](arg1);
 }
 
+export function DefaultSettingsPath(arg1) {
+  return window['go']['main']['App']['DefaultSettingsPath'](arg1);
+}
+
 export function DeleteCollection(arg1) {
   return window['go']['main']['App']['DeleteCollection'](arg1);
+}
+
+export function Export3MF() {
+  return window['go']['main']['App']['Export3MF']();
 }
 
 export function GetCollectionColors(arg1) {
@@ -24,6 +32,14 @@ export function IsBusy() {
 
 export function ListCollections() {
   return window['go']['main']['App']['ListCollections']();
+}
+
+export function LoadSettingsDialog() {
+  return window['go']['main']['App']['LoadSettingsDialog']();
+}
+
+export function LoadSettingsFile(arg1) {
+  return window['go']['main']['App']['LoadSettingsFile'](arg1);
 }
 
 export function LogMessage(arg1, arg2) {
@@ -46,8 +62,12 @@ export function SaveCollectionColors(arg1, arg2) {
   return window['go']['main']['App']['SaveCollectionColors'](arg1, arg2);
 }
 
-export function SaveFile() {
-  return window['go']['main']['App']['SaveFile']();
+export function SaveSettings(arg1, arg2) {
+  return window['go']['main']['App']['SaveSettings'](arg1, arg2);
+}
+
+export function SaveSettingsDialog(arg1) {
+  return window['go']['main']['App']['SaveSettingsDialog'](arg1);
 }
 
 export function SelectInputFile() {

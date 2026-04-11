@@ -5,7 +5,11 @@ import {pipeline} from '../models';
 
 export function CreateCollection(arg1:string):Promise<void>;
 
+export function DefaultSettingsPath(arg1:string):Promise<string>;
+
 export function DeleteCollection(arg1:string):Promise<void>;
+
+export function Export3MF():Promise<string>;
 
 export function GetCollectionColors(arg1:string):Promise<Array<main.ColorEntry>>;
 
@@ -14,6 +18,10 @@ export function ImportCollection():Promise<string>;
 export function IsBusy():Promise<boolean>;
 
 export function ListCollections():Promise<Array<main.CollectionInfo>>;
+
+export function LoadSettingsDialog():Promise<main.LoadSettingsResult>;
+
+export function LoadSettingsFile(arg1:string):Promise<main.LoadSettingsResult>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
@@ -25,7 +33,9 @@ export function ResolveColor(arg1:string):Promise<main.ColorEntry>;
 
 export function SaveCollectionColors(arg1:string,arg2:Array<main.ColorEntry>):Promise<void>;
 
-export function SaveFile():Promise<string>;
+export function SaveSettings(arg1:string,arg2:main.Settings):Promise<void>;
+
+export function SaveSettingsDialog(arg1:main.Settings):Promise<string>;
 
 export function SelectInputFile():Promise<string>;
 

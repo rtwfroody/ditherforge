@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +19,7 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex               // protects cache and lastOpts; held during pipeline execution and SaveFile
+	mu       sync.Mutex               // protects cache and lastOpts; held during pipeline execution and Export3MF
 	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
@@ -130,10 +133,10 @@ func (a *App) IsBusy() bool {
 	return true
 }
 
-// SaveFile acquires the pipeline mutex, opens a native save dialog, and
+// Export3MF acquires the pipeline mutex, opens a native save dialog, and
 // exports the 3MF file using cached pipeline results. Returns the saved
 // path, or empty if the user cancelled.
-func (a *App) SaveFile() (string, error) {
+func (a *App) Export3MF() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -360,4 +363,153 @@ func (a *App) ImportCollection() (string, error) {
 // RenameCollection renames a user collection.
 func (a *App) RenameCollection(oldName, newName string) error {
 	return a.collections.Rename(oldName, newName)
+}
+
+// SettingsFile is the JSON structure written to/read from .json settings files.
+type SettingsFile struct {
+	DitherForge SettingsMeta `json:"_ditherforge"`
+	Settings    Settings     `json:"settings"`
+}
+
+// SettingsMeta contains metadata about the settings file.
+type SettingsMeta struct {
+	URL     string `json:"url"`
+	Version string `json:"version"`
+}
+
+// WarpPinSetting is the JSON representation of a color warp pin.
+type WarpPinSetting struct {
+	SourceHex   string `json:"sourceHex"`
+	TargetHex   string `json:"targetHex"`
+	TargetLabel string `json:"targetLabel,omitempty"`
+	Sigma       float64 `json:"sigma"`
+}
+
+// ColorSlotSetting is the JSON representation of a color slot.
+type ColorSlotSetting struct {
+	Hex        string `json:"hex"`
+	Label      string `json:"label,omitempty"`
+	Collection string `json:"collection,omitempty"`
+}
+
+// Settings contains all user-configurable settings.
+type Settings struct {
+	InputFile           string             `json:"inputFile,omitempty"`
+	SizeMode            string             `json:"sizeMode"`
+	SizeValue           string             `json:"sizeValue"`
+	ScaleValue          string             `json:"scaleValue"`
+	NozzleDiameter      string             `json:"nozzleDiameter"`
+	LayerHeight         string             `json:"layerHeight"`
+	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
+	InventoryCollection string             `json:"inventoryCollection"`
+	Brightness          float64            `json:"brightness"`
+	Contrast            float64            `json:"contrast"`
+	Saturation          float64            `json:"saturation"`
+	WarpPins            []WarpPinSetting   `json:"warpPins"`
+	Dither              string             `json:"dither"`
+	ColorSnap           float64            `json:"colorSnap"`
+	NoMerge             bool               `json:"noMerge"`
+	NoSimplify          bool               `json:"noSimplify"`
+	Stats               bool               `json:"stats"`
+}
+
+// SaveSettings writes settings to the given path.
+// If the file already exists and is not a DitherForge settings file, it refuses
+// to overwrite it.
+func (a *App) SaveSettings(path string, settings Settings) error {
+	if data, err := os.ReadFile(path); err == nil {
+		var existing SettingsFile
+		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil || existing.DitherForge.URL == "" {
+			return fmt.Errorf("refusing to overwrite %s: not a DitherForge settings file", filepath.Base(path))
+		}
+	}
+	sf := SettingsFile{
+		DitherForge: SettingsMeta{
+			URL:     "https://github.com/rtwfroody/ditherforge",
+			Version: pipeline.Version,
+		},
+		Settings: settings,
+	}
+	data, err := json.MarshalIndent(sf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+	return nil
+}
+
+// SaveSettingsDialog opens a save dialog and writes settings to the chosen path.
+// Returns the saved path, or empty if the user cancelled.
+func (a *App) SaveSettingsDialog(settings Settings) (string, error) {
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "Save Settings",
+		DefaultFilename: "settings.json",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := a.SaveSettings(path, settings); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// LoadSettingsDialog opens a file picker and reads settings from the chosen file.
+// Returns the path and settings, or empty path if cancelled.
+func (a *App) LoadSettingsDialog() (*LoadSettingsResult, error) {
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Open Settings",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return &LoadSettingsResult{}, nil
+	}
+	return a.LoadSettingsFile(path)
+}
+
+// LoadSettingsFile reads settings from the given path.
+func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	var sf SettingsFile
+	if err := json.Unmarshal(data, &sf); err != nil {
+		return nil, fmt.Errorf("parse settings: %w", err)
+	}
+	if sf.DitherForge.URL == "" {
+		return nil, fmt.Errorf("not a DitherForge settings file (missing _ditherforge metadata)")
+	}
+	return &LoadSettingsResult{
+		Path:     path,
+		Settings: sf.Settings,
+	}, nil
+}
+
+// LoadSettingsResult is returned by LoadSettingsDialog/LoadSettingsFile.
+type LoadSettingsResult struct {
+	Path     string   `json:"path"`
+	Settings Settings `json:"settings"`
+}
+
+// DefaultSettingsPath returns a .json path derived from the input file path.
+func (a *App) DefaultSettingsPath(inputFile string) string {
+	if inputFile == "" {
+		return ""
+	}
+	ext := filepath.Ext(inputFile)
+	return strings.TrimSuffix(inputFile, ext) + ".json"
 }
