@@ -45,20 +45,31 @@
   } = $props();
 
   // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
+  // Go operates on sRGB values, so we convert linear→sRGB before adjusting,
+  // then sRGB→linear after, since Three.js works in linear space.
   const colorAdjustGLSL = `
     uniform float uBrightness;
     uniform float uContrast;
     uniform float uSaturation;
+
+    float adjLinearToSRGB(float c) {
+      return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    }
+    float adjSRGBToLinear(float c) {
+      return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+    }
   `;
   const colorAdjustApply = `
     {
-      vec3 c = diffuseColor.rgb;
+      // Convert to sRGB for adjustment (matching Go's AdjustColor).
+      vec3 c = vec3(adjLinearToSRGB(diffuseColor.r), adjLinearToSRGB(diffuseColor.g), adjLinearToSRGB(diffuseColor.b));
       c = c + uBrightness;
       c = (c - 0.5) * uContrast + 0.5;
       float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
       c = mix(vec3(lum), c, uSaturation);
       c = clamp(c, 0.0, 1.0);
-      diffuseColor.rgb = c;
+      // Convert back to linear for Three.js lighting.
+      diffuseColor.rgb = vec3(adjSRGBToLinear(c.r), adjSRGBToLinear(c.g), adjSRGBToLinear(c.b));
     }
   `;
 
@@ -738,7 +749,7 @@
 
         <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
         <AxesGizmo />
-        <ColorPicker3D {pickMode} onPick={onColorPick} />
+        <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
       </Canvas>
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
