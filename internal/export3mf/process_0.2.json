@@ -56,7 +56,7 @@
   "preheat_time": "30",
   "prime_tower_brim_width": "5",
   "prime_tower_width": "20",
-  "prime_volume": "30",
+  "prime_volume": "15",
   "print_sequence": "by layer",
   "print_settings_id": "",
   "raft_layers": "0",

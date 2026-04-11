@@ -53,7 +53,7 @@
   "overhang_4_4_speed": "10",
   "overhang_totally_speed": "50",
   "prime_tower_width": "20",
-  "prime_volume": "30",
+  "prime_volume": "15",
   "print_sequence": "by layer",
   "print_settings_id": "",
   "raft_layers": "0",
