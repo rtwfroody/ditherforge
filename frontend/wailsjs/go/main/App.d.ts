@@ -19,11 +19,11 @@ export function IsBusy():Promise<boolean>;
 
 export function ListCollections():Promise<Array<main.CollectionInfo>>;
 
-export function LoadSettingsDialog():Promise<main.LoadSettingsResult>;
-
 export function LoadSettingsFile(arg1:string):Promise<main.LoadSettingsResult>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
+
+export function OpenFileDialog():Promise<string>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
@@ -36,7 +36,5 @@ export function SaveCollectionColors(arg1:string,arg2:Array<main.ColorEntry>):Pr
 export function SaveSettings(arg1:string,arg2:main.Settings):Promise<void>;
 
 export function SaveSettingsDialog(arg1:main.Settings):Promise<string>;
-
-export function SelectInputFile():Promise<string>;
 
 export function Version():Promise<string>;

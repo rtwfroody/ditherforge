@@ -9,7 +9,8 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon, FileIcon } from '@lucide/svelte';
+  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
+  import * as Menubar from '$lib/components/ui/menubar';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
@@ -17,7 +18,7 @@
   import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { SelectInputFile, ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, LoadSettingsDialog, DefaultSettingsPath, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -54,7 +55,7 @@
   let stats = $state(false);
 
   // Tab navigation.
-  let activeTab: 'file' | 'model' | 'collections' = $state('model');
+  let activeTab: 'model' | 'collections' = $state('model');
 
   // Settings file state.
   let settingsPath = $state('');  // current save path; empty = unsaved
@@ -115,6 +116,7 @@
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
+  let inputError = $state('');
 
   // Resolved unlocked colors from the backend (the non-locked portion of the palette).
   let resolvedUnlockedColors = $state<ColorInfo[]>([]);
@@ -161,6 +163,7 @@
   EventsOn('pipeline-error', (event: { gen: number; message: string }) => {
     if (event.gen < latestGen) return;
     running = false;
+    inputError = event.message;
     statusMessage = `Error: ${event.message}`;
     statusType = 'error';
   });
@@ -215,13 +218,11 @@
     }
   }
 
-  async function browseInput() {
-    const path = await SelectInputFile();
-    if (path) {
-      inputFile = path;
-      // Update default settings path when input file changes.
-      settingsPath = await DefaultSettingsPath(path);
-    }
+  async function openInputModel(path: string) {
+    inputMeshUrl = undefined;
+    outputMeshUrl = undefined;
+    inputFile = path;
+    settingsPath = await DefaultSettingsPath(path);
   }
 
   function serializeSettings() {
@@ -279,7 +280,7 @@
     }
     try {
       await SaveSettings(settingsPath, serializeSettings() as any);
-      statusMessage = `Saved settings to ${settingsPath}`;
+      statusMessage = `Saved to ${settingsPath}`;
       statusType = 'success';
     } catch (err: any) {
       statusMessage = `Save error: ${err}`;
@@ -292,7 +293,7 @@
       const path = await SaveSettingsDialog(serializeSettings() as any);
       if (path) {
         settingsPath = path;
-        statusMessage = `Saved settings to ${path}`;
+        statusMessage = `Saved to ${path}`;
         statusType = 'success';
       }
     } catch (err: any) {
@@ -303,15 +304,22 @@
 
   async function handleOpen() {
     try {
-      const result = await LoadSettingsDialog();
-      if (result && result.path) {
-        settingsPath = result.path;
-        applySettings(result.settings);
-        statusMessage = `Loaded settings from ${result.path}`;
-        statusType = 'success';
+      const path = await OpenFileDialog();
+      if (!path) return;
+      const ext = path.split('.').pop()?.toLowerCase();
+      if (ext === 'json') {
+        const result = await LoadSettingsFile(path);
+        if (result && result.path) {
+          settingsPath = result.path;
+          applySettings(result.settings);
+          statusMessage = `Loaded from ${result.path}`;
+          statusType = 'success';
+        }
+      } else {
+        await openInputModel(path);
       }
     } catch (err: any) {
-      statusMessage = `Load error: ${err}`;
+      statusMessage = `Open error: ${err}`;
       statusType = 'error';
     }
   }
@@ -376,6 +384,7 @@
       return;
     }
     running = true;
+    inputError = '';
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
@@ -408,16 +417,27 @@
   }
 </script>
 
-<main class="h-screen flex">
+<main class="h-screen flex flex-col">
+  <!-- Menu bar -->
+  <Menubar.Root class="rounded-none border-b border-t-0 border-x-0">
+    <Menubar.Menu>
+      <Menubar.Trigger>File</Menubar.Trigger>
+      <Menubar.Content>
+        <Menubar.Item onSelect={handleOpen}>Open...</Menubar.Item>
+        <Menubar.Item onSelect={handleSave} disabled={!settingsPath}>Save JSON</Menubar.Item>
+        <Menubar.Item onSelect={handleSaveAs}>Save JSON As...</Menubar.Item>
+        <Menubar.Separator />
+        <Menubar.Item onSelect={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Menubar.Item>
+      </Menubar.Content>
+    </Menubar.Menu>
+    {#if settingsPath || inputFile}
+      <span class="ml-auto text-xs text-muted-foreground self-center pr-2 truncate max-w-64" title={settingsPath || inputFile}>{(settingsPath || inputFile).split('/').pop()}</span>
+    {/if}
+  </Menubar.Root>
+
+  <div class="flex-1 flex min-h-0">
   <!-- Icon rail -->
   <div class="w-12 min-w-12 flex flex-col items-center py-4 gap-2 border-r bg-muted/30">
-    <button
-      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'file' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-      title="File"
-      onclick={() => activeTab = 'file'}
-    >
-      <FileIcon size={18} />
-    </button>
     <button
       class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'model' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
       title="Model Settings"
@@ -436,42 +456,13 @@
 
   <!-- Left panel: fixed width for model settings, full width for collections -->
   <div class="{activeTab === 'model' ? 'w-[480px] min-w-[400px]' : 'flex-1'} min-h-0 flex flex-col">
-  {#if activeTab === 'file'}
-    <div class="flex-1 flex flex-col p-6 overflow-y-auto">
-    <h1 class="text-2xl font-bold mb-4">File</h1>
-    <Card.Root class="shrink-0">
-      <Card.Content class="pt-6 space-y-4">
-        <div class="space-y-2">
-          <Button variant="outline" class="w-full justify-start" onclick={handleOpen}>Open Settings...</Button>
-          <Button variant="outline" class="w-full justify-start" onclick={handleSave}>Save Settings{settingsPath ? '' : '...'}</Button>
-          <Button variant="outline" class="w-full justify-start" onclick={handleSaveAs}>Save Settings As...</Button>
-          <Separator />
-          <Button variant="outline" class="w-full justify-start" onclick={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Button>
-        </div>
-        {#if settingsPath}
-          <p class="text-xs text-muted-foreground truncate" title={settingsPath}>Current: {settingsPath}</p>
-        {/if}
-      </Card.Content>
-    </Card.Root>
-    </div>
-  {:else if activeTab === 'model'}
+  {#if activeTab === 'model'}
     <div class="flex-1 flex flex-col p-6 overflow-y-auto">
     <h1 class="text-2xl font-bold mb-1"><a href="https://github.com/rtwfroody/ditherforge" onclick={(e) => { e.preventDefault(); BrowserOpenURL('https://github.com/rtwfroody/ditherforge'); }} class="hover:underline">DitherForge</a> {#if version}<span class="text-base font-normal text-muted-foreground">{version.replace(/^ditherforge\s*/i, '')}</span>{/if}</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-4">
-        <!-- Input file -->
-        <div class="space-y-2">
-          <Label for="input">Input file</Label>
-          <div class="flex gap-2">
-            <Input id="input" bind:value={inputFile} placeholder="Select a .glb or .3mf file" class="flex-1" />
-            <Button variant="outline" onclick={browseInput}>Browse</Button>
-          </div>
-        </div>
-
-        <Separator />
-
         <!-- Core settings -->
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-2">
@@ -680,18 +671,13 @@
       </Card.Content>
     </Card.Root>
 
-    <!-- Action -->
-    <div class="mt-4 flex items-center gap-4">
-      <Button onclick={exportTo3MF} disabled={!outputMeshUrl || running || saving} size="lg">
-        Export 3MF
-      </Button>
-
-      {#if statusMessage}
-        <p class="text-sm {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : 'text-muted-foreground'}">
-          {statusMessage}
-        </p>
-      {/if}
+    {#if statusMessage}
+    <div class="mt-4">
+      <p class="text-sm {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : 'text-muted-foreground'}">
+        {statusMessage}
+      </p>
     </div>
+    {/if}
 
     </div>
   {:else}
@@ -699,17 +685,18 @@
   {/if}
   </div>
 
-  <!-- Right column: 3D viewers (shown on model and file tabs) -->
-  {#if activeTab === 'model' || activeTab === 'file'}
+  <!-- Right column: 3D viewers (shown on model tab) -->
+  {#if activeTab === 'model'}
     <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
       <div class="flex-1 min-h-0">
-        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} />
+        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
       </div>
       <div class="flex-1 min-h-0">
         <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
       </div>
     </div>
   {/if}
+  </div>
 </main>
 
 <AlertDialog.Root bind:open={forceDialogOpen}>

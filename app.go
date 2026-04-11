@@ -77,16 +77,6 @@ func (a *App) shutdown(ctx context.Context) {
 	close(a.reqCh)
 }
 
-// SelectInputFile opens a native file picker for .glb/.3mf files.
-func (a *App) SelectInputFile() (string, error) {
-	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Select Input Model",
-		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "3D Models (*.glb, *.3mf)", Pattern: "*.glb;*.3mf"},
-		},
-	})
-}
-
 // CreateCollection creates a new empty user collection.
 func (a *App) CreateCollection(name string) error {
 	return a.collections.Create(name, nil)
@@ -444,7 +434,7 @@ func (a *App) SaveSettings(path string, settings Settings) error {
 // Returns the saved path, or empty if the user cancelled.
 func (a *App) SaveSettingsDialog(settings Settings) (string, error) {
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
-		Title:           "Save Settings",
+		Title:           "Save",
 		DefaultFilename: "settings.json",
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
@@ -462,22 +452,17 @@ func (a *App) SaveSettingsDialog(settings Settings) (string, error) {
 	return path, nil
 }
 
-// LoadSettingsDialog opens a file picker and reads settings from the chosen file.
-// Returns the path and settings, or empty path if cancelled.
-func (a *App) LoadSettingsDialog() (*LoadSettingsResult, error) {
-	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Open Settings",
+// OpenFileDialog opens a file picker that accepts .json, .glb, and .3mf files.
+// Returns the selected path, or empty if cancelled.
+func (a *App) OpenFileDialog() (string, error) {
+	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Open",
 		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "All Supported (*.json, *.glb, *.3mf)", Pattern: "*.json;*.glb;*.3mf"},
 			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
+			{DisplayName: "3D Models (*.glb, *.3mf)", Pattern: "*.glb;*.3mf"},
 		},
 	})
-	if err != nil {
-		return nil, err
-	}
-	if path == "" {
-		return &LoadSettingsResult{}, nil
-	}
-	return a.LoadSettingsFile(path)
 }
 
 // LoadSettingsFile reads settings from the given path.

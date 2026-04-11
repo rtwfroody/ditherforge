@@ -8,6 +8,7 @@
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
+  import { LoaderCircleIcon } from '@lucide/svelte';
 
 
   function log(msg: string) {
@@ -30,6 +31,7 @@
     pickMode = false,
     onColorPick,
     warpPins = [],
+    loading = '',
   }: {
     meshUrl?: string;
     label: string;
@@ -42,6 +44,7 @@
     pickMode?: boolean;
     onColorPick?: (hex: string) => void;
     warpPins?: WarpPin[];
+    loading?: string;
   } = $props();
 
   // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
@@ -754,6 +757,11 @@
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
         {errorMessage}
+      </div>
+    {:else if loading}
+      <div class="flex items-center justify-center h-full text-sm text-muted-foreground gap-2">
+        <LoaderCircleIcon class="w-4 h-4 animate-spin" />
+        Loading {loading}
       </div>
     {:else}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground">

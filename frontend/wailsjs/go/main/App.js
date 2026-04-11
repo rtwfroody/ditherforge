@@ -34,16 +34,16 @@ export function ListCollections() {
   return window['go']['main']['App']['ListCollections']();
 }
 
-export function LoadSettingsDialog() {
-  return window['go']['main']['App']['LoadSettingsDialog']();
-}
-
 export function LoadSettingsFile(arg1) {
   return window['go']['main']['App']['LoadSettingsFile'](arg1);
 }
 
 export function LogMessage(arg1, arg2) {
   return window['go']['main']['App']['LogMessage'](arg1, arg2);
+}
+
+export function OpenFileDialog() {
+  return window['go']['main']['App']['OpenFileDialog']();
 }
 
 export function ProcessPipeline(arg1) {
@@ -68,10 +68,6 @@ export function SaveSettings(arg1, arg2) {
 
 export function SaveSettingsDialog(arg1) {
   return window['go']['main']['App']['SaveSettingsDialog'](arg1);
-}
-
-export function SelectInputFile() {
-  return window['go']['main']['App']['SelectInputFile']();
 }
 
 export function Version() {
