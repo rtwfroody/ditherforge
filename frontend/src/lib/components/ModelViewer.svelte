@@ -550,7 +550,7 @@
       position: [center[0] + dist * 0.3, center[1] - dist * 0.8, center[2] + dist * 0.5],
       target: center,
       near: size * 0.001,
-      far: size * 20,
+      far: size * 10000,
     };
   }
 

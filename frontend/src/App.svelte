@@ -241,6 +241,16 @@
     settingsPath = await DefaultSettingsPath(path);
   }
 
+  // Reset the camera pose whenever the input model changes — no matter
+  // how (File > Open, loading a settings JSON, etc.).
+  let prevInputFile = '';
+  $effect(() => {
+    if (inputFile !== prevInputFile) {
+      prevInputFile = inputFile;
+      sharedCamera.initialized = false;
+    }
+  });
+
   function serializeSettings() {
     return {
       inputFile,
