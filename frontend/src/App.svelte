@@ -450,7 +450,7 @@
                   <button
                     type="button"
                     class="w-full h-12 rounded cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                    style={slot ? `background: ${slot.hex};` : resolved ? `background: ${resolved.hex}; opacity: 0.7;` : 'background: var(--muted);'}
+                    style={slot ? `background: ${slot.hex};` : resolved ? `background: ${resolved.hex};` : 'background: var(--muted);'}
                     title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
                     onclick={() => openPicker(i)}
                   >
