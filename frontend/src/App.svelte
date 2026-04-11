@@ -9,7 +9,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
-  import { SlidersHorizontalIcon, PaletteIcon, LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
+  import { LockIcon, LockOpenIcon, LoaderCircleIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
@@ -18,7 +18,8 @@
   import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection } from '../wailsjs/go/main/App';
+  import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
 
@@ -54,8 +55,11 @@
   let noSimplify = $state(false);
   let stats = $state(false);
 
-  // Tab navigation.
-  let activeTab: 'model' | 'collections' = $state('model');
+  // Collection editor dialog state.
+  let collectionDialogOpen = $state(false);
+  let newCollectionDialogOpen = $state(false);
+  let newCollectionName = $state('');
+  let deleteCollectionDialogOpen = $state(false);
 
   // Settings file state.
   let settingsPath = $state('');  // current save path; empty = unsaved
@@ -324,6 +328,54 @@
     }
   }
 
+  // Filaments menu handlers.
+  collectionStore.ensureLoaded();
+
+
+  function openCollection(name: string) {
+    collectionStore.select(name);
+    collectionDialogOpen = true;
+  }
+
+  async function handleImportCollection() {
+    try {
+      const name = await ImportCollection();
+      if (name) {
+        await collectionStore.refresh();
+        openCollection(name);
+      }
+    } catch (err) {
+      console.error('Failed to import collection:', err);
+    }
+  }
+
+  async function handleDeleteCollection() {
+    const name = collectionStore.activeCollection;
+    if (!name) return;
+    try {
+      await DeleteCollection(name);
+      collectionDialogOpen = false;
+      deleteCollectionDialogOpen = false;
+      collectionStore.activeCollection = '';
+      collectionStore.colors = [];
+      await collectionStore.refresh();
+    } catch (err) {
+      console.error('Failed to delete collection:', err);
+    }
+  }
+
+  async function handleCreateCollection() {
+    if (!newCollectionName.trim()) return;
+    try {
+      await CreateCollection(newCollectionName.trim());
+      newCollectionDialogOpen = false;
+      await collectionStore.refresh();
+      openCollection(newCollectionName.trim());
+    } catch (err) {
+      console.error('Failed to create collection:', err);
+    }
+  }
+
   // Load collection colors for inventory source.
   async function loadInventoryCollectionColors(name: string) {
     if (!name) {
@@ -430,33 +482,29 @@
         <Menubar.Item onSelect={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
+    <Menubar.Menu>
+      <Menubar.Trigger>Filaments</Menubar.Trigger>
+      <Menubar.Content>
+        {#each collectionStore.collections as col}
+          <Menubar.Item onSelect={() => openCollection(col.name)}>
+            {col.name} <span class="text-muted-foreground ml-auto pl-4">{col.count}</span>
+          </Menubar.Item>
+        {/each}
+        {#if collectionStore.collections.length > 0}
+          <Menubar.Separator />
+        {/if}
+        <Menubar.Item onSelect={() => { newCollectionName = ''; newCollectionDialogOpen = true; }}>New...</Menubar.Item>
+        <Menubar.Item onSelect={handleImportCollection}>Import...</Menubar.Item>
+      </Menubar.Content>
+    </Menubar.Menu>
     {#if settingsPath || inputFile}
       <span class="ml-auto text-xs text-muted-foreground self-center pr-2 truncate max-w-64" title={settingsPath || inputFile}>{(settingsPath || inputFile).split('/').pop()}</span>
     {/if}
   </Menubar.Root>
 
   <div class="flex-1 flex min-h-0">
-  <!-- Icon rail -->
-  <div class="w-12 min-w-12 flex flex-col items-center py-4 gap-2 border-r bg-muted/30">
-    <button
-      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'model' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-      title="Model Settings"
-      onclick={() => activeTab = 'model'}
-    >
-      <SlidersHorizontalIcon size={18} />
-    </button>
-    <button
-      class="w-9 h-9 rounded-lg flex items-center justify-center transition-colors {activeTab === 'collections' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
-      title="Filament Collections"
-      onclick={() => activeTab = 'collections'}
-    >
-      <PaletteIcon size={18} />
-    </button>
-  </div>
-
-  <!-- Left panel: fixed width for model settings, full width for collections -->
-  <div class="{activeTab === 'model' ? 'w-[480px] min-w-[400px]' : 'flex-1'} min-h-0 flex flex-col">
-  {#if activeTab === 'model'}
+  <!-- Left panel -->
+  <div class="w-[480px] min-w-[400px] min-h-0 flex flex-col">
     <div class="flex-1 flex flex-col p-6 overflow-y-auto">
     <h1 class="text-2xl font-bold mb-1"><a href="https://github.com/rtwfroody/ditherforge" onclick={(e) => { e.preventDefault(); BrowserOpenURL('https://github.com/rtwfroody/ditherforge'); }} class="hover:underline">DitherForge</a> {#if version}<span class="text-base font-normal text-muted-foreground">{version.replace(/^ditherforge\s*/i, '')}</span>{/if}</h1>
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
@@ -680,22 +728,17 @@
     {/if}
 
     </div>
-  {:else}
-    <CollectionManager />
-  {/if}
   </div>
 
-  <!-- Right column: 3D viewers (shown on model tab) -->
-  {#if activeTab === 'model'}
-    <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
-      <div class="flex-1 min-h-0">
-        <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
-      </div>
-      <div class="flex-1 min-h-0">
-        <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
-      </div>
+  <!-- Right column: 3D viewers -->
+  <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
+    <div class="flex-1 min-h-0">
+      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
-  {/if}
+    <div class="flex-1 min-h-0">
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
+    </div>
+  </div>
   </div>
 </main>
 
@@ -740,3 +783,54 @@
     {/if}
   </Dialog.Content>
 </Dialog.Root>
+
+<Dialog.Root bind:open={collectionDialogOpen}>
+  <Dialog.Content class="sm:max-w-4xl max-h-[80vh] overflow-y-auto overflow-x-hidden">
+    <Dialog.Header>
+      <Dialog.Title>{collectionStore.activeCollection}</Dialog.Title>
+    </Dialog.Header>
+    <CollectionManager />
+    {#if collectionStore.isEditable}
+      <Dialog.Footer>
+        <Button variant="destructive" size="sm" class="text-foreground" onclick={() => { deleteCollectionDialogOpen = true; }}>Delete Collection</Button>
+      </Dialog.Footer>
+    {/if}
+  </Dialog.Content>
+</Dialog.Root>
+
+<AlertDialog.Root bind:open={newCollectionDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>New collection</AlertDialog.Title>
+      <AlertDialog.Description>
+        Enter a name for the new collection.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <div class="py-4">
+      <Input
+        bind:value={newCollectionName}
+        placeholder="Collection name"
+        onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') handleCreateCollection(); }}
+      />
+    </div>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action onclick={handleCreateCollection} disabled={!newCollectionName.trim()}>Create</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={deleteCollectionDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete collection</AlertDialog.Title>
+      <AlertDialog.Description>
+        Are you sure you want to delete "{collectionStore.activeCollection}"? This cannot be undone.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action onclick={handleDeleteCollection}>Delete</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

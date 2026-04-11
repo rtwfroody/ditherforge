@@ -5,6 +5,10 @@ class CollectionStore {
   collections = $state<main.CollectionInfo[]>([]);
   activeCollection = $state('');
   colors = $state<main.ColorEntry[]>([]);
+  isEditable = $derived(
+    !!this.activeCollection &&
+    !this.collections.find(c => c.name === this.activeCollection)?.builtIn
+  );
   private loaded = false;
 
   async load() {
