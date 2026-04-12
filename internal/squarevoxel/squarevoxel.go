@@ -9,6 +9,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -86,7 +87,8 @@ func colorCells(
 	si *voxel.SpatialIndex,
 	cellSet map[voxel.CellKey]struct{},
 	p regionParams,
-	bar interface{ Add(int) error },
+	tracker progress.Tracker,
+	counter *atomic.Int64,
 ) ([]voxel.ActiveCell, error) {
 	colorRadius := p.CellSize * 3
 	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
@@ -123,9 +125,8 @@ func colorCells(
 				if i%1000 == 0 && ctx.Err() != nil {
 					return
 				}
-				if bar != nil {
-					bar.Add(1)
-				}
+				cur := counter.Add(1)
+				tracker.StageProgress("Coloring cells", int(cur))
 				cx := p.MinV[0] + float32(k.Col)*p.CellSize
 				cy := p.MinV[1] + float32(k.Row)*p.CellSize
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
@@ -169,7 +170,7 @@ type TwoGridResult struct {
 
 // VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size for
 // layer 0 and upperSize for layers 1+.
-func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size, upperSize, layerH float32) (*TwoGridResult, error) {
+func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker) (*TwoGridResult, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("empty model")
 	}
@@ -224,9 +225,10 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 
 	// Color cells
 	tColor := time.Now()
-	bar := progress.NewBar(totalCells, "  Coloring cells")
+	tracker.StageStart("Coloring cells", true, totalCells)
+	var counter atomic.Int64
 
-	cells0, err := colorCells(ctx, model, si, cellSet0, p0, bar)
+	cells0, err := colorCells(ctx, model, si, cellSet0, p0, tracker, &counter)
 	if err != nil {
 		return nil, err
 	}
@@ -234,13 +236,14 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 		Grid: 1, CellSize: upperSize, LayerH: layerH,
 		MinV: minV, NCols: nCols1, NRows: nRows1,
 		LayerLo: 1, LayerHi: nLayers - 1,
-	}, bar)
+	}, tracker, &counter)
 	if err != nil {
 		return nil, err
 	}
 
 	cells := append(cells0, cells1...)
-	progress.FinishBar(bar, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
+	tracker.StageDone("Coloring cells")
+	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, fmt.Errorf("no active cells found")
 	}
@@ -262,7 +265,7 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 }
 
 // Voxelize performs voxelization with a single uniform cell size.
-func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH float32) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
+func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH float32, tracker progress.Tracker) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("empty model")
 	}
@@ -295,12 +298,14 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	fmt.Printf("  Voxelized: %d cells in %.1fs\n", len(cellSet), time.Since(tVoxelize).Seconds())
 
 	tColor := time.Now()
-	bar := progress.NewBar(len(cellSet), "  Coloring cells")
-	cells, err := colorCells(ctx, model, si, cellSet, p, bar)
+	tracker.StageStart("Coloring cells", true, len(cellSet))
+	var counter atomic.Int64
+	cells, err := colorCells(ctx, model, si, cellSet, p, tracker, &counter)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}
-	progress.FinishBar(bar, "Colored cells", fmt.Sprintf("%d cells", len(cells)), time.Since(tColor))
+	tracker.StageDone("Coloring cells")
+	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("no active cells found")
 	}

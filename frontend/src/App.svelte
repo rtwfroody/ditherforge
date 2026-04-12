@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
@@ -146,6 +147,38 @@
   // Resolved unlocked colors from the backend (the non-locked portion of the palette).
   let resolvedUnlockedColors = $state<ColorInfo[]>([]);
 
+  // Pipeline progress stages for the output viewer.
+  type StageInfo = {
+    name: string;
+    status: 'running' | 'done';
+    hasProgress: boolean;
+    current: number;
+    total: number;
+    startedAt: number;  // Date.now() when stage started
+    elapsed: number;    // final elapsed seconds (set on done)
+  };
+  let pipelineStages = $state<StageInfo[]>([]);
+  let stageTick = $state(0);  // incremented to force timer re-render
+  let stageTimerHandle = 0;
+
+  // Tick running stage timers so the display updates.
+  function startStageTimer() {
+    if (stageTimerHandle) return;
+    stageTimerHandle = window.setInterval(() => {
+      const hasRunning = pipelineStages.some(s => s.status === 'running');
+      if (hasRunning) {
+        stageTick++;
+      } else {
+        window.clearInterval(stageTimerHandle);
+        stageTimerHandle = 0;
+      }
+    }, 100);
+  }
+
+  onDestroy(() => {
+    if (stageTimerHandle) window.clearInterval(stageTimerHandle);
+  });
+
   // Per-slot resolved color: maps unlocked colors back to their slot positions.
   let resolvedBySlot = $derived.by((): (ColorInfo | null)[] => {
     let idx = 0;
@@ -206,6 +239,58 @@
     const numLocked = colorSlots.filter(s => s !== null).length;
     const collName = inventoryCollection;
     resolvedUnlockedColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
+  });
+  EventsOn('pipeline-stage', (event: { gen: number; stage: string; status: string; hasProgress: boolean; total: number }) => {
+    if (event.gen < latestGen) return;
+    const now = Date.now();
+    if (event.status === 'running') {
+      const existing = pipelineStages.find(s => s.name === event.stage);
+      if (existing) {
+        existing.status = 'running';
+        existing.hasProgress = event.hasProgress;
+        existing.total = event.total;
+        existing.current = 0;
+        existing.startedAt = now;
+        existing.elapsed = 0;
+        pipelineStages = pipelineStages;
+      } else {
+        pipelineStages = [...pipelineStages, {
+          name: event.stage,
+          status: 'running',
+          hasProgress: event.hasProgress,
+          current: 0,
+          total: event.total,
+          startedAt: now,
+          elapsed: 0,
+        }];
+      }
+      startStageTimer();
+    } else if (event.status === 'done') {
+      const existing = pipelineStages.find(s => s.name === event.stage);
+      if (existing) {
+        existing.status = 'done';
+        existing.elapsed = (now - existing.startedAt) / 1000;
+        pipelineStages = pipelineStages;
+      } else {
+        pipelineStages = [...pipelineStages, {
+          name: event.stage,
+          status: 'done',
+          hasProgress: false,
+          current: 0,
+          total: 0,
+          startedAt: now,
+          elapsed: 0,
+        }];
+      }
+    }
+  });
+  EventsOn('pipeline-progress', (event: { gen: number; stage: string; current: number }) => {
+    if (event.gen < latestGen) return;
+    const existing = pipelineStages.find(s => s.name === event.stage);
+    if (existing) {
+      existing.current = event.current;
+      pipelineStages = pipelineStages;
+    }
   });
 
   function scheduleProcess(delay = 300) {
@@ -483,6 +568,11 @@
     statusType = 'idle';
     outputMeshUrl = undefined;
     resolvedUnlockedColors = [] as ColorInfo[];
+    pipelineStages = [];
+    if (stageTimerHandle) {
+      window.clearInterval(stageTimerHandle);
+      stageTimerHandle = 0;
+    }
 
     // ProcessPipeline enqueues the request and returns immediately.
     // The backend worker processes only the latest request and delivers
@@ -791,7 +881,7 @@
       <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />
     </div>
   </div>
   </div>

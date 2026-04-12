@@ -8,6 +8,7 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -149,7 +150,7 @@ func TestColorSelection(t *testing.T) {
 			// Voxelize to get cell colors.
 			cellSize := float32(0.4 * 1.275)
 			layerH := float32(0.2)
-			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, cellSize, layerH)
+			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, cellSize, layerH, progress.NullTracker{})
 			if err != nil {
 				t.Fatalf("Voxelize: %v", err)
 			}
@@ -162,7 +163,7 @@ func TestColorSelection(t *testing.T) {
 				NumColors: tc.nColors,
 				Inventory: inv,
 			}
-			paletteRGB, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
+			paletteRGB, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 			if err != nil {
 				t.Fatalf("ResolvePalette: %v", err)
 			}
@@ -235,7 +236,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -261,7 +262,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -283,7 +284,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    []palette.InventoryEntry{{Color: [3]uint8{255, 0, 0}}},
 			Inventory: smallInv,
 		}
-		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
+		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err == nil {
 			t.Fatalf("expected error when inventory is exhausted after filtering")
 		}
@@ -293,7 +294,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 		pcfg := voxel.PaletteConfig{
 			NumColors: 3,
 		}
-		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true)
+		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err == nil {
 			t.Fatalf("expected error when no color source is set")
 		}

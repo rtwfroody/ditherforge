@@ -15,6 +15,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -53,6 +54,26 @@ type WarpPin struct {
 	Sigma     float64 `json:"sigma"`     // falloff in delta-E units; 0 = auto
 }
 
+// Callbacks groups optional callbacks for a pipeline run.
+type Callbacks struct {
+	OnInputMesh func(*MeshData)
+	OnPalette   func([][3]uint8, []string)
+	Progress    progress.Tracker
+}
+
+// stageNames maps StageID to a human-readable name for progress reporting.
+var stageNames = map[StageID]string{
+	StageLoad:        "Loading",
+	StageVoxelize:    "Voxelizing",
+	StageDecimate:    "Decimating",
+	StageColorAdjust: "Adjusting colors",
+	StageColorWarp:   "Warping colors",
+	StagePalette:     "Building palette",
+	StageDither:      "Dithering",
+	StageClip:        "Clipping",
+	StageMerge:       "Merging",
+}
+
 // MeshData holds flat arrays for 3D preview rendering.
 type MeshData struct {
 	Vertices       []float32 `json:"Vertices"`                 // flat [x,y,z, x,y,z, ...]
@@ -87,10 +108,10 @@ type Result struct {
 
 // RunCached executes the pipeline using per-stage caching. Only stages whose
 // settings changed (or whose dependencies changed) are re-executed.
-// The optional onPalette callback is called with the resolved palette colors
+// The optional cb.OnPalette callback is called with the resolved palette colors
 // on every run (including when the palette stage is served from cache),
 // allowing callers to update the UI before later stages finish.
-func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh func(*MeshData), onPalette func([][3]uint8, []string)) (*ProcessResult, error) {
+func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbacks) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
 	case "none", "dizzy":
@@ -98,8 +119,29 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 		return nil, fmt.Errorf("invalid --dither %q: must be none or dizzy", opts.Dither)
 	}
 
+	// Extract callbacks, using safe defaults for nil.
+	var onInputMesh func(*MeshData)
+	var onPalette func([][3]uint8, []string)
+	var tracker progress.Tracker = progress.NullTracker{}
+	if cb != nil {
+		onInputMesh = cb.OnInputMesh
+		onPalette = cb.OnPalette
+		if cb.Progress != nil {
+			tracker = cb.Progress
+		}
+	}
+
 	startFrom := cache.Invalidate(opts)
 	start := time.Now()
+
+	// Emit instant start+done for cached (skipped) stages so the UI shows
+	// them as completed.
+	for s := StageID(0); s < startFrom && s < numStages; s++ {
+		if name, ok := stageNames[s]; ok {
+			tracker.StageStart(name, false, 0)
+			tracker.StageDone(name)
+		}
+	}
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -107,9 +149,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 0: Load
 	if startFrom <= StageLoad {
+		tracker.StageStart(stageNames[StageLoad], false, 0)
 		if err := runLoad(ctx, cache, opts); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageLoad])
 	}
 	lo := cache.getLoad()
 
@@ -142,9 +186,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 1: Voxelize
 	if startFrom <= StageVoxelize {
-		if err := runVoxelize(ctx, cache, opts, lo); err != nil {
+		tracker.StageStart(stageNames[StageVoxelize], false, 0)
+		if err := runVoxelize(ctx, cache, opts, lo, tracker); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageVoxelize])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -153,9 +199,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 2: Decimate
 	if startFrom <= StageDecimate {
+		tracker.StageStart(stageNames[StageDecimate], false, 0)
 		if err := runDecimate(ctx, cache, opts, lo, vo); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageDecimate])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -163,9 +211,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 3: Color adjustment
 	if startFrom <= StageColorAdjust {
+		tracker.StageStart(stageNames[StageColorAdjust], false, 0)
 		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageColorAdjust])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -174,9 +224,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 4: Color warp (RBF-based color space warping)
 	if startFrom <= StageColorWarp {
+		tracker.StageStart(stageNames[StageColorWarp], false, 0)
 		if err := runColorWarp(ctx, cache, opts, cao); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageColorWarp])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -185,9 +237,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 5: Palette + snap colors
 	if startFrom <= StagePalette {
-		if err := runPalette(ctx, cache, opts, cwo); err != nil {
+		tracker.StageStart(stageNames[StagePalette], false, 0)
+		if err := runPalette(ctx, cache, opts, cwo, tracker); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StagePalette])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -200,9 +254,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 6: Dither + flood fill
 	if startFrom <= StageDither {
+		tracker.StageStart(stageNames[StageDither], false, 0)
 		if err := runDither(ctx, cache, opts, po, vo); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageDither])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -211,9 +267,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 7: Clip
 	if startFrom <= StageClip {
+		tracker.StageStart(stageNames[StageClip], false, 0)
 		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageClip])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -221,9 +279,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, onInputMesh
 
 	// Stage 8: Merge
 	if startFrom <= StageMerge {
+		tracker.StageStart(stageNames[StageMerge], false, 0)
 		if err := runMerge(ctx, cache, opts); err != nil {
 			return nil, err
 		}
+		tracker.StageDone(stageNames[StageMerge])
 	}
 
 	mo := cache.getMerge()
@@ -259,7 +319,9 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 	}
 
 	cache := NewStageCache()
-	pr, err := RunCached(ctx, cache, opts, nil, nil)
+	pr, err := RunCached(ctx, cache, opts, &Callbacks{
+		Progress: progress.NewCLITracker(),
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -382,7 +444,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	return nil
 }
 
-func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput) error {
+func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
 	layer0Size := opts.NozzleDiameter * 1.275
 	upperSize := opts.NozzleDiameter * 1.05
 	layerH := opts.LayerHeight
@@ -390,7 +452,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 
 	fmt.Println("Voxelizing...")
 	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH)
+		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH, tracker)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -405,7 +467,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		})
 	} else {
 		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH)
+		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH, tracker)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -490,7 +552,7 @@ func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *colorWarpOutput) error {
+func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *colorWarpOutput, tracker progress.Tracker) error {
 	pcfg, err := buildPaletteConfig(opts)
 	if err != nil {
 		return err
@@ -505,7 +567,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 	copy(cells, cwo.Cells)
 
 	ditherMode := opts.Dither
-	pal, palLabels, palDisplay, err := voxel.ResolvePalette(ctx, cells, pcfg, ditherMode != "none")
+	pal, palLabels, palDisplay, err := voxel.ResolvePalette(ctx, cells, pcfg, ditherMode != "none", tracker)
 	if err != nil {
 		return err
 	}

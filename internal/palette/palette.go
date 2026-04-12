@@ -303,7 +303,7 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 // When dithering is true, uses hull-based scoring that accounts for
 // dithering's ability to mix colors. When false, uses nearest-color scoring
 // that minimizes the error when each cell gets exactly one color.
-func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool) ([]InventoryEntry, error) {
+func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool, tracker progress.Tracker) ([]InventoryEntry, error) {
 	if n >= len(inventory) {
 		return inventory, nil
 	}
@@ -349,7 +349,7 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 	var err error
 	if exhaustive {
 		var counter atomic.Int64
-		bar := progress.NewBar(combos, "  Selecting colors")
+		tracker.StageStart("Selecting colors", true, combos)
 		done := make(chan struct{})
 		exited := make(chan struct{})
 		go func() {
@@ -359,9 +359,9 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 			for {
 				select {
 				case <-ticker.C:
-					bar.Set64(counter.Load())
+					tracker.StageProgress("Selecting colors", int(counter.Load()))
 				case <-done:
-					bar.Set64(counter.Load())
+					tracker.StageProgress("Selecting colors", int(counter.Load()))
 					return
 				}
 			}
@@ -371,10 +371,10 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 		<-exited
 		evaluated = int(counter.Load())
 		if err != nil {
-			bar.Finish()
 			return nil, err
 		}
-		progress.FinishBar(bar, "Selected colors", fmt.Sprintf("(%d evaluated)", evaluated), time.Since(start))
+		tracker.StageDone("Selecting colors")
+		fmt.Printf("  Selected colors (%d evaluated) in %.1fs\n", evaluated, time.Since(start).Seconds())
 	} else {
 		bestSubset, evaluated, err = greedySwapSearch(ctx, invLab, lockedLab, samples, n, scorer)
 		if err != nil {

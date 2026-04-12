@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -199,6 +201,58 @@ func (a *App) pipelineWorker() {
 	}
 }
 
+// guiTracker implements progress.Tracker by emitting Wails events.
+type guiTracker struct {
+	appCtx   context.Context
+	gen      int64
+	mu       sync.Mutex
+	lastEmit time.Time
+}
+
+type stageEvent struct {
+	Gen         int64  `json:"gen"`
+	Stage       string `json:"stage"`
+	Status      string `json:"status"` // "running" or "done"
+	HasProgress bool   `json:"hasProgress"`
+	Total       int    `json:"total"`
+}
+
+type progressEvent struct {
+	Gen     int64  `json:"gen"`
+	Stage   string `json:"stage"`
+	Current int    `json:"current"`
+}
+
+func (t *guiTracker) StageStart(stage string, hasProgress bool, total int) {
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-stage", stageEvent{
+		Gen: t.gen, Stage: stage, Status: "running",
+		HasProgress: hasProgress, Total: total,
+	})
+}
+
+func (t *guiTracker) StageProgress(stage string, current int) {
+	t.mu.Lock()
+	now := time.Now()
+	if now.Sub(t.lastEmit) < 100*time.Millisecond {
+		t.mu.Unlock()
+		return
+	}
+	t.lastEmit = now
+	t.mu.Unlock()
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-progress", progressEvent{
+		Gen: t.gen, Stage: stage, Current: current,
+	})
+}
+
+func (t *guiTracker) StageDone(stage string) {
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-stage", stageEvent{
+		Gen: t.gen, Stage: stage, Status: "done",
+	})
+}
+
+// Compile-time check that guiTracker implements progress.Tracker.
+var _ progress.Tracker = (*guiTracker)(nil)
+
 // processOne runs a single pipeline request under the mutex.
 func (a *App) processOne(req pipelineRequest) {
 	a.mu.Lock()
@@ -209,30 +263,34 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
-	result, err := pipeline.RunCached(ctx, a.cache, req.opts, func(mesh *pipeline.MeshData) {
-		// Input mesh available — emit immediately so the preview appears
-		// before later pipeline stages finish.
-		if a.lastInputID != "" {
-			a.meshes.Remove(a.lastInputID)
-		}
-		a.lastInputID = a.meshes.Store(mesh)
-		wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
-	}, func(pal [][3]uint8, labels []string) {
-		colors := make([]map[string]string, len(pal))
-		for i, c := range pal {
-			label := ""
-			if i < len(labels) {
-				label = labels[i]
+	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
+		OnInputMesh: func(mesh *pipeline.MeshData) {
+			// Input mesh available — emit immediately so the preview appears
+			// before later pipeline stages finish.
+			if a.lastInputID != "" {
+				a.meshes.Remove(a.lastInputID)
 			}
-			colors[i] = map[string]string{
-				"hex":   fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
-				"label": label,
+			a.lastInputID = a.meshes.Store(mesh)
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
+		},
+		OnPalette: func(pal [][3]uint8, labels []string) {
+			colors := make([]map[string]string, len(pal))
+			for i, c := range pal {
+				label := ""
+				if i < len(labels) {
+					label = labels[i]
+				}
+				colors[i] = map[string]string{
+					"hex":   fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
+					"label": label,
+				}
 			}
-		}
-		wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{
-			"gen":    req.gen,
-			"colors": colors,
-		})
+			wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{
+				"gen":    req.gen,
+				"colors": colors,
+			})
+		},
+		Progress: &guiTracker{appCtx: a.ctx, gen: req.gen},
 	})
 	if err != nil {
 		if ctx.Err() != nil {

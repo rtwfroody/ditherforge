@@ -8,7 +8,7 @@
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
-  import { LoaderCircleIcon } from '@lucide/svelte';
+  import { LoaderCircleIcon, CheckIcon } from '@lucide/svelte';
 
 
   function log(msg: string) {
@@ -18,6 +18,15 @@
   import { SharedCamera } from './SharedCamera.svelte';
 
   type WarpPin = { sourceHex: string; targetHex: string; sigma: number };
+  type StageInfo = {
+    name: string;
+    status: 'running' | 'done';
+    hasProgress: boolean;
+    current: number;
+    total: number;
+    startedAt: number;
+    elapsed: number;
+  };
 
   let {
     meshUrl,
@@ -32,6 +41,8 @@
     onColorPick,
     warpPins = [],
     loading = '',
+    stages = [],
+    stageTick = 0,
   }: {
     meshUrl?: string;
     label: string;
@@ -45,7 +56,15 @@
     onColorPick?: (hex: string) => void;
     warpPins?: WarpPin[];
     loading?: string;
+    stages?: StageInfo[];
+    stageTick?: number;
   } = $props();
+
+  // Compute live elapsed time for a running stage. The _tick parameter
+  // creates a Svelte reactive dependency so this re-evaluates on each tick.
+  function elapsedSince(startedAt: number, _tick: number): string {
+    return ((Date.now() - startedAt) / 1000).toFixed(1);
+  }
 
   // Color adjustment GLSL snippet. Must match Go's AdjustColor exactly.
   // Go operates on sRGB values, so we convert linear→sRGB before adjusting,
@@ -748,6 +767,33 @@
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
         {errorMessage}
+      </div>
+    {:else if stages.length > 0}
+      <div class="flex flex-col justify-end gap-2 p-4 text-sm overflow-hidden h-full">
+        {#each stages as stage}
+          <div class="flex items-center gap-2">
+            {#if stage.status === 'done'}
+              <CheckIcon class="w-4 h-4 text-green-500 shrink-0" />
+            {:else}
+              <LoaderCircleIcon class="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
+            {/if}
+            <span class={stage.status === 'done' ? 'text-muted-foreground' : ''}>
+              {stage.name}
+            </span>
+            <span class="ml-auto text-xs text-muted-foreground tabular-nums">
+              {#if stage.status === 'done' && stage.elapsed >= 0.1}
+                {stage.elapsed.toFixed(1)}s
+              {:else if stage.status === 'running'}
+                {elapsedSince(stage.startedAt, stageTick)}s
+              {/if}
+            </span>
+          </div>
+          {#if stage.status === 'running' && stage.hasProgress && stage.total > 0}
+            <div class="ml-6 h-2 bg-muted rounded-full overflow-hidden">
+              <div class="h-full bg-primary rounded-full transition-all" style="width: {Math.round(100 * stage.current / stage.total)}%"></div>
+            </div>
+          {/if}
+        {/each}
       </div>
     {:else if loading}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground gap-2">

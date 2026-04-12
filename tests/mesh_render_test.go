@@ -17,6 +17,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/render"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -92,7 +93,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 		layerH := defaultLayerHeight
 
 		t.Log("Running pipeline stages...")
-		cells, _, minV, err := squarevoxel.Voxelize(ctx, model, cellSize, layerH)
+		cells, _, minV, err := squarevoxel.Voxelize(ctx, model, cellSize, layerH, progress.NullTracker{})
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return
@@ -104,7 +105,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, defaultPaletteConfig(), true)
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, defaultPaletteConfig(), true, progress.NullTracker{})
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return
