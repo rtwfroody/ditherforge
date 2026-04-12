@@ -28,6 +28,14 @@
     LogMessage('info', msg);
   }
 
+  // Shorten a path for display. Always shows at least the full filename.
+  function shortenPath(path: string, maxLen = 40): string {
+    if (path.length <= maxLen) return path;
+    const name = path.split(/[/\\]/).pop() ?? path;
+    if (name.length >= maxLen - 3) return name;
+    return '...' + path.slice(-(maxLen - 3));
+  }
+
   // Dark mode toggle — persisted in localStorage, falls back to system preference.
   let darkMode = $state(
     localStorage.getItem('theme')
@@ -533,7 +541,7 @@
     </Menubar.Menu>
     <div class="ml-auto flex items-center gap-2 pr-2">
       {#if settingsPath || inputFile}
-        <span class="text-xs text-muted-foreground truncate max-w-64" title={settingsPath || inputFile}>{(settingsPath || inputFile).split('/').pop()}</span>
+        <span class="text-xs text-muted-foreground truncate max-w-64" title={settingsPath || inputFile}>{shortenPath(settingsPath || inputFile)}</span>
       {/if}
       <button
         class="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
@@ -780,7 +788,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label="Input Model" viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
+      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} />
