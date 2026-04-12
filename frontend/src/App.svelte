@@ -82,6 +82,28 @@
   let placingStickerIndex = $state(-1);
   let previewScale = $state(1); // set when input-mesh event includes it
 
+  // Recent files (persisted in localStorage).
+  const MAX_RECENT = 10;
+  function loadRecentFiles(): string[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem('recentFiles') || '[]');
+      return Array.isArray(raw) ? raw.filter((x: unknown) => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+  let recentFiles = $state<string[]>(loadRecentFiles());
+
+  function addRecentFile(path: string) {
+    recentFiles = [path, ...recentFiles.filter(p => p !== path)].slice(0, MAX_RECENT);
+    localStorage.setItem('recentFiles', JSON.stringify(recentFiles));
+  }
+
+  function removeRecentFile(path: string) {
+    recentFiles = recentFiles.filter(p => p !== path);
+    localStorage.setItem('recentFiles', JSON.stringify(recentFiles));
+  }
+
   // Collection editor dialog state.
   let collectionDialogOpen = $state(false);
   let newCollectionDialogOpen = $state(false);
@@ -384,6 +406,7 @@
     inputFile = path;
     reloadSeq++;
     settingsPath = await DefaultSettingsPath(path);
+    addRecentFile(path);
     // Force a pipeline run even if the path didn't change (file on disk may
     // have changed). The $effect won't fire when inputFile is unchanged, so
     // schedule explicitly.
@@ -498,16 +521,15 @@
     }
   }
 
-  async function handleOpen() {
+  async function openFile(path: string) {
     try {
-      const path = await OpenFileDialog();
-      if (!path) return;
       const ext = path.split('.').pop()?.toLowerCase();
       if (ext === 'json') {
         const result = await LoadSettingsFile(path);
         if (result && result.path) {
           settingsPath = result.path;
           applySettings(result.settings);
+          addRecentFile(path);
           statusMessage = `Loaded from ${result.path}`;
           statusType = 'success';
         }
@@ -515,9 +537,21 @@
         await openInputModel(path);
       }
     } catch (err: any) {
+      removeRecentFile(path);
       statusMessage = `Open error: ${err}`;
       statusType = 'error';
     }
+  }
+
+  async function handleOpen() {
+    const path = await OpenFileDialog();
+    if (!path) return;
+    await openFile(path);
+  }
+
+  function clearRecentFiles() {
+    recentFiles = [];
+    localStorage.removeItem('recentFiles');
   }
 
   // Filaments menu handlers.
@@ -685,6 +719,19 @@
       <Menubar.Trigger>File</Menubar.Trigger>
       <Menubar.Content>
         <Menubar.Item onSelect={handleOpen}>Open...</Menubar.Item>
+        <Menubar.Sub>
+          <Menubar.SubTrigger disabled={recentFiles.length === 0}>Open Recent</Menubar.SubTrigger>
+          <Menubar.SubContent align="start">
+            {#each recentFiles as path}
+              <Menubar.Item onSelect={() => openFile(path)}>
+                {path.split(/[/\\]/).pop()}
+                <span class="text-muted-foreground ml-auto pl-4 text-xs truncate max-w-48" title={path}>{shortenPath(path)}</span>
+              </Menubar.Item>
+            {/each}
+            <Menubar.Separator />
+            <Menubar.Item onSelect={clearRecentFiles}>Clear Recent</Menubar.Item>
+          </Menubar.SubContent>
+        </Menubar.Sub>
         <Menubar.Item onSelect={handleSave} disabled={!settingsPath}>Save JSON</Menubar.Item>
         <Menubar.Item onSelect={handleSaveAs}>Save JSON As...</Menubar.Item>
         <Menubar.Separator />
