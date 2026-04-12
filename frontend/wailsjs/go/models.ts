@@ -200,6 +200,7 @@ export namespace pipeline {
 	    UniformGrid: boolean;
 	    Size?: number;
 	    Force: boolean;
+	    ReloadSeq: number;
 	    Stats: boolean;
 	    ColorSnap: number;
 	    WarpPins?: WarpPin[];
@@ -229,6 +230,7 @@ export namespace pipeline {
 	        this.UniformGrid = source["UniformGrid"];
 	        this.Size = source["Size"];
 	        this.Force = source["Force"];
+	        this.ReloadSeq = source["ReloadSeq"];
 	        this.Stats = source["Stats"];
 	        this.ColorSnap = source["ColorSnap"];
 	        this.WarpPins = this.convertValues(source["WarpPins"], WarpPin);

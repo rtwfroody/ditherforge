@@ -235,11 +235,18 @@
     }
   }
 
+  let reloadSeq = $state(0);
+
   async function openInputModel(path: string) {
     inputMeshUrl = undefined;
     outputMeshUrl = undefined;
     inputFile = path;
+    reloadSeq++;
     settingsPath = await DefaultSettingsPath(path);
+    // Force a pipeline run even if the path didn't change (file on disk may
+    // have changed). The $effect won't fire when inputFile is unchanged, so
+    // schedule explicitly.
+    scheduleProcess(0);
   }
 
   // Reset the camera pose whenever the input model changes — no matter
@@ -443,6 +450,7 @@
       NoSimplify: noSimplify,
       UniformGrid: uniformGrid,
       Force: force,
+      ReloadSeq: reloadSeq,
       Stats: stats,
       ColorSnap: colorSnap,
       WarpPins: warpPins

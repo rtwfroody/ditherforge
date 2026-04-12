@@ -40,6 +40,7 @@ type Options struct {
 	UniformGrid    bool
 	Size           *float32
 	Force          bool
+	ReloadSeq      int64 // bumped to force re-read of the same input file
 	Stats          bool
 	ColorSnap      float64
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`

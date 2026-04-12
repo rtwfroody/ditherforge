@@ -109,10 +109,11 @@ type mergeOutput struct {
 // is type-safe and free of format-string ambiguities.
 
 type loadSettings struct {
-	Input   string
-	Scale   float32
-	HasSize bool
-	Size    float32
+	Input     string
+	Scale     float32
+	HasSize   bool
+	Size      float32
+	ReloadSeq int64
 }
 
 type voxelizeSettings struct {
@@ -186,7 +187,7 @@ func writeInt(h hash.Hash64, i int) {
 func settingsForStage(stage StageID, opts Options) any {
 	switch stage {
 	case StageLoad:
-		s := loadSettings{Input: opts.Input, Scale: opts.Scale}
+		s := loadSettings{Input: opts.Input, Scale: opts.Scale, ReloadSeq: opts.ReloadSeq}
 		if opts.Size != nil {
 			s.HasSize = true
 			s.Size = *opts.Size
@@ -236,6 +237,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.Scale)
 		writeBool(h, v.HasSize)
 		writeFloat32(h, v.Size)
+		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
