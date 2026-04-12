@@ -46,6 +46,28 @@ export namespace main {
 	        this.collection = source["collection"];
 	    }
 	}
+	export class StickerSetting {
+	    imagePath: string;
+	    center: number[];
+	    normal: number[];
+	    up: number[];
+	    scale: number;
+	    rotation: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new StickerSetting(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.imagePath = source["imagePath"];
+	        this.center = source["center"];
+	        this.normal = source["normal"];
+	        this.up = source["up"];
+	        this.scale = source["scale"];
+	        this.rotation = source["rotation"];
+	    }
+	}
 	export class WarpPinSetting {
 	    sourceHex: string;
 	    targetHex: string;
@@ -77,6 +99,7 @@ export namespace main {
 	    contrast: number;
 	    saturation: number;
 	    warpPins: WarpPinSetting[];
+	    stickers?: StickerSetting[];
 	    dither: string;
 	    colorSnap: number;
 	    noMerge: boolean;
@@ -101,6 +124,7 @@ export namespace main {
 	        this.contrast = source["contrast"];
 	        this.saturation = source["saturation"];
 	        this.warpPins = this.convertValues(source["warpPins"], WarpPinSetting);
+	        this.stickers = this.convertValues(source["stickers"], StickerSetting);
 	        this.dither = source["dither"];
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
@@ -159,11 +183,34 @@ export namespace main {
 		}
 	}
 	
+	
 
 }
 
 export namespace pipeline {
 	
+	export class Sticker {
+	    ImagePath: string;
+	    Center: number[];
+	    Normal: number[];
+	    Up: number[];
+	    Scale: number;
+	    Rotation: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Sticker(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ImagePath = source["ImagePath"];
+	        this.Center = source["Center"];
+	        this.Normal = source["Normal"];
+	        this.Up = source["Up"];
+	        this.Scale = source["Scale"];
+	        this.Rotation = source["Rotation"];
+	    }
+	}
 	export class WarpPin {
 	    sourceHex: string;
 	    targetHex: string;
@@ -204,6 +251,7 @@ export namespace pipeline {
 	    Stats: boolean;
 	    ColorSnap: number;
 	    WarpPins?: WarpPin[];
+	    Stickers?: Sticker[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -234,6 +282,7 @@ export namespace pipeline {
 	        this.Stats = source["Stats"];
 	        this.ColorSnap = source["ColorSnap"];
 	        this.WarpPins = this.convertValues(source["WarpPins"], WarpPin);
+	        this.Stickers = this.convertValues(source["Stickers"], Sticker);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -254,6 +303,7 @@ export namespace pipeline {
 		    return a;
 		}
 	}
+	
 
 }
 

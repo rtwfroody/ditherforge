@@ -18,6 +18,7 @@ type StageID int
 const (
 	StageLoad        StageID = iota
 	StageVoxelize
+	StageSticker
 	StageDecimate
 	StageColorAdjust
 	StageColorWarp
@@ -60,6 +61,10 @@ type voxelizeOutput struct {
 	UpperSize     float32
 	LayerH        float32
 	TwoGrid       bool
+}
+
+type stickerOutput struct {
+	Cells []voxel.ActiveCell
 }
 
 type colorAdjustOutput struct {
@@ -120,6 +125,10 @@ type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
 	UniformGrid    bool
+}
+
+type stickerSettings struct {
+	Stickers []Sticker
 }
 
 type colorAdjustSettings struct {
@@ -195,6 +204,8 @@ func settingsForStage(stage StageID, opts Options) any {
 		return s
 	case StageVoxelize:
 		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight, UniformGrid: opts.UniformGrid}
+	case StageSticker:
+		return stickerSettings{Stickers: opts.Stickers}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -242,6 +253,26 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
 		writeBool(h, v.UniformGrid)
+	case stickerSettings:
+		writeInt(h, len(v.Stickers))
+		for _, s := range v.Stickers {
+			writeString(h, s.ImagePath)
+			// Include image file mod time so changes to the PNG invalidate cache.
+			if info, err := os.Stat(s.ImagePath); err == nil {
+				binary.Write(h, binary.LittleEndian, info.ModTime().UnixNano())
+			}
+			for _, c := range s.Center {
+				writeFloat64(h, c)
+			}
+			for _, n := range s.Normal {
+				writeFloat64(h, n)
+			}
+			for _, u := range s.Up {
+				writeFloat64(h, u)
+			}
+			writeFloat64(h, s.Scale)
+			writeFloat64(h, s.Rotation)
+		}
 	case colorAdjustSettings:
 		writeFloat32(h, v.Brightness)
 		writeFloat32(h, v.Contrast)
@@ -312,6 +343,13 @@ func (c *StageCache) getVoxelize() *voxelizeOutput {
 		return nil
 	}
 	return c.stages[StageVoxelize].output.(*voxelizeOutput)
+}
+
+func (c *StageCache) getSticker() *stickerOutput {
+	if c.stages[StageSticker] == nil {
+		return nil
+	}
+	return c.stages[StageSticker].output.(*stickerOutput)
 }
 
 func (c *StageCache) getColorAdjust() *colorAdjustOutput {

@@ -5,6 +5,7 @@
   import Invalidator from './Invalidator.svelte';
   import AxesGizmo from './AxesGizmo.svelte';
   import ColorPicker3D from './ColorPicker3D.svelte';
+  import StickerPlacer from './StickerPlacer.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -38,7 +39,9 @@
     contrast = 0,
     saturation = 0,
     pickMode = false,
+    stickerPlaceMode = false,
     onColorPick,
+    onStickerPlace,
     warpPins = [],
     loading = '',
     stages = [],
@@ -53,7 +56,9 @@
     contrast?: number;
     saturation?: number;
     pickMode?: boolean;
+    stickerPlaceMode?: boolean;
     onColorPick?: (hex: string) => void;
+    onStickerPlace?: (point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) => void;
     warpPins?: WarpPin[];
     loading?: string;
     stages?: StageInfo[];
@@ -747,7 +752,7 @@
             bind:ref={controlsRef}
             target={cameraSetup.target}
             enableDamping
-            enabled={!pickMode}
+            enabled={!pickMode && !stickerPlaceMode}
             onchange={handleControlsChange}
           />
         </T.PerspectiveCamera>
@@ -763,6 +768,7 @@
         <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
+        <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} />
       </Canvas>
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">

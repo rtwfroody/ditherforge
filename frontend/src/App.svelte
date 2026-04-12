@@ -18,8 +18,10 @@
   import CollectionSelect from '$lib/components/CollectionSelect.svelte';
   import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
+  import StickerPanel from '$lib/components/StickerPanel.svelte';
+  import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage } from '../wailsjs/go/main/App';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline } from '../wailsjs/go/models';
@@ -76,6 +78,9 @@
   let noSimplify = $state(false);
   let uniformGrid = $state(false);
   let stats = $state(false);
+  let stickers = $state<StickerUI[]>([]);
+  let placingStickerIndex = $state(-1);
+  let previewScale = $state(1); // set when input-mesh event includes it
 
   // Collection editor dialog state.
   let collectionDialogOpen = $state(false);
@@ -202,9 +207,10 @@
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
-  EventsOn('input-mesh', (event: { gen: number; url: string }) => {
+  EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number }) => {
     if (event.gen < latestGen) return;
     inputMeshUrl = event.url;
+    if (event.previewScale) previewScale = event.previewScale;
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
@@ -312,6 +318,7 @@
           inventoryCollectionColors,
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
+          JSON.stringify(stickers),
           dither, colorSnap, noMerge, noSimplify, uniformGrid, stats];
     if (!initialized) {
       initialized = true;
@@ -326,6 +333,47 @@
       warpPins = warpPins;
       pickingPinIndex = -1;
     }
+  }
+
+  async function addSticker() {
+    const path = await OpenStickerImage();
+    if (!path) return;
+    const fileName = path.split(/[/\\]/).pop() ?? path;
+    stickers = [...stickers, {
+      imagePath: path,
+      fileName,
+      center: null,
+      normal: null,
+      up: null,
+      scale: 20,
+      rotation: 0,
+    }];
+    // Automatically enter placement mode for the new sticker.
+    placingStickerIndex = stickers.length - 1;
+  }
+
+  function removeSticker(index: number) {
+    stickers = stickers.filter((_, i) => i !== index);
+    if (placingStickerIndex === index) placingStickerIndex = -1;
+    else if (placingStickerIndex > index) placingStickerIndex--;
+  }
+
+  function handleStickerPlace(point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) {
+    if (placingStickerIndex < 0 || placingStickerIndex >= stickers.length) return;
+    // Convert from preview-scaled coordinates to pipeline coordinates.
+    const unscaled: [number, number, number] = [
+      point[0] / previewScale,
+      point[1] / previewScale,
+      point[2] / previewScale,
+    ];
+    stickers[placingStickerIndex] = {
+      ...stickers[placingStickerIndex],
+      center: unscaled,
+      normal,
+      up: cameraUp,
+    };
+    stickers = stickers;
+    placingStickerIndex = -1;
   }
 
   let reloadSeq = $state(0);
@@ -366,6 +414,14 @@
       contrast,
       saturation,
       warpPins: warpPins.map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel, sigma: p.sigma })),
+      stickers: stickers.filter(s => s.center !== null).map(s => ({
+        imagePath: s.imagePath,
+        center: s.center,
+        normal: s.normal,
+        up: s.up,
+        scale: s.scale,
+        rotation: s.rotation,
+      })),
       dither,
       colorSnap,
       noMerge,
@@ -394,6 +450,17 @@
     if (s.saturation !== undefined) saturation = s.saturation;
     if (s.warpPins !== undefined) {
       warpPins = s.warpPins.map((p: any) => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel || '', sigma: p.sigma }));
+    }
+    if (s.stickers !== undefined) {
+      stickers = s.stickers.map((st: any) => ({
+        imagePath: st.imagePath,
+        fileName: (st.imagePath || '').split(/[/\\]/).pop() || st.imagePath,
+        center: st.center,
+        normal: st.normal,
+        up: st.up,
+        scale: st.scale,
+        rotation: st.rotation,
+      }));
     }
     if (s.dither !== undefined) dither = s.dither;
     if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
@@ -549,6 +616,16 @@
       WarpPins: warpPins
         .filter(p => /^#[0-9a-fA-F]{6}$/.test(p.sourceHex) && /^#[0-9a-fA-F]{6}$/.test(p.targetHex))
         .map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, sigma: p.sigma })),
+      Stickers: stickers
+        .filter(s => s.center !== null)
+        .map(s => ({
+          ImagePath: s.imagePath,
+          Center: s.center!,
+          Normal: s.normal!,
+          Up: s.up!,
+          Scale: s.scale,
+          Rotation: s.rotation,
+        })),
     };
 
     if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
@@ -740,6 +817,16 @@
 
         <Separator />
 
+        <!-- Stickers -->
+        <StickerPanel
+          bind:stickers={stickers}
+          bind:placingIndex={placingStickerIndex}
+          onAdd={addSticker}
+          onRemove={removeSticker}
+        />
+
+        <Separator />
+
         <!-- Color settings -->
         <div class="space-y-4">
           <!-- Color palette grid -->
@@ -878,7 +965,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} onColorPick={handleColorPick} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
+      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />

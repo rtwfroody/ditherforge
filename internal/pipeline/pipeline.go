@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/png"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +47,17 @@ type Options struct {
 	Stats          bool
 	ColorSnap      float64
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
+	Stickers       []Sticker `json:"Stickers,omitempty"`
+}
+
+// Sticker defines a PNG image to apply onto the voxelized mesh surface.
+type Sticker struct {
+	ImagePath string     `json:"ImagePath"`
+	Center    [3]float64 `json:"Center"`    // world-space placement point
+	Normal    [3]float64 `json:"Normal"`    // surface normal at placement
+	Up        [3]float64 `json:"Up"`        // camera up vector at placement time
+	Scale     float64    `json:"Scale"`     // world-unit width of sticker
+	Rotation  float64    `json:"Rotation"`  // degrees, around surface normal
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
@@ -56,7 +69,7 @@ type WarpPin struct {
 
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
-	OnInputMesh func(*MeshData)
+	OnInputMesh func(*MeshData, float32) // mesh data and preview scale
 	OnPalette   func([][3]uint8, []string)
 	Progress    progress.Tracker
 }
@@ -65,6 +78,7 @@ type Callbacks struct {
 var stageNames = map[StageID]string{
 	StageLoad:        "Loading",
 	StageVoxelize:    "Voxelizing",
+	StageSticker:     "Applying stickers",
 	StageDecimate:    "Decimating",
 	StageColorAdjust: "Adjusting colors",
 	StageColorWarp:   "Warping colors",
@@ -120,7 +134,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Extract callbacks, using safe defaults for nil.
-	var onInputMesh func(*MeshData)
+	var onInputMesh func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
@@ -170,7 +184,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			}
 			mesh = &scaled
 		}
-		onInputMesh(mesh)
+		onInputMesh(mesh, lo.PreviewScale)
 	}
 
 	// Force check (between load and voxelize).
@@ -197,7 +211,20 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	vo := cache.getVoxelize()
 
-	// Stage 2: Decimate
+	// Stage 2: Sticker
+	if startFrom <= StageSticker {
+		tracker.StageStart(stageNames[StageSticker], false, 0)
+		if err := runSticker(ctx, cache, opts, vo); err != nil {
+			return nil, err
+		}
+		tracker.StageDone(stageNames[StageSticker])
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	so := cache.getSticker()
+
+	// Stage 3: Decimate
 	if startFrom <= StageDecimate {
 		tracker.StageStart(stageNames[StageDecimate], false, 0)
 		if err := runDecimate(ctx, cache, opts, lo, vo); err != nil {
@@ -209,10 +236,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 
-	// Stage 3: Color adjustment
+	// Stage 4: Color adjustment
 	if startFrom <= StageColorAdjust {
 		tracker.StageStart(stageNames[StageColorAdjust], false, 0)
-		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
+		if err := runColorAdjust(ctx, cache, opts, so); err != nil {
 			return nil, err
 		}
 		tracker.StageDone(stageNames[StageColorAdjust])
@@ -484,14 +511,47 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+func runSticker(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+	if len(opts.Stickers) == 0 {
+		// Pass through — no stickers to apply.
+		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{Cells: vo.Cells})
+		return nil
+	}
+
+	// Copy cells to avoid mutating the voxelize cache.
+	cells := make([]voxel.ActiveCell, len(vo.Cells))
+	copy(cells, vo.Cells)
+
+	for _, s := range opts.Stickers {
+		f, err := os.Open(s.ImagePath)
+		if err != nil {
+			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
+		}
+		img, err := png.Decode(f)
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
+		}
+
+		if err := voxel.ApplySticker(ctx, cells, vo.CellAssignMap,
+			img, s.Center, s.Normal, s.Up, s.Scale, s.Rotation,
+			max(vo.Layer0Size, vo.UpperSize)); err != nil {
+			return err
+		}
+	}
+
+	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{Cells: cells})
+	return nil
+}
+
+func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, so *stickerOutput) error {
 	adj := voxel.ColorAdjustment{
 		Brightness: opts.Brightness,
 		Contrast:   opts.Contrast,
 		Saturation: opts.Saturation,
 	}
 	tAdj := time.Now()
-	cells, err := voxel.AdjustCellColors(ctx, vo.Cells, adj)
+	cells, err := voxel.AdjustCellColors(ctx, so.Cells, adj)
 	if err != nil {
 		return err
 	}

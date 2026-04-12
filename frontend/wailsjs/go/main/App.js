@@ -46,6 +46,10 @@ export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
 
+export function OpenStickerImage() {
+  return window['go']['main']['App']['OpenStickerImage']();
+}
+
 export function ProcessPipeline(arg1) {
   return window['go']['main']['App']['ProcessPipeline'](arg1);
 }

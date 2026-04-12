@@ -51,8 +51,9 @@ type pipelineEvent struct {
 // meshEvent is the payload sent via Wails events for mesh data.
 // URL points to a binary mesh endpoint served by meshHandler.
 type meshEvent struct {
-	Gen int64  `json:"gen"`
-	URL string `json:"url"`
+	Gen          int64   `json:"gen"`
+	URL          string  `json:"url"`
+	PreviewScale float32 `json:"previewScale,omitempty"`
 }
 
 // NewApp creates a new App instance.
@@ -264,14 +265,14 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancelMu.Unlock()
 
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
-		OnInputMesh: func(mesh *pipeline.MeshData) {
+		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
 			a.lastInputID = a.meshes.Store(mesh)
-			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID})
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale})
 		},
 		OnPalette: func(pal [][3]uint8, labels []string) {
 			colors := make([]map[string]string, len(pal))
@@ -413,6 +414,17 @@ func (a *App) RenameCollection(oldName, newName string) error {
 	return a.collections.Rename(oldName, newName)
 }
 
+// OpenStickerImage opens a file dialog for selecting a PNG sticker image.
+// Returns the selected path, or empty if cancelled.
+func (a *App) OpenStickerImage() (string, error) {
+	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Select Sticker Image",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "PNG Images (*.png)", Pattern: "*.png"},
+		},
+	})
+}
+
 // SettingsFile is the JSON structure written to/read from .json settings files.
 type SettingsFile struct {
 	DitherForge SettingsMeta `json:"_ditherforge"`
@@ -423,6 +435,16 @@ type SettingsFile struct {
 type SettingsMeta struct {
 	URL     string `json:"url"`
 	Version string `json:"version"`
+}
+
+// StickerSetting is the JSON representation of a sticker for settings persistence.
+type StickerSetting struct {
+	ImagePath string     `json:"imagePath"`
+	Center    [3]float64 `json:"center"`
+	Normal    [3]float64 `json:"normal"`
+	Up        [3]float64 `json:"up"`
+	Scale     float64    `json:"scale"`
+	Rotation  float64    `json:"rotation"`
 }
 
 // WarpPinSetting is the JSON representation of a color warp pin.
@@ -454,6 +476,7 @@ type Settings struct {
 	Contrast            float64            `json:"contrast"`
 	Saturation          float64            `json:"saturation"`
 	WarpPins            []WarpPinSetting   `json:"warpPins"`
+	Stickers            []StickerSetting   `json:"stickers,omitempty"`
 	Dither              string             `json:"dither"`
 	ColorSnap           float64            `json:"colorSnap"`
 	NoMerge             bool               `json:"noMerge"`

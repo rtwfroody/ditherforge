@@ -25,6 +25,8 @@ export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
 export function OpenFileDialog():Promise<string>;
 
+export function OpenStickerImage():Promise<string>;
+
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
 export function RenameCollection(arg1:string,arg2:string):Promise<void>;
