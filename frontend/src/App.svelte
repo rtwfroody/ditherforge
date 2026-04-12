@@ -661,17 +661,17 @@
                 <div class="group relative">
                   <button
                     type="button"
-                    class="w-full h-12 rounded cursor-pointer flex items-center justify-center text-xs select-none {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                    style={slot ? `background: ${slot.hex};` : resolved ? `background: ${resolved.hex};` : 'background: var(--muted);'}
+                    class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
                     title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
                     onclick={() => openPicker(i)}
                   >
-                    {#if slot}
-                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{slot.label || slot.hex}</span>
-                    {:else if resolved}
-                      <span class="px-1 rounded" style="background: rgba(0,0,0,0.4); color: white;">{resolved.label || resolved.hex}</span>
+                    {#if slot || resolved}
+                      {@const info = slot ?? resolved}
+                      <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
+                      <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
                     {:else}
-                      <span class="text-muted-foreground">auto</span>
+                      <div class="w-full h-5 bg-muted"></div>
+                      <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
                     {/if}
                   </button>
                   <!-- Lock toggle -->
@@ -698,7 +698,7 @@
               {/each}
               {#if colorSlots.length < 16}
                 <button
-                  class="w-full h-12 rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
+                  class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
                   onclick={addColorSlot}
                 >+</button>
               {/if}
