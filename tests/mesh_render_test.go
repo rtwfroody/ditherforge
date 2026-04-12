@@ -122,7 +122,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 		}
 		patchAssignment := make([]int32, numPatches)
 		for i, c := range cells {
-			k := voxel.CellKey{Col: c.Col, Row: c.Row, Layer: c.Layer}
+			k := voxel.CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}
 			patchAssignment[patchMap[k]] = assignments[i]
 		}
 

@@ -197,6 +197,7 @@ export namespace pipeline {
 	    Dither: string;
 	    NoMerge: boolean;
 	    NoSimplify: boolean;
+	    UniformGrid: boolean;
 	    Size?: number;
 	    Force: boolean;
 	    Stats: boolean;
@@ -225,6 +226,7 @@ export namespace pipeline {
 	        this.Dither = source["Dither"];
 	        this.NoMerge = source["NoMerge"];
 	        this.NoSimplify = source["NoSimplify"];
+	        this.UniformGrid = source["UniformGrid"];
 	        this.Size = source["Size"];
 	        this.Force = source["Force"];
 	        this.Stats = source["Stats"];

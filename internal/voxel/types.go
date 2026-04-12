@@ -23,10 +23,14 @@ type Config struct {
 
 // ActiveCell represents one voxel cell to generate.
 type ActiveCell struct {
+	Grid            uint8
 	Col, Row, Layer int
 	Cx, Cy, Cz     float32
 	Color           [3]uint8
 }
 
 // CellKey is a canonical grid cell identifier.
-type CellKey struct{ Col, Row, Layer int }
+type CellKey struct {
+	Grid            uint8
+	Col, Row, Layer int
+}

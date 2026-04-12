@@ -344,38 +344,32 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	}
 }
 
-// neighbor holds a precomputed neighbor reference with its diffusion weight.
-type neighbor struct {
-	idx    int
-	weight float32
+// Neighbor holds a precomputed neighbor reference with its diffusion weight.
+type Neighbor struct {
+	Idx    int
+	Weight float32
 }
 
-// DitherCellsDizzy applies dizzy dithering: random traversal order with
-// error diffusion to actual spatial neighbors. Produces blue-noise-like
-// results without directional bias.
-func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
+// BuildNeighbors computes the neighbor list for each cell using within-grid
+// CellKey adjacency (26-connected). Face-adjacent weight 1.0, edge 0.1,
+// corner 0.01.
+func BuildNeighbors(cells []ActiveCell) [][]Neighbor {
 	n := len(cells)
-
-	// Build cell lookup map.
 	cellMap := make(map[CellKey]int, n)
 	for i, c := range cells {
-		cellMap[CellKey{c.Col, c.Row, c.Layer}] = i
+		cellMap[CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}] = i
 	}
 
-	// Precompute neighbor lists with weights.
-	// Face-adjacent (1 axis differs): weight 1.0
-	// Edge-adjacent (2 axes differ): weight 0.1
-	// Corner-adjacent (3 axes differ): weight 0.01
-	neighbors := make([][]neighbor, n)
+	neighbors := make([][]Neighbor, n)
 	for i, c := range cells {
-		var nbrs []neighbor
+		var nbrs []Neighbor
 		for dc := -1; dc <= 1; dc++ {
 			for dr := -1; dr <= 1; dr++ {
 				for dl := -1; dl <= 1; dl++ {
 					if dc == 0 && dr == 0 && dl == 0 {
 						continue
 					}
-					if j, ok := cellMap[CellKey{c.Col + dc, c.Row + dr, c.Layer + dl}]; ok {
+					if j, ok := cellMap[CellKey{Grid: c.Grid, Col: c.Col + dc, Row: c.Row + dr, Layer: c.Layer + dl}]; ok {
 						axes := 0
 						if dc != 0 {
 							axes++
@@ -395,15 +389,27 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 						case 3:
 							w = 0.01
 						}
-						nbrs = append(nbrs, neighbor{idx: j, weight: w})
+						nbrs = append(nbrs, Neighbor{Idx: j, Weight: w})
 					}
 				}
 			}
 		}
 		neighbors[i] = nbrs
 	}
+	return neighbors
+}
 
-	// Random permutation with deterministic seed.
+// DitherCellsDizzy applies dizzy dithering: random traversal order with
+// error diffusion to actual spatial neighbors. Produces blue-noise-like
+// results without directional bias.
+func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
+	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells))
+}
+
+// DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
+func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor) ([]int32, error) {
+	n := len(cells)
+
 	rng := rand.New(rand.NewSource(42))
 	order := rng.Perm(n)
 
@@ -439,21 +445,20 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 		eG := g - float32(chosen[1])
 		eB := b - float32(chosen[2])
 
-		// Distribute error to unprocessed neighbors.
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
-			if !processed[nb.idx] {
-				totalWeight += nb.weight
+			if !processed[nb.Idx] {
+				totalWeight += nb.Weight
 			}
 		}
 		if totalWeight > 0 {
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
-				if !processed[nb.idx] {
-					w := nb.weight * scale
-					errBuf[nb.idx][0] += eR * w
-					errBuf[nb.idx][1] += eG * w
-					errBuf[nb.idx][2] += eB * w
+				if !processed[nb.Idx] {
+					w := nb.Weight * scale
+					errBuf[nb.Idx][0] += eR * w
+					errBuf[nb.Idx][1] += eG * w
+					errBuf[nb.Idx][2] += eB * w
 				}
 			}
 		}

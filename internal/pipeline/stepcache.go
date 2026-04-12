@@ -56,8 +56,10 @@ type voxelizeOutput struct {
 	Cells         []voxel.ActiveCell
 	CellAssignMap map[voxel.CellKey]int
 	MinV          [3]float32
-	CellSize      float32
+	Layer0Size    float32
+	UpperSize     float32
 	LayerH        float32
+	TwoGrid       bool
 }
 
 type colorAdjustOutput struct {
@@ -116,6 +118,7 @@ type loadSettings struct {
 type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
+	UniformGrid    bool
 }
 
 type colorAdjustSettings struct {
@@ -190,7 +193,7 @@ func settingsForStage(stage StageID, opts Options) any {
 		}
 		return s
 	case StageVoxelize:
-		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
+		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight, UniformGrid: opts.UniformGrid}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -236,6 +239,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
+		writeBool(h, v.UniformGrid)
 	case colorAdjustSettings:
 		writeFloat32(h, v.Brightness)
 		writeFloat32(h, v.Contrast)

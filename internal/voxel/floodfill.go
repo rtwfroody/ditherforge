@@ -9,7 +9,7 @@ import "context"
 func FloodFillPatches(ctx context.Context, cells []ActiveCell, assignments []int32) (patchMap map[CellKey]int, numPatches int, err error) {
 	cellIdx := make(map[CellKey]int, len(cells))
 	for i, c := range cells {
-		cellIdx[CellKey{c.Col, c.Row, c.Layer}] = i
+		cellIdx[CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}] = i
 	}
 
 	patchMap = make(map[CellKey]int, len(cells))
@@ -18,7 +18,7 @@ func FloodFillPatches(ctx context.Context, cells []ActiveCell, assignments []int
 
 	cellCount := 0
 	for i, c := range cells {
-		k := CellKey{c.Col, c.Row, c.Layer}
+		k := CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}
 		if visited[k] {
 			continue
 		}
@@ -38,12 +38,12 @@ func FloodFillPatches(ctx context.Context, cells []ActiveCell, assignments []int
 			cur := queue[0]
 			queue = queue[1:]
 			for _, nk := range [6]CellKey{
-				{cur.Col + 1, cur.Row, cur.Layer},
-				{cur.Col - 1, cur.Row, cur.Layer},
-				{cur.Col, cur.Row + 1, cur.Layer},
-				{cur.Col, cur.Row - 1, cur.Layer},
-				{cur.Col, cur.Row, cur.Layer + 1},
-				{cur.Col, cur.Row, cur.Layer - 1},
+				{Grid: cur.Grid, Col: cur.Col + 1, Row: cur.Row, Layer: cur.Layer},
+				{Grid: cur.Grid, Col: cur.Col - 1, Row: cur.Row, Layer: cur.Layer},
+				{Grid: cur.Grid, Col: cur.Col, Row: cur.Row + 1, Layer: cur.Layer},
+				{Grid: cur.Grid, Col: cur.Col, Row: cur.Row - 1, Layer: cur.Layer},
+				{Grid: cur.Grid, Col: cur.Col, Row: cur.Row, Layer: cur.Layer + 1},
+				{Grid: cur.Grid, Col: cur.Col, Row: cur.Row, Layer: cur.Layer - 1},
 			} {
 				if visited[nk] {
 					continue

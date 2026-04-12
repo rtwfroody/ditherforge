@@ -65,6 +65,7 @@
   let colorSnap = $state(5);
   let noMerge = $state(false);
   let noSimplify = $state(false);
+  let uniformGrid = $state(false);
   let stats = $state(false);
 
   // Collection editor dialog state.
@@ -218,7 +219,7 @@
           inventoryCollectionColors,
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
-          dither, colorSnap, noMerge, noSimplify, stats];
+          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats];
     if (!initialized) {
       initialized = true;
       return;
@@ -269,6 +270,7 @@
       colorSnap,
       noMerge,
       noSimplify,
+      uniformGrid,
       stats,
     };
   }
@@ -297,6 +299,7 @@
     if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
     if (s.noMerge !== undefined) noMerge = s.noMerge;
     if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
+    if (s.uniformGrid !== undefined) uniformGrid = s.uniformGrid;
     if (s.stats !== undefined) stats = s.stats;
   }
 
@@ -438,6 +441,7 @@
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
+      UniformGrid: uniformGrid,
       Force: force,
       Stats: stats,
       ColorSnap: colorSnap,
@@ -739,6 +743,10 @@
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noSimplify} />
                 No simplify
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={uniformGrid} />
+                Uniform grid
               </label>
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={stats} />

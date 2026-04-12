@@ -89,6 +89,9 @@ func edgePlaneIntersect(a, b [3]float32, axis int, value float32) [3]float32 {
 // boundary planes and assigns each fragment the palette color of its
 // enclosing patch. Clips against all global color boundary planes to
 // ensure adjacent triangles sharing an edge get identical clip points.
+//
+// TODO: refactor to share the common worker/clip/dedup logic with
+// ClipMeshByPatchesTwoGrid — the two functions are ~80% identical.
 func ClipMeshByPatches(
 	ctx context.Context,
 	model *loader.LoadedModel,
@@ -108,9 +111,9 @@ func ClipMeshByPatches(
 		for ck, ci := range patchMap {
 			myAssign := patchAssignment[ci]
 			neighbors := [3]CellKey{
-				{ck.Col + 1, ck.Row, ck.Layer},
-				{ck.Col, ck.Row + 1, ck.Layer},
-				{ck.Col, ck.Row, ck.Layer + 1},
+				{Grid: ck.Grid, Col: ck.Col + 1, Row: ck.Row, Layer: ck.Layer},
+				{Grid: ck.Grid, Col: ck.Col, Row: ck.Row + 1, Layer: ck.Layer},
+				{Grid: ck.Grid, Col: ck.Col, Row: ck.Row, Layer: ck.Layer + 1},
 			}
 			for axis, nk := range neighbors {
 				ni, ok := patchMap[nk]
@@ -323,7 +326,277 @@ func CentroidToCell(p [3]float32, minV [3]float32, cellSize, layerH float32) Cel
 	col := int(math.Round(float64(p[0]-minV[0]) / float64(cellSize)))
 	row := int(math.Round(float64(p[1]-minV[1]) / float64(cellSize)))
 	layer := int(math.Round(float64(p[2]-minV[2]) / float64(layerH)))
-	return CellKey{Col: col, Row: row, Layer: layer}
+	return CellKey{Grid: 0, Col: col, Row: row, Layer: layer}
+}
+
+// TwoGridConfig holds parameters for two-grid clipping.
+type TwoGridConfig struct {
+	MinV       [3]float32
+	Layer0Size float32
+	UpperSize  float32
+	LayerH     float32
+	SeamZ      float32 // Z boundary between layer 0 and layer 1
+}
+
+// CentroidToCellTwoGrid maps a 3D point to the correct grid cell.
+func CentroidToCellTwoGrid(p [3]float32, cfg TwoGridConfig) CellKey {
+	if p[2] < cfg.SeamZ {
+		col := int(math.Round(float64(p[0]-cfg.MinV[0]) / float64(cfg.Layer0Size)))
+		row := int(math.Round(float64(p[1]-cfg.MinV[1]) / float64(cfg.Layer0Size)))
+		layer := int(math.Round(float64(p[2]-cfg.MinV[2]) / float64(cfg.LayerH)))
+		return CellKey{Grid: 0, Col: col, Row: row, Layer: layer}
+	}
+	col := int(math.Round(float64(p[0]-cfg.MinV[0]) / float64(cfg.UpperSize)))
+	row := int(math.Round(float64(p[1]-cfg.MinV[1]) / float64(cfg.UpperSize)))
+	layer := int(math.Round(float64(p[2]-cfg.MinV[2]) / float64(cfg.LayerH)))
+	return CellKey{Grid: 1, Col: col, Row: row, Layer: layer}
+}
+
+// ClipMeshByPatchesTwoGrid clips the mesh using two different XY grids.
+//
+// TODO: refactor to share the common worker/clip/dedup logic with
+// ClipMeshByPatches — the two functions are ~80% identical.
+func ClipMeshByPatchesTwoGrid(
+	ctx context.Context,
+	model *loader.LoadedModel,
+	patchMap map[CellKey]int,
+	patchAssignment []int32,
+	cfg TwoGridConfig,
+) ([][3]float32, [][3]uint32, []int32, error) {
+	// Build boundary planes per grid.
+	// Z planes are global (shared by both grids). X/Y planes are per-grid.
+	zPlaneSet := make(map[float32]struct{})
+	var xyPlaneSets [2][2]map[float32]struct{} // [grid][axis 0=X, 1=Y]
+
+	for ck, ci := range patchMap {
+		myAssign := patchAssignment[ci]
+		cellSize := cfg.Layer0Size
+		if ck.Grid == 1 {
+			cellSize = cfg.UpperSize
+		}
+
+		// X neighbor
+		nk := CellKey{Grid: ck.Grid, Col: ck.Col + 1, Row: ck.Row, Layer: ck.Layer}
+		if ni, ok := patchMap[nk]; ok && patchAssignment[ni] != myAssign {
+			val := cfg.MinV[0] + (float32(ck.Col)+0.5)*cellSize
+			if xyPlaneSets[ck.Grid][0] == nil {
+				xyPlaneSets[ck.Grid][0] = make(map[float32]struct{})
+			}
+			xyPlaneSets[ck.Grid][0][val] = struct{}{}
+		}
+		// Y neighbor
+		nk = CellKey{Grid: ck.Grid, Col: ck.Col, Row: ck.Row + 1, Layer: ck.Layer}
+		if ni, ok := patchMap[nk]; ok && patchAssignment[ni] != myAssign {
+			val := cfg.MinV[1] + (float32(ck.Row)+0.5)*cellSize
+			if xyPlaneSets[ck.Grid][1] == nil {
+				xyPlaneSets[ck.Grid][1] = make(map[float32]struct{})
+			}
+			xyPlaneSets[ck.Grid][1][val] = struct{}{}
+		}
+		// Z neighbor (within same grid)
+		nk = CellKey{Grid: ck.Grid, Col: ck.Col, Row: ck.Row, Layer: ck.Layer + 1}
+		if ni, ok := patchMap[nk]; ok && patchAssignment[ni] != myAssign {
+			val := cfg.MinV[2] + (float32(ck.Layer)+0.5)*cfg.LayerH
+			zPlaneSet[val] = struct{}{}
+		}
+	}
+
+	// The seam Z is always a boundary (patches don't span grids).
+	zPlaneSet[cfg.SeamZ] = struct{}{}
+
+	// Sort plane lists.
+	zPlanes := sortedKeys(zPlaneSet)
+	var xyPlanes [2][2][]float32
+	for g := 0; g < 2; g++ {
+		for a := 0; a < 2; a++ {
+			xyPlanes[g][a] = sortedKeys(xyPlaneSets[g][a])
+		}
+	}
+
+	// Process faces in parallel.
+	type workerResult struct {
+		vd          *VertexDedup
+		faces       [][3]uint32
+		assignments []int32
+	}
+
+	nFaces := len(model.Faces)
+	numWorkers := runtime.NumCPU()
+	if numWorkers > nFaces {
+		numWorkers = nFaces
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	results := make([]workerResult, numWorkers)
+	chunkSize := (nFaces + numWorkers - 1) / numWorkers
+
+	var wg sync.WaitGroup
+	for w := range numWorkers {
+		lo := w * chunkSize
+		hi := lo + chunkSize
+		if hi > nFaces {
+			hi = nFaces
+		}
+		if lo >= hi {
+			continue
+		}
+		wg.Add(1)
+		go func(workerIdx, faceStart, faceEnd int) {
+			defer wg.Done()
+			wvd := NewVertexDedup()
+			estFaces := (faceEnd - faceStart) * 4
+			wFaces := make([][3]uint32, 0, estFaces)
+			wAssign := make([]int32, 0, estFaces)
+
+			for fi := faceStart; fi < faceEnd; fi++ {
+				if (fi-faceStart)%1000 == 0 && ctx.Err() != nil {
+					return
+				}
+				if FaceAlpha(fi, model) < 128 {
+					continue
+				}
+
+				f := model.Faces[fi]
+				v0 := model.Vertices[f[0]]
+				v1 := model.Vertices[f[1]]
+				v2 := model.Vertices[f[2]]
+
+				// Step 1: clip by Z planes (including seam).
+				fragments := clipByPlanes([][][3]float32{{v0, v1, v2}}, 2, zPlanes)
+
+				// Step 2: for each Z-clipped fragment, determine grid and
+				// clip by that grid's X/Y planes.
+				var final [][][3]float32
+				for _, poly := range fragments {
+					centroid := polyCentroid(poly)
+					grid := 1
+					if centroid[2] < cfg.SeamZ {
+						grid = 0
+					}
+					xyFrags := clipByPlanes([][][3]float32{poly}, 0, xyPlanes[grid][0])
+					xyFrags = clipByPlanes(xyFrags, 1, xyPlanes[grid][1])
+					final = append(final, xyFrags...)
+				}
+
+				for _, poly := range final {
+					if polyArea(poly) < 1e-8 {
+						continue
+					}
+
+					centroid := polyCentroid(poly)
+					ck := CentroidToCellTwoGrid(centroid, cfg)
+					var assignment int32
+					if pid, ok := patchMap[ck]; ok {
+						assignment = patchAssignment[pid]
+					} else {
+						a, found := nearestPatchAssignment(ck, patchMap, patchAssignment)
+						if !found {
+							continue
+						}
+						assignment = a
+					}
+
+					vi0 := wvd.GetVertex(poly[0])
+					for i := 1; i < len(poly)-1; i++ {
+						vi1 := wvd.GetVertex(poly[i])
+						vi2 := wvd.GetVertex(poly[i+1])
+						if vi0 == vi1 || vi1 == vi2 || vi0 == vi2 {
+							continue
+						}
+						wFaces = append(wFaces, [3]uint32{vi0, vi1, vi2})
+						wAssign = append(wAssign, assignment)
+					}
+				}
+			}
+
+			results[workerIdx] = workerResult{vd: wvd, faces: wFaces, assignments: wAssign}
+		}(w, lo, hi)
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, nil, nil, ctx.Err()
+	}
+
+	globalVD := NewVertexDedup()
+	var allFaces [][3]uint32
+	var allAssignments []int32
+	for _, r := range results {
+		if r.vd == nil {
+			continue
+		}
+		remap := make([]uint32, len(r.vd.Verts))
+		for i, v := range r.vd.Verts {
+			remap[i] = globalVD.GetVertex(v)
+		}
+		for _, f := range r.faces {
+			allFaces = append(allFaces, [3]uint32{remap[f[0]], remap[f[1]], remap[f[2]]})
+		}
+		allAssignments = append(allAssignments, r.assignments...)
+	}
+
+	return globalVD.Verts, allFaces, allAssignments, nil
+}
+
+// clipByPlanes clips a set of polygons against sorted planes on a single axis.
+func clipByPlanes(fragments [][][3]float32, axis int, planes []float32) [][][3]float32 {
+	if len(planes) == 0 {
+		return fragments
+	}
+	var result [][][3]float32
+	for _, poly := range fragments {
+		lo, hi := poly[0][axis], poly[0][axis]
+		for _, v := range poly[1:] {
+			if v[axis] < lo {
+				lo = v[axis]
+			}
+			if v[axis] > hi {
+				hi = v[axis]
+			}
+		}
+
+		iLo := sort.Search(len(planes), func(i int) bool { return planes[i] > lo })
+		iHi := sort.Search(len(planes), func(i int) bool { return planes[i] >= hi })
+
+		if iLo >= iHi {
+			result = append(result, poly)
+			continue
+		}
+
+		current := [][][3]float32{poly}
+		for pi := iLo; pi < iHi; pi++ {
+			var remaining [][][3]float32
+			for _, p := range current {
+				neg, pos := ClipPolygonByPlane(p, axis, planes[pi])
+				if len(neg) >= 3 {
+					result = append(result, neg)
+				}
+				if len(pos) >= 3 {
+					remaining = append(remaining, pos)
+				}
+			}
+			current = remaining
+		}
+		for _, p := range current {
+			if len(p) >= 3 {
+				result = append(result, p)
+			}
+		}
+	}
+	return result
+}
+
+func sortedKeys(m map[float32]struct{}) []float32 {
+	if len(m) == 0 {
+		return nil
+	}
+	s := make([]float32, 0, len(m))
+	for v := range m {
+		s = append(s, v)
+	}
+	sort.Slice(s, func(a, b int) bool { return s[a] < s[b] })
+	return s
 }
 
 // nearestPatchAssignment searches neighboring cells for the nearest occupied
@@ -343,7 +616,7 @@ func nearestPatchAssignment(ck CellKey, patchMap map[CellKey]int, patchAssignmen
 					if dist == 0 || dist >= bestDist {
 						continue
 					}
-					nk := CellKey{ck.Col + dc, ck.Row + dr, ck.Layer + dl}
+					nk := CellKey{Grid: ck.Grid, Col: ck.Col + dc, Row: ck.Row + dr, Layer: ck.Layer + dl}
 					if pid, ok := patchMap[nk]; ok {
 						bestDist = dist
 						bestAssign = patchAssignment[pid]
