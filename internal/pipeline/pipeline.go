@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"log"
 	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,7 @@ type Options struct {
 	LockedColors   []string
 	Scale          float32
 	Output         string
+	BaseColor      string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
 	NozzleDiameter float32
 	LayerHeight    float32
 	InventoryFile    string
@@ -458,6 +461,11 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	// first voxel layer aligns with grid layer 0.
 	normalizeZ(model)
 
+	// Apply base color override for untextured faces.
+	if opts.BaseColor != "" {
+		applyBaseColorOverride(model, opts.BaseColor)
+	}
+
 	ex := modelExtents(model)
 	fmt.Printf("  Extent: %.1f x %.1f x %.1f mm\n", ex[0], ex[1], ex[2])
 
@@ -471,6 +479,29 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 		PreviewScale: unitScale / totalScale,
 	})
 	return nil
+}
+
+// applyBaseColorOverride sets the base color for all untextured faces to the
+// given hex color (e.g. "#FF0000"). If no NoTextureMask exists (all faces are
+// untextured, as in STL files), all faces are updated.
+func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
+	hex := strings.TrimPrefix(hexColor, "#")
+	if len(hex) != 6 {
+		log.Printf("Warning: ignoring invalid base color %q (expected 6-digit hex like #FF0000)", hexColor)
+		return
+	}
+	v, err := strconv.ParseUint(hex, 16, 32)
+	if err != nil {
+		log.Printf("Warning: ignoring invalid base color %q: %v", hexColor, err)
+		return
+	}
+	rgba := [4]uint8{uint8(v >> 16), uint8(v >> 8), uint8(v), 255}
+
+	for i := range model.FaceBaseColor {
+		if model.NoTextureMask == nil || model.NoTextureMask[i] {
+			model.FaceBaseColor[i] = rgba
+		}
+	}
 }
 
 func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, so *stickerOutput, tracker progress.Tracker) error {

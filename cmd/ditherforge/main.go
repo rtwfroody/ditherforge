@@ -32,6 +32,7 @@ type Args struct {
 	Inventory      string   `arg:"--inventory" help:"Inventory file for remaining colors"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
+	BaseColor      string   `arg:"--base-color" help:"Hex color for untextured faces (e.g. #FF0000)"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
 	Brightness     float32  `arg:"--brightness" default:"0" help:"Brightness adjustment (-100 to +100)"`
@@ -65,6 +66,7 @@ func main() {
 		InventoryFile:  args.Inventory,
 		Scale:          args.Scale,
 		Output:         args.Output,
+		BaseColor:      args.BaseColor,
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
 		Brightness:     args.Brightness,

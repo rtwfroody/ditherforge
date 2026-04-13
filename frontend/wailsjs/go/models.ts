@@ -258,6 +258,7 @@ export namespace pipeline {
 	    LockedColors: string[];
 	    Scale: number;
 	    Output: string;
+	    BaseColor: string;
 	    NozzleDiameter: number;
 	    LayerHeight: number;
 	    InventoryFile: string;
@@ -290,6 +291,7 @@ export namespace pipeline {
 	        this.LockedColors = source["LockedColors"];
 	        this.Scale = source["Scale"];
 	        this.Output = source["Output"];
+	        this.BaseColor = source["BaseColor"];
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
 	        this.InventoryFile = source["InventoryFile"];

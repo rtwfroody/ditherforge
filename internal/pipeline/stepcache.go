@@ -121,6 +121,7 @@ type loadSettings struct {
 	Size        float32
 	ReloadSeq   int64
 	ObjectIndex int
+	BaseColor   string
 }
 
 type voxelizeSettings struct {
@@ -200,7 +201,7 @@ func writeInt(h hash.Hash64, i int) {
 func settingsForStage(stage StageID, opts Options) any {
 	switch stage {
 	case StageLoad:
-		s := loadSettings{Input: opts.Input, Scale: opts.Scale, ReloadSeq: opts.ReloadSeq, ObjectIndex: opts.ObjectIndex}
+		s := loadSettings{Input: opts.Input, Scale: opts.Scale, ReloadSeq: opts.ReloadSeq, ObjectIndex: opts.ObjectIndex, BaseColor: opts.BaseColor}
 		if opts.Size != nil {
 			s.HasSize = true
 			s.Size = *opts.Size
@@ -254,6 +255,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.Size)
 		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
+		writeString(h, v.BaseColor)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)

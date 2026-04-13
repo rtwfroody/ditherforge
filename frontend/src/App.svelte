@@ -22,6 +22,7 @@
   import ObjectPicker from '$lib/components/ObjectPicker.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
+  import { contrastColor } from '$lib/utils';
   import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, EnumerateObjects } from '../wailsjs/go/main/App';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -59,6 +60,9 @@
   let scaleValue = $state('1.0');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
+  // Base color for untextured faces: null = use model default, or {hex, label, collection}.
+  let baseColor = $state<ColorInfo | null>(null);
+  let baseColorPickerOpen = $state(false);
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
   type ColorInfo = { hex: string; label: string; collection?: string };
   type ColorSlot = ColorInfo | null;
@@ -337,7 +341,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
-          layerHeight, ...colorSlots,
+          layerHeight, baseColor, ...colorSlots,
           inventoryCollectionColors,
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
@@ -463,6 +467,7 @@
       scaleValue: String(scaleValue),
       nozzleDiameter: String(nozzleDiameter),
       layerHeight: String(layerHeight),
+      baseColor: baseColor ? { hex: baseColor.hex, label: baseColor.label, collection: baseColor.collection } : null,
       colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection } : null),
       inventoryCollection,
       brightness,
@@ -495,6 +500,7 @@
     if (s.scaleValue !== undefined) scaleValue = s.scaleValue;
     if (s.nozzleDiameter !== undefined) nozzleDiameter = s.nozzleDiameter;
     if (s.layerHeight !== undefined) layerHeight = s.layerHeight;
+    if (s.baseColor !== undefined) baseColor = s.baseColor ? { hex: s.baseColor.hex, label: s.baseColor.label || '', collection: s.baseColor.collection || '' } : null;
     if (s.colorSlots !== undefined) {
       colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
     }
@@ -666,6 +672,7 @@
       NumColors: colorSlots.length,
       LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
+      BaseColor: baseColor?.hex ?? '',
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
       InventoryFile: '',
@@ -814,24 +821,48 @@
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-4">
         <!-- Core settings -->
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-2">
-            <div class="flex items-center gap-4">
-              <label class="flex items-center gap-1.5 text-sm font-medium">
-                <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
-                Size (mm)
-              </label>
-              <label class="flex items-center gap-1.5 text-sm font-medium">
-                <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
-                Scale
-              </label>
-            </div>
-            {#if sizeMode === 'size'}
-              <Input id="size" bind:value={sizeValue} type="number" step={1} />
-            {:else}
-              <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
-            {/if}
+        <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
+          <div class="flex items-center gap-4">
+            <label class="flex items-center gap-1.5 text-sm font-medium">
+              <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
+              Size (mm)
+            </label>
+            <label class="flex items-center gap-1.5 text-sm font-medium">
+              <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
+              Scale
+            </label>
           </div>
+          <span class="text-sm font-medium">Base color</span>
+          {#if sizeMode === 'size'}
+            <Input id="size" bind:value={sizeValue} type="number" step={1} />
+          {:else}
+            <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
+          {/if}
+          {#if baseColor}
+            <div class="flex items-center gap-2">
+              <button
+                class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
+                style="background: {baseColor.hex}; color: {contrastColor(baseColor.hex)};"
+                title={colorTooltip(baseColor)}
+                onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}
+              >
+                {baseColor.label || baseColor.hex}
+              </button>
+              <Button variant="ghost" size="sm" onclick={() => { baseColor = null; baseColorPickerOpen = false; }}>Clear</Button>
+            </div>
+          {:else}
+            <Button variant="outline" class="w-full" size="sm" onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}>
+              Default
+            </Button>
+          {/if}
+          {#if baseColorPickerOpen}
+            <div class="col-span-2">
+              <CollectionPicker
+                onselect={(hex, label, collection) => { baseColor = { hex, label, collection }; baseColorPickerOpen = false; }}
+                onclose={() => { baseColorPickerOpen = false; }}
+              />
+            </div>
+          {/if}
           <PresetSelect
             bind:value={nozzleDiameter}
             label="Nozzle diameter (mm)"
