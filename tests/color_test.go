@@ -132,7 +132,7 @@ func TestColorSelection(t *testing.T) {
 			}
 
 			const unitScale = float32(1000)
-			model, err := loader.LoadGLB(glbPath, unitScale)
+			model, err := loader.LoadGLB(glbPath, unitScale, -1)
 			if err != nil {
 				t.Fatalf("LoadGLB: %v", err)
 			}
@@ -141,7 +141,7 @@ func TestColorSelection(t *testing.T) {
 			ext := modelExtent(model)
 			if ext != 100 {
 				scale := float32(100) / ext
-				model, err = loader.LoadGLB(glbPath, unitScale*scale)
+				model, err = loader.LoadGLB(glbPath, unitScale*scale, -1)
 				if err != nil {
 					t.Fatalf("LoadGLB (rescaled): %v", err)
 				}

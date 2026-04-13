@@ -11,7 +11,7 @@ func TestLoadSTL_ASCII(t *testing.T) {
 		t.Skipf("test file not found: %s", path)
 	}
 
-	model, err := LoadSTL(path, 1.0)
+	model, err := LoadSTL(path, 1.0, -1)
 	if err != nil {
 		t.Fatalf("LoadSTL: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestLoadSTL_Binary(t *testing.T) {
 		t.Skipf("test file not found: %s", path)
 	}
 
-	model, err := LoadSTL(path, 1.0)
+	model, err := LoadSTL(path, 1.0, -1)
 	if err != nil {
 		t.Fatalf("LoadSTL: %v", err)
 	}

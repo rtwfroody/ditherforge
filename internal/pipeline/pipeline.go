@@ -48,6 +48,7 @@ type Options struct {
 	ColorSnap      float64
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
 	Stickers       []Sticker `json:"Stickers,omitempty"`
+	ObjectIndex    int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
@@ -427,7 +428,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 
 	fmt.Printf("Loading %s...", opts.Input)
 	tLoad := time.Now()
-	model, err := loadModel(opts.Input, scale)
+	model, err := loadModel(opts.Input, scale, opts.ObjectIndex)
 	if err != nil {
 		return fmt.Errorf("loading %s: %w", inputExt, err)
 	}
@@ -445,7 +446,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 			totalScale = scale * rescale
 			fmt.Printf("  Rescaling to %.0f mm...", *opts.Size)
 			tRescale := time.Now()
-			model, err = loadModel(opts.Input, totalScale)
+			model, err = loadModel(opts.Input, totalScale, opts.ObjectIndex)
 			if err != nil {
 				return fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
 			}

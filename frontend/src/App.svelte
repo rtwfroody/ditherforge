@@ -19,12 +19,13 @@
   import ColorPinEditor from '$lib/components/ColorPinEditor.svelte';
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import StickerPanel from '$lib/components/StickerPanel.svelte';
+  import ObjectPicker from '$lib/components/ObjectPicker.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, EnumerateObjects } from '../wailsjs/go/main/App';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
-  import type { pipeline } from '../wailsjs/go/models';
+  import type { pipeline, loader } from '../wailsjs/go/models';
 
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
   function log(msg: string) {
@@ -400,13 +401,42 @@
   }
 
   let reloadSeq = $state(0);
+  let objectIndex = $state(-1); // -1 = all objects, >=0 = specific object
+  let objectPickerOpen = $state(false);
+  let objectPickerItems = $state<loader.ObjectInfo[]>([]);
+  let pendingInputPath = $state('');
 
   async function openInputModel(path: string) {
+    const ext = path.split('.').pop()?.toLowerCase();
+    if (ext === '3mf' || ext === 'glb') {
+      try {
+        const objects = await EnumerateObjects(path);
+        if (objects && objects.length > 1) {
+          pendingInputPath = path;
+          objectPickerItems = objects;
+          objectPickerOpen = true;
+          return; // wait for user selection in dialog
+        }
+      } catch (e) {
+        // Fall through to load normally
+      }
+    }
+    objectIndex = -1;
+    proceedWithInput(path);
+  }
+
+  function onObjectSelected(idx: number) {
+    objectIndex = idx;
+    proceedWithInput(pendingInputPath);
+    pendingInputPath = '';
+  }
+
+  function proceedWithInput(path: string) {
     inputMeshUrl = undefined;
     outputMeshUrl = undefined;
     inputFile = path;
     reloadSeq++;
-    settingsPath = await DefaultSettingsPath(path);
+    DefaultSettingsPath(path).then(p => settingsPath = p).catch(() => {});
     addRecentFile(path);
     // Force a pipeline run even if the path didn't change (file on disk may
     // have changed). The $effect won't fire when inputFile is unchanged, so
@@ -427,6 +457,7 @@
   function serializeSettings() {
     return {
       inputFile,
+      objectIndex,
       sizeMode,
       sizeValue: String(sizeValue),
       scaleValue: String(scaleValue),
@@ -458,6 +489,7 @@
 
   function applySettings(s: any) {
     if (s.inputFile !== undefined) inputFile = s.inputFile;
+    objectIndex = s.objectIndex ?? -1;
     if (s.sizeMode !== undefined) sizeMode = s.sizeMode;
     if (s.sizeValue !== undefined) sizeValue = s.sizeValue;
     if (s.scaleValue !== undefined) scaleValue = s.scaleValue;
@@ -648,6 +680,7 @@
       UniformGrid: uniformGrid,
       Force: force,
       ReloadSeq: reloadSeq,
+      ObjectIndex: objectIndex,
       Stats: stats,
       ColorSnap: colorSnap,
       WarpPins: warpPins
@@ -894,7 +927,7 @@
                     onclick={() => openPicker(i)}
                   >
                     {#if slot || resolved}
-                      {@const info = slot ?? resolved}
+                      {@const info = (slot ?? resolved)!}
                       <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
                       <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
                     {:else}
@@ -1117,3 +1150,9 @@
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<ObjectPicker
+  objects={objectPickerItems}
+  bind:open={objectPickerOpen}
+  onSelect={onObjectSelected}
+/>

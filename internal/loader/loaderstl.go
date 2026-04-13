@@ -11,7 +11,8 @@ import (
 // LoadSTL loads an STL file and returns a LoadedModel.
 // STL files contain only geometry (no textures or colors), so all faces
 // are assigned a default gray base color.
-func LoadSTL(path string, scale float32) (*LoadedModel, error) {
+// objectIndex is ignored for STL files (always a single object).
+func LoadSTL(path string, scale float32, objectIndex int) (*LoadedModel, error) {
 	solid, err := stl.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading STL: %w", err)

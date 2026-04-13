@@ -14,6 +14,10 @@ export function DeleteCollection(arg1) {
   return window['go']['main']['App']['DeleteCollection'](arg1);
 }
 
+export function EnumerateObjects(arg1) {
+  return window['go']['main']['App']['EnumerateObjects'](arg1);
+}
+
 export function Export3MF() {
   return window['go']['main']['App']['Export3MF']();
 }

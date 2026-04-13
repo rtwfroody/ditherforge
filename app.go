@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
+	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	"github.com/rtwfroody/ditherforge/internal/progress"
@@ -544,6 +545,20 @@ func (a *App) OpenFileDialog() (string, error) {
 			{DisplayName: "3D Models (*.glb, *.3mf, *.stl)", Pattern: "*.glb;*.3mf;*.stl"},
 		},
 	})
+}
+
+// EnumerateObjects returns the list of objects in a multi-object 3MF or GLB file.
+// Returns nil for formats that don't support multiple objects (e.g. STL).
+func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".3mf":
+		return loader.Enumerate3MFObjects(path)
+	case ".glb":
+		return loader.EnumerateGLBObjects(path)
+	default:
+		return nil, nil
+	}
 }
 
 // LoadSettingsFile reads settings from the given path.

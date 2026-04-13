@@ -17,15 +17,15 @@ const defaultGray = 180
 
 // loadModel dispatches to the correct loader based on file extension and applies
 // the given scale factor.
-func loadModel(path string, scale float32) (*loader.LoadedModel, error) {
+func loadModel(path string, scale float32, objectIndex int) (*loader.LoadedModel, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".glb":
-		return loader.LoadGLB(path, scale)
+		return loader.LoadGLB(path, scale, objectIndex)
 	case ".3mf":
-		return loader.Load3MF(path, scale)
+		return loader.Load3MF(path, scale, objectIndex)
 	case ".stl":
-		return loader.LoadSTL(path, scale)
+		return loader.LoadSTL(path, scale, objectIndex)
 	default:
 		return nil, fmt.Errorf("unsupported format %q (use .glb, .3mf, or .stl)", ext)
 	}

@@ -1,3 +1,26 @@
+export namespace loader {
+	
+	export class ObjectInfo {
+	    index: number;
+	    name: string;
+	    triCount: number;
+	    thumbnail: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ObjectInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.name = source["name"];
+	        this.triCount = source["triCount"];
+	        this.thumbnail = source["thumbnail"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
 	export class CollectionInfo {
@@ -254,6 +277,7 @@ export namespace pipeline {
 	    ColorSnap: number;
 	    WarpPins?: WarpPin[];
 	    Stickers?: Sticker[];
+	    ObjectIndex: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -285,6 +309,7 @@ export namespace pipeline {
 	        this.ColorSnap = source["ColorSnap"];
 	        this.WarpPins = this.convertValues(source["WarpPins"], WarpPin);
 	        this.Stickers = this.convertValues(source["Stickers"], Sticker);
+	        this.ObjectIndex = source["ObjectIndex"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -253,9 +253,9 @@ func loadTestModel(t *testing.T, path string) *loader.LoadedModel {
 	load := func(scale float32) (*loader.LoadedModel, error) {
 		switch ext {
 		case ".glb":
-			return loader.LoadGLB(path, 1000*scale) // meters → mm
+			return loader.LoadGLB(path, 1000*scale, -1) // meters → mm
 		case ".3mf":
-			return loader.Load3MF(path, scale)
+			return loader.Load3MF(path, scale, -1)
 		default:
 			t.Fatalf("unsupported extension %q", ext)
 			return nil, nil

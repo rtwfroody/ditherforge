@@ -139,7 +139,7 @@ func clampF32(v, lo, hi float32) float32 {
 }
 
 // LoadGLB loads a GLB file and returns a LoadedModel.
-func LoadGLB(path string, scale float32) (*LoadedModel, error) {
+func LoadGLB(path string, scale float32, objectIndex int) (*LoadedModel, error) {
 	doc, err := gltf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening GLB: %w", err)
@@ -216,7 +216,7 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 	var texturedPrims []primitiveData
 	var untexturedPrims []primitiveData
 	skippedDraco := 0
-	meshCounter := 0 // counts distinct mesh instances (node+mesh pairs)
+	meshCounter := 0 // counts distinct GLTF meshes (not primitives)
 
 	var visitNode func(nodeIdx int, parentTransform mat4)
 	visitNode = func(nodeIdx int, parentTransform mat4) {
@@ -226,9 +226,9 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 
 		if node.Mesh != nil {
 			mesh := doc.Meshes[*node.Mesh]
+			meshIdx := meshCounter
+			meshCounter++
 			for _, prim := range mesh.Primitives {
-				meshIdx := meshCounter
-				meshCounter++
 				if _, ok := prim.Attributes[gltf.POSITION]; !ok {
 					continue
 				}
@@ -357,6 +357,24 @@ func LoadGLB(path string, scale float32) (*LoadedModel, error) {
 		for _, rootNode := range doc.Scenes[sceneIdx].Nodes {
 			visitNode(rootNode, identity())
 		}
+	}
+
+	// Filter by objectIndex if specified.
+	if objectIndex >= 0 {
+		var filteredTextured []primitiveData
+		for _, pd := range texturedPrims {
+			if pd.meshIdx == objectIndex {
+				filteredTextured = append(filteredTextured, pd)
+			}
+		}
+		texturedPrims = filteredTextured
+		var filteredUntextured []primitiveData
+		for _, pd := range untexturedPrims {
+			if pd.meshIdx == objectIndex {
+				filteredUntextured = append(filteredUntextured, pd)
+			}
+		}
+		untexturedPrims = filteredUntextured
 	}
 
 	if len(texturedPrims) == 0 && len(untexturedPrims) == 0 {

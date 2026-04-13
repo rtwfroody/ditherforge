@@ -37,6 +37,7 @@ type baseMaterial3mf struct {
 
 type object3mf struct {
 	ID   int     `xml:"id,attr"`
+	Name string  `xml:"name,attr"`
 	Mesh mesh3mf `xml:"mesh"`
 }
 
@@ -264,14 +265,22 @@ func parseMixedFilaments(defs string, physicalColors [][4]uint8) [][4]uint8 {
 //
 // Limitation: ignores <build> item transforms and <components> composition.
 // Multi-part assemblies will be merged at their local coordinates.
-func Load3MF(path string, scale float32) (*LoadedModel, error) {
+// parse3MFModels opens a 3MF file and parses all .model XML files within it.
+// Returns the zip reader (caller must close), the parsed models, and any
+// auxiliary config files found.
+type parsed3MFResult struct {
+	zr                  *zip.ReadCloser
+	models              []model3mf
+	projectSettingsFile *zip.File
+	modelSettingsFile   *zip.File
+}
+
+func parse3MFModels(path string) (*parsed3MFResult, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening 3MF: %w", err)
 	}
-	defer zr.Close()
 
-	// Find .model files, project_settings.config, and model_settings.config.
 	var modelFiles []*zip.File
 	var projectSettingsFile *zip.File
 	var modelSettingsFile *zip.File
@@ -287,27 +296,49 @@ func Load3MF(path string, scale float32) (*LoadedModel, error) {
 		}
 	}
 	if len(modelFiles) == 0 {
+		zr.Close()
 		return nil, fmt.Errorf("3MF contains no .model files")
 	}
 
-	// Parse all .model files and collect meshes.
 	var allModels []model3mf
 	for _, mf := range modelFiles {
 		rc, err := mf.Open()
 		if err != nil {
+			zr.Close()
 			return nil, fmt.Errorf("opening %s: %w", mf.Name, err)
 		}
 		data, err := io.ReadAll(rc)
 		rc.Close()
 		if err != nil {
+			zr.Close()
 			return nil, fmt.Errorf("reading %s: %w", mf.Name, err)
 		}
 		var m model3mf
 		if err := xml.Unmarshal(data, &m); err != nil {
+			zr.Close()
 			return nil, fmt.Errorf("parsing %s: %w", mf.Name, err)
 		}
 		allModels = append(allModels, m)
 	}
+
+	return &parsed3MFResult{
+		zr:                  zr,
+		models:              allModels,
+		projectSettingsFile: projectSettingsFile,
+		modelSettingsFile:   modelSettingsFile,
+	}, nil
+}
+
+func Load3MF(path string, scale float32, objectIndex int) (*LoadedModel, error) {
+	parsed, err := parse3MFModels(path)
+	if err != nil {
+		return nil, err
+	}
+	defer parsed.zr.Close()
+
+	allModels := parsed.models
+	projectSettingsFile := parsed.projectSettingsFile
+	modelSettingsFile := parsed.modelSettingsFile
 
 	// Collect basematerials across all models.
 	type bmGroup struct {
@@ -367,11 +398,20 @@ func Load3MF(path string, scale float32) (*LoadedModel, error) {
 	var allFaces [][3]uint32
 	var allFaceBaseColor [][4]uint8
 
+	nonEmptyIdx := 0
 	for _, m := range allModels {
 		for _, obj := range m.Resources.Objects {
 			mesh := obj.Mesh
 			if len(mesh.Vertices.Vertex) == 0 || len(mesh.Triangles.Triangle) == 0 {
 				continue
+			}
+
+			if objectIndex >= 0 {
+				if nonEmptyIdx != objectIndex {
+					nonEmptyIdx++
+					continue
+				}
+				nonEmptyIdx++
 			}
 
 			vertOffset := uint32(len(allVerts))

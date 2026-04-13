@@ -77,6 +77,7 @@ func main() {
 		Force:          args.Force,
 		Stats:          args.Stats,
 		ColorSnap:      args.ColorSnap,
+		ObjectIndex:    -1, // load all objects (no CLI flag yet; GUI has a picker dialog)
 	}
 
 	prepResult, _, err := pipeline.Run(context.Background(), opts)
