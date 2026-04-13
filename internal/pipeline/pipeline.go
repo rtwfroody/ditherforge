@@ -533,6 +533,12 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
 		}
 
+		bounds := img.Bounds()
+		if bounds.Dx() == 0 || bounds.Dy() == 0 {
+			fmt.Printf("  Sticker %s: 0x0 image, skipping\n", s.ImagePath)
+			continue
+		}
+
 		seedTri := voxel.FindSeedTriangle(s.Center, model, si)
 		if seedTri < 0 {
 			fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)

@@ -141,6 +141,14 @@ func BuildStickerDecal(
 		TriUVs: make(map[int32][3][2]float32),
 	}
 
+	// UV-space occupancy bitmap. Tracks which sticker pixels have already
+	// been claimed by a triangle. A new triangle is only accepted if it
+	// covers at least one unclaimed pixel, preventing the sticker from
+	// repeating when geodesic unfolding folds back on non-developable surfaces.
+	occW := imgBounds.Dx()
+	occH := imgBounds.Dy()
+	occupancy := make([]bool, occW*occH)
+
 	// BFS flood-fill from seed triangle.
 	visited := make([]bool, len(model.Faces))
 	queue := []bfsEntry{{tri: seedTri, uvs: seedUVs}}
@@ -151,6 +159,11 @@ func BuildStickerDecal(
 		queue = queue[1:]
 
 		if !triOverlapsUVBounds(entry.uvs) {
+			continue
+		}
+
+		// Only accept this triangle if it covers at least one new pixel.
+		if !occupancyClaimTriangle(entry.uvs, occupancy, occW, occH) {
 			continue
 		}
 
@@ -282,6 +295,48 @@ func triOverlapsUVBounds(uvs [3][2]float32) bool {
 	minV := min(uvs[0][1], min(uvs[1][1], uvs[2][1]))
 	maxV := max(uvs[0][1], max(uvs[1][1], uvs[2][1]))
 	return maxU >= 0 && minU <= 1 && maxV >= 0 && minV <= 1
+}
+
+// occupancyClaimTriangle rasterizes a triangle in UV space into the occupancy
+// bitmap. Returns true if at least one pixel was newly claimed (i.e., the
+// triangle covers some previously unclaimed area). All pixels covered by the
+// triangle are marked as claimed regardless of the return value.
+func occupancyClaimTriangle(uvs [3][2]float32, occ []bool, w, h int) bool {
+	// Compute AABB in pixel coordinates, clipped to bitmap.
+	fw, fh := float32(w), float32(h)
+	minPx := int(max(0, min(uvs[0][0], min(uvs[1][0], uvs[2][0]))*fw))
+	maxPx := int(min(fw-1, max(uvs[0][0], max(uvs[1][0], uvs[2][0]))*fw))
+	minPy := int(max(0, min(uvs[0][1], min(uvs[1][1], uvs[2][1]))*fh))
+	maxPy := int(min(fh-1, max(uvs[0][1], max(uvs[1][1], uvs[2][1]))*fh))
+
+	claimedNew := false
+	for py := minPy; py <= maxPy; py++ {
+		for px := minPx; px <= maxPx; px++ {
+			// Sample point at pixel center.
+			u := (float32(px) + 0.5) / fw
+			v := (float32(py) + 0.5) / fh
+			if !pointInTriangle2D(u, v, uvs) {
+				continue
+			}
+			idx := py*w + px
+			if !occ[idx] {
+				claimedNew = true
+			}
+			occ[idx] = true
+		}
+	}
+	return claimedNew
+}
+
+// pointInTriangle2D returns true if point (px,py) is inside the 2D triangle
+// defined by uvs, using barycentric coordinate sign tests.
+func pointInTriangle2D(px, py float32, uvs [3][2]float32) bool {
+	d1 := (px-uvs[1][0])*(uvs[0][1]-uvs[1][1]) - (uvs[0][0]-uvs[1][0])*(py-uvs[1][1])
+	d2 := (px-uvs[2][0])*(uvs[1][1]-uvs[2][1]) - (uvs[1][0]-uvs[2][0])*(py-uvs[2][1])
+	d3 := (px-uvs[0][0])*(uvs[2][1]-uvs[0][1]) - (uvs[2][0]-uvs[0][0])*(py-uvs[0][1])
+	hasNeg := (d1 < 0) || (d2 < 0) || (d3 < 0)
+	hasPos := (d1 > 0) || (d2 > 0) || (d3 > 0)
+	return !(hasNeg && hasPos)
 }
 
 // CompositeStickerColor samples all decals for the given triangle at the given

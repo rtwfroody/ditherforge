@@ -16,9 +16,10 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 2. Use **File > Open** to select a `.glb` or `.3mf` file
 3. Set **Nozzle diameter** and **Layer height** to match your slicer
 4. Set **Size (mm)** to your target print size
-5. Adjust the palette and color settings — the output preview updates automatically
-6. Use **File > Export 3MF** to save the result
-7. Open the exported 3MF in OrcaSlicer or BambuStudio and print
+5. Optionally, open the **Stickers** panel to apply PNG images onto the model surface
+6. Adjust the palette and color settings — the output preview updates automatically
+7. Use **File > Export 3MF** to save the result
+8. Open the exported 3MF in OrcaSlicer or BambuStudio and print
 
 For real use, you'll want to update your Inventory filament collection as
 described right below.
@@ -106,6 +107,29 @@ Three sliders adjust the model's colors before palette selection:
 The input preview reflects these adjustments instantly via GPU shaders. The
 output re-renders with each change.
 
+## How to Use Stickers
+
+Stickers let you apply PNG images directly onto the model surface before
+voxelization. The image is projected along the surface topology, so it wraps
+around curves naturally rather than being applied as a flat decal.
+
+To place a sticker:
+
+1. Open the **Stickers** panel in the sidebar.
+2. Click **Add Sticker** and choose a PNG file.
+3. Click a point on the input model to place it. The sticker centers on that
+   point, oriented to the surface.
+4. Adjust **Scale** and **Rotation** as needed.
+
+To add more stickers, repeat the process. There is no hard limit on the number
+of stickers.
+
+Stickers are composited over the base model color during voxelization. They are
+affected by brightness, contrast, and saturation adjustments like any other
+color on the model.
+
+Sticker placements are saved and restored with the JSON settings file.
+
 ## How to Use Color Pins
 
 Color pins remap specific colors in the model before dithering. Use them to
@@ -164,25 +188,28 @@ compatible with OrcaSlicer and BambuStudio.
 
 1. **Load** — reads a GLB or 3MF file and scales it to millimeters. The model
    bottom is normalized to Z = 0.
-2. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
-   layer settings. Each cell gets the color sampled from the original texture.
-   First-layer cells are wider (`nozzle × 1.275`); upper cells are narrower
-   (`nozzle × 1.05`).
-3. **Decimate** — reduces the triangle count of the input mesh before clipping,
+2. **Stickers** — composites any sticker images onto the model's texture. Each
+   sticker is placed at a clicked surface point and projected outward following
+   the mesh topology.
+3. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
+   layer settings. Each cell gets the color sampled from the original texture
+   (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
+   upper cells are narrower (`nozzle × 1.05`).
+4. **Decimate** — reduces the triangle count of the input mesh before clipping,
    using QEM mesh decimation.
-4. **Color adjust** — applies brightness, contrast, and saturation.
-5. **Color warp** — applies color pin remappings using Gaussian RBF
+5. **Color adjust** — applies brightness, contrast, and saturation.
+6. **Color warp** — applies color pin remappings using Gaussian RBF
    interpolation in CIELAB color space.
-6. **Palette** — resolves locked colors, then selects auto colors from the
+7. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
-7. **Dither** — assigns a palette color to each cell to approximate the original
+8. **Dither** — assigns a palette color to each cell to approximate the original
    texture. The default `dizzy` mode uses random traversal with error diffusion
    to spatial neighbors, producing blue-noise-like patterns. `none` assigns the
    nearest palette color with no dithering.
-8. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
+9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
    each fragment a palette color.
-9. **Merge** — merges coplanar triangles to reduce face count.
-10. **Export** — writes a 3MF file with per-face material assignments.
+10. **Merge** — merges coplanar triangles to reduce face count.
+11. **Export** — writes a 3MF file with per-face material assignments.
 
 Each stage is cached by its settings hash. Changing a downstream parameter
 (e.g., dithering mode) skips all upstream stages on the next run.
@@ -293,6 +320,23 @@ These models work well with DitherForge and are free to download:
 | Contrast | -100 to +100 | 0 | Increases or reduces the tonal range |
 | Saturation | -100 to +100 | 0 | Increases or reduces color intensity |
 
+### Stickers
+
+Stickers composite PNG images onto the model surface before voxelization.
+
+| Field | Description |
+|-------|-------------|
+| Image | PNG file to use as the sticker |
+| Placement | Set by clicking a point on the input model. Determines position, surface normal, and orientation. |
+| Scale | Size of the sticker on the surface |
+| Rotation | Rotation of the sticker around the surface normal |
+
+Multiple stickers can be added. They are applied in order and composited over
+the base model color. Sticker colors are subject to the same brightness,
+contrast, and saturation adjustments as the rest of the model.
+
+Stickers are saved as part of the JSON settings file.
+
 ### Color Pins (Warp Pins)
 
 Each pin maps a source color to a target filament color using Gaussian RBF
@@ -344,7 +388,7 @@ solid-color regions.
 
 Saved settings include: input file path, size/scale, nozzle diameter, layer
 height, palette (locked colors and collection), color adjustments, color pins,
-dither mode, color snap, and advanced flags.
+stickers, dither mode, color snap, and advanced flags.
 
 ### Advanced Options (GUI)
 
