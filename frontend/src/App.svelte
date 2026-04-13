@@ -540,6 +540,7 @@
     }
     try {
       await SaveSettings(settingsPath, serializeSettings() as any);
+      addRecentFile(settingsPath);
       statusMessage = `Saved to ${settingsPath}`;
       statusType = 'success';
     } catch (err: any) {
@@ -553,6 +554,7 @@
       const path = await SaveSettingsDialog(serializeSettings() as any);
       if (path) {
         settingsPath = path;
+        addRecentFile(path);
         statusMessage = `Saved to ${path}`;
         statusType = 'success';
       }
