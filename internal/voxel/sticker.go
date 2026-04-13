@@ -47,10 +47,11 @@ func FindSeedTriangle(point [3]float64, model *loader.LoadedModel, si *SpatialIn
 var edgeVertIdx = [3][2]int{{0, 1}, {1, 2}, {2, 0}}
 var edgeOtherIdx = [3]int{2, 0, 1} // the vertex NOT on the edge
 
-// bfsEntry carries a triangle and its computed sticker UVs through the BFS.
+// bfsEntry carries a triangle and its tangent-plane coordinates through the BFS.
+// Tangent coords are in world units (isotropic); converted to UV when storing.
 type bfsEntry struct {
 	tri int32
-	uvs [3][2]float32
+	tc  [3][2]float32
 }
 
 // BuildStickerDecal creates a decal by flood-filling from a seed triangle
@@ -116,25 +117,39 @@ func BuildStickerDecal(
 	halfW := scale / 2
 	halfH := (scale * aspect) / 2
 
-	// planarUV projects a vertex onto the tangent plane for the seed triangle.
-	planarUV := func(pos [3]float32) [2]float32 {
+	// planarTangent projects a vertex onto the tangent plane, returning
+	// coordinates in world units (isotropic). The BFS tracks these tangent
+	// coordinates so that unfoldVertex works in an isotropic space. We
+	// convert to UV only when storing in the decal or checking occupancy.
+	planarTangent := func(pos [3]float32) [2]float32 {
 		dx := float64(pos[0]) - center[0]
 		dy := float64(pos[1]) - center[1]
 		dz := float64(pos[2]) - center[2]
-		projT := dx*t[0] + dy*t[1] + dz*t[2]
-		projB := dx*b[0] + dy*b[1] + dz*b[2]
 		return [2]float32{
-			float32((projT/halfW + 1) / 2),
-			float32((projB/halfH + 1) / 2),
+			float32(dx*t[0] + dy*t[1] + dz*t[2]),
+			float32(dx*b[0] + dy*b[1] + dz*b[2]),
 		}
 	}
 
-	// Compute seed triangle UVs by planar projection.
+	// tangentToUV converts tangent-plane coordinates to [0,1] UV.
+	fHalfW := float32(halfW)
+	fHalfH := float32(halfH)
+	tangentToUV := func(tc [2]float32) [2]float32 {
+		return [2]float32{
+			(tc[0]/fHalfW + 1) / 2,
+			(tc[1]/fHalfH + 1) / 2,
+		}
+	}
+	tangentTrisToUV := func(tc [3][2]float32) [3][2]float32 {
+		return [3][2]float32{tangentToUV(tc[0]), tangentToUV(tc[1]), tangentToUV(tc[2])}
+	}
+
+	// Compute seed triangle tangent coords.
 	seedFace := model.Faces[seedTri]
-	seedUVs := [3][2]float32{
-		planarUV(model.Vertices[seedFace[0]]),
-		planarUV(model.Vertices[seedFace[1]]),
-		planarUV(model.Vertices[seedFace[2]]),
+	seedTangent := [3][2]float32{
+		planarTangent(model.Vertices[seedFace[0]]),
+		planarTangent(model.Vertices[seedFace[1]]),
+		planarTangent(model.Vertices[seedFace[2]]),
 	}
 
 	decal := &StickerDecal{
@@ -157,25 +172,39 @@ func BuildStickerDecal(
 	occH := imgBounds.Dy()
 	occupancy := make([]bool, occW*occH)
 
-	// BFS flood-fill from seed triangle.
+	// triOverlapsTangentBounds checks if the triangle overlaps the sticker
+	// area in tangent-plane coordinates: [-halfW,halfW] x [-halfH,halfH].
+	triOverlapsTangentBounds := func(tc [3][2]float32) bool {
+		minU := min(tc[0][0], min(tc[1][0], tc[2][0]))
+		maxU := max(tc[0][0], max(tc[1][0], tc[2][0]))
+		minV := min(tc[0][1], min(tc[1][1], tc[2][1]))
+		maxV := max(tc[0][1], max(tc[1][1], tc[2][1]))
+		return maxU >= -fHalfW && minU <= fHalfW && maxV >= -fHalfH && minV <= fHalfH
+	}
+
+	// BFS flood-fill from seed triangle. Coordinates are in tangent-plane
+	// space (world units) so that unfoldVertex operates in an isotropic space.
 	visited := make([]bool, len(model.Faces))
-	queue := []bfsEntry{{tri: seedTri, uvs: seedUVs}}
+	queue := []bfsEntry{{tri: seedTri, tc: seedTangent}}
 	visited[seedTri] = true
 
 	for len(queue) > 0 {
 		entry := queue[0]
 		queue = queue[1:]
 
-		if !triOverlapsUVBounds(entry.uvs) {
+		if !triOverlapsTangentBounds(entry.tc) {
 			continue
 		}
+
+		// Convert to UV for occupancy check and decal storage.
+		uvs := tangentTrisToUV(entry.tc)
 
 		// Only accept this triangle if it covers at least one new pixel.
-		if !occupancyClaimTriangle(entry.uvs, occupancy, occW, occH) {
+		if !occupancyClaimTriangle(uvs, occupancy, occW, occH) {
 			continue
 		}
 
-		decal.TriUVs[entry.tri] = entry.uvs
+		decal.TriUVs[entry.tri] = uvs
 
 		// Expand to neighbors through each edge.
 		var curNormal [3]float32
@@ -213,12 +242,12 @@ func BuildStickerDecal(
 			// Shared edge: vertices of current tri's edge ei.
 			curFace := model.Faces[entry.tri]
 			i0, i1 := edgeVertIdx[ei][0], edgeVertIdx[ei][1]
-			uvA := entry.uvs[i0]
-			uvB := entry.uvs[i1]
+			tcA := entry.tc[i0]
+			tcB := entry.tc[i1]
 			posA := model.Vertices[curFace[i0]]
 
 			// The current triangle's third vertex (not on the shared edge).
-			uvCurrent := entry.uvs[edgeOtherIdx[ei]]
+			tcCurrent := entry.tc[edgeOtherIdx[ei]]
 
 			// Neighbor's vertices: shared edge is at edgeVertIdx[nej],
 			// and the new vertex is at edgeOtherIdx[nej].
@@ -228,47 +257,48 @@ func BuildStickerDecal(
 			posE := model.Vertices[nFace[nj1]]
 			posNew := model.Vertices[nFace[edgeOtherIdx[nej]]]
 
-			// Match neighbor's shared edge vertices to our UVs.
+			// Match neighbor's shared edge vertices to our tangent coords.
 			// The shared edge may be traversed in reverse order.
-			var uvD, uvE [2]float32
+			var tcD, tcE [2]float32
 			snapA := SnapPos(posA)
 			snapD := SnapPos(posD)
 			if snapA == snapD {
-				uvD, uvE = uvA, uvB
+				tcD, tcE = tcA, tcB
 			} else {
-				uvD, uvE = uvB, uvA
+				tcD, tcE = tcB, tcA
 			}
 
-			// Unfold the new vertex into UV space.
-			uvNew := unfoldVertex(posD, posE, posNew, uvD, uvE, uvCurrent)
+			// Unfold the new vertex into tangent space (isotropic).
+			tcNew := unfoldVertex(posD, posE, posNew, tcD, tcE, tcCurrent)
 
-			// Build the neighbor's full UV array in face-vertex order.
-			var nUVs [3][2]float32
-			nUVs[nj0] = uvD
-			nUVs[nj1] = uvE
-			nUVs[edgeOtherIdx[nej]] = uvNew
+			// Build the neighbor's full tangent-coord array in face-vertex order.
+			var nTCs [3][2]float32
+			nTCs[nj0] = tcD
+			nTCs[nj1] = tcE
+			nTCs[edgeOtherIdx[nej]] = tcNew
 
-			queue = append(queue, bfsEntry{tri: ni, uvs: nUVs})
+			queue = append(queue, bfsEntry{tri: ni, tc: nTCs})
 		}
 	}
 
 	return decal
 }
 
-// unfoldVertex computes the UV of a new vertex C by unfolding the 3D triangle
-// (A, B, C) across the shared edge A-B into UV space. The shared edge has
-// known UVs (uvA, uvB). uvCurrent is the UV of the parent triangle's third
-// vertex, used to determine which side of the edge the new vertex goes on
-// (it must go on the opposite side).
-func unfoldVertex(posA, posB, posC [3]float32, uvA, uvB, uvCurrent [2]float32) [2]float32 {
-	// UV edge vector and length.
-	uvEdge := [2]float32{uvB[0] - uvA[0], uvB[1] - uvA[1]}
-	uvEdgeLen := float32(math.Sqrt(float64(uvEdge[0]*uvEdge[0] + uvEdge[1]*uvEdge[1])))
-	if uvEdgeLen < 1e-10 {
-		return uvA
+// unfoldVertex computes the 2D position of a new vertex C by unfolding the 3D
+// triangle (A, B, C) across the shared edge A-B into a flat coordinate space.
+// The shared edge has known 2D positions (flatA, flatB). flatCurrent is the 2D
+// position of the parent triangle's third vertex, used to determine which side
+// of the edge the new vertex goes on (it must go on the opposite side).
+// The 2D space can be any isotropic coordinate system (e.g. tangent-plane coords).
+func unfoldVertex(posA, posB, posC [3]float32, flatA, flatB, flatCurrent [2]float32) [2]float32 {
+	// 2D edge vector and length.
+	edgeVec := [2]float32{flatB[0] - flatA[0], flatB[1] - flatA[1]}
+	edgeLen := float32(math.Sqrt(float64(edgeVec[0]*edgeVec[0] + edgeVec[1]*edgeVec[1])))
+	if edgeLen < 1e-10 {
+		return flatA
 	}
-	uvDir := [2]float32{uvEdge[0] / uvEdgeLen, uvEdge[1] / uvEdgeLen}
-	uvPerp := [2]float32{-uvDir[1], uvDir[0]} // 90° CCW rotation
+	edgeDir := [2]float32{edgeVec[0] / edgeLen, edgeVec[1] / edgeLen}
+	edgePerp := [2]float32{-edgeDir[1], edgeDir[0]} // 90° CCW rotation
 
 	// 3D vectors from A.
 	ab := [3]float32{posB[0] - posA[0], posB[1] - posA[1], posB[2] - posA[2]}
@@ -276,7 +306,7 @@ func unfoldVertex(posA, posB, posC [3]float32, uvA, uvB, uvCurrent [2]float32) [
 	lenAB := float32(math.Sqrt(float64(ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2])))
 	lenAC := float32(math.Sqrt(float64(ac[0]*ac[0] + ac[1]*ac[1] + ac[2]*ac[2])))
 	if lenAB < 1e-10 || lenAC < 1e-10 {
-		return uvA
+		return flatA
 	}
 
 	// Angle at A via dot product.
@@ -289,34 +319,22 @@ func unfoldVertex(posA, posB, posC [3]float32, uvA, uvB, uvCurrent [2]float32) [
 	}
 	sinA := float32(math.Sqrt(float64(1 - cosA*cosA)))
 
-	// Scale from 3D to UV.
-	uvScale := uvEdgeLen / lenAB
+	// Scale from 3D to 2D.
+	flatScale := edgeLen / lenAB
 
-	// The new vertex must be on the opposite side of the edge from uvCurrent.
-	toCurrent := [2]float32{uvCurrent[0] - uvA[0], uvCurrent[1] - uvA[1]}
-	crossSign := uvEdge[0]*toCurrent[1] - uvEdge[1]*toCurrent[0]
+	// The new vertex must be on the opposite side of the edge from flatCurrent.
+	toCurrent := [2]float32{flatCurrent[0] - flatA[0], flatCurrent[1] - flatA[1]}
+	crossSign := edgeVec[0]*toCurrent[1] - edgeVec[1]*toCurrent[0]
 	sign := float32(1)
 	if crossSign > 0 {
 		sign = -1
 	}
 
-	r := lenAC * uvScale
+	r := lenAC * flatScale
 	return [2]float32{
-		uvA[0] + r*(cosA*uvDir[0]+sign*sinA*uvPerp[0]),
-		uvA[1] + r*(cosA*uvDir[1]+sign*sinA*uvPerp[1]),
+		flatA[0] + r*(cosA*edgeDir[0]+sign*sinA*edgePerp[0]),
+		flatA[1] + r*(cosA*edgeDir[1]+sign*sinA*edgePerp[1]),
 	}
-}
-
-// triOverlapsUVBounds returns true if the triangle (in sticker UV space)
-// overlaps the [0,1]x[0,1] sticker region. This uses a bounding-box test:
-// the triangle's AABB must overlap [0,1]x[0,1]. This is conservative (may
-// include some triangles that don't actually overlap) but never misses.
-func triOverlapsUVBounds(uvs [3][2]float32) bool {
-	minU := min(uvs[0][0], min(uvs[1][0], uvs[2][0]))
-	maxU := max(uvs[0][0], max(uvs[1][0], uvs[2][0]))
-	minV := min(uvs[0][1], min(uvs[1][1], uvs[2][1]))
-	maxV := max(uvs[0][1], max(uvs[1][1], uvs[2][1]))
-	return maxU >= 0 && minU <= 1 && maxV >= 0 && minV <= 1
 }
 
 // occupancyClaimTriangle rasterizes a triangle in UV space into the occupancy
