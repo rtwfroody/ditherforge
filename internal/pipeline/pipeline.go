@@ -198,23 +198,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		}
 	}
 
-	// Stage 1: Voxelize
-	if startFrom <= StageVoxelize {
-		tracker.StageStart(stageNames[StageVoxelize], false, 0)
-		if err := runVoxelize(ctx, cache, opts, lo, tracker); err != nil {
-			return nil, err
-		}
-		tracker.StageDone(stageNames[StageVoxelize])
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	vo := cache.getVoxelize()
-
-	// Stage 2: Sticker
+	// Stage 1: Sticker (builds decals from mesh, before voxelization)
 	if startFrom <= StageSticker {
 		tracker.StageStart(stageNames[StageSticker], false, 0)
-		if err := runSticker(ctx, cache, opts, vo); err != nil {
+		if err := runSticker(ctx, cache, opts, lo); err != nil {
 			return nil, err
 		}
 		tracker.StageDone(stageNames[StageSticker])
@@ -223,6 +210,19 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 	so := cache.getSticker()
+
+	// Stage 2: Voxelize (uses decals from sticker stage)
+	if startFrom <= StageVoxelize {
+		tracker.StageStart(stageNames[StageVoxelize], false, 0)
+		if err := runVoxelize(ctx, cache, opts, lo, so, tracker); err != nil {
+			return nil, err
+		}
+		tracker.StageDone(stageNames[StageVoxelize])
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	vo := cache.getVoxelize()
 
 	// Stage 3: Decimate
 	if startFrom <= StageDecimate {
@@ -239,7 +239,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Stage 4: Color adjustment
 	if startFrom <= StageColorAdjust {
 		tracker.StageStart(stageNames[StageColorAdjust], false, 0)
-		if err := runColorAdjust(ctx, cache, opts, so); err != nil {
+		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
 			return nil, err
 		}
 		tracker.StageDone(stageNames[StageColorAdjust])
@@ -471,7 +471,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	return nil
 }
 
-func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
+func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, so *stickerOutput, tracker progress.Tracker) error {
 	layer0Size := opts.NozzleDiameter * 1.275
 	upperSize := opts.NozzleDiameter * 1.05
 	layerH := opts.LayerHeight
@@ -479,7 +479,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 
 	fmt.Println("Voxelizing...")
 	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH, tracker)
+		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -494,7 +494,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		})
 	} else {
 		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH, tracker)
+		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -511,17 +511,17 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runSticker(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput) error {
 	if len(opts.Stickers) == 0 {
-		// Pass through — no stickers to apply.
-		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{Cells: vo.Cells})
+		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{})
 		return nil
 	}
 
-	// Copy cells to avoid mutating the voxelize cache.
-	cells := make([]voxel.ActiveCell, len(vo.Cells))
-	copy(cells, vo.Cells)
+	model := lo.Model
+	adj := voxel.BuildTriAdjacency(model)
+	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 
+	var decals []*voxel.StickerDecal
 	for _, s := range opts.Stickers {
 		f, err := os.Open(s.ImagePath)
 		if err != nil {
@@ -533,25 +533,33 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, vo *voxeli
 			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
 		}
 
-		if err := voxel.ApplySticker(ctx, cells, vo.CellAssignMap,
-			img, s.Center, s.Normal, s.Up, s.Scale, s.Rotation,
-			max(vo.Layer0Size, vo.UpperSize)); err != nil {
-			return err
+		seedTri := voxel.FindSeedTriangle(s.Center, model, si)
+		if seedTri < 0 {
+			fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
+			continue
 		}
+
+		decal := voxel.BuildStickerDecal(model, adj, img,
+			seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation)
+		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
+		decals = append(decals, decal)
 	}
 
-	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{Cells: cells})
+	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{
+		Decals: decals,
+		Adj:    adj,
+	})
 	return nil
 }
 
-func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, so *stickerOutput) error {
+func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
 	adj := voxel.ColorAdjustment{
 		Brightness: opts.Brightness,
 		Contrast:   opts.Contrast,
 		Saturation: opts.Saturation,
 	}
 	tAdj := time.Now()
-	cells, err := voxel.AdjustCellColors(ctx, so.Cells, adj)
+	cells, err := voxel.AdjustCellColors(ctx, vo.Cells, adj)
 	if err != nil {
 		return err
 	}

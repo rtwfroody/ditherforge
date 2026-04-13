@@ -827,6 +827,16 @@
 
         <Separator />
 
+        <!-- Stickers -->
+        <StickerPanel
+          bind:stickers={stickers}
+          bind:placingIndex={placingStickerIndex}
+          onAdd={addSticker}
+          onRemove={removeSticker}
+        />
+
+        <Separator />
+
         <!-- Color adjustments -->
         <div class="space-y-3">
           <div class="space-y-1">
@@ -860,16 +870,6 @@
           loadCollectionColors={GetCollectionColors}
           bind:pickingIndex={pickingPinIndex}
           onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
-        />
-
-        <Separator />
-
-        <!-- Stickers -->
-        <StickerPanel
-          bind:stickers={stickers}
-          bind:placingIndex={placingStickerIndex}
-          onAdd={addSticker}
-          onRemove={removeSticker}
         />
 
         <Separator />

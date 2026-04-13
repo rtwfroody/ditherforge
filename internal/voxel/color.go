@@ -199,100 +199,21 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 }
 
 // SampleNearestColor finds the closest surface point to p, then samples the
-// texture color and alpha there. Returns RGBA.
-func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) [4]uint8 {
+// texture color and alpha there. If decals are provided, sticker textures are
+// composited over the base color. Returns RGBA.
+func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf, decals []*StickerDecal) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	bestTri := int32(-1)
 	var bestS, bestT float32
 	for _, ti := range cands {
 		f := model.Faces[ti]
-		v0 := model.Vertices[f[0]]
-		v1 := model.Vertices[f[1]]
-		v2 := model.Vertices[f[2]]
-
-		e0 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
-		e1 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
-		d := [3]float32{v0[0] - p[0], v0[1] - p[1], v0[2] - p[2]}
-
-		a := Dot3(e0, e0)
-		b := Dot3(e0, e1)
-		c := Dot3(e1, e1)
-		dd := Dot3(e0, d)
-		e := Dot3(e1, d)
-
-		det := a*c - b*b
-		s := b*e - c*dd
-		t := b*dd - a*e
-
-		if s+t <= det {
-			if s < 0 {
-				if t < 0 {
-					if dd < 0 {
-						t = 0
-						s = ClampF(-dd/a, 0, 1)
-					} else {
-						s = 0
-						t = ClampF(-e/c, 0, 1)
-					}
-				} else {
-					s = 0
-					t = ClampF(-e/c, 0, 1)
-				}
-			} else if t < 0 {
-				t = 0
-				s = ClampF(-dd/a, 0, 1)
-			} else {
-				invDet := 1.0 / det
-				s *= invDet
-				t *= invDet
-			}
-		} else {
-			if s < 0 {
-				tmp0 := b + dd
-				tmp1 := c + e
-				if tmp1 > tmp0 {
-					numer := tmp1 - tmp0
-					denom := a - 2*b + c
-					s = ClampF(numer/denom, 0, 1)
-					t = 1 - s
-				} else {
-					s = 0
-					t = ClampF(-e/c, 0, 1)
-				}
-			} else if t < 0 {
-				tmp0 := b + e
-				tmp1 := a + dd
-				if tmp1 > tmp0 {
-					numer := tmp1 - tmp0
-					denom := a - 2*b + c
-					t = ClampF(numer/denom, 0, 1)
-					s = 1 - t
-				} else {
-					t = 0
-					s = ClampF(-dd/a, 0, 1)
-				}
-			} else {
-				numer := (c + e) - (b + dd)
-				if numer <= 0 {
-					s = 0
-				} else {
-					denom := a - 2*b + c
-					s = ClampF(numer/denom, 0, 1)
-				}
-				t = 1 - s
-			}
-		}
-
-		dx := d[0] + s*e0[0] + t*e1[0]
-		dy := d[1] + s*e0[1] + t*e1[1]
-		dz := d[2] + s*e0[2] + t*e1[2]
-		distSq := dx*dx + dy*dy + dz*dz
-		if distSq < bestDistSq {
-			bestDistSq = distSq
+		r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+		if r.DistSq < bestDistSq {
+			bestDistSq = r.DistSq
 			bestTri = ti
-			bestS = s
-			bestT = t
+			bestS = r.S
+			bestT = r.T
 		}
 	}
 
@@ -304,6 +225,7 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	f := model.Faces[bestTri]
 	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
 
+	var rgba [4]uint8
 	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
 		// Texture sampling path.
 		uv0 := model.UVs[f[0]]
@@ -313,7 +235,7 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
 		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
 
-		rgba := BilinearSample(model.Textures[texIdx], u, v)
+		rgba = BilinearSample(model.Textures[texIdx], u, v)
 		// Alpha-blend texture sample over material base color.
 		texA := float32(rgba[3]) / 255
 		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
@@ -321,7 +243,6 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
 		// Combine texture alpha, base color alpha, and material alpha.
 		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
-		return rgba
 	} else if model.VertexColors != nil {
 		// Vertex color interpolation path.
 		c0 := model.VertexColors[f[0]]
@@ -332,7 +253,7 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		b := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
 		a := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
 		// Modulate by material base color and alpha.
-		return [4]uint8{
+		rgba = [4]uint8{
 			uint8(ClampF(r*float32(bc[0])/255+0.5, 0, 255)),
 			uint8(ClampF(g*float32(bc[1])/255+0.5, 0, 255)),
 			uint8(ClampF(b*float32(bc[2])/255+0.5, 0, 255)),
@@ -341,8 +262,15 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 	} else {
 		// Base color only path.
 		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
-		return [4]uint8{bc[0], bc[1], bc[2], a}
+		rgba = [4]uint8{bc[0], bc[1], bc[2], a}
 	}
+
+	// Composite sticker decals over the base color.
+	if len(decals) > 0 {
+		rgba = CompositeStickerColor(rgba, bestTri, bary, decals)
+	}
+
+	return rgba
 }
 
 // Neighbor holds a precomputed neighbor reference with its diffusion weight.

@@ -16,9 +16,9 @@ import (
 type StageID int
 
 const (
-	StageLoad        StageID = iota
+	StageLoad    StageID = iota
+	StageSticker         // builds decals from mesh, before voxelization
 	StageVoxelize
-	StageSticker
 	StageDecimate
 	StageColorAdjust
 	StageColorWarp
@@ -64,7 +64,8 @@ type voxelizeOutput struct {
 }
 
 type stickerOutput struct {
-	Cells []voxel.ActiveCell
+	Decals []*voxel.StickerDecal
+	Adj    *voxel.TriAdjacency // cached for potential reuse
 }
 
 type colorAdjustOutput struct {

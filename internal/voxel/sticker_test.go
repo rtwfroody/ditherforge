@@ -1,35 +1,12 @@
 package voxel
 
 import (
-	"context"
 	"image"
 	"image/color"
 	"testing"
-)
 
-// makeFlatGrid creates a flat 2D grid of voxels at layer 0.
-func makeFlatGrid(cols, rows int, cellSize float32) ([]ActiveCell, map[CellKey]int) {
-	cells := make([]ActiveCell, 0, cols*rows)
-	cellMap := make(map[CellKey]int)
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
-			idx := len(cells)
-			cell := ActiveCell{
-				Grid:  0,
-				Col:   c,
-				Row:   r,
-				Layer: 0,
-				Cx:    float32(c) * cellSize,
-				Cy:    float32(r) * cellSize,
-				Cz:    0,
-				Color: [3]uint8{128, 128, 128}, // gray
-			}
-			cells = append(cells, cell)
-			cellMap[CellKey{Grid: 0, Col: c, Row: r, Layer: 0}] = idx
-		}
-	}
-	return cells, cellMap
-}
+	"github.com/rtwfroody/ditherforge/internal/loader"
+)
 
 // makeTestImage creates a solid colored image with full alpha.
 func makeTestImage(w, h int, c color.NRGBA) *image.NRGBA {
@@ -42,140 +19,183 @@ func makeTestImage(w, h int, c color.NRGBA) *image.NRGBA {
 	return img
 }
 
-func TestApplyStickerBasic(t *testing.T) {
-	// 10x10 grid, 1mm cell size.
-	cells, cellMap := makeFlatGrid(10, 10, 1.0)
+// makeFlatQuadModel creates a flat quad (two triangles) on the XY plane at z=0.
+// The quad spans from (0,0,0) to (size,size,0).
+func makeFlatQuadModel(size float32) *loader.LoadedModel {
+	return &loader.LoadedModel{
+		Vertices: [][3]float32{
+			{0, 0, 0},
+			{size, 0, 0},
+			{size, size, 0},
+			{0, size, 0},
+		},
+		Faces: [][3]uint32{
+			{0, 1, 2},
+			{0, 2, 3},
+		},
+		FaceBaseColor: [][4]uint8{
+			{128, 128, 128, 255},
+			{128, 128, 128, 255},
+		},
+	}
+}
 
-	// Red sticker image, 4x4 pixels.
+func TestFindSeedTriangle(t *testing.T) {
+	model := makeFlatQuadModel(10)
+	si := NewSpatialIndex(model, 2)
+
+	// Click near center of the quad — should find a triangle.
+	tri := FindSeedTriangle([3]float64{5, 5, 0}, model, si)
+	if tri < 0 {
+		t.Fatal("expected to find a seed triangle")
+	}
+	if tri != 0 && tri != 1 {
+		t.Fatalf("expected tri 0 or 1, got %d", tri)
+	}
+
+	// Click far away — should still find something (expanding radius).
+	tri = FindSeedTriangle([3]float64{100, 100, 0}, model, si)
+	if tri < 0 {
+		t.Fatal("expected to find a seed triangle even far from mesh")
+	}
+}
+
+func TestBuildStickerDecalBasic(t *testing.T) {
+	model := makeFlatQuadModel(10)
+	adj := BuildTriAdjacency(model)
 	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 255})
 
-	// Place sticker at center of grid (5, 5, 0), normal pointing up (+Z),
-	// camera up is +Y. Scale = 3mm width.
+	// Place sticker at center of quad, normal pointing up (+Z).
 	center := [3]float64{5, 5, 0}
 	normal := [3]float64{0, 0, 1}
 	up := [3]float64{0, 1, 0}
 	scale := 3.0
-	rotation := 0.0
 
-	err := ApplySticker(context.Background(), cells, cellMap,
-		img, center, normal, up, scale, rotation, 1.0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Count how many cells turned red.
-	redCount := 0
-	for _, c := range cells {
-		if c.Color[0] == 255 && c.Color[1] == 0 && c.Color[2] == 0 {
-			redCount++
-		}
+	si := NewSpatialIndex(model, 2)
+	seedTri := FindSeedTriangle(center, model, si)
+	if seedTri < 0 {
+		t.Fatal("no seed triangle found")
 	}
 
-	// With a 3mm sticker on a 1mm grid, we expect roughly 3x3 = 9 cells affected.
-	if redCount == 0 {
-		t.Errorf("expected some cells to be recolored, got 0")
+	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0)
+
+	if len(decal.TriUVs) == 0 {
+		t.Fatal("expected some triangles in decal, got 0")
 	}
-	if redCount > 25 {
-		t.Errorf("too many cells recolored: %d (sticker should cover ~9 cells)", redCount)
-	}
-	t.Logf("Recolored %d cells (expected ~9 for 3mm sticker on 1mm grid)", redCount)
+	t.Logf("Decal covers %d triangles", len(decal.TriUVs))
 }
 
-func TestApplyStickerTransparent(t *testing.T) {
-	cells, cellMap := makeFlatGrid(10, 10, 1.0)
-
-	// Fully transparent image — no cells should change.
-	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 0})
-
-	err := ApplySticker(context.Background(), cells, cellMap,
-		img, [3]float64{5, 5, 0}, [3]float64{0, 0, 1}, [3]float64{0, 1, 0},
-		3.0, 0.0, 1.0)
-	if err != nil {
-		t.Fatal(err)
+func TestBuildStickerDecalDoesNotWrapThrough(t *testing.T) {
+	// Build a box-like mesh: 6 faces (12 triangles). Place a sticker on one face.
+	// The decal should not wrap to the opposite face.
+	model := &loader.LoadedModel{
+		Vertices: [][3]float32{
+			// Front face (z=1)
+			{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1},
+			// Back face (z=0)
+			{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+		},
+		Faces: [][3]uint32{
+			// Front
+			{0, 1, 2}, {0, 2, 3},
+			// Back
+			{5, 4, 7}, {5, 7, 6},
+			// Right
+			{1, 5, 6}, {1, 6, 2},
+			// Left
+			{4, 0, 3}, {4, 3, 7},
+			// Top
+			{3, 2, 6}, {3, 6, 7},
+			// Bottom
+			{4, 5, 1}, {4, 1, 0},
+		},
+		FaceBaseColor: make([][4]uint8, 12),
+	}
+	for i := range model.FaceBaseColor {
+		model.FaceBaseColor[i] = [4]uint8{128, 128, 128, 255}
 	}
 
-	for _, c := range cells {
-		if c.Color != [3]uint8{128, 128, 128} {
-			t.Errorf("transparent sticker should not change any colors, but found %v", c.Color)
-			break
-		}
-	}
-}
-
-func TestApplyStickerRotation(t *testing.T) {
-	// 20x20 grid to give room for a rotated sticker.
-	cells, cellMap := makeFlatGrid(20, 20, 1.0)
-
-	// Non-square image: 8 wide x 2 tall, red, to see rotation effect.
-	img := makeTestImage(8, 2, color.NRGBA{255, 0, 0, 255})
-
-	center := [3]float64{10, 10, 0}
-	normal := [3]float64{0, 0, 1}
-	up := [3]float64{0, 1, 0}
-
-	// Apply with 0° rotation.
-	cellsCopy0 := make([]ActiveCell, len(cells))
-	copy(cellsCopy0, cells)
-	err := ApplySticker(context.Background(), cellsCopy0, cellMap,
-		img, center, normal, up, 8.0, 0.0, 1.0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Apply with 90° rotation.
-	cellsCopy90 := make([]ActiveCell, len(cells))
-	copy(cellsCopy90, cells)
-	err = ApplySticker(context.Background(), cellsCopy90, cellMap,
-		img, center, normal, up, 8.0, 90.0, 1.0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Collect recolored positions for each.
-	type pos struct{ col, row int }
-	red0 := map[pos]bool{}
-	red90 := map[pos]bool{}
-	for _, c := range cellsCopy0 {
-		if c.Color[0] == 255 && c.Color[1] == 0 {
-			red0[pos{c.Col, c.Row}] = true
-		}
-	}
-	for _, c := range cellsCopy90 {
-		if c.Color[0] == 255 && c.Color[1] == 0 {
-			red90[pos{c.Col, c.Row}] = true
-		}
-	}
-
-	// The patterns should be different (one is horizontal, the other vertical).
-	if len(red0) == 0 || len(red90) == 0 {
-		t.Fatalf("both rotations should color some cells: 0°=%d, 90°=%d", len(red0), len(red90))
-	}
-
-	// Check that the sets are not identical.
-	same := true
-	for k := range red0 {
-		if !red90[k] {
-			same = false
-			break
-		}
-	}
-	if same && len(red0) == len(red90) {
-		t.Error("rotation should change the pattern of colored cells")
-	}
-	t.Logf("0° rotation: %d cells, 90° rotation: %d cells", len(red0), len(red90))
-}
-
-func TestApplyStickerNoVoxelAtCenter(t *testing.T) {
-	// Empty grid — ApplySticker should return nil gracefully.
-	cells := []ActiveCell{}
-	cellMap := map[CellKey]int{}
-
+	adj := BuildTriAdjacency(model)
 	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 255})
 
-	err := ApplySticker(context.Background(), cells, cellMap,
-		img, [3]float64{5, 5, 0}, [3]float64{0, 0, 1}, [3]float64{0, 1, 0},
-		3.0, 0.0, 1.0)
-	if err != nil {
-		t.Fatalf("expected nil error for empty grid, got %v", err)
+	// Place sticker on front face, centered, scale covers just the front face.
+	center := [3]float64{0.5, 0.5, 1}
+	normal := [3]float64{0, 0, 1}
+	up := [3]float64{0, 1, 0}
+	scale := 0.8
+
+	si := NewSpatialIndex(model, 0.5)
+	seedTri := FindSeedTriangle(center, model, si)
+	if seedTri < 0 {
+		t.Fatal("no seed triangle found")
+	}
+
+	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0)
+
+	// Check that no back-face triangles (indices 2,3) are in the decal.
+	for _, backTri := range []int32{2, 3} {
+		if _, ok := decal.TriUVs[backTri]; ok {
+			t.Errorf("back face triangle %d should not be in decal", backTri)
+		}
+	}
+	t.Logf("Decal covers %d triangles (front face has 2)", len(decal.TriUVs))
+}
+
+func TestCompositeStickerColor(t *testing.T) {
+	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 255})
+
+	decal := &StickerDecal{
+		Image: img,
+		TriUVs: map[int32][3][2]float32{
+			0: {
+				{0, 0},
+				{1, 0},
+				{0.5, 1},
+			},
+		},
+	}
+
+	base := [4]uint8{128, 128, 128, 255}
+	// Barycentric at center of triangle.
+	bary := [3]float32{1.0 / 3, 1.0 / 3, 1.0 / 3}
+
+	result := CompositeStickerColor(base, 0, bary, []*StickerDecal{decal})
+
+	// Should be red (sticker is fully opaque red).
+	if result[0] < 200 {
+		t.Errorf("expected red channel > 200, got %d", result[0])
+	}
+	if result[1] > 50 || result[2] > 50 {
+		t.Errorf("expected low green/blue, got g=%d b=%d", result[1], result[2])
+	}
+}
+
+func TestCompositeStickerColorTransparent(t *testing.T) {
+	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 0}) // fully transparent
+
+	decal := &StickerDecal{
+		Image: img,
+		TriUVs: map[int32][3][2]float32{
+			0: {{0, 0}, {1, 0}, {0.5, 1}},
+		},
+	}
+
+	base := [4]uint8{128, 128, 128, 255}
+	bary := [3]float32{1.0 / 3, 1.0 / 3, 1.0 / 3}
+
+	result := CompositeStickerColor(base, 0, bary, []*StickerDecal{decal})
+
+	// Transparent sticker should not change the base color.
+	if result != base {
+		t.Errorf("transparent sticker should not change base, got %v", result)
+	}
+}
+
+func TestCompositeStickerColorNoDecal(t *testing.T) {
+	// Triangle not in any decal — color should be unchanged.
+	base := [4]uint8{128, 128, 128, 255}
+	result := CompositeStickerColor(base, 99, [3]float32{0.33, 0.33, 0.34}, nil)
+	if result != base {
+		t.Errorf("no decal should leave base unchanged, got %v", result)
 	}
 }

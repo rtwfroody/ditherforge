@@ -89,6 +89,7 @@ func colorCells(
 	p regionParams,
 	tracker progress.Tracker,
 	counter *atomic.Int64,
+	decals []*voxel.StickerDecal,
 ) ([]voxel.ActiveCell, error) {
 	colorRadius := p.CellSize * 3
 	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
@@ -132,7 +133,7 @@ func colorCells(
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
 				rgba := voxel.SampleNearestColor(
 					[3]float32{cx, cy, cz},
-					model, si, colorRadius, buf)
+					model, si, colorRadius, buf, decals)
 				if rgba[3] < 128 {
 					continue
 				}
@@ -170,7 +171,7 @@ type TwoGridResult struct {
 
 // VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size for
 // layer 0 and upperSize for layers 1+.
-func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker) (*TwoGridResult, error) {
+func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) (*TwoGridResult, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("empty model")
 	}
@@ -228,7 +229,7 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 	tracker.StageStart("Coloring cells", true, totalCells)
 	var counter atomic.Int64
 
-	cells0, err := colorCells(ctx, model, si, cellSet0, p0, tracker, &counter)
+	cells0, err := colorCells(ctx, model, si, cellSet0, p0, tracker, &counter, decals)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +237,7 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 		Grid: 1, CellSize: upperSize, LayerH: layerH,
 		MinV: minV, NCols: nCols1, NRows: nRows1,
 		LayerLo: 1, LayerHi: nLayers - 1,
-	}, tracker, &counter)
+	}, tracker, &counter, decals)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +266,7 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 }
 
 // Voxelize performs voxelization with a single uniform cell size.
-func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH float32, tracker progress.Tracker) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
+func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("empty model")
 	}
@@ -300,7 +301,7 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, len(cellSet))
 	var counter atomic.Int64
-	cells, err := colorCells(ctx, model, si, cellSet, p, tracker, &counter)
+	cells, err := colorCells(ctx, model, si, cellSet, p, tracker, &counter, decals)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}

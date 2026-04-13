@@ -150,7 +150,7 @@ func TestColorSelection(t *testing.T) {
 			// Voxelize to get cell colors.
 			cellSize := float32(0.4 * 1.275)
 			layerH := float32(0.2)
-			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, cellSize, layerH, progress.NullTracker{})
+			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, cellSize, layerH, progress.NullTracker{}, nil)
 			if err != nil {
 				t.Fatalf("Voxelize: %v", err)
 			}
