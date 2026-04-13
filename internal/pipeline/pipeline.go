@@ -200,7 +200,19 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		}
 	}
 
-	// Stage 1: Sticker (builds decals from mesh, before voxelization)
+	// Stage 1: Decimate (only depends on geometry + grid params, not stickers)
+	if startFrom <= StageDecimate {
+		tracker.StageStart(stageNames[StageDecimate], false, 0)
+		if err := runDecimate(ctx, cache, opts, lo); err != nil {
+			return nil, err
+		}
+		tracker.StageDone(stageNames[StageDecimate])
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Stage 2: Sticker (builds decals from mesh, before voxelization)
 	if startFrom <= StageSticker {
 		tracker.StageStart(stageNames[StageSticker], false, 0)
 		if err := runSticker(ctx, cache, opts, lo); err != nil {
@@ -213,7 +225,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	so := cache.getSticker()
 
-	// Stage 2: Voxelize (uses decals from sticker stage)
+	// Stage 3: Voxelize (uses decals from sticker stage)
 	if startFrom <= StageVoxelize {
 		tracker.StageStart(stageNames[StageVoxelize], false, 0)
 		if err := runVoxelize(ctx, cache, opts, lo, so, tracker); err != nil {
@@ -225,18 +237,6 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 	vo := cache.getVoxelize()
-
-	// Stage 3: Decimate
-	if startFrom <= StageDecimate {
-		tracker.StageStart(stageNames[StageDecimate], false, 0)
-		if err := runDecimate(ctx, cache, opts, lo, vo); err != nil {
-			return nil, err
-		}
-		tracker.StageDone(stageNames[StageDecimate])
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
 
 	// Stage 4: Color adjustment
 	if startFrom <= StageColorAdjust {
@@ -474,8 +474,8 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 }
 
 func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, so *stickerOutput, tracker progress.Tracker) error {
-	layer0Size := opts.NozzleDiameter * 1.275
-	upperSize := opts.NozzleDiameter * 1.05
+	layer0Size := opts.NozzleDiameter * squarevoxel.Layer0CellScale
+	upperSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	layerH := opts.LayerHeight
 	twoGrid := !opts.UniformGrid
 
@@ -615,9 +615,11 @@ func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *col
 	return nil
 }
 
-func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, vo *voxelizeOutput) error {
+func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput) error {
 	fmt.Println("Decimating...")
-	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, vo.Cells, min(vo.Layer0Size, vo.UpperSize), opts.NoSimplify)
+	cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
+	targetCells := squarevoxel.CountSurfaceCells(ctx, lo.Model, opts.NozzleDiameter, opts.LayerHeight)
+	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, targetCells, cellSize, opts.NoSimplify)
 	if err != nil {
 		return fmt.Errorf("decimate: %w", err)
 	}

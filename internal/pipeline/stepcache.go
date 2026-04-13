@@ -17,9 +17,9 @@ type StageID int
 
 const (
 	StageLoad    StageID = iota
+	StageDecimate
 	StageSticker         // builds decals from mesh, before voxelization
 	StageVoxelize
-	StageDecimate
 	StageColorAdjust
 	StageColorWarp
 	StagePalette
@@ -144,7 +144,9 @@ type colorWarpSettings struct {
 }
 
 type decimateSettings struct {
-	NoSimplify bool
+	NoSimplify     bool
+	NozzleDiameter float32
+	LayerHeight    float32
 }
 
 type paletteSettings struct {
@@ -213,7 +215,7 @@ func settingsForStage(stage StageID, opts Options) any {
 	case StageColorWarp:
 		return colorWarpSettings{WarpPins: opts.WarpPins}
 	case StageDecimate:
-		return decimateSettings{NoSimplify: opts.NoSimplify}
+		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
 		var contents string
 		if opts.InventoryFile != "" {
@@ -290,6 +292,8 @@ func stageKey(stage StageID, opts Options) uint64 {
 		}
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
+		writeFloat32(h, v.NozzleDiameter)
+		writeFloat32(h, v.LayerHeight)
 	case paletteSettings:
 		writeInt(h, v.NumColors)
 		writeString(h, v.LockedColors)

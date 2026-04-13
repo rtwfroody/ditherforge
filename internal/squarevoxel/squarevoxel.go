@@ -17,6 +17,12 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
+// Cell size multipliers relative to nozzle diameter.
+const (
+	Layer0CellScale = 1.275 // wider cells for the first layer
+	UpperCellScale  = 1.05  // standard cells for upper layers
+)
+
 // regionParams holds parameters for voxelizing a Z-range of the model on a
 // specific XY grid.
 type regionParams struct {
@@ -320,9 +326,37 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	return cells, cellAssignMap, minV, nil
 }
 
-// DecimateMesh simplifies the model geometry. All color info has been
-// extracted into the voxel grid, so we can simplify purely for geometry.
-func DecimateMesh(ctx context.Context, model *loader.LoadedModel, cells []voxel.ActiveCell, cellSize float32, noSimplify bool) (*loader.LoadedModel, error) {
+// CountSurfaceCells quickly counts the number of surface voxel cells for the
+// given model and grid parameters, without performing color sampling.
+func CountSurfaceCells(ctx context.Context, model *loader.LoadedModel, nozzleDiameter, layerHeight float32) int {
+	cellSize := nozzleDiameter * UpperCellScale
+
+	minV, maxV := voxel.ComputeBounds(model.Vertices)
+	xyPad := cellSize * 2
+	zPad := layerHeight * 2
+	minV[0] -= xyPad
+	minV[1] -= xyPad
+	minV[2] -= zPad
+	maxV[0] += xyPad
+	maxV[1] += xyPad
+	maxV[2] += zPad
+
+	nCols := int(math.Ceil(float64(maxV[0]-minV[0])/float64(cellSize))) + 1
+	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
+	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerHeight))) + 1
+
+	p := regionParams{
+		Grid: 0, CellSize: cellSize, LayerH: layerHeight,
+		MinV: minV, NCols: nCols, NRows: nRows,
+		LayerLo: 0, LayerHi: nLayers - 1,
+	}
+	cellSet := voxelizeRegion(ctx, model, p)
+	return len(cellSet)
+}
+
+// DecimateMesh simplifies the model geometry purely based on shape, targeting
+// roughly one triangle per surface voxel cell.
+func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells int, cellSize float32, noSimplify bool) (*loader.LoadedModel, error) {
 	if noSimplify {
 		return model, nil
 	}
@@ -335,9 +369,8 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, cells []voxel.
 	}
 	// Target ~1 triangle per surface cell. Clipping recreates geometry
 	// at voxel boundaries, so the decimated mesh just needs a rough hull.
-	targetFaces := len(cells)
-	if targetFaces < len(opaqueFaces) {
-		decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetFaces, float64(cellSize))
+	if targetCells < len(opaqueFaces) {
+		decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetCells, float64(cellSize))
 		if err != nil {
 			return nil, err
 		}
