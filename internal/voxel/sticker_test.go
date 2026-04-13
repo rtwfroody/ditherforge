@@ -77,7 +77,7 @@ func TestBuildStickerDecalBasic(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0)
+	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0, 0)
 
 	if len(decal.TriUVs) == 0 {
 		t.Fatal("expected some triangles in decal, got 0")
@@ -130,7 +130,7 @@ func TestBuildStickerDecalDoesNotWrapThrough(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0)
+	decal := BuildStickerDecal(model, adj, img, seedTri, center, normal, up, scale, 0, 0)
 
 	// Check that no back-face triangles (indices 2,3) are in the decal.
 	for _, backTri := range []int32{2, 3} {

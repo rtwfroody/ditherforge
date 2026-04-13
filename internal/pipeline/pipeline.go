@@ -56,8 +56,9 @@ type Sticker struct {
 	Center    [3]float64 `json:"Center"`    // world-space placement point
 	Normal    [3]float64 `json:"Normal"`    // surface normal at placement
 	Up        [3]float64 `json:"Up"`        // camera up vector at placement time
-	Scale     float64    `json:"Scale"`     // world-unit width of sticker
-	Rotation  float64    `json:"Rotation"`  // degrees, around surface normal
+	Scale    float64 `json:"Scale"`    // world-unit width of sticker
+	Rotation float64 `json:"Rotation"` // degrees, around surface normal
+	MaxAngle float64 `json:"MaxAngle"` // max inter-triangle angle (degrees) for flood-fill; 0 = no limit
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
@@ -546,7 +547,7 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		}
 
 		decal := voxel.BuildStickerDecal(model, adj, img,
-			seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation)
+			seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle)
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		decals = append(decals, decal)
 	}

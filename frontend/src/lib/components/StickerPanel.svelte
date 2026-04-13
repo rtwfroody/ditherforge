@@ -12,6 +12,7 @@
     up: [number, number, number] | null;
     scale: number;
     rotation: number;
+    maxAngle: number;
   };
 
   let {
@@ -79,6 +80,15 @@
         </div>
         <Slider type="single" min={0} max={360} step={1} value={sticker.rotation}
           onValueChange={(v: number) => { stickers[i] = { ...sticker, rotation: v }; stickers = stickers; }} />
+      </div>
+
+      <div class="space-y-1">
+        <div class="flex items-center justify-between">
+          <span class="text-xs">Surface bend limit</span>
+          <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.maxAngle === 0 ? 'off' : sticker.maxAngle + '°'}</span>
+        </div>
+        <Slider type="single" min={0} max={180} step={5} value={sticker.maxAngle}
+          onValueChange={(v: number) => { stickers[i] = { ...sticker, maxAngle: v }; stickers = stickers; }} />
       </div>
     </div>
   {/each}

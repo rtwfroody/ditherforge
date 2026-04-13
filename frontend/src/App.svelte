@@ -369,6 +369,7 @@
       up: null,
       scale: 20,
       rotation: 0,
+      maxAngle: 0,
     }];
     // Automatically enter placement mode for the new sticker.
     placingStickerIndex = stickers.length - 1;
@@ -444,6 +445,7 @@
         up: s.up,
         scale: s.scale,
         rotation: s.rotation,
+        maxAngle: s.maxAngle,
       })),
       dither,
       colorSnap,
@@ -483,6 +485,7 @@
         up: st.up,
         scale: st.scale,
         rotation: st.rotation,
+        maxAngle: st.maxAngle ?? 0,
       }));
     }
     if (s.dither !== undefined) dither = s.dither;
@@ -659,6 +662,7 @@
           Up: s.up!,
           Scale: s.scale,
           Rotation: s.rotation,
+          MaxAngle: s.maxAngle,
         })),
     };
 

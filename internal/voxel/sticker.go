@@ -69,6 +69,7 @@ func BuildStickerDecal(
 	up [3]float64,
 	scale float64,
 	rotationDeg float64,
+	maxAngleDeg float64,
 ) *StickerDecal {
 	// Build orthonormal tangent frame from normal and up.
 	n := normalize3(normal)
@@ -141,6 +142,13 @@ func BuildStickerDecal(
 		TriUVs: make(map[int32][3][2]float32),
 	}
 
+	// Precompute cosine threshold for max angle check.
+	// A maxAngleDeg of 0 means no limit.
+	cosMaxAngle := float32(-1) // accept all angles by default
+	if maxAngleDeg > 0 && maxAngleDeg < 180 {
+		cosMaxAngle = float32(math.Cos(maxAngleDeg * math.Pi / 180))
+	}
+
 	// UV-space occupancy bitmap. Tracks which sticker pixels have already
 	// been claimed by a triangle. A new triangle is only accepted if it
 	// covers at least one unclaimed pixel, preventing the sticker from
@@ -170,10 +178,24 @@ func BuildStickerDecal(
 		decal.TriUVs[entry.tri] = entry.uvs
 
 		// Expand to neighbors through each edge.
+		var curNormal [3]float32
+		if cosMaxAngle > -1 {
+			curNormal = faceNormal32(model, entry.tri)
+		}
 		for ei, ni := range adj.Neighbors[entry.tri] {
 			if ni < 0 || visited[ni] {
 				continue
 			}
+
+			// Skip neighbor if the angle between face normals exceeds the limit.
+			if cosMaxAngle > -1 {
+				n2 := faceNormal32(model, ni)
+				dot := curNormal[0]*n2[0] + curNormal[1]*n2[1] + curNormal[2]*n2[2]
+				if dot < cosMaxAngle {
+					continue
+				}
+			}
+
 			visited[ni] = true
 
 			// Find which edge of the neighbor connects back.
@@ -388,6 +410,24 @@ func CompositeStickerColor(base [4]uint8, triIdx int32, bary [3]float32, decals 
 		}
 	}
 	return result
+}
+
+// faceNormal32 computes the unit normal of a triangle by cross product.
+func faceNormal32(model *loader.LoadedModel, tri int32) [3]float32 {
+	f := model.Faces[tri]
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	ax, ay, az := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+	bx, by, bz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+	nx := ay*bz - az*by
+	ny := az*bx - ax*bz
+	nz := ax*by - ay*bx
+	l := float32(math.Sqrt(float64(nx*nx + ny*ny + nz*nz)))
+	if l < 1e-12 {
+		return [3]float32{0, 0, 1}
+	}
+	return [3]float32{nx / l, ny / l, nz / l}
 }
 
 // Vector math helpers.

@@ -273,6 +273,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 			}
 			writeFloat64(h, s.Scale)
 			writeFloat64(h, s.Rotation)
+			writeFloat64(h, s.MaxAngle)
 		}
 	case colorAdjustSettings:
 		writeFloat32(h, v.Brightness)

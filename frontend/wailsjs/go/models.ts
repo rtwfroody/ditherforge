@@ -196,6 +196,7 @@ export namespace pipeline {
 	    Up: number[];
 	    Scale: number;
 	    Rotation: number;
+	    MaxAngle: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Sticker(source);
@@ -209,6 +210,7 @@ export namespace pipeline {
 	        this.Up = source["Up"];
 	        this.Scale = source["Scale"];
 	        this.Rotation = source["Rotation"];
+	        this.MaxAngle = source["MaxAngle"];
 	    }
 	}
 	export class WarpPin {
