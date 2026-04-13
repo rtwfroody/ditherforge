@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"image"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
 const defaultGray = 180
@@ -162,6 +165,105 @@ func sampleFaceColor(model *loader.LoadedModel, fi int) (uint8, uint8, uint8) {
 	}
 
 	return defaultGray, defaultGray, defaultGray
+}
+
+// atlasRegion records where a single decal image was placed in the atlas.
+type atlasRegion struct {
+	x, w, h int // pixel offset and dimensions in the atlas
+}
+
+// buildStickerAtlas packs decal images into a single horizontal-strip atlas.
+// Returns the atlas image and per-decal region info for UV remapping.
+func buildStickerAtlas(decals []*voxel.StickerDecal) (image.Image, []atlasRegion) {
+	regions := make([]atlasRegion, len(decals))
+	totalW, maxH := 0, 0
+	for i, d := range decals {
+		b := d.Image.Bounds()
+		regions[i] = atlasRegion{x: totalW, w: b.Dx(), h: b.Dy()}
+		totalW += b.Dx()
+		if b.Dy() > maxH {
+			maxH = b.Dy()
+		}
+	}
+	atlas := image.NewNRGBA(image.Rect(0, 0, totalW, maxH))
+	for i, d := range decals {
+		r := regions[i]
+		draw.Draw(atlas, image.Rect(r.x, 0, r.x+r.w, r.h), d.Image, d.Image.Bounds().Min, draw.Src)
+	}
+	return atlas, regions
+}
+
+// encodeAtlasTexture encodes an atlas image as a base64 PNG string.
+// Always uses PNG (not JPEG) because sticker images have alpha channels.
+func encodeAtlasTexture(img image.Image) string {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return ""
+	}
+	return "png:" + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// attachStickerOverlay returns a copy of mesh with sticker atlas overlay data
+// attached. The decals' TriUVs are remapped to atlas coordinates.
+func attachStickerOverlay(mesh *MeshData, decals []*voxel.StickerDecal) *MeshData {
+	nFaces := len(mesh.Faces) / 3
+
+	atlas, regions := buildStickerAtlas(decals)
+	atlasStr := encodeAtlasTexture(atlas)
+	if atlasStr == "" {
+		return mesh
+	}
+	totalW := float32(atlas.Bounds().Dx())
+	totalH := float32(atlas.Bounds().Dy())
+	if totalW == 0 || totalH == 0 {
+		return mesh
+	}
+
+	stickerUVs := make([]float32, nFaces*6)
+	stickerMask := make([]uint8, nFaces)
+	stickerBounds := make([]float32, nFaces*4) // per-face [minU, maxU, minV, maxV] for shader clamping
+
+	// NOTE: When multiple decals claim the same triangle, the last decal wins.
+	// The voxelizer composites all layers via alpha blending, so overlapping
+	// stickers may look different in the input preview vs. the output. Supporting
+	// true multi-layer compositing would require multiple atlas samples per fragment.
+	for di, d := range decals {
+		r := regions[di]
+		rX := float32(r.x)
+		rW := float32(r.w)
+		rH := float32(r.h)
+		for triIdx, triUV := range d.TriUVs {
+			if int(triIdx) >= nFaces {
+				continue
+			}
+			stickerMask[triIdx] = 1
+			off := int(triIdx) * 6
+			// Atlas bounds for this decal region (used for per-fragment clamping).
+			minU := rX / totalW
+			maxU := (rX + rW) / totalW
+			minV := float32(0)
+			maxV := rH / totalH
+			bOff := int(triIdx) * 4
+			stickerBounds[bOff] = minU
+			stickerBounds[bOff+1] = maxU
+			stickerBounds[bOff+2] = minV
+			stickerBounds[bOff+3] = maxV
+
+			for v := 0; v < 3; v++ {
+				localU := triUV[v][0]
+				localV := triUV[v][1]
+				stickerUVs[off+v*2] = (rX + localU*rW) / totalW
+				stickerUVs[off+v*2+1] = (1 - localV) * rH / totalH
+			}
+		}
+	}
+
+	out := *mesh // shallow copy
+	out.StickerUVs = stickerUVs
+	out.StickerFaceMask = stickerMask
+	out.StickerBounds = stickerBounds
+	out.StickerAtlas = atlasStr
+	return &out
 }
 
 // buildMeshData creates a MeshData from remesh output (model + palette assignments).

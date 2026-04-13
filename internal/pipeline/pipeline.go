@@ -101,6 +101,12 @@ type MeshData struct {
 	UVs            []float32 `json:"UVs,omitempty"`            // flat [u,v, u,v, ...] per vertex, optional
 	Textures       []string  `json:"Textures,omitempty"`       // base64 JPEG images, optional
 	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
+
+	// Sticker overlay: per-face sticker UVs referencing a combined atlas texture.
+	StickerUVs      []float32 `json:"StickerUVs,omitempty"`      // flat [u,v, u,v, ...] per face-vertex (nFaces*6), nil if no stickers
+	StickerFaceMask []uint8   `json:"StickerFaceMask,omitempty"` // 1 per face: 1=has sticker, 0=none, nil if no stickers
+	StickerBounds   []float32 `json:"StickerBounds,omitempty"`   // flat [minU,maxU,minV,maxV, ...] per face (nFaces*4), atlas sub-region for shader clamping
+	StickerAtlas    string    `json:"StickerAtlas,omitempty"`     // base64 encoded atlas image, empty if no stickers
 }
 
 // ProcessResult summarizes a completed pipeline run (stages 0–6, no file export).
@@ -176,22 +182,6 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	lo := cache.getLoad()
 
-	if onInputMesh != nil && lo.InputMesh != nil {
-		// Send input mesh at preview scale so it matches the input viewer's
-		// coordinate space. We copy and rescale rather than mutating the cache.
-		mesh := lo.InputMesh
-		if lo.PreviewScale != 1 {
-			scaled := *mesh
-			scaled.Vertices = make([]float32, len(mesh.Vertices))
-			copy(scaled.Vertices, mesh.Vertices)
-			for i := range scaled.Vertices {
-				scaled.Vertices[i] *= lo.PreviewScale
-			}
-			mesh = &scaled
-		}
-		onInputMesh(mesh, lo.PreviewScale)
-	}
-
 	// Force check (between load and voxelize).
 	if !opts.Force {
 		ext := modelMaxExtent(lo.Model)
@@ -227,6 +217,25 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 	so := cache.getSticker()
+
+	// Send input mesh (with sticker overlay) to the preview after stickers
+	// are built so the input viewer shows decals on the original geometry.
+	if onInputMesh != nil && lo.InputMesh != nil {
+		mesh := lo.InputMesh
+		if so != nil && len(so.Decals) > 0 {
+			mesh = attachStickerOverlay(mesh, so.Decals)
+		}
+		if lo.PreviewScale != 1 {
+			scaled := *mesh
+			scaled.Vertices = make([]float32, len(mesh.Vertices))
+			copy(scaled.Vertices, mesh.Vertices)
+			for i := range scaled.Vertices {
+				scaled.Vertices[i] *= lo.PreviewScale
+			}
+			mesh = &scaled
+		}
+		onInputMesh(mesh, lo.PreviewScale)
+	}
 
 	// Stage 3: Voxelize (uses decals from sticker stage)
 	if startFrom <= StageVoxelize {

@@ -304,8 +304,9 @@
     }
   }
 
-  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters): THREE.MeshStandardMaterial {
+  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null): THREE.MeshStandardMaterial {
     const mat = new THREE.MeshStandardMaterial(opts);
+    const hasSticker = !!stickerTex;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBrightness = colorUniforms.uBrightness;
       shader.uniforms.uContrast = colorUniforms.uContrast;
@@ -314,10 +315,33 @@
       shader.uniforms.uWarpSourceLab = warpUniforms.uWarpSourceLab;
       shader.uniforms.uWarpWeights = warpUniforms.uWarpWeights;
       shader.uniforms.uWarpSigmas = warpUniforms.uWarpSigmas;
-      shader.fragmentShader = colorAdjustGLSL + warpGLSL + shader.fragmentShader;
+
+      // Sticker uniforms.
+      shader.uniforms.uStickerAtlas = { value: stickerTex || null };
+      shader.uniforms.uHasSticker = { value: hasSticker ? 1.0 : 0.0 };
+
+      // Prepend declarations.
+      shader.fragmentShader = stickerGLSL + colorAdjustGLSL + warpGLSL + shader.fragmentShader;
+
+      // Inject sticker varyings into vertex shader.
+      if (hasSticker) {
+        shader.vertexShader = shader.vertexShader.replace(
+          'void main() {',
+          'attribute vec2 aStickerUV;\nattribute float aStickerMask;\nattribute vec4 aStickerBounds;\nvarying vec2 vStickerUV;\nvarying float vStickerMask;\nvarying vec4 vStickerBounds;\nvoid main() {\n  vStickerUV = aStickerUV;\n  vStickerMask = aStickerMask;\n  vStickerBounds = aStickerBounds;',
+        );
+        shader.fragmentShader = 'varying vec2 vStickerUV;\nvarying float vStickerMask;\nvarying vec4 vStickerBounds;\n' + shader.fragmentShader;
+      } else {
+        shader.vertexShader = shader.vertexShader.replace(
+          'void main() {',
+          'varying vec2 vStickerUV;\nvarying float vStickerMask;\nvarying vec4 vStickerBounds;\nvoid main() {\n  vStickerUV = vec2(0.0);\n  vStickerMask = 0.0;\n  vStickerBounds = vec4(0.0);',
+        );
+        shader.fragmentShader = 'varying vec2 vStickerUV;\nvarying float vStickerMask;\nvarying vec4 vStickerBounds;\n' + shader.fragmentShader;
+      }
+
+      // Composite order: base color → sticker → color adjust → warp.
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <color_fragment>',
-        '#include <color_fragment>\n' + colorAdjustApply + '\n' + warpApply,
+        '#include <color_fragment>\n' + stickerApply + '\n' + colorAdjustApply + '\n' + warpApply,
       );
     };
     return mat;
@@ -335,6 +359,10 @@
     uvs: Float32Array | null;
     textures: string[] | null;
     faceTextureIdx: Int32Array | null;
+    stickerUVs: Float32Array | null;
+    stickerFaceMask: Uint8Array | null;
+    stickerBounds: Float32Array | null; // per-face [minU,maxU,minV,maxV] atlas sub-region
+    stickerAtlas: string | null;
   }
 
   // Fetch binary mesh data from the backend and parse directly into typed arrays.
@@ -387,7 +415,30 @@
       }
     }
 
-    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx };
+    // Sticker overlay section (optional, appended after textures).
+    let stickerUVs: Float32Array | null = null;
+    let stickerFaceMask: Uint8Array | null = null;
+    let stickerBounds: Float32Array | null = null;
+    let stickerAtlas: string | null = null;
+
+    if (offset < buf.byteLength) {
+      const hasSticker = view.getUint32(offset, true); offset += 4;
+      if (hasSticker === 1) {
+        const nStickerUVs = view.getUint32(offset, true); offset += 4;
+        stickerUVs = new Float32Array(buf.slice(offset, offset + nStickerUVs * 4)); offset += nStickerUVs * 4;
+        const nStickerMask = view.getUint32(offset, true); offset += 4;
+        stickerFaceMask = new Uint8Array(buf.slice(offset, offset + nStickerMask)); offset += nStickerMask;
+        const nStickerBounds = view.getUint32(offset, true); offset += 4;
+        stickerBounds = new Float32Array(buf.slice(offset, offset + nStickerBounds * 4)); offset += nStickerBounds * 4;
+        const decoder2 = new TextDecoder();
+        const atlasLen = view.getUint32(offset, true); offset += 4;
+        const atlasBytes = new Uint8Array(buf, offset, atlasLen);
+        stickerAtlas = decoder2.decode(atlasBytes);
+        offset += atlasLen;
+      }
+    }
+
+    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas };
   }
 
   function hasTextures(td: TypedMeshData): boolean {
@@ -459,11 +510,87 @@
     return colors;
   }
 
+  // Unpack per-face sticker UVs, mask, and atlas bounds for a subset of faces.
+  // Returns null if no faces in the group have stickers.
+  function unpackStickerData(td: TypedMeshData, faceIndices: Uint32Array): { uvs: Float32Array; mask: Float32Array; bounds: Float32Array } | null {
+    if (!td.stickerUVs || !td.stickerFaceMask || !td.stickerBounds) return null;
+    let hasAny = false;
+    const uvs = new Float32Array(faceIndices.length * 6);
+    const mask = new Float32Array(faceIndices.length * 3);
+    // Per-vertex bounds (vec4: minU, maxU, minV, maxV) — same for all 3 verts of a face.
+    const bounds = new Float32Array(faceIndices.length * 12);
+    for (let i = 0; i < faceIndices.length; i++) {
+      const f = faceIndices[i];
+      const m = td.stickerFaceMask[f];
+      if (m) hasAny = true;
+      mask[i * 3] = m; mask[i * 3 + 1] = m; mask[i * 3 + 2] = m;
+      const srcOff = f * 6;
+      const dstOff = i * 6;
+      uvs[dstOff]     = td.stickerUVs[srcOff];
+      uvs[dstOff + 1] = td.stickerUVs[srcOff + 1];
+      uvs[dstOff + 2] = td.stickerUVs[srcOff + 2];
+      uvs[dstOff + 3] = td.stickerUVs[srcOff + 3];
+      uvs[dstOff + 4] = td.stickerUVs[srcOff + 4];
+      uvs[dstOff + 5] = td.stickerUVs[srcOff + 5];
+      // Same bounds for all 3 vertices of this face.
+      const bSrc = f * 4;
+      const b0 = td.stickerBounds[bSrc];
+      const b1 = td.stickerBounds[bSrc + 1];
+      const b2 = td.stickerBounds[bSrc + 2];
+      const b3 = td.stickerBounds[bSrc + 3];
+      for (let v = 0; v < 3; v++) {
+        const bDst = (i * 3 + v) * 4;
+        bounds[bDst] = b0; bounds[bDst + 1] = b1;
+        bounds[bDst + 2] = b2; bounds[bDst + 3] = b3;
+      }
+    }
+    if (!hasAny) return null;
+    return { uvs, mask, bounds };
+  }
+
+  // GLSL for sticker compositing — declarations prepended to fragment shader.
+  const stickerGLSL = `
+    uniform sampler2D uStickerAtlas;
+    uniform float uHasSticker;
+  `;
+  // Applied after #include <color_fragment>, before color adjustment.
+  // Skip compositing when the interpolated UV falls outside this decal's
+  // atlas region — matches the voxelizer, which samples transparent for
+  // out-of-range UVs instead of stretching edge pixels.
+  const stickerApply = `
+    {
+      if (uHasSticker > 0.5 && vStickerMask > 0.5 &&
+          vStickerUV.x >= vStickerBounds.x && vStickerUV.x <= vStickerBounds.y &&
+          vStickerUV.y >= vStickerBounds.z && vStickerUV.y <= vStickerBounds.w) {
+        vec4 sc = texture2D(uStickerAtlas, vStickerUV);
+        diffuseColor.rgb = mix(diffuseColor.rgb, sc.rgb, sc.a);
+      }
+    }
+  `;
+
   // Build all-faces index for the common case of no texture grouping.
   function allFaceIndices(nFaces: number): Uint32Array {
     const indices = new Uint32Array(nFaces);
     for (let i = 0; i < nFaces; i++) indices[i] = i;
     return indices;
+  }
+
+  // Load sticker atlas texture if present in mesh data.
+  async function loadStickerAtlas(td: TypedMeshData): Promise<THREE.Texture | null> {
+    if (!td.stickerAtlas) return null;
+    const tex = await loadTexture(td.stickerAtlas);
+    tex.premultiplyAlpha = false;
+    return tex;
+  }
+
+  // Add sticker UV, mask, and bounds attributes to a geometry for a face group.
+  function applyStickerAttributes(geo: THREE.BufferGeometry, td: TypedMeshData, faceIndices: Uint32Array): void {
+    const sd = unpackStickerData(td, faceIndices);
+    if (sd) {
+      geo.setAttribute('aStickerUV', new THREE.BufferAttribute(sd.uvs, 2));
+      geo.setAttribute('aStickerMask', new THREE.BufferAttribute(sd.mask, 1));
+      geo.setAttribute('aStickerBounds', new THREE.BufferAttribute(sd.bounds, 4));
+    }
   }
 
   async function buildTexturedScene(td: TypedMeshData): Promise<SceneData> {
@@ -472,6 +599,8 @@
     const faceTexIdx = td.faceTextureIdx!;
     const faces = td.faces;
     const nFaces = faces.length / 3;
+
+    const stickerAtlasTex = await loadStickerAtlas(td);
 
     // Group faces by texture index (-1 = untextured).
     const groups = new Map<number, number[]>();
@@ -509,10 +638,11 @@
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         geo.setAttribute('uv', new THREE.BufferAttribute(faceUvs, 2));
+        applyStickerAttributes(geo, td, faceIndices);
         geo.computeVertexNormals();
 
         const tex = await loadTexture(textures[texId]);
-        const mat = createAdjustedMaterial({ map: tex });
+        const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex);
         meshes.push({ geometry: geo, material: mat });
       } else {
         // Untextured group: use face colors.
@@ -521,9 +651,10 @@
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        applyStickerAttributes(geo, td, faceIndices);
         geo.computeVertexNormals();
 
-        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true });
+        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
         meshes.push({ geometry: geo, material: mat });
       }
     }
@@ -531,18 +662,21 @@
     return { meshes };
   }
 
-  function buildFaceColorScene(td: TypedMeshData): SceneData {
+  async function buildFaceColorScene(td: TypedMeshData): Promise<SceneData> {
     const nFaces = td.faces.length / 3;
     const faceIndices = allFaceIndices(nFaces);
     const positions = unpackPositions(td, faceIndices);
     const colors = unpackFaceColors(td, faceIndices);
 
+    const stickerAtlasTex = await loadStickerAtlas(td);
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    applyStickerAttributes(geo, td, faceIndices);
     geo.computeVertexNormals();
 
-    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true });
+    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
     return { meshes: [{ geometry: geo, material: mat }] };
   }
 
@@ -652,9 +786,15 @@
             }
           });
         } else {
-          scene = buildFaceColorScene(td);
-          log(`[${viewerId}] ${faceCount} triangles ready in ${(performance.now() - t0).toFixed(0)}ms`);
-          disposeScene(prev);
+          buildFaceColorScene(td).then((s) => {
+            if (myId === buildId) {
+              scene = s;
+              log(`[${viewerId}] ${faceCount} triangles ready in ${(performance.now() - t0).toFixed(0)}ms`);
+              disposeScene(prev);
+            } else {
+              disposeScene(s);
+            }
+          });
         }
       }).catch((err) => {
         console.error(`[${viewerId}] mesh load error:`, err);

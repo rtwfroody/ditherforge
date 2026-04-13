@@ -33,6 +33,17 @@ import (
 //	  For each texture:
 //	    uint32 length
 //	    []byte base64-encoded JPEG data
+//	Sticker overlay:
+//	  uint32 hasStickerData  (0 or 1)
+//	  If 1:
+//	    uint32 nStickerUVs
+//	    float32[nStickerUVs]   (per face-vertex sticker UVs)
+//	    uint32 nStickerMask
+//	    uint8[nStickerMask]    (per-face sticker mask)
+//	    uint32 nStickerBounds
+//	    float32[nStickerBounds] (per-face [minU,maxU,minV,maxV] atlas clamp bounds)
+//	    uint32 atlasLen
+//	    []byte base64-encoded PNG atlas
 func float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
@@ -144,5 +155,31 @@ func (h *meshHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		binary.LittleEndian.PutUint32(tmp[:], uint32(len(b)))
 		w.Write(tmp[:])
 		w.Write(b)
+	}
+
+	// Sticker overlay section.
+	if len(mesh.StickerUVs) > 0 && mesh.StickerAtlas != "" {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasStickerData
+		w.Write(tmp[:])
+
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.StickerUVs)))
+		w.Write(tmp[:])
+		w.Write(float32SliceToBytes(mesh.StickerUVs))
+
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.StickerFaceMask)))
+		w.Write(tmp[:])
+		w.Write(mesh.StickerFaceMask)
+
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.StickerBounds)))
+		w.Write(tmp[:])
+		w.Write(float32SliceToBytes(mesh.StickerBounds))
+
+		atlasBytes := []byte(mesh.StickerAtlas)
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(atlasBytes)))
+		w.Write(tmp[:])
+		w.Write(atlasBytes)
+	} else {
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no sticker data
+		w.Write(tmp[:])
 	}
 }
