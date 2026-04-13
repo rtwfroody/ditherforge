@@ -24,8 +24,10 @@ func loadModel(path string, scale float32) (*loader.LoadedModel, error) {
 		return loader.LoadGLB(path, scale)
 	case ".3mf":
 		return loader.Load3MF(path, scale)
+	case ".stl":
+		return loader.LoadSTL(path, scale)
 	default:
-		return nil, fmt.Errorf("unsupported format %q (use .glb or .3mf)", ext)
+		return nil, fmt.Errorf("unsupported format %q (use .glb, .3mf, or .stl)", ext)
 	}
 }
 

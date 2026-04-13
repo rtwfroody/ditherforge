@@ -539,9 +539,9 @@ func (a *App) OpenFileDialog() (string, error) {
 	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Open",
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "All Supported (*.json, *.glb, *.3mf)", Pattern: "*.json;*.glb;*.3mf"},
+			{DisplayName: "All Supported (*.json, *.glb, *.3mf, *.stl)", Pattern: "*.json;*.glb;*.3mf;*.stl"},
 			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
-			{DisplayName: "3D Models (*.glb, *.3mf)", Pattern: "*.glb;*.3mf"},
+			{DisplayName: "3D Models (*.glb, *.3mf, *.stl)", Pattern: "*.glb;*.3mf;*.stl"},
 		},
 	})
 }
