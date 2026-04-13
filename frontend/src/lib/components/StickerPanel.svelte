@@ -7,6 +7,7 @@
   export type StickerUI = {
     imagePath: string;
     fileName: string;
+    thumbnail: string;
     center: [number, number, number] | null;
     normal: [number, number, number] | null;
     up: [number, number, number] | null;
@@ -38,31 +39,40 @@
 
   {#each stickers as sticker, i}
     <div class="border rounded-md p-2 space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <span class="text-xs text-muted-foreground truncate flex-1" title={sticker.imagePath}>
-          {sticker.fileName}
-        </span>
-        <Button
-          variant={placingIndex === i ? "default" : "outline"}
-          size="sm"
-          class="h-6 px-2 text-xs"
-          onclick={() => placingIndex = placingIndex === i ? -1 : i}
-        >
-          <CrosshairIcon class="w-3 h-3 mr-1" />
-          {placingIndex === i ? 'Placing...' : sticker.center ? 'Reposition' : 'Place'}
-        </Button>
-        <Button variant="ghost" size="sm" class="h-6 w-6 p-0" onclick={() => onRemove(i)}>
-          <TrashIcon class="w-3.5 h-3.5" />
-        </Button>
-      </div>
-
-      {#if sticker.center}
-        <div class="text-[10px] text-muted-foreground">
-          Placed at ({sticker.center[0].toFixed(1)}, {sticker.center[1].toFixed(1)}, {sticker.center[2].toFixed(1)})
+      <div class="flex gap-2">
+        {#if sticker.thumbnail}
+          <img src={sticker.thumbnail} alt={sticker.fileName} title={sticker.imagePath}
+            class="w-12 h-12 object-contain rounded border shrink-0" />
+        {/if}
+        <div class="flex-1 min-w-0 space-y-0.5">
+          <div class="flex items-center justify-between gap-1">
+            <span class="text-xs text-muted-foreground truncate" title={sticker.imagePath}>
+              {sticker.fileName}
+            </span>
+            <div class="flex items-center gap-0.5 shrink-0">
+              <Button
+                variant={placingIndex === i ? "default" : "outline"}
+                size="sm"
+                class="h-6 px-2 text-xs"
+                onclick={() => placingIndex = placingIndex === i ? -1 : i}
+              >
+                <CrosshairIcon class="w-3 h-3 mr-1" />
+                {placingIndex === i ? 'Placing...' : sticker.center ? 'Reposition' : 'Place'}
+              </Button>
+              <Button variant="ghost" size="sm" class="h-6 w-6 p-0" onclick={() => onRemove(i)}>
+                <TrashIcon class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          </div>
+          {#if sticker.center}
+            <div class="text-[10px] text-muted-foreground">
+              Placed at ({sticker.center[0].toFixed(1)}, {sticker.center[1].toFixed(1)}, {sticker.center[2].toFixed(1)})
+            </div>
+          {:else}
+            <div class="text-[10px] text-muted-foreground italic">Click the model to place</div>
+          {/if}
         </div>
-      {:else}
-        <div class="text-[10px] text-muted-foreground italic">Click the model to place</div>
-      {/if}
+      </div>
 
       <div class="space-y-1">
         <div class="flex items-center justify-between">

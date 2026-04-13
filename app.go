@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/image/draw"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -436,6 +442,49 @@ func (a *App) OpenStickerImage() (string, error) {
 			{DisplayName: "PNG Images (*.png)", Pattern: "*.png"},
 		},
 	})
+}
+
+// ReadStickerThumbnail reads a sticker image and returns a base64 data URL
+// thumbnail (max 64x64, preserving aspect ratio).
+func (a *App) ReadStickerThumbnail(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open sticker: %w", err)
+	}
+	defer f.Close()
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return "", fmt.Errorf("decode sticker: %w", err)
+	}
+
+	const maxDim = 64
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w > maxDim || h > maxDim {
+		if w >= h {
+			h = h * maxDim / w
+			w = maxDim
+		} else {
+			w = w * maxDim / h
+			h = maxDim
+		}
+	}
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+
+	thumb := image.NewNRGBA(image.Rect(0, 0, w, h))
+	draw.BiLinear.Scale(thumb, thumb.Bounds(), img, bounds, draw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, thumb); err != nil {
+		return "", fmt.Errorf("encode thumbnail: %w", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // SettingsFile is the JSON structure written to/read from .json settings files.

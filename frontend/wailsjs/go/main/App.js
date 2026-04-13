@@ -58,6 +58,10 @@ export function ProcessPipeline(arg1) {
   return window['go']['main']['App']['ProcessPipeline'](arg1);
 }
 
+export function ReadStickerThumbnail(arg1) {
+  return window['go']['main']['App']['ReadStickerThumbnail'](arg1);
+}
+
 export function RenameCollection(arg1, arg2) {
   return window['go']['main']['App']['RenameCollection'](arg1, arg2);
 }

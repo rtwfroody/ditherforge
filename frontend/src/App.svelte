@@ -23,7 +23,7 @@
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, EnumerateObjects } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, EnumerateObjects } from '../wailsjs/go/main/App';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline, loader } from '../wailsjs/go/models';
@@ -366,9 +366,12 @@
     const path = await OpenStickerImage();
     if (!path) return;
     const fileName = path.split(/[/\\]/).pop() ?? path;
+    let thumbnail = '';
+    try { thumbnail = await ReadStickerThumbnail(path); } catch { /* ignore */ }
     stickers = [...stickers, {
       imagePath: path,
       fileName,
+      thumbnail,
       center: null,
       normal: null,
       up: null,
@@ -518,6 +521,7 @@
       stickers = s.stickers.map((st: any) => ({
         imagePath: st.imagePath,
         fileName: (st.imagePath || '').split(/[/\\]/).pop() || st.imagePath,
+        thumbnail: '',
         center: st.center,
         normal: st.normal,
         up: st.up,
@@ -525,6 +529,13 @@
         rotation: st.rotation,
         maxAngle: st.maxAngle ?? 0,
       }));
+      // Load thumbnails asynchronously.
+      stickers.forEach((st, i) => {
+        ReadStickerThumbnail(st.imagePath).then(thumb => {
+          stickers[i] = { ...stickers[i], thumbnail: thumb };
+          stickers = stickers;
+        }).catch(() => {});
+      });
     }
     if (s.dither !== undefined) dither = s.dither;
     if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
