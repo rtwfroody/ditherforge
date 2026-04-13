@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/alexflint/go-arg"
@@ -31,7 +32,7 @@ type Args struct {
 	Color          []string `arg:"--color,separate" help:"Lock a color (CSS name or hex, repeatable, comma-separated)"`
 	Inventory      string   `arg:"--inventory" help:"Inventory file for remaining colors"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
-	Output         string   `arg:"--output" default:"output.3mf" help:"Output .3mf file"`
+	Output         string   `arg:"--output" help:"Output .3mf file (default: <input>.3mf)"`
 	BaseColor      string   `arg:"--base-color" help:"Hex color for untextured faces (e.g. #FF0000)"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
@@ -58,6 +59,17 @@ func (Args) Version() string {
 func main() {
 	var args Args
 	arg.MustParse(&args)
+
+	if args.Output == "" {
+		base := filepath.Base(args.Input)
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		if strings.EqualFold(ext, ".3mf") {
+			args.Output = stem + "-df.3mf"
+		} else {
+			args.Output = stem + ".3mf"
+		}
+	}
 
 	opts := pipeline.Options{
 		Input:          args.Input,
