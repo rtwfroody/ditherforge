@@ -40,6 +40,9 @@
     saturation = 0,
     pickMode = false,
     stickerPlaceMode = false,
+    stickerImage = '',
+    stickerSize = 1,
+    stickerRotation = 0,
     onColorPick,
     onStickerPlace,
     warpPins = [],
@@ -57,6 +60,9 @@
     saturation?: number;
     pickMode?: boolean;
     stickerPlaceMode?: boolean;
+    stickerImage?: string;
+    stickerSize?: number;
+    stickerRotation?: number;
     onColorPick?: (hex: string) => void;
     onStickerPlace?: (point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) => void;
     warpPins?: WarpPin[];
@@ -908,7 +914,7 @@
         <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
-        <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} />
+        <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
       </Canvas>
     {:else if errorMessage}
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
