@@ -443,7 +443,16 @@
     inputMeshUrl = undefined;
     outputMeshUrl = undefined;
     inputFile = path;
+    // Stickers are tied to the previous model's geometry; clear them.
+    // Warp pins reference colors sampled from the previous model; clear too.
+    stickers = [];
+    placingStickerIndex = -1;
+    warpPins = [];
+    pickingPinIndex = -1;
     reloadSeq++;
+    // Clear settingsPath synchronously so a save before DefaultSettingsPath
+    // resolves (or if it fails) can't write to the previous model's file.
+    settingsPath = '';
     DefaultSettingsPath(path).then(p => settingsPath = p).catch(() => {});
     addRecentFile(path);
     // Force a pipeline run even if the path didn't change (file on disk may
