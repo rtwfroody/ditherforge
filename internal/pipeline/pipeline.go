@@ -6,9 +6,10 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"log"
 	"image/color"
-	"image/png"
+	_ "image/jpeg"
+	_ "image/png"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -569,7 +570,7 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		if err != nil {
 			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
 		}
-		img, err := png.Decode(f)
+		img, _, err := image.Decode(f)
 		f.Close()
 		if err != nil {
 			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)

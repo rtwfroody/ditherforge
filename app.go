@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	_ "image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -433,13 +434,13 @@ func (a *App) RenameCollection(oldName, newName string) error {
 	return a.collections.Rename(oldName, newName)
 }
 
-// OpenStickerImage opens a file dialog for selecting a PNG sticker image.
-// Returns the selected path, or empty if cancelled.
+// OpenStickerImage opens a file dialog for selecting a sticker image
+// (PNG or JPEG). Returns the selected path, or empty if cancelled.
 func (a *App) OpenStickerImage() (string, error) {
 	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select Sticker Image",
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "PNG Images (*.png)", Pattern: "*.png"},
+			{DisplayName: "Images (*.png, *.jpg, *.jpeg)", Pattern: "*.png;*.jpg;*.jpeg"},
 		},
 	})
 }
