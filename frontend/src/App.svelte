@@ -355,7 +355,7 @@
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
           dither, colorSnap, noMerge, noSimplify, uniformGrid, stats,
-          alphaWrap, alphaWrapAlpha, alphaWrapOffset];
+          alphaWrap, alphaWrapAlpha, alphaWrapOffset, reloadSeq];
     if (!initialized) {
       initialized = true;
       return;
@@ -550,10 +550,8 @@
     settingsPath = '';
     DefaultSettingsPath(path).then(p => settingsPath = p).catch(() => {});
     addRecentFile(path);
-    // Force a pipeline run even if the path didn't change (file on disk may
-    // have changed). The $effect won't fire when inputFile is unchanged, so
-    // schedule explicitly.
-    scheduleProcess(0);
+    // The $effect tracks reloadSeq, so bumping it above ensures the pipeline
+    // runs even when the path is unchanged (file on disk may have changed).
   }
 
   // Reset the camera pose whenever the input model changes — no matter
