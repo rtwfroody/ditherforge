@@ -48,7 +48,14 @@ func NewStageCache() *StageCache {
 // Per-stage output types.
 
 type loadOutput struct {
-	Model        *loader.LoadedModel
+	// Model is the geometry model used for voxelization, decimation, and
+	// clip-shell construction. When alpha-wrap is enabled, Model is the
+	// wrapped (cleaned) mesh; otherwise it aliases ColorModel.
+	Model *loader.LoadedModel
+	// ColorModel is the original loaded mesh, carrying UVs, textures, and
+	// materials. Used for color sampling and sticker placement. When
+	// alpha-wrap is disabled, Model == ColorModel.
+	ColorModel   *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
@@ -116,13 +123,16 @@ type mergeOutput struct {
 // is type-safe and free of format-string ambiguities.
 
 type loadSettings struct {
-	Input       string
-	Scale       float32
-	HasSize     bool
-	Size        float32
-	ReloadSeq   int64
-	ObjectIndex int
-	BaseColor   string
+	Input           string
+	Scale           float32
+	HasSize         bool
+	Size            float32
+	ReloadSeq       int64
+	ObjectIndex     int
+	BaseColor       string
+	AlphaWrap       bool
+	AlphaWrapAlpha  float32
+	AlphaWrapOffset float32
 }
 
 type voxelizeSettings struct {
@@ -202,7 +212,16 @@ func writeInt(h hash.Hash64, i int) {
 func settingsForStage(stage StageID, opts Options) any {
 	switch stage {
 	case StageLoad:
-		s := loadSettings{Input: opts.Input, Scale: opts.Scale, ReloadSeq: opts.ReloadSeq, ObjectIndex: opts.ObjectIndex, BaseColor: opts.BaseColor}
+		s := loadSettings{
+			Input:           opts.Input,
+			Scale:           opts.Scale,
+			ReloadSeq:       opts.ReloadSeq,
+			ObjectIndex:     opts.ObjectIndex,
+			BaseColor:       opts.BaseColor,
+			AlphaWrap:       opts.AlphaWrap,
+			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
+			AlphaWrapOffset: opts.AlphaWrapOffset,
+		}
 		if opts.Size != nil {
 			s.HasSize = true
 			s.Size = *opts.Size
@@ -257,6 +276,9 @@ func stageKey(stage StageID, opts Options) uint64 {
 		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
 		writeString(h, v.BaseColor)
+		writeBool(h, v.AlphaWrap)
+		writeFloat32(h, v.AlphaWrapAlpha)
+		writeFloat32(h, v.AlphaWrapOffset)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/alphawrap"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
@@ -53,6 +54,9 @@ type Options struct {
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
 	Stickers       []Sticker `json:"Stickers,omitempty"`
 	ObjectIndex    int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
+	AlphaWrap       bool    // enable CGAL Alpha_wrap_3 post-load mesh cleanup
+	AlphaWrapAlpha  float32 // mm; 0 = auto (5 × NozzleDiameter)
+	AlphaWrapOffset float32 // mm; 0 = auto (alpha / 30)
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
@@ -184,9 +188,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	lo := cache.getLoad()
 
-	// Force check (between load and voxelize).
+	// Force check (between load and voxelize). Use the original (unwrapped)
+	// mesh — the wrap inflates extents by `offset` on every side.
 	if !opts.Force {
-		ext := modelMaxExtent(lo.Model)
+		ext := modelMaxExtent(lo.ColorModel)
 		if ext > 300 {
 			return &ProcessResult{
 				NeedsForce:    true,
@@ -334,7 +339,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Build output preview mesh from merge result + palette.
 	// Scale vertices to match the preview's coordinate space so both
 	// viewers use the same scale.
-	outModel := buildOutputModel(lo.Model, mo)
+	// Use ColorModel as the texture source — shell geometry comes from mo;
+	// only Textures is read from the source, and the wrapped mesh has none.
+	outModel := buildOutputModel(lo.ColorModel, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
 	if lo.PreviewScale != 1 {
 		for i := range outputMesh.Vertices {
@@ -400,7 +407,7 @@ func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int,
 		return 0, fmt.Errorf("pipeline has not been run yet")
 	}
 
-	outModel := buildOutputModel(lo.Model, mo)
+	outModel := buildOutputModel(lo.ColorModel, mo)
 
 	fmt.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
@@ -488,8 +495,34 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	// so nativeExtentFile = modelMaxExtent/totalScale, and nativeExtentMM =
 	// nativeExtentFile * unitScale.
 	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
+
+	// Alpha-wrap (mesh cleanup for 3D printing). The wrapped mesh replaces
+	// the geometry used for voxelization, decimation, and clipping; the
+	// original is kept for color sampling and sticker placement.
+	geomModel := model
+	if opts.AlphaWrap {
+		alpha := opts.AlphaWrapAlpha
+		if alpha <= 0 {
+			alpha = opts.NozzleDiameter * 5
+		}
+		offset := opts.AlphaWrapOffset
+		if offset <= 0 {
+			offset = alpha / 30
+		}
+		fmt.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm...", alpha, offset)
+		tWrap := time.Now()
+		wrapped, err := alphawrap.Wrap(model, alpha, offset)
+		if err != nil {
+			return fmt.Errorf("alpha-wrap: %w", err)
+		}
+		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
+			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
+		geomModel = wrapped
+	}
+
 	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
-		Model:        model,
+		Model:        geomModel,
+		ColorModel:   model,
 		InputMesh:    buildInputMeshData(model),
 		PreviewScale: unitScale / totalScale,
 		ExtentMM:     nativeExtentMM,
@@ -528,7 +561,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 
 	fmt.Println("Voxelizing...")
 	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH, tracker, so.Decals)
+		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.ColorModel, layer0Size, upperSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -543,7 +576,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		})
 	} else {
 		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH, tracker, so.Decals)
+		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, lo.ColorModel, cellSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -566,7 +599,9 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		return nil
 	}
 
-	model := lo.Model
+	// Stickers are placed against the original mesh (which carries UVs and
+	// user-visible geometry), not the alpha-wrapped geometry.
+	model := lo.ColorModel
 	adj := voxel.BuildTriAdjacency(model)
 	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 

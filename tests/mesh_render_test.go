@@ -93,7 +93,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 		layerH := defaultLayerHeight
 
 		t.Log("Running pipeline stages...")
-		cells, _, minV, err := squarevoxel.Voxelize(ctx, model, cellSize, layerH, progress.NullTracker{}, nil)
+		cells, _, minV, err := squarevoxel.Voxelize(ctx, model, model, cellSize, layerH, progress.NullTracker{}, nil)
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return

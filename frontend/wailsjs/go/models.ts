@@ -285,6 +285,9 @@ export namespace pipeline {
 	    WarpPins?: WarpPin[];
 	    Stickers?: Sticker[];
 	    ObjectIndex: number;
+	    AlphaWrap: boolean;
+	    AlphaWrapAlpha: number;
+	    AlphaWrapOffset: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -318,6 +321,9 @@ export namespace pipeline {
 	        this.WarpPins = this.convertValues(source["WarpPins"], WarpPin);
 	        this.Stickers = this.convertValues(source["Stickers"], Sticker);
 	        this.ObjectIndex = source["ObjectIndex"];
+	        this.AlphaWrap = source["AlphaWrap"];
+	        this.AlphaWrapAlpha = source["AlphaWrapAlpha"];
+	        this.AlphaWrapOffset = source["AlphaWrapOffset"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

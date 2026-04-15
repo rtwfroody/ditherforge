@@ -83,6 +83,9 @@
   let noSimplify = $state(false);
   let uniformGrid = $state(false);
   let stats = $state(false);
+  let alphaWrap = $state(false);
+  let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
+  let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
   let stickers = $state<StickerUI[]>([]);
   let placingStickerIndex = $state(-1);
   const placingSticker = $derived(placingStickerIndex >= 0 ? stickers[placingStickerIndex] ?? null : null);
@@ -351,7 +354,8 @@
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
-          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats];
+          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats,
+          alphaWrap, alphaWrapAlpha, alphaWrapOffset];
     if (!initialized) {
       initialized = true;
       return;
@@ -594,6 +598,9 @@
       noSimplify,
       uniformGrid,
       stats,
+      alphaWrap,
+      alphaWrapAlpha,
+      alphaWrapOffset,
     };
   }
 
@@ -653,6 +660,9 @@
     if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
     if (s.uniformGrid !== undefined) uniformGrid = s.uniformGrid;
     if (s.stats !== undefined) stats = s.stats;
+    if (s.alphaWrap !== undefined) alphaWrap = s.alphaWrap;
+    if (s.alphaWrapAlpha !== undefined) alphaWrapAlpha = s.alphaWrapAlpha;
+    if (s.alphaWrapOffset !== undefined) alphaWrapOffset = s.alphaWrapOffset;
   }
 
   async function handleSave() {
@@ -808,6 +818,9 @@
       NoMerge: noMerge,
       NoSimplify: noSimplify,
       UniformGrid: uniformGrid,
+      AlphaWrap: alphaWrap,
+      AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
+      AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
       Force: force,
       ReloadSeq: reloadSeq,
       ObjectIndex: objectIndex,
@@ -1184,6 +1197,31 @@
                 <Checkbox bind:checked={stats} />
                 Stats
               </label>
+            </div>
+
+            <div class="space-y-2 pt-2 border-t">
+              <label class="flex items-center gap-2 text-sm font-medium">
+                <Checkbox bind:checked={alphaWrap} />
+                Alpha-wrap (clean geometry for 3D printing)
+              </label>
+              {#if alphaWrap}
+                <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground">Alpha (mm)</span>
+                    <input type="number" step="0.1" min="0"
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) * 5 || 2).toFixed(2)})`}
+                           class="h-9 rounded border bg-background px-2"
+                           bind:value={alphaWrapAlpha} />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground">Offset (mm)</span>
+                    <input type="number" step="0.01" min="0"
+                           placeholder="auto (alpha / 30)"
+                           class="h-9 rounded border bg-background px-2"
+                           bind:value={alphaWrapOffset} />
+                  </label>
+                </div>
+              {/if}
             </div>
           </div>
         </details>
