@@ -13,13 +13,15 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 ## Quick Start
 
 1. Launch `ditherforge`
-2. Use **File > Open** to select a `.glb` or `.3mf` file
+2. Use **File > Open** to select a `.glb`, `.3mf`, or `.stl` file
 3. Set **Nozzle diameter** and **Layer height** to match your slicer
 4. Set **Size (mm)** to your target print size
-5. Optionally, open the **Stickers** panel to apply PNG images onto the model surface
+5. Optionally, open the **Stickers** panel to apply PNG or JPEG images onto the model surface
 6. Adjust the palette and color settings — the output preview updates automatically
-7. Use **File > Export 3MF** to save the result
+7. Use **File > Export 3MF** to save the result (defaults to `<input>.3mf`)
 8. Open the exported 3MF in OrcaSlicer or BambuStudio and print
+
+**File > Open Recent** lists both recently opened models and recently used JSON settings files.
 
 For real use, you'll want to update your Inventory filament collection as
 described right below.
@@ -71,6 +73,21 @@ values you will use in your slicer. These control the voxel grid resolution:
 
 The default values are 0.4 mm nozzle and 0.20 mm layer height.
 
+## How to Select an Object in a Multi-Object File
+
+3MF and GLB files can contain multiple objects. When a file has more than one,
+an **Object** dropdown appears in the settings panel. Choose **All objects** to
+process the entire file together, or pick a specific object to work with it
+alone. STL files always contain a single mesh and do not show this control.
+
+## How to Set a Base Color for Untextured Faces
+
+Meshes sometimes have faces without a texture or vertex color (common in STL
+files and in some 3MF files). By default these faces render as plain white.
+Use the **Base color** picker in the settings panel to choose a different
+color — this acts as the "paint" applied to any face that has no other color
+assigned, before dithering and palette selection.
+
 ## How to Configure the Color Palette
 
 The palette grid shows all color slots. Each slot is either:
@@ -109,26 +126,39 @@ output re-renders with each change.
 
 ## How to Use Stickers
 
-Stickers let you apply PNG images directly onto the model surface before
-voxelization. The image is projected along the surface topology, so it wraps
-around curves naturally rather than being applied as a flat decal.
+Stickers let you apply PNG or JPEG images directly onto the model surface
+before voxelization. As you drag the cursor over the model while placing, a
+floating billboard preview shows exactly where the sticker will sit.
 
 To place a sticker:
 
 1. Open the **Stickers** panel in the sidebar.
-2. Click **Add Sticker** and choose a PNG file.
-3. Click a point on the input model to place it. The sticker centers on that
-   point, oriented to the surface.
-4. Adjust **Scale** and **Rotation** as needed.
+2. Click **Add** and choose a PNG or JPEG file. A thumbnail appears in the
+   panel and the app enters placement mode automatically.
+3. Click a point on the input model. The sticker centers on that point,
+   oriented to the surface. The input preview updates immediately to show the
+   applied sticker.
+4. Adjust **Scale**, **Rotation**, and **Mode** as needed.
 
-To add more stickers, repeat the process. There is no hard limit on the number
-of stickers.
+### Sticker modes
 
-Stickers are composited over the base model color during voxelization. They are
-affected by brightness, contrast, and saturation adjustments like any other
-color on the model.
+Each sticker has two modes, selected with radio buttons:
 
-Sticker placements are saved and restored with the JSON settings file.
+- **Unfold** (default) — flood-fills from the clicked triangle across the
+  mesh, unfolding each triangle into the sticker's tangent plane. The sticker
+  wraps around curves following the surface. A **Surface bend limit** slider
+  stops the flood-fill at sharp edges (0° = no limit).
+- **Projection** — projects the sticker along its normal, like a slide
+  projector. The image lands on whatever front-facing surface is closest along
+  the projection direction and does not wrap around corners. Useful for flat
+  labels on complex or non-developable geometry.
+
+There is no hard limit on the number of stickers. They are composited over the
+base model color during voxelization and are affected by the brightness,
+contrast, and saturation sliders like any other color on the model.
+
+Sticker placements, scale, rotation, mode, and bend limit are saved and
+restored with the JSON settings file.
 
 ## How to Use Color Pins
 
@@ -186,11 +216,13 @@ compatible with OrcaSlicer and BambuStudio.
 
 ## How It Works
 
-1. **Load** — reads a GLB or 3MF file and scales it to millimeters. The model
-   bottom is normalized to Z = 0.
-2. **Stickers** — composites any sticker images onto the model's texture. Each
-   sticker is placed at a clicked surface point and projected outward following
-   the mesh topology.
+1. **Load** — reads a GLB, 3MF, or STL file and scales it to millimeters. The
+   model bottom is normalized to Z = 0. For files with multiple objects, the
+   selected object (or all objects) is processed.
+2. **Stickers** — maps each sticker image onto the mesh. "Unfold" mode
+   flood-fills from the placement point across mesh adjacency; "Projection"
+   mode projects the image along the sticker normal onto the frontmost
+   surface. Sticker colors are alpha-composited over the base texture.
 3. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
@@ -219,14 +251,17 @@ Each stage is cached by its settings hash. Changing a downstream parameter
 ## CLI
 
 `ditherforge-cli` provides the same pipeline from the command line, without a
-GUI window.
+GUI window. It accepts `.glb`, `.3mf`, and `.stl` inputs.
 
 ```
 ditherforge-cli model.glb --size 100
 ```
 
 This loads `model.glb`, scales it to 100 mm, selects 4 colors from the default
-palette, and writes `output.3mf`.
+palette, and writes `model.3mf` alongside the input.
+
+Note: the CLI does not currently support stickers, color pins, or multi-object
+selection. Use the GUI to configure those and save a JSON settings file.
 
 ### Options
 
@@ -237,6 +272,7 @@ palette, and writes `output.3mf`.
 | `-n` | `4` | Number of palette colors |
 | `--color` | — | Lock a color (CSS name or `#RRGGBB`; repeatable, comma-separated) |
 | `--inventory` | — | Filament inventory file (`#RRGGBB Label` per line) for auto colors |
+| `--base-color` | — | Hex color for untextured faces (e.g. `#FF0000`) |
 | `--brightness` | `0` | Brightness adjustment (-100 to +100) |
 | `--contrast` | `0` | Contrast adjustment (-100 to +100) |
 | `--saturation` | `0` | Saturation adjustment (-100 to +100) |
@@ -244,7 +280,7 @@ palette, and writes `output.3mf`.
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
 | `--color-snap` | `5` | Pre-dither color snap distance in delta E (0 to disable) |
-| `--output` | `output.3mf` | Output file path |
+| `--output` | `<input>.3mf` | Output file path |
 | `--no-merge` | — | Skip coplanar triangle merging |
 | `--no-simplify` | — | Skip QEM mesh decimation before clipping |
 | `--force` | — | Bypass the 300 mm extent size check |
@@ -311,6 +347,8 @@ These models work well with DitherForge and are free to download:
 | Scale | 1.0 | Relative scale multiplier |
 | Nozzle diameter | 0.4 mm | Controls voxel cell width. First layer: `nozzle × 1.275`. Upper layers: `nozzle × 1.05`. |
 | Layer height | 0.20 mm | Controls voxel cell height |
+| Object | All objects | For multi-object 3MF/GLB files, selects which object(s) to process |
+| Base color | white | Color used for mesh faces that lack texture or vertex color |
 
 ### Color Adjustments
 
@@ -322,14 +360,16 @@ These models work well with DitherForge and are free to download:
 
 ### Stickers
 
-Stickers composite PNG images onto the model surface before voxelization.
+Stickers composite PNG or JPEG images onto the model surface before voxelization.
 
 | Field | Description |
 |-------|-------------|
-| Image | PNG file to use as the sticker |
-| Placement | Set by clicking a point on the input model. Determines position, surface normal, and orientation. |
-| Scale | Size of the sticker on the surface |
-| Rotation | Rotation of the sticker around the surface normal |
+| Image | PNG or JPEG file to use as the sticker |
+| Placement | Set by clicking a point on the input model. A floating billboard preview follows the cursor during placement. |
+| Scale | Size of the sticker on the surface, in mm |
+| Rotation | Rotation of the sticker around the surface normal (0–360°) |
+| Mode | **Unfold** flood-fills across mesh adjacency, wrapping around curves. **Projection** projects the image along the normal onto the nearest front-facing surface. |
+| Surface bend limit | (Unfold mode only.) Stops flood-fill where adjacent faces exceed this angle. 0 = no limit. |
 
 Multiple stickers can be added. They are applied in order and composited over
 the base model color. Sticker colors are subject to the same brightness,
