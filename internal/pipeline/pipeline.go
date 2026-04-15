@@ -503,7 +503,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	if opts.AlphaWrap {
 		alpha := opts.AlphaWrapAlpha
 		if alpha <= 0 {
-			alpha = opts.NozzleDiameter * 5
+			alpha = opts.NozzleDiameter
 		}
 		offset := opts.AlphaWrapOffset
 		if offset <= 0 {

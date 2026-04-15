@@ -47,7 +47,7 @@ type Args struct {
 	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
 	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)"`
 	AlphaWrap       bool    `arg:"--alpha-wrap" help:"Clean up the loaded mesh with CGAL Alpha_wrap_3 (requires uv on PATH)"`
-	AlphaWrapAlpha  float32 `arg:"--alpha-wrap-alpha" help:"Alpha-wrap probe radius in mm (default: 5 × nozzle diameter)"`
+	AlphaWrapAlpha  float32 `arg:"--alpha-wrap-alpha" help:"Alpha-wrap probe radius in mm (default: nozzle diameter)"`
 	AlphaWrapOffset float32 `arg:"--alpha-wrap-offset" help:"Alpha-wrap offset distance in mm (default: alpha/30)"`
 }
 

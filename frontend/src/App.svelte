@@ -1209,7 +1209,7 @@
                   <label class="flex flex-col gap-1">
                     <span class="text-muted-foreground">Alpha (mm)</span>
                     <input type="number" step="0.1" min="0"
-                           placeholder={`auto (${(parseFloat(nozzleDiameter) * 5 || 2).toFixed(2)})`}
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
                            class="h-9 rounded border bg-background px-2"
                            bind:value={alphaWrapAlpha} />
                   </label>
