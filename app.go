@@ -143,7 +143,9 @@ func (a *App) Export3MF() (string, error) {
 	defer a.mu.Unlock()
 
 	defaultName := "output.3mf"
+	defaultDir := ""
 	if a.lastOpts.Input != "" {
+		defaultDir = filepath.Dir(a.lastOpts.Input)
 		base := filepath.Base(a.lastOpts.Input)
 		ext := filepath.Ext(base)
 		stem := strings.TrimSuffix(base, ext)
@@ -155,8 +157,9 @@ func (a *App) Export3MF() (string, error) {
 	}
 
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
-		Title:           "Save Output",
-		DefaultFilename: defaultName,
+		Title:            "Save Output",
+		DefaultFilename:  defaultName,
+		DefaultDirectory: defaultDir,
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},
 		},
