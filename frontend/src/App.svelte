@@ -379,6 +379,7 @@
       scale: 20,
       rotation: 0,
       maxAngle: 0,
+      mode: 'unfold',
     }];
     // Automatically enter placement mode for the new sticker.
     placingStickerIndex = stickers.length - 1;
@@ -495,6 +496,7 @@
         scale: s.scale,
         rotation: s.rotation,
         maxAngle: s.maxAngle,
+        mode: s.mode,
       })),
       dither,
       colorSnap,
@@ -538,6 +540,7 @@
         scale: st.scale,
         rotation: st.rotation,
         maxAngle: st.maxAngle ?? 0,
+        mode: st.mode === 'projection' ? 'projection' : 'unfold',
       }));
       // Load thumbnails asynchronously.
       stickers.forEach((st, i) => {
@@ -726,6 +729,7 @@
           Scale: s.scale,
           Rotation: s.rotation,
           MaxAngle: s.maxAngle,
+          Mode: s.mode,
         })),
     };
 

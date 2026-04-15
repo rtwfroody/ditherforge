@@ -64,6 +64,7 @@ type Sticker struct {
 	Scale    float64 `json:"Scale"`    // world-unit width of sticker
 	Rotation float64 `json:"Rotation"` // degrees, around surface normal
 	MaxAngle float64 `json:"MaxAngle"` // max inter-triangle angle (degrees) for flood-fill; 0 = no limit
+	Mode     string  `json:"Mode"`     // "unfold" (default) or "projection"
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
@@ -582,14 +583,23 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 			continue
 		}
 
-		seedTri := voxel.FindSeedTriangle(s.Center, model, si)
-		if seedTri < 0 {
-			fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
-			continue
+		var decal *voxel.StickerDecal
+		if s.Mode == "projection" {
+			decal = voxel.BuildStickerDecalProjection(model, img,
+				s.Center, s.Normal, s.Up, s.Scale, s.Rotation)
+			if len(decal.TriUVs) == 0 {
+				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
+				continue
+			}
+		} else {
+			seedTri := voxel.FindSeedTriangle(s.Center, model, si)
+			if seedTri < 0 {
+				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
+				continue
+			}
+			decal = voxel.BuildStickerDecal(model, adj, img,
+				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle)
 		}
-
-		decal := voxel.BuildStickerDecal(model, adj, img,
-			seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle)
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		decals = append(decals, decal)
 	}

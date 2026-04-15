@@ -76,6 +76,8 @@ export namespace main {
 	    up: number[];
 	    scale: number;
 	    rotation: number;
+	    maxAngle?: number;
+	    mode?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new StickerSetting(source);
@@ -89,6 +91,8 @@ export namespace main {
 	        this.up = source["up"];
 	        this.scale = source["scale"];
 	        this.rotation = source["rotation"];
+	        this.maxAngle = source["maxAngle"];
+	        this.mode = source["mode"];
 	    }
 	}
 	export class WarpPinSetting {
@@ -220,6 +224,7 @@ export namespace pipeline {
 	    Scale: number;
 	    Rotation: number;
 	    MaxAngle: number;
+	    Mode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Sticker(source);
@@ -234,6 +239,7 @@ export namespace pipeline {
 	        this.Scale = source["Scale"];
 	        this.Rotation = source["Rotation"];
 	        this.MaxAngle = source["MaxAngle"];
+	        this.Mode = source["Mode"];
 	    }
 	}
 	export class WarpPin {

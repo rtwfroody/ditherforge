@@ -14,6 +14,7 @@
     scale: number;
     rotation: number;
     maxAngle: number;
+    mode: 'unfold' | 'projection';
   };
 
   let {
@@ -93,13 +94,33 @@
       </div>
 
       <div class="space-y-1">
-        <div class="flex items-center justify-between">
-          <span class="text-xs">Surface bend limit</span>
-          <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.maxAngle === 0 ? 'off' : sticker.maxAngle + '°'}</span>
+        <span class="text-xs">Mode</span>
+        <div class="flex gap-3 text-xs">
+          <label class="flex items-center gap-1">
+            <input type="radio" name={"sticker-mode-" + i} value="unfold"
+              checked={sticker.mode === 'unfold'}
+              onchange={() => { stickers[i] = { ...sticker, mode: 'unfold' }; stickers = stickers; }} />
+            Unfold
+          </label>
+          <label class="flex items-center gap-1">
+            <input type="radio" name={"sticker-mode-" + i} value="projection"
+              checked={sticker.mode === 'projection'}
+              onchange={() => { stickers[i] = { ...sticker, mode: 'projection' }; stickers = stickers; }} />
+            Projection
+          </label>
         </div>
-        <Slider type="single" min={0} max={180} step={5} value={sticker.maxAngle}
-          onValueChange={(v: number) => { stickers[i] = { ...sticker, maxAngle: v }; stickers = stickers; }} />
       </div>
+
+      {#if sticker.mode === 'unfold'}
+        <div class="space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-xs">Surface bend limit</span>
+            <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.maxAngle === 0 ? 'off' : sticker.maxAngle + '°'}</span>
+          </div>
+          <Slider type="single" min={0} max={180} step={5} value={sticker.maxAngle}
+            onValueChange={(v: number) => { stickers[i] = { ...sticker, maxAngle: v }; stickers = stickers; }} />
+        </div>
+      {/if}
     </div>
   {/each}
 

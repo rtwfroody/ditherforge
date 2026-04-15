@@ -72,44 +72,7 @@ func BuildStickerDecal(
 	rotationDeg float64,
 	maxAngleDeg float64,
 ) *StickerDecal {
-	// Build orthonormal tangent frame from normal and up.
-	n := normalize3(normal)
-	u := normalize3(up)
-
-	// If up is nearly parallel to normal, substitute a world axis.
-	cross := cross3(u, n)
-	crossLen := math.Sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2])
-	if crossLen < 0.1 {
-		if math.Abs(n[0]) < 0.9 {
-			u = [3]float64{1, 0, 0}
-		} else {
-			u = [3]float64{0, 1, 0}
-		}
-	}
-
-	// T (tangent/right) = normalize(cross(up, normal))
-	t := normalize3(cross3(u, n))
-	// B (bitangent/up on surface) = normalize(cross(normal, T))
-	b := normalize3(cross3(n, t))
-
-	// Apply rotation around the normal.
-	if rotationDeg != 0 {
-		rad := rotationDeg * math.Pi / 180
-		cosR := math.Cos(rad)
-		sinR := math.Sin(rad)
-		newT := [3]float64{
-			cosR*t[0] + sinR*b[0],
-			cosR*t[1] + sinR*b[1],
-			cosR*t[2] + sinR*b[2],
-		}
-		newB := [3]float64{
-			-sinR*t[0] + cosR*b[0],
-			-sinR*t[1] + cosR*b[1],
-			-sinR*t[2] + cosR*b[2],
-		}
-		t = newT
-		b = newB
-	}
+	t, b, _ := buildStickerTangentFrame(normal, up, rotationDeg)
 
 	// Sticker dimensions in world units.
 	imgBounds := img.Bounds()
@@ -377,6 +340,215 @@ func pointInTriangle2D(px, py float32, uvs [3][2]float32) bool {
 	hasNeg := (d1 < 0) || (d2 < 0) || (d3 < 0)
 	hasPos := (d1 > 0) || (d2 > 0) || (d3 > 0)
 	return !(hasNeg && hasPos)
+}
+
+// buildStickerTangentFrame returns (t, b, n): the sticker's tangent, bitangent,
+// and normal in world coordinates. Matches the convention used by both decal
+// builders and the frontend's floating-billboard preview: n along the surface
+// normal, t across, b up on the surface; rotationDeg rotates (t,b) around n.
+// If up is nearly parallel to normal, a world axis is substituted.
+func buildStickerTangentFrame(normal, up [3]float64, rotationDeg float64) (t, b, n [3]float64) {
+	n = normalize3(normal)
+	u := normalize3(up)
+
+	cross := cross3(u, n)
+	crossLen := math.Sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2])
+	if crossLen < 0.1 {
+		if math.Abs(n[0]) < 0.9 {
+			u = [3]float64{1, 0, 0}
+		} else {
+			u = [3]float64{0, 1, 0}
+		}
+	}
+
+	t = normalize3(cross3(u, n))
+	b = normalize3(cross3(n, t))
+
+	if rotationDeg != 0 {
+		rad := rotationDeg * math.Pi / 180
+		cosR := math.Cos(rad)
+		sinR := math.Sin(rad)
+		newT := [3]float64{
+			cosR*t[0] + sinR*b[0],
+			cosR*t[1] + sinR*b[1],
+			cosR*t[2] + sinR*b[2],
+		}
+		newB := [3]float64{
+			-sinR*t[0] + cosR*b[0],
+			-sinR*t[1] + cosR*b[1],
+			-sinR*t[2] + cosR*b[2],
+		}
+		t = newT
+		b = newB
+	}
+	return t, b, n
+}
+
+// Triangles whose face normal makes a larger angle with the sticker normal
+// than this are rejected from projection mode. Above ~84° (cos ≈ 0.1) the
+// projected footprint stretches so far that the resulting UV smear is never
+// what the user wants.
+const projectionMinCosAngle = float32(0.1)
+
+// BuildStickerDecalProjection creates a decal by projecting the sticker image
+// onto the mesh along the sticker normal. Unlike the unfolding builder, there
+// is no flood fill or geodesic distortion — every front-facing triangle whose
+// projected footprint overlaps the sticker rectangle becomes a candidate, and
+// the candidate is kept only if it is the frontmost surface along the
+// projection direction at its centroid (approximate occlusion test).
+//
+// Limitation: partially occluded triangles (centroid visible, some portion
+// hidden) are kept whole, so the sticker can bleed through onto hidden
+// regions. A fully correct implementation would require triangle clipping
+// in UV space.
+func BuildStickerDecalProjection(
+	model *loader.LoadedModel,
+	img image.Image,
+	center [3]float64,
+	normal [3]float64,
+	up [3]float64,
+	scale float64,
+	rotationDeg float64,
+) *StickerDecal {
+	t, b, n := buildStickerTangentFrame(normal, up, rotationDeg)
+
+	imgBounds := img.Bounds()
+	aspect := float64(imgBounds.Dy()) / float64(imgBounds.Dx())
+	halfW := scale / 2
+	halfH := (scale * aspect) / 2
+	fHalfW := float32(halfW)
+	fHalfH := float32(halfH)
+
+	// Per-vertex tangent projection: returns (tc_u, tc_v, depth_along_n).
+	// depth_along_n is in world units; larger = closer to the (virtual)
+	// projector at +n infinity.
+	projectVertex := func(pos [3]float32) (float32, float32, float32) {
+		dx := float64(pos[0]) - center[0]
+		dy := float64(pos[1]) - center[1]
+		dz := float64(pos[2]) - center[2]
+		return float32(dx*t[0] + dy*t[1] + dz*t[2]),
+			float32(dx*b[0] + dy*b[1] + dz*b[2]),
+			float32(dx*n[0] + dy*n[1] + dz*n[2])
+	}
+
+	type candidate struct {
+		tri    int32
+		tcs    [3][2]float32 // tangent-plane coords per vertex
+		depths [3]float32    // depth along +n per vertex
+		cx, cy float32       // centroid tangent coords
+		cdepth float32       // centroid depth
+	}
+
+	// Gather candidates: front-facing (well past edge-on) triangles whose
+	// tangent-plane AABB overlaps the sticker rectangle. Zero-area faces are
+	// skipped explicitly; we don't rely on faceNormal32's [0,0,1] fallback,
+	// which would spuriously pass the front-face test when the sticker
+	// normal happens to point +Z.
+	var cands []candidate
+	for fi := range model.Faces {
+		tri := int32(fi)
+		f := model.Faces[tri]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+
+		ax, ay, az := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+		bx, by, bz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+		nx := ay*bz - az*by
+		ny := az*bx - ax*bz
+		nz := ax*by - ay*bx
+		nLen := float32(math.Sqrt(float64(nx*nx + ny*ny + nz*nz)))
+		if nLen < 1e-12 {
+			continue
+		}
+		fnDot := float32(float64(nx/nLen)*n[0] + float64(ny/nLen)*n[1] + float64(nz/nLen)*n[2])
+		if fnDot < projectionMinCosAngle {
+			continue
+		}
+
+		u0, b0, d0 := projectVertex(v0)
+		u1, b1, d1 := projectVertex(v1)
+		u2, b2, d2 := projectVertex(v2)
+
+		minU := min(u0, min(u1, u2))
+		maxU := max(u0, max(u1, u2))
+		minV := min(b0, min(b1, b2))
+		maxV := max(b0, max(b1, b2))
+		if maxU < -fHalfW || minU > fHalfW || maxV < -fHalfH || minV > fHalfH {
+			continue
+		}
+
+		cands = append(cands, candidate{
+			tri:    tri,
+			tcs:    [3][2]float32{{u0, b0}, {u1, b1}, {u2, b2}},
+			depths: [3]float32{d0, d1, d2},
+			cx:     (u0 + u1 + u2) / 3,
+			cy:     (b0 + b1 + b2) / 3,
+			cdepth: (d0 + d1 + d2) / 3,
+		})
+	}
+
+	decal := &StickerDecal{
+		Image:  img,
+		TriUVs: make(map[int32][3][2]float32),
+	}
+	if len(cands) == 0 {
+		return decal
+	}
+
+	// Occlusion test: for each candidate, check if any OTHER candidate is
+	// closer to the projector at its centroid (t,b). If so, drop it.
+	// O(n²) in candidates; acceptable for typical sticker sizes.
+	//
+	// depthEps scales with sticker size so coplanar surfaces within 0.01%
+	// of the sticker's width are treated as ties rather than occluders.
+	const baryEps = float32(1e-4)
+	depthEps := float32(scale) * 1e-4
+	for i, c := range cands {
+		occluded := false
+		for j, other := range cands {
+			if i == j {
+				continue
+			}
+			bary, ok := barycentric2D(c.cx, c.cy, other.tcs)
+			if !ok {
+				continue
+			}
+			if bary[0] < -baryEps || bary[1] < -baryEps || bary[2] < -baryEps {
+				continue
+			}
+			otherDepth := bary[0]*other.depths[0] + bary[1]*other.depths[1] + bary[2]*other.depths[2]
+			if otherDepth > c.cdepth+depthEps {
+				occluded = true
+				break
+			}
+		}
+		if occluded {
+			continue
+		}
+		decal.TriUVs[c.tri] = [3][2]float32{
+			{(c.tcs[0][0]/fHalfW + 1) / 2, (c.tcs[0][1]/fHalfH + 1) / 2},
+			{(c.tcs[1][0]/fHalfW + 1) / 2, (c.tcs[1][1]/fHalfH + 1) / 2},
+			{(c.tcs[2][0]/fHalfW + 1) / 2, (c.tcs[2][1]/fHalfH + 1) / 2},
+		}
+	}
+
+	return decal
+}
+
+// barycentric2D returns barycentric coords of (px,py) relative to the 2D
+// triangle. ok is false if the triangle is degenerate.
+func barycentric2D(px, py float32, tri [3][2]float32) ([3]float32, bool) {
+	x0, y0 := tri[0][0], tri[0][1]
+	x1, y1 := tri[1][0], tri[1][1]
+	x2, y2 := tri[2][0], tri[2][1]
+	denom := (y1-y2)*(x0-x2) + (x2-x1)*(y0-y2)
+	if denom == 0 {
+		return [3]float32{}, false
+	}
+	w0 := ((y1-y2)*(px-x2) + (x2-x1)*(py-y2)) / denom
+	w1 := ((y2-y0)*(px-x2) + (x0-x2)*(py-y2)) / denom
+	return [3]float32{w0, w1, 1 - w0 - w1}, true
 }
 
 // CompositeStickerColor samples all decals for the given triangle at the given

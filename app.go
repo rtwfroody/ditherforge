@@ -508,6 +508,8 @@ type StickerSetting struct {
 	Up        [3]float64 `json:"up"`
 	Scale     float64    `json:"scale"`
 	Rotation  float64    `json:"rotation"`
+	MaxAngle  float64    `json:"maxAngle,omitempty"`
+	Mode      string     `json:"mode,omitempty"`
 }
 
 // WarpPinSetting is the JSON representation of a color warp pin.
