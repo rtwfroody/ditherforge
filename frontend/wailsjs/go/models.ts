@@ -115,11 +115,13 @@ export namespace main {
 	}
 	export class Settings {
 	    inputFile?: string;
+	    objectIndex?: number;
 	    sizeMode: string;
 	    sizeValue: string;
 	    scaleValue: string;
 	    nozzleDiameter: string;
 	    layerHeight: string;
+	    baseColor?: ColorSlotSetting;
 	    colorSlots: ColorSlotSetting[];
 	    inventoryCollection: string;
 	    brightness: number;
@@ -131,7 +133,11 @@ export namespace main {
 	    colorSnap: number;
 	    noMerge: boolean;
 	    noSimplify: boolean;
+	    uniformGrid: boolean;
 	    stats: boolean;
+	    alphaWrap: boolean;
+	    alphaWrapAlpha: string;
+	    alphaWrapOffset: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -140,11 +146,13 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.inputFile = source["inputFile"];
+	        this.objectIndex = source["objectIndex"];
 	        this.sizeMode = source["sizeMode"];
 	        this.sizeValue = source["sizeValue"];
 	        this.scaleValue = source["scaleValue"];
 	        this.nozzleDiameter = source["nozzleDiameter"];
 	        this.layerHeight = source["layerHeight"];
+	        this.baseColor = this.convertValues(source["baseColor"], ColorSlotSetting);
 	        this.colorSlots = this.convertValues(source["colorSlots"], ColorSlotSetting);
 	        this.inventoryCollection = source["inventoryCollection"];
 	        this.brightness = source["brightness"];
@@ -156,7 +164,11 @@ export namespace main {
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
 	        this.noSimplify = source["noSimplify"];
+	        this.uniformGrid = source["uniformGrid"];
 	        this.stats = source["stats"];
+	        this.alphaWrap = source["alphaWrap"];
+	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
+	        this.alphaWrapOffset = source["alphaWrapOffset"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

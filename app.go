@@ -533,24 +533,32 @@ type ColorSlotSetting struct {
 
 // Settings contains all user-configurable settings.
 type Settings struct {
-	InputFile           string             `json:"inputFile,omitempty"`
-	SizeMode            string             `json:"sizeMode"`
-	SizeValue           string             `json:"sizeValue"`
-	ScaleValue          string             `json:"scaleValue"`
-	NozzleDiameter      string             `json:"nozzleDiameter"`
-	LayerHeight         string             `json:"layerHeight"`
+	InputFile           string              `json:"inputFile,omitempty"`
+	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
+	// the frontend maps nil → -1 ("all objects"), which differs from 0 ("first object").
+	ObjectIndex         *int                `json:"objectIndex,omitempty"`
+	SizeMode            string              `json:"sizeMode"`
+	SizeValue           string              `json:"sizeValue"`
+	ScaleValue          string              `json:"scaleValue"`
+	NozzleDiameter      string              `json:"nozzleDiameter"`
+	LayerHeight         string              `json:"layerHeight"`
+	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
-	InventoryCollection string             `json:"inventoryCollection"`
-	Brightness          float64            `json:"brightness"`
-	Contrast            float64            `json:"contrast"`
-	Saturation          float64            `json:"saturation"`
-	WarpPins            []WarpPinSetting   `json:"warpPins"`
-	Stickers            []StickerSetting   `json:"stickers,omitempty"`
-	Dither              string             `json:"dither"`
-	ColorSnap           float64            `json:"colorSnap"`
-	NoMerge             bool               `json:"noMerge"`
-	NoSimplify          bool               `json:"noSimplify"`
-	Stats               bool               `json:"stats"`
+	InventoryCollection string              `json:"inventoryCollection"`
+	Brightness          float64             `json:"brightness"`
+	Contrast            float64             `json:"contrast"`
+	Saturation          float64             `json:"saturation"`
+	WarpPins            []WarpPinSetting    `json:"warpPins"`
+	Stickers            []StickerSetting    `json:"stickers,omitempty"`
+	Dither              string              `json:"dither"`
+	ColorSnap           float64             `json:"colorSnap"`
+	NoMerge             bool                `json:"noMerge"`
+	NoSimplify          bool                `json:"noSimplify"`
+	UniformGrid         bool                `json:"uniformGrid"`
+	Stats               bool                `json:"stats"`
+	AlphaWrap           bool                `json:"alphaWrap"`
+	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
+	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
 }
 
 // SaveSettings writes settings to the given path.
