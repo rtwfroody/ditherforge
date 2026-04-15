@@ -719,6 +719,34 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 		fmt.Printf("  Snapped cell colors toward palette by delta E %.1f\n", opts.ColorSnap)
 	}
 
+	// Put the most-used color in slot 0 so 3mf-aware slicers use it for
+	// infill (the first filament handles non-color regions). Only reorder
+	// when slot 0 is auto-selected: locked colors occupy slots 0..N-1, so
+	// slot 0 is unlocked iff there are no locked colors at all. Use a
+	// nearest-neighbor assignment as a cheap proxy for dither output —
+	// dithering rarely changes which color dominates. Runs after snap so
+	// the count reflects the cells dither will see.
+	if len(pcfg.Locked) == 0 && len(pal) > 1 {
+		assigns, err := voxel.AssignColors(ctx, cells, pal)
+		if err != nil {
+			return err
+		}
+		counts := make([]int, len(pal))
+		for _, a := range assigns {
+			counts[a]++
+		}
+		best := 0
+		for i := 1; i < len(counts); i++ {
+			if counts[i] > counts[best] {
+				best = i
+			}
+		}
+		if best != 0 {
+			pal[0], pal[best] = pal[best], pal[0]
+			palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
+		}
+	}
+
 	cache.setStage(StagePalette, stageKey(StagePalette, opts), &paletteOutput{
 		Palette:       pal,
 		PaletteLabels: palLabels,
@@ -751,7 +779,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 	}
 	fmt.Printf("  Dithered (%s) %d cells in %.1fs\n", ditherMode, len(cells), time.Since(tDither).Seconds())
 
-	// Print per-color usage, sorted by count descending.
+	// Per-color usage counts.
 	counts := make([]int, len(pal))
 	for _, a := range assignments {
 		counts[a]++
