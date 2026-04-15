@@ -51,6 +51,7 @@ type loadOutput struct {
 	Model        *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
+	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
 }
 
 type voxelizeOutput struct {

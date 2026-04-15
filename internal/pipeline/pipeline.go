@@ -76,7 +76,7 @@ type WarpPin struct {
 
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
-	OnInputMesh func(*MeshData, float32) // mesh data and preview scale
+	OnInputMesh func(*MeshData, float32, float32) // mesh, preview scale, native extent mm
 	OnPalette   func([][3]uint8, []string)
 	Progress    progress.Tracker
 }
@@ -147,7 +147,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Extract callbacks, using safe defaults for nil.
-	var onInputMesh func(*MeshData, float32)
+	var onInputMesh func(*MeshData, float32, float32)
 	var onPalette func([][3]uint8, []string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
@@ -236,7 +236,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			}
 			mesh = &scaled
 		}
-		onInputMesh(mesh, lo.PreviewScale)
+		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM)
 	}
 
 	// Stage 3: Voxelize (uses decals from sticker stage)
@@ -484,10 +484,15 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 		return ctx.Err()
 	}
 
+	// Native extent in mm: modelMaxExtent(model) = nativeExtentFile * totalScale,
+	// so nativeExtentFile = modelMaxExtent/totalScale, and nativeExtentMM =
+	// nativeExtentFile * unitScale.
+	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
 		Model:        model,
 		InputMesh:    buildInputMeshData(model),
 		PreviewScale: unitScale / totalScale,
+		ExtentMM:     nativeExtentMM,
 	})
 	return nil
 }

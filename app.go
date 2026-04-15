@@ -62,6 +62,7 @@ type meshEvent struct {
 	Gen          int64   `json:"gen"`
 	URL          string  `json:"url"`
 	PreviewScale float32 `json:"previewScale,omitempty"`
+	ExtentMM     float32 `json:"extentMM,omitempty"` // native max extent in mm, for input-mesh
 }
 
 // NewApp creates a new App instance.
@@ -285,14 +286,14 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancelMu.Unlock()
 
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
-		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32) {
+		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
 			a.lastInputID = a.meshes.Store(mesh)
-			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale})
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale, ExtentMM: extentMM})
 		},
 		OnPalette: func(pal [][3]uint8, labels []string) {
 			colors := make([]map[string]string, len(pal))
