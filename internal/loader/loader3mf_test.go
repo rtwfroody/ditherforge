@@ -59,7 +59,7 @@ func TestLoad3MF_BaseMaterials(t *testing.T) {
 		"3D/3dmodel.model": modelXML,
 	})
 
-	model, err := Load3MF(path, 1.0, -1)
+	model, err := Load3MF(path, -1)
 	if err != nil {
 		t.Fatalf("Load3MF: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestLoad3MF_PaintColor(t *testing.T) {
 		"Metadata/project_settings.config": projectSettings,
 	})
 
-	model, err := Load3MF(path, 1.0, -1)
+	model, err := Load3MF(path, -1)
 	if err != nil {
 		t.Fatalf("Load3MF: %v", err)
 	}
@@ -167,10 +167,11 @@ func TestLoad3MF_Scale(t *testing.T) {
 		"3D/3dmodel.model": modelXML,
 	})
 
-	model, err := Load3MF(path, 2.0, -1)
+	model, err := Load3MF(path, -1)
 	if err != nil {
 		t.Fatalf("Load3MF: %v", err)
 	}
+	ScaleModel(model, 2.0)
 
 	// Vertex 0 should be (10, 20, 30) after 2× scale.
 	v := model.Vertices[0]
@@ -202,7 +203,7 @@ func TestLoad3MF_NoColor(t *testing.T) {
 		"3D/3dmodel.model": modelXML,
 	})
 
-	model, err := Load3MF(path, 1.0, -1)
+	model, err := Load3MF(path, -1)
 	if err != nil {
 		t.Fatalf("Load3MF: %v", err)
 	}
@@ -289,7 +290,7 @@ func TestLoad3MF_MixedFilaments(t *testing.T) {
 		"Metadata/project_settings.config": projectSettings,
 	})
 
-	model, err := Load3MF(path, 1.0, -1)
+	model, err := Load3MF(path, -1)
 	if err != nil {
 		t.Fatalf("Load3MF: %v", err)
 	}

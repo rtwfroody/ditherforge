@@ -132,19 +132,16 @@ func TestColorSelection(t *testing.T) {
 			}
 
 			const unitScale = float32(1000)
-			model, err := loader.LoadGLB(glbPath, unitScale, -1)
+			model, err := loader.LoadGLB(glbPath, -1)
 			if err != nil {
 				t.Fatalf("LoadGLB: %v", err)
 			}
+			loader.ScaleModel(model, unitScale)
 
 			// Scale to 100mm extent.
 			ext := modelExtent(model)
 			if ext != 100 {
-				scale := float32(100) / ext
-				model, err = loader.LoadGLB(glbPath, unitScale*scale, -1)
-				if err != nil {
-					t.Fatalf("LoadGLB (rescaled): %v", err)
-				}
+				loader.ScaleModel(model, 100/ext)
 			}
 
 			// Voxelize to get cell colors.

@@ -33,11 +33,20 @@ const (
 // re-run when settings change.
 type StageCache struct {
 	stages [numStages]*cachedStage
+	// raw caches the pristine parsed model (file units, no scale/normalize/
+	// base-color override). It survives Scale/Size/BaseColor changes so the
+	// file parse isn't repeated when only a scale-dependent knob moves.
+	raw *cachedRaw
 }
 
 type cachedStage struct {
 	key    uint64
 	output any
+}
+
+type cachedRaw struct {
+	key   uint64
+	model *loader.LoadedModel
 }
 
 // NewStageCache returns an empty stage cache.
@@ -439,4 +448,28 @@ func (c *StageCache) getMerge() *mergeOutput {
 
 func (c *StageCache) setStage(stage StageID, key uint64, output any) {
 	c.stages[stage] = &cachedStage{key: key, output: output}
+}
+
+// rawLoadKey hashes only the inputs that affect the raw file parse.
+// Invariant: any Options field consumed by loadModel (preview.go) must appear
+// here, or the raw cache will return a stale model after that field changes.
+func rawLoadKey(opts Options) uint64 {
+	h := fnv.New64a()
+	writeString(h, opts.Input)
+	binary.Write(h, binary.LittleEndian, opts.ReloadSeq)
+	writeInt(h, opts.ObjectIndex)
+	return h.Sum64()
+}
+
+// getRaw returns the cached pristine model, or nil if the key has changed.
+func (c *StageCache) getRaw(opts Options) *loader.LoadedModel {
+	k := rawLoadKey(opts)
+	if c.raw == nil || c.raw.key != k {
+		return nil
+	}
+	return c.raw.model
+}
+
+func (c *StageCache) setRaw(opts Options, m *loader.LoadedModel) {
+	c.raw = &cachedRaw{key: rawLoadKey(opts), model: m}
 }

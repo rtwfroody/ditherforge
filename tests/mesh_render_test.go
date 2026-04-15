@@ -250,32 +250,29 @@ func loadTestModel(t *testing.T, path string) *loader.LoadedModel {
 	t.Helper()
 	ext := strings.ToLower(filepath.Ext(path))
 
-	load := func(scale float32) (*loader.LoadedModel, error) {
-		switch ext {
-		case ".glb":
-			return loader.LoadGLB(path, 1000*scale, -1) // meters → mm
-		case ".3mf":
-			return loader.Load3MF(path, scale, -1)
-		default:
-			t.Fatalf("unsupported extension %q", ext)
-			return nil, nil
-		}
-	}
-
+	var model *loader.LoadedModel
+	var err error
+	var unitScale float32 = 1
 	t.Logf("Loading %s...", path)
-	model, err := load(1.0)
+	switch ext {
+	case ".glb":
+		model, err = loader.LoadGLB(path, -1)
+		unitScale = 1000 // meters → mm
+	case ".3mf":
+		model, err = loader.Load3MF(path, -1)
+	default:
+		t.Fatalf("unsupported extension %q", ext)
+	}
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	loader.ScaleModel(model, unitScale)
 
 	me := modelExtent(model)
 	if me != maxExtentMM {
 		scale := maxExtentMM / me
 		t.Logf("  Extent %.1fmm, target %.0fmm, scaling by %.4f", me, maxExtentMM, scale)
-		model, err = load(scale)
-		if err != nil {
-			t.Fatalf("load (rescaled): %v", err)
-		}
+		loader.ScaleModel(model, scale)
 	}
 	return model
 }

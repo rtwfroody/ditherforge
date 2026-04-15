@@ -18,8 +18,13 @@ import (
 )
 
 // LoadedModel holds all extracted data from a GLB file.
+//
+// Cache invariant: a LoadedModel returned by Load* is treated as immutable.
+// Downstream code (pipeline stages, voxelizer, etc.) MUST NOT mutate any
+// slice field in place. Use CloneForEdit to obtain a working copy first, and
+// extend the clone if adding mutation of additional fields.
 type LoadedModel struct {
-	Vertices       [][3]float32  // world-space, already transformed + scaled
+	Vertices       [][3]float32  // world-space, axis-transformed but NOT scaled (file units; apply ScaleModel)
 	Faces          [][3]uint32
 	UVs            [][2]float32  // per-vertex, aligned to Vertices
 	VertexColors   [][4]uint8   // per-vertex RGBA; nil if no vertex colors
@@ -138,8 +143,33 @@ func clampF32(v, lo, hi float32) float32 {
 	return v
 }
 
+// CloneForEdit returns a shallow copy of m with Vertices and FaceBaseColor
+// duplicated into fresh slices. Callers can then freely mutate those fields
+// (e.g. apply scale, normalize Z, override base color) without touching the
+// original — which is important when the original is cached across runs.
+// Other slices (Faces, UVs, Textures, ...) are shared; they are never mutated
+// by the pipeline post-load.
+func CloneForEdit(m *LoadedModel) *LoadedModel {
+	c := *m
+	c.Vertices = append([][3]float32(nil), m.Vertices...)
+	if m.FaceBaseColor != nil {
+		c.FaceBaseColor = append([][4]uint8(nil), m.FaceBaseColor...)
+	}
+	return &c
+}
+
+// ScaleModel multiplies every vertex by s in place. No-op for s == 1.
+func ScaleModel(m *LoadedModel, s float32) {
+	if s == 1 {
+		return
+	}
+	for i, v := range m.Vertices {
+		m.Vertices[i] = [3]float32{v[0] * s, v[1] * s, v[2] * s}
+	}
+}
+
 // LoadGLB loads a GLB file and returns a LoadedModel.
-func LoadGLB(path string, scale float32, objectIndex int) (*LoadedModel, error) {
+func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 	doc, err := gltf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening GLB: %w", err)
@@ -446,15 +476,9 @@ func LoadGLB(path string, scale float32, objectIndex int) (*LoadedModel, error) 
 		appendPrim(pd, int32(nTex)) // sentinel
 	}
 
-	// Apply Y-up to Z-up transform and scale.
-	// GLTF: Y-up; slicers: Z-up.
-	// Transform: x'=x*scale, y'=-z*scale, z'=y*scale
+	// Apply Y-up to Z-up transform. GLTF: Y-up; slicers: Z-up.
 	for i, v := range allVerts {
-		allVerts[i] = [3]float32{
-			v[0] * scale,
-			-v[2] * scale,
-			v[1] * scale,
-		}
+		allVerts[i] = [3]float32{v[0], -v[2], v[1]}
 	}
 
 	// Deduplicate vertices by (position, UV, color) tuple. Vertices at UV seams

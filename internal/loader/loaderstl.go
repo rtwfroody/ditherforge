@@ -12,7 +12,7 @@ import (
 // STL files contain only geometry (no textures or colors), so all faces
 // are assigned a default gray base color.
 // objectIndex is ignored for STL files (always a single object).
-func LoadSTL(path string, scale float32, objectIndex int) (*LoadedModel, error) {
+func LoadSTL(path string, objectIndex int) (*LoadedModel, error) {
 	solid, err := stl.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading STL: %w", err)
@@ -35,9 +35,9 @@ func LoadSTL(path string, scale float32, objectIndex int) (*LoadedModel, error) 
 		var fi [3]uint32
 		for j := 0; j < 3; j++ {
 			pos := [3]float32{
-				tri.Vertices[j][0] * scale,
-				tri.Vertices[j][1] * scale,
-				tri.Vertices[j][2] * scale,
+				tri.Vertices[j][0],
+				tri.Vertices[j][1],
+				tri.Vertices[j][2],
 			}
 			if idx, ok := posToIdx[pos]; ok {
 				fi[j] = idx

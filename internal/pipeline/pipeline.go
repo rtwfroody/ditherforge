@@ -447,32 +447,39 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	unitScale := unitScaleForExt(inputExt)
 	scale := unitScale * opts.Scale
 
-	fmt.Printf("Loading %s...", opts.Input)
-	tLoad := time.Now()
-	model, err := loadModel(opts.Input, scale, opts.ObjectIndex)
-	if err != nil {
-		return fmt.Errorf("loading %s: %w", inputExt, err)
+	raw := cache.getRaw(opts)
+	if raw == nil {
+		fmt.Printf("Loading %s...", opts.Input)
+		tLoad := time.Now()
+		loaded, err := loadModel(opts.Input, opts.ObjectIndex)
+		if err != nil {
+			return fmt.Errorf("loading %s: %w", inputExt, err)
+		}
+		fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(loaded.Vertices), len(loaded.Faces), time.Since(tLoad).Seconds())
+		cache.setRaw(opts, loaded)
+		raw = loaded
 	}
-	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
+	// Work on a clone so scale/normalize/base-color don't mutate the cached raw.
+	model := loader.CloneForEdit(raw)
 
 	// Track the total scale applied so we can convert output mesh
 	// vertices back to preview scale (which uses unitScale only).
 	totalScale := scale
 
-	// Auto-scale to --size if specified.
+	// Auto-scale to --size if specified: fold the size-correction factor into
+	// totalScale so we do one in-place vertex scale below.
 	if opts.Size != nil {
-		ext := modelMaxExtent(model)
+		ext := modelMaxExtent(model) * scale
 		if ext != *opts.Size {
-			rescale := *opts.Size / ext
-			totalScale = scale * rescale
-			fmt.Printf("  Rescaling to %.0f mm...", *opts.Size)
-			tRescale := time.Now()
-			model, err = loadModel(opts.Input, totalScale, opts.ObjectIndex)
-			if err != nil {
-				return fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
-			}
-			fmt.Printf(" done in %.1fs\n", time.Since(tRescale).Seconds())
+			totalScale = scale * (*opts.Size / ext)
 		}
+	}
+
+	if totalScale != 1 {
+		fmt.Printf("  Scaling by %g...", totalScale)
+		tScale := time.Now()
+		loader.ScaleModel(model, totalScale)
+		fmt.Printf(" done in %.1fms\n", float64(time.Since(tScale))/float64(time.Millisecond))
 	}
 
 	// Normalize Z so the model bottom sits at z=0. This ensures the
