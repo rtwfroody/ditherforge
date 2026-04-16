@@ -597,8 +597,8 @@
       uniformGrid,
       stats,
       alphaWrap,
-      alphaWrapAlpha,
-      alphaWrapOffset,
+      alphaWrapAlpha: String(alphaWrapAlpha),
+      alphaWrapOffset: String(alphaWrapOffset),
     };
   }
 
