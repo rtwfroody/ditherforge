@@ -21,9 +21,9 @@ jobs:
             cgal_cli_targets: "linux/amd64"
           - os: windows-latest
             platform: windows-amd64
-            wails_flags: ""
+            wails_flags: "-tags cgal"
             cli_targets: "windows/amd64"
-            cgal_cli_targets: ""
+            cgal_cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
             wails_flags: ""
@@ -54,6 +54,20 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cgal gmp mpfr
 
+      - name: Cache vcpkg packages
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+          key: vcpkg-windows-cgal-v1
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install cgal:x64-windows-static
+          echo "CGO_CXXFLAGS=-std=c++17 -I${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
