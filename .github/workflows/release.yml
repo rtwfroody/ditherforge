@@ -26,7 +26,7 @@ jobs:
             cgal_cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
-            wails_flags: "-platform darwin/universal"
+            wails_flags: ""
             cli_targets: "darwin/amd64 darwin/arm64"
             cgal_cli_targets: "darwin/arm64"
 
@@ -73,8 +73,26 @@ jobs:
       # --- GUI binary ---
 
       - name: Build GUI
+        if: runner.os != 'macOS'
         shell: bash
         run: wails build ${{ matrix.wails_flags }}
+
+      - name: Build GUI (macOS universal with CGAL on arm64)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Build arm64 with CGAL linked in.
+          wails build -platform darwin/arm64 -tags cgal
+          cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-arm64
+
+          # Build amd64 without CGAL (no cross-compiled GMP/MPFR available).
+          wails build -platform darwin/amd64
+          cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-amd64
+
+          # Combine into universal binary inside the .app bundle.
+          lipo -create -output build/bin/ditherforge.app/Contents/MacOS/ditherforge \
+            ditherforge-gui-arm64 ditherforge-gui-amd64
+          rm ditherforge-gui-arm64 ditherforge-gui-amd64
 
       # --- CLI binaries ---
 
