@@ -64,7 +64,13 @@ type loadOutput struct {
 	// ColorModel is the original loaded mesh, carrying UVs, textures, and
 	// materials. Used for color sampling and sticker placement. When
 	// alpha-wrap is disabled, Model == ColorModel.
-	ColorModel   *loader.LoadedModel
+	ColorModel *loader.LoadedModel
+	// SampleModel is the mesh used for per-voxel color sampling. When the
+	// geometry mesh (Model) has been grown by a step like alpha-wrap,
+	// SampleModel is the original mesh inflated along vertex normals so its
+	// surface roughly matches Model's. Otherwise SampleModel aliases
+	// ColorModel.
+	SampleModel  *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)

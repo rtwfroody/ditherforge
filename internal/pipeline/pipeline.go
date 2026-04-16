@@ -527,9 +527,26 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 		geomModel = wrapped
 	}
 
+	// If the geometry mesh grew relative to the original (e.g. alpha-wrap
+	// with positive offset), inflate the original along vertex normals so
+	// its surface roughly matches. The sample mesh is used only for per-voxel
+	// color lookup — grown cells project onto corresponding original surface
+	// points instead of clumping at convex edges.
+	sampleModel := model
+	if geomModel != model {
+		origExt := modelMaxExtent(model)
+		geomExt := modelMaxExtent(geomModel)
+		inflateOffset := (geomExt - origExt) / 2
+		if inflateOffset > 1e-4 {
+			fmt.Printf("  Inflating color-sample mesh by %.3f mm\n", inflateOffset)
+			sampleModel = loader.InflateAlongNormals(model, inflateOffset)
+		}
+	}
+
 	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
 		Model:        geomModel,
 		ColorModel:   model,
+		SampleModel:  sampleModel,
 		InputMesh:    buildInputMeshData(model),
 		PreviewScale: unitScale / totalScale,
 		ExtentMM:     nativeExtentMM,
@@ -568,7 +585,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 
 	fmt.Println("Voxelizing...")
 	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.ColorModel, layer0Size, upperSize, layerH, tracker, so.Decals)
+		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.SampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -583,7 +600,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		})
 	} else {
 		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, lo.ColorModel, cellSize, layerH, tracker, so.Decals)
+		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, lo.SampleModel, cellSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}

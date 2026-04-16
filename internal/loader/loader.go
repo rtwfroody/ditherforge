@@ -8,6 +8,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -166,6 +167,53 @@ func ScaleModel(m *LoadedModel, s float32) {
 	for i, v := range m.Vertices {
 		m.Vertices[i] = [3]float32{v[0] * s, v[1] * s, v[2] * s}
 	}
+}
+
+// InflateAlongNormals returns a clone of m with each vertex displaced by
+// offset along its area-weighted vertex normal. Used to grow the
+// color-sampling mesh so it matches an adjusted (e.g. alpha-wrapped) mesh's
+// surface, preventing color-sampling clumps at convex edges of the original.
+func InflateAlongNormals(m *LoadedModel, offset float32) *LoadedModel {
+	if offset == 0 {
+		return m
+	}
+	normals := make([][3]float64, len(m.Vertices))
+	for _, f := range m.Faces {
+		a := m.Vertices[f[0]]
+		b := m.Vertices[f[1]]
+		c := m.Vertices[f[2]]
+		ux := float64(b[0] - a[0])
+		uy := float64(b[1] - a[1])
+		uz := float64(b[2] - a[2])
+		vx := float64(c[0] - a[0])
+		vy := float64(c[1] - a[1])
+		vz := float64(c[2] - a[2])
+		// Cross product magnitude == 2 * area, so this is area-weighted.
+		nx := uy*vz - uz*vy
+		ny := uz*vx - ux*vz
+		nz := ux*vy - uy*vx
+		for _, vi := range f {
+			normals[vi][0] += nx
+			normals[vi][1] += ny
+			normals[vi][2] += nz
+		}
+	}
+	c := CloneForEdit(m)
+	o := float64(offset)
+	for i, v := range c.Vertices {
+		n := normals[i]
+		l := n[0]*n[0] + n[1]*n[1] + n[2]*n[2]
+		if l < 1e-20 {
+			continue
+		}
+		inv := o / math.Sqrt(l)
+		c.Vertices[i] = [3]float32{
+			v[0] + float32(n[0]*inv),
+			v[1] + float32(n[1]*inv),
+			v[2] + float32(n[2]*inv),
+		}
+	}
+	return c
 }
 
 // LoadGLB loads a GLB file and returns a LoadedModel.
