@@ -7,11 +7,13 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// TestWrapTetrahedron wraps a simple tetrahedron. Skipped if `uv` is not
-// installed (CI without uv still passes).
+// TestWrapTetrahedron wraps a simple tetrahedron. Skipped when using the
+// Python fallback and `uv` is not installed (CI without uv still passes).
 func TestWrapTetrahedron(t *testing.T) {
-	if _, err := exec.LookPath("uv"); err != nil {
-		t.Skip("uv not installed; skipping alpha-wrap integration test")
+	if !hasCGAL {
+		if _, err := exec.LookPath("uv"); err != nil {
+			t.Skip("uv not installed and cgal build tag not set; skipping alpha-wrap integration test")
+		}
 	}
 
 	model := &loader.LoadedModel{

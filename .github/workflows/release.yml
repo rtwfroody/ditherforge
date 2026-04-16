@@ -3,6 +3,7 @@ name: Build and Release
 on:
   push:
     branches: [main]
+  pull_request:
 
 permissions:
   contents: write
@@ -14,16 +15,19 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-amd64
-            wails_flags: "-tags webkit2_41,draco"
+            wails_flags: "-tags webkit2_41,draco,cgal"
             cli_targets: "linux/amd64 linux/arm64"
+            cgal_cli_targets: "linux/amd64"
           - os: windows-latest
             platform: windows-amd64
-            wails_flags: ""
+            wails_flags: "-tags cgal"
             cli_targets: "windows/amd64"
+            cgal_cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
-            wails_flags: "-platform darwin/universal"
+            wails_flags: "-platform darwin/universal -tags cgal"
             cli_targets: "darwin/amd64 darwin/arm64"
+            cgal_cli_targets: "darwin/arm64"
 
     runs-on: ${{ matrix.os }}
 
@@ -43,7 +47,19 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config libcgal-dev libgmp-dev libmpfr-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cgal gmp mpfr
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install cgal:x64-windows-static
+          echo "CGO_CXXFLAGS=-std=c++17 -I${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
@@ -61,7 +77,20 @@ jobs:
 
       # --- CLI binaries ---
 
-      - name: Build CLI
+      - name: Build CLI (with CGAL)
+        shell: bash
+        run: |
+          for target in ${{ matrix.cgal_cli_targets }}; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL)..."
+            CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -tags cgal -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+          done
+
+      - name: Build CLI (without CGAL, cross-compile)
         shell: bash
         run: |
           for target in ${{ matrix.cli_targets }}; do
@@ -69,9 +98,14 @@ jobs:
             GOARCH="${target#*/}"
             EXT=""
             if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-            echo "Building CLI for ${GOOS}/${GOARCH}..."
+            OUT="ditherforge-cli-${GOOS}-${GOARCH}${EXT}"
+            if [ -f "$OUT" ]; then
+              echo "Skipping ${GOOS}/${GOARCH} (already built with CGAL)"
+              continue
+            fi
+            echo "Building CLI for ${GOOS}/${GOARCH} (no CGAL)..."
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+              go build -o "$OUT" ./cmd/ditherforge
           done
 
       # --- Smoke test (Linux only) ---
@@ -80,6 +114,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ./ditherforge-cli-linux-amd64 --version
+          go test -tags cgal -timeout 2m ./internal/alphawrap/...
           go test -timeout 2m ./internal/...
 
       # --- Package ---
@@ -156,6 +191,7 @@ jobs:
             ditherforge-*.dmg
 
   release:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     steps:
