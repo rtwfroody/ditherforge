@@ -54,33 +54,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cgal gmp mpfr
 
-      - name: Restore vcpkg cache
-        if: runner.os == 'Windows'
-        id: vcpkg-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
-          key: vcpkg-windows-cgal-v2
-
-      - name: Kill stale MSYS2 processes
-        if: runner.os == 'Windows'
-        run: taskkill /F /IM gpg-agent.exe 2>nul || exit /b 0
-        shell: cmd
-
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          vcpkg install cgal:x64-windows-static --overlay-triplets=custom-triplets
-          echo "CGO_CXXFLAGS=-std=c++17 -Wa,-mbig-obj -I${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
-
-      - name: Save vcpkg cache
-        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
-          key: vcpkg-windows-cgal-v2
+          pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr
+          echo "CGO_CXXFLAGS=-std=c++17 -Wa,-mbig-obj -IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-LC:/msys64/mingw64/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
