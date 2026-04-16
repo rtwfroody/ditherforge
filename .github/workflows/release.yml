@@ -26,7 +26,7 @@ jobs:
             cgal_cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
-            wails_flags: "-platform darwin/universal -tags cgal"
+            wails_flags: "-platform darwin/universal"
             cli_targets: "darwin/amd64 darwin/arm64"
             cgal_cli_targets: "darwin/arm64"
 
