@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           vcpkg install cgal:x64-windows-static --overlay-triplets=custom-triplets
-          echo "CGO_CXXFLAGS=-std=c++17 -I${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/include" >> "$GITHUB_ENV"
+          echo "CGO_CXXFLAGS=-std=c++17 -Wa,-mbig-obj -I${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/include" >> "$GITHUB_ENV"
           echo "CGO_LDFLAGS=-L${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
 
       - name: Save vcpkg cache
