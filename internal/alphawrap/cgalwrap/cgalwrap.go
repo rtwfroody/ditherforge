@@ -4,7 +4,11 @@ package cgalwrap
 
 /*
 #cgo CXXFLAGS: -std=c++17
+#cgo darwin,arm64 CXXFLAGS: -I/opt/homebrew/include
+#cgo darwin,amd64 CXXFLAGS: -I/usr/local/include
 #cgo LDFLAGS: -lgmp -lmpfr
+#cgo darwin,arm64 LDFLAGS: -L/opt/homebrew/lib
+#cgo darwin,amd64 LDFLAGS: -L/usr/local/lib
 #include "wrap.h"
 */
 import "C"
