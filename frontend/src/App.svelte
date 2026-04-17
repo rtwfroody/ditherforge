@@ -1155,20 +1155,6 @@
 
         <!-- Color settings -->
         <div class="space-y-4">
-          <!-- Color snap -->
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Color snap (delta E)</Label>
-                <HelpTip>
-                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-            </div>
-            <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
-          </div>
-
           <!-- Color palette grid -->
           <div class="space-y-2">
             <div class="flex items-center gap-1.5">
@@ -1245,6 +1231,20 @@
               bind:selected={inventoryCollection}
               onchange={loadInventoryCollectionColors}
             />
+          </div>
+
+          <!-- Color snap -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <Label>Color snap (delta E)</Label>
+                <HelpTip>
+                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                </HelpTip>
+              </div>
+              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+            </div>
+            <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
           </div>
         </div>
 
