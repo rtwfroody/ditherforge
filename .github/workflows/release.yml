@@ -192,11 +192,15 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # GUI: create DMG from .app bundle
+          # GUI: create DMG with app bundle and getting-started doc
+          mkdir -p dmg-staging
+          cp -R build/bin/ditherforge.app dmg-staging/
+          cp build/macos-readme.html "dmg-staging/Getting Started.html"
           hdiutil create -volname "DitherForge" \
-            -srcfolder build/bin/ditherforge.app \
+            -srcfolder dmg-staging \
             -ov -format UDZO \
             "ditherforge-${VERSION}-macos-universal.dmg"
+          rm -rf dmg-staging
 
           # CLI: universal binary via lipo, sign, then tar.gz
           lipo -create -output ditherforge-cli \
