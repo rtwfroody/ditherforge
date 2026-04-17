@@ -117,7 +117,7 @@ jobs:
         run: |
           # Build arm64 with CGAL and Draco linked in.
           # customenv tells draco-go to use our system libdraco_c instead of its bundled one.
-          CGO_LDFLAGS="-L/usr/local/lib" wails build -platform darwin/arm64 -tags customenv,draco,cgal
+          CGO_LDFLAGS="-L/usr/local/lib -ldraco_c -lstdc++ -lm" wails build -platform darwin/arm64 -tags customenv,draco,cgal
           cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-arm64
 
           # Build amd64 without CGAL (no cross-compiled GMP/MPFR available).
@@ -151,7 +151,7 @@ jobs:
             EXTRA_LDFLAGS=""
             if [ "$(uname)" = "Darwin" ]; then
               TAGS="customenv,draco,cgal"
-              EXTRA_LDFLAGS="-L/usr/local/lib"
+              EXTRA_LDFLAGS="-L/usr/local/lib -ldraco_c -lstdc++ -lm"
             fi
             echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL and Draco)..."
             CGO_ENABLED=1 CGO_LDFLAGS="${CGO_LDFLAGS} ${EXTRA_LDFLAGS}" GOOS="$GOOS" GOARCH="$GOARCH" \
