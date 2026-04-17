@@ -72,9 +72,8 @@ jobs:
             -DDRACO_STANDARD_EDGEBREAKER=ON \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/draco-c/build --config Release
-          mkdir -p /tmp/draco-c-install/lib /tmp/draco-c-install/include
+          mkdir -p /tmp/draco-c-install/lib
           cp /tmp/draco-c/build/libdraco_c.a /tmp/draco-c-install/lib/
-          cp /tmp/draco-c/build/draco_c/include/draco/c_api.h /tmp/draco-c-install/include/
 
       - name: Save draco-c cache
         if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
@@ -85,9 +84,7 @@ jobs:
 
       - name: Install draco-c
         if: runner.os == 'macOS'
-        run: |
-          sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
-          sudo cp /tmp/draco-c-install/include/c_api.h /usr/local/include/
+        run: sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
 
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
