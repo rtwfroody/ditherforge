@@ -84,7 +84,9 @@ jobs:
 
       - name: Install draco-c
         if: runner.os == 'macOS'
-        run: sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
+        run: |
+          sudo mkdir -p /usr/local/lib
+          sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
 
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
