@@ -94,7 +94,7 @@ jobs:
         run: |
           C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr
           echo "CGO_CXXFLAGS=-O3 -DNDEBUG -std=c++17 -Wa,-mbig-obj -IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-LC:/msys64/mingw64/lib -lgmp -lmpfr" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=C:/msys64/mingw64/lib/libmpfr.a C:/msys64/mingw64/lib/libgmp.a" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
