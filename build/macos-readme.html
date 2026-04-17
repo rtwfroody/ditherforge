@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DitherForge - Getting Started on macOS</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.6; }
+  h1 { font-size: 1.5em; }
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 0.95em; }
+  .step { margin: 1em 0; padding: 0.8em 1em; background: #f8f8f8; border-radius: 8px; }
+  .step-num { font-weight: bold; color: #007aff; }
+</style>
+</head>
+<body>
+<h1>DitherForge - Getting Started</h1>
+<p>Because DitherForge is not signed with an Apple Developer certificate,
+macOS will block it the first time you try to open it.
+You only need to do this once.</p>
+
+<div class="step">
+  <span class="step-num">Step 1.</span>
+  Drag <strong>ditherforge.app</strong> to your <strong>Applications</strong> folder (or wherever you like).
+</div>
+
+<div class="step">
+  <span class="step-num">Step 2.</span>
+  Open <strong>Terminal</strong> (search for it in Spotlight) and paste this command:
+  <br><br>
+  <code>xattr -cr /Applications/ditherforge.app</code>
+  <br><br>
+  If you put the app somewhere else, adjust the path accordingly.
+</div>
+
+<div class="step">
+  <span class="step-num">Step 3.</span>
+  Double-click <strong>ditherforge.app</strong> to launch it. It will open normally from now on.
+</div>
+</body>
+</html>

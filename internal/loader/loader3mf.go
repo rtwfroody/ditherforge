@@ -261,7 +261,7 @@ func parseMixedFilaments(defs string, physicalColors [][4]uint8) [][4]uint8 {
 
 // Load3MF loads a 3MF file and returns a LoadedModel.
 // Supports OrcaSlicer/BambuStudio paint_color attributes and standard 3MF
-// basematerials. The scale parameter is applied directly (3MF is already in mm).
+// basematerials. Vertices are returned in file units (3MF is already in mm).
 //
 // Limitation: ignores <build> item transforms and <components> composition.
 // Multi-part assemblies will be merged at their local coordinates.
@@ -329,7 +329,7 @@ func parse3MFModels(path string) (*parsed3MFResult, error) {
 	}, nil
 }
 
-func Load3MF(path string, scale float32, objectIndex int) (*LoadedModel, error) {
+func Load3MF(path string, objectIndex int) (*LoadedModel, error) {
 	parsed, err := parse3MFModels(path)
 	if err != nil {
 		return nil, err
@@ -417,13 +417,8 @@ func Load3MF(path string, scale float32, objectIndex int) (*LoadedModel, error) 
 			vertOffset := uint32(len(allVerts))
 			nv := uint32(len(mesh.Vertices.Vertex))
 
-			// Add vertices with scale.
 			for _, v := range mesh.Vertices.Vertex {
-				allVerts = append(allVerts, [3]float32{
-					v.X * scale,
-					v.Y * scale,
-					v.Z * scale,
-				})
+				allVerts = append(allVerts, [3]float32{v.X, v.Y, v.Z})
 			}
 
 			// Add faces with color resolution.

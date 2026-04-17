@@ -46,6 +46,9 @@ type Args struct {
 	Force          bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats          bool     `arg:"--stats" help:"Print face counts per material"`
 	ColorSnap      float64  `arg:"--color-snap" default:"5" help:"Shift cell colors toward nearest palette color by this many delta E units (0 to disable)"`
+	AlphaWrap       bool    `arg:"--alpha-wrap" help:"Clean up the loaded mesh with CGAL Alpha_wrap_3 (requires uv on PATH)"`
+	AlphaWrapAlpha  float32 `arg:"--alpha-wrap-alpha" help:"Alpha-wrap probe radius in mm (default: nozzle diameter)"`
+	AlphaWrapOffset float32 `arg:"--alpha-wrap-offset" help:"Alpha-wrap offset distance in mm (default: alpha/30)"`
 }
 
 func (Args) Description() string {
@@ -90,8 +93,11 @@ func main() {
 		Size:           args.Size,
 		Force:          args.Force,
 		Stats:          args.Stats,
-		ColorSnap:      args.ColorSnap,
-		ObjectIndex:    -1, // load all objects (no CLI flag yet; GUI has a picker dialog)
+		ColorSnap:       args.ColorSnap,
+		ObjectIndex:     -1, // load all objects (no CLI flag yet; GUI has a picker dialog)
+		AlphaWrap:       args.AlphaWrap,
+		AlphaWrapAlpha:  args.AlphaWrapAlpha,
+		AlphaWrapOffset: args.AlphaWrapOffset,
 	}
 
 	prepResult, _, err := pipeline.Run(context.Background(), opts)

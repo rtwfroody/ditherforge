@@ -8,6 +8,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,8 +19,13 @@ import (
 )
 
 // LoadedModel holds all extracted data from a GLB file.
+//
+// Cache invariant: a LoadedModel returned by Load* is treated as immutable.
+// Downstream code (pipeline stages, voxelizer, etc.) MUST NOT mutate any
+// slice field in place. Use CloneForEdit to obtain a working copy first, and
+// extend the clone if adding mutation of additional fields.
 type LoadedModel struct {
-	Vertices       [][3]float32  // world-space, already transformed + scaled
+	Vertices       [][3]float32  // world-space, axis-transformed but NOT scaled (file units; apply ScaleModel)
 	Faces          [][3]uint32
 	UVs            [][2]float32  // per-vertex, aligned to Vertices
 	VertexColors   [][4]uint8   // per-vertex RGBA; nil if no vertex colors
@@ -138,8 +144,80 @@ func clampF32(v, lo, hi float32) float32 {
 	return v
 }
 
+// CloneForEdit returns a shallow copy of m with Vertices and FaceBaseColor
+// duplicated into fresh slices. Callers can then freely mutate those fields
+// (e.g. apply scale, normalize Z, override base color) without touching the
+// original — which is important when the original is cached across runs.
+// Other slices (Faces, UVs, Textures, ...) are shared; they are never mutated
+// by the pipeline post-load.
+func CloneForEdit(m *LoadedModel) *LoadedModel {
+	c := *m
+	c.Vertices = append([][3]float32(nil), m.Vertices...)
+	if m.FaceBaseColor != nil {
+		c.FaceBaseColor = append([][4]uint8(nil), m.FaceBaseColor...)
+	}
+	return &c
+}
+
+// ScaleModel multiplies every vertex by s in place. No-op for s == 1.
+func ScaleModel(m *LoadedModel, s float32) {
+	if s == 1 {
+		return
+	}
+	for i, v := range m.Vertices {
+		m.Vertices[i] = [3]float32{v[0] * s, v[1] * s, v[2] * s}
+	}
+}
+
+// InflateAlongNormals returns a clone of m with each vertex displaced by
+// offset along its area-weighted vertex normal. Used to grow the
+// color-sampling mesh so it matches an adjusted (e.g. alpha-wrapped) mesh's
+// surface, preventing color-sampling clumps at convex edges of the original.
+func InflateAlongNormals(m *LoadedModel, offset float32) *LoadedModel {
+	if offset == 0 {
+		return m
+	}
+	normals := make([][3]float64, len(m.Vertices))
+	for _, f := range m.Faces {
+		a := m.Vertices[f[0]]
+		b := m.Vertices[f[1]]
+		c := m.Vertices[f[2]]
+		ux := float64(b[0] - a[0])
+		uy := float64(b[1] - a[1])
+		uz := float64(b[2] - a[2])
+		vx := float64(c[0] - a[0])
+		vy := float64(c[1] - a[1])
+		vz := float64(c[2] - a[2])
+		// Cross product magnitude == 2 * area, so this is area-weighted.
+		nx := uy*vz - uz*vy
+		ny := uz*vx - ux*vz
+		nz := ux*vy - uy*vx
+		for _, vi := range f {
+			normals[vi][0] += nx
+			normals[vi][1] += ny
+			normals[vi][2] += nz
+		}
+	}
+	c := CloneForEdit(m)
+	o := float64(offset)
+	for i, v := range c.Vertices {
+		n := normals[i]
+		l := n[0]*n[0] + n[1]*n[1] + n[2]*n[2]
+		if l < 1e-20 {
+			continue
+		}
+		inv := o / math.Sqrt(l)
+		c.Vertices[i] = [3]float32{
+			v[0] + float32(n[0]*inv),
+			v[1] + float32(n[1]*inv),
+			v[2] + float32(n[2]*inv),
+		}
+	}
+	return c
+}
+
 // LoadGLB loads a GLB file and returns a LoadedModel.
-func LoadGLB(path string, scale float32, objectIndex int) (*LoadedModel, error) {
+func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 	doc, err := gltf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening GLB: %w", err)
@@ -446,15 +524,9 @@ func LoadGLB(path string, scale float32, objectIndex int) (*LoadedModel, error) 
 		appendPrim(pd, int32(nTex)) // sentinel
 	}
 
-	// Apply Y-up to Z-up transform and scale.
-	// GLTF: Y-up; slicers: Z-up.
-	// Transform: x'=x*scale, y'=-z*scale, z'=y*scale
+	// Apply Y-up to Z-up transform. GLTF: Y-up; slicers: Z-up.
 	for i, v := range allVerts {
-		allVerts[i] = [3]float32{
-			v[0] * scale,
-			-v[2] * scale,
-			v[1] * scale,
-		}
+		allVerts[i] = [3]float32{v[0], -v[2], v[1]}
 	}
 
 	// Deduplicate vertices by (position, UV, color) tuple. Vertices at UV seams

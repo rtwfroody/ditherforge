@@ -3,6 +3,7 @@ name: Build and Release
 on:
   push:
     branches: [main]
+  pull_request:
 
 permissions:
   contents: write
@@ -10,20 +11,24 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             platform: linux-amd64
-            wails_flags: "-tags webkit2_41,draco"
+            wails_flags: "-tags webkit2_41,draco,cgal"
             cli_targets: "linux/amd64 linux/arm64"
+            cgal_cli_targets: "linux/amd64"
           - os: windows-latest
             platform: windows-amd64
-            wails_flags: ""
+            wails_flags: "-tags draco,cgal"
             cli_targets: "windows/amd64"
+            cgal_cli_targets: "windows/amd64"
           - os: macos-latest
             platform: macos-universal
-            wails_flags: "-platform darwin/universal"
+            wails_flags: ""
             cli_targets: "darwin/amd64 darwin/arm64"
+            cgal_cli_targets: "darwin/arm64"
 
     runs-on: ${{ matrix.os }}
 
@@ -43,7 +48,53 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config libcgal-dev libgmp-dev libmpfr-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cgal gmp mpfr
+
+      - name: Restore draco-c cache
+        if: runner.os == 'macOS'
+        id: draco-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/draco-c-install
+          key: draco-c-macos-arm64-v1
+
+      - name: Build draco-c for arm64
+        if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/qmuntal/draco-c.git /tmp/draco-c
+          cmake -S /tmp/draco-c -B /tmp/draco-c/build \
+            -DDRACO_POINT_CLOUD_COMPRESSION=ON \
+            -DDRACO_MESH_COMPRESSION=ON \
+            -DDRACO_STANDARD_EDGEBREAKER=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/draco-c/build --config Release
+          mkdir -p /tmp/draco-c-install/lib
+          cp /tmp/draco-c/build/libdraco_c.a /tmp/draco-c-install/lib/
+
+      - name: Save draco-c cache
+        if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/draco-c-install
+          key: draco-c-macos-arm64-v1
+
+      - name: Install draco-c
+        if: runner.os == 'macOS'
+        run: |
+          sudo mkdir -p /usr/local/lib
+          sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr
+          echo "CGO_CXXFLAGS=-O3 -DNDEBUG -std=c++17 -Wa,-mbig-obj -IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-static C:/msys64/mingw64/lib/libmpfr.a C:/msys64/mingw64/lib/libgmp.a" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
@@ -56,12 +107,58 @@ jobs:
       # --- GUI binary ---
 
       - name: Build GUI
+        if: runner.os != 'macOS'
         shell: bash
         run: wails build ${{ matrix.wails_flags }}
 
+      - name: Build GUI (macOS universal with CGAL on arm64)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Build arm64 with CGAL and Draco linked in.
+          # customenv tells draco-go to use our system libdraco_c instead of its bundled one.
+          CGO_LDFLAGS="-L/usr/local/lib -ldraco_c -lstdc++ -lm" wails build -platform darwin/arm64 -tags customenv,draco,cgal
+          cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-arm64
+
+          # Build amd64 without CGAL (no cross-compiled GMP/MPFR available).
+          wails build -platform darwin/amd64
+          cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-amd64
+
+          # Combine into universal binary inside the .app bundle.
+          lipo -create -output build/bin/ditherforge.app/Contents/MacOS/ditherforge \
+            ditherforge-gui-arm64 ditherforge-gui-amd64
+          rm ditherforge-gui-arm64 ditherforge-gui-amd64
+
+          # Verify no Homebrew dylib dependencies leaked into the binary.
+          if otool -L build/bin/ditherforge.app/Contents/MacOS/ditherforge | grep -q /opt/homebrew; then
+            echo "::error::Binary still links against Homebrew dylibs"
+            otool -L build/bin/ditherforge.app/Contents/MacOS/ditherforge
+            exit 1
+          fi
+
+
       # --- CLI binaries ---
 
-      - name: Build CLI
+      - name: Build CLI (with CGAL)
+        shell: bash
+        run: |
+          for target in ${{ matrix.cgal_cli_targets }}; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            TAGS="draco,cgal"
+            EXTRA_LDFLAGS=""
+            if [ "$(uname)" = "Darwin" ]; then
+              TAGS="customenv,draco,cgal"
+              EXTRA_LDFLAGS="-L/usr/local/lib -ldraco_c -lstdc++ -lm"
+            fi
+            echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL and Draco)..."
+            CGO_ENABLED=1 CGO_LDFLAGS="${CGO_LDFLAGS} ${EXTRA_LDFLAGS}" GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -tags "$TAGS" -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+          done
+
+      - name: Build CLI (without CGAL, cross-compile)
         shell: bash
         run: |
           for target in ${{ matrix.cli_targets }}; do
@@ -69,9 +166,14 @@ jobs:
             GOARCH="${target#*/}"
             EXT=""
             if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-            echo "Building CLI for ${GOOS}/${GOARCH}..."
+            OUT="ditherforge-cli-${GOOS}-${GOARCH}${EXT}"
+            if [ -f "$OUT" ]; then
+              echo "Skipping ${GOOS}/${GOARCH} (already built with CGAL)"
+              continue
+            fi
+            echo "Building CLI for ${GOOS}/${GOARCH} (no CGAL)..."
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+              go build -o "$OUT" ./cmd/ditherforge
           done
 
       # --- Smoke test (Linux only) ---
@@ -80,6 +182,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ./ditherforge-cli-linux-amd64 --version
+          go test -tags cgal -timeout 2m ./internal/alphawrap/...
           go test -timeout 2m ./internal/...
 
       # --- Package ---
@@ -130,13 +233,17 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          # GUI: create DMG from .app bundle
+          # GUI: create DMG with app bundle and getting-started doc
+          mkdir -p dmg-staging
+          cp -R build/bin/ditherforge.app dmg-staging/
+          cp build/macos-readme.html "dmg-staging/Getting Started.html"
           hdiutil create -volname "DitherForge" \
-            -srcfolder build/bin/ditherforge.app \
+            -srcfolder dmg-staging \
             -ov -format UDZO \
             "ditherforge-${VERSION}-macos-universal.dmg"
+          rm -rf dmg-staging
 
-          # CLI: universal binary via lipo, then tar.gz
+          # CLI: universal binary via lipo, sign, then tar.gz
           lipo -create -output ditherforge-cli \
             ditherforge-cli-darwin-amd64 \
             ditherforge-cli-darwin-arm64
@@ -156,6 +263,7 @@ jobs:
             ditherforge-*.dmg
 
   release:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     steps:

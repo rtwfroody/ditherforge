@@ -89,7 +89,7 @@ func voxelizeRegion(
 // colorCells samples colors for all keys in cellSet and returns ActiveCells.
 func colorCells(
 	ctx context.Context,
-	model *loader.LoadedModel,
+	colorModel *loader.LoadedModel,
 	si *voxel.SpatialIndex,
 	cellSet map[voxel.CellKey]struct{},
 	p regionParams,
@@ -126,7 +126,7 @@ func colorCells(
 		wg.Add(1)
 		go func(workerIdx int, keys []voxel.CellKey) {
 			defer wg.Done()
-			buf := voxel.NewSearchBuf(len(model.Faces))
+			buf := voxel.NewSearchBuf(len(colorModel.Faces))
 			local := make([]voxel.ActiveCell, 0, len(keys))
 			for i, k := range keys {
 				if i%1000 == 0 && ctx.Err() != nil {
@@ -139,7 +139,7 @@ func colorCells(
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
 				rgba := voxel.SampleNearestColor(
 					[3]float32{cx, cy, cz},
-					model, si, colorRadius, buf, decals)
+					colorModel, si, colorRadius, buf, decals)
 				if rgba[3] < 128 {
 					continue
 				}
@@ -176,10 +176,15 @@ type TwoGridResult struct {
 }
 
 // VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size for
-// layer 0 and upperSize for layers 1+.
-func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) (*TwoGridResult, error) {
+// layer 0 and upperSize for layers 1+. Geometry cells are marked using
+// model; colors are sampled from colorModel. Pass the same model twice if
+// the caller has no separate color mesh.
+func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) (*TwoGridResult, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("empty model")
+	}
+	if colorModel == nil {
+		colorModel = model
 	}
 
 	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
@@ -199,7 +204,7 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 	maxV[2] += zPad
 
 	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
-	si := voxel.NewSpatialIndex(model, maxCellSize*2)
+	si := voxel.NewSpatialIndex(colorModel, maxCellSize*2)
 
 	tVoxelize := time.Now()
 
@@ -235,11 +240,11 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 	tracker.StageStart("Coloring cells", true, totalCells)
 	var counter atomic.Int64
 
-	cells0, err := colorCells(ctx, model, si, cellSet0, p0, tracker, &counter, decals)
+	cells0, err := colorCells(ctx, colorModel, si, cellSet0, p0, tracker, &counter, decals)
 	if err != nil {
 		return nil, err
 	}
-	cells1, err := colorCells(ctx, model, si, cellSet1, regionParams{
+	cells1, err := colorCells(ctx, colorModel, si, cellSet1, regionParams{
 		Grid: 1, CellSize: upperSize, LayerH: layerH,
 		MinV: minV, NCols: nCols1, NRows: nRows1,
 		LayerLo: 1, LayerHi: nLayers - 1,
@@ -271,10 +276,15 @@ func VoxelizeTwoGrids(ctx context.Context, model *loader.LoadedModel, layer0Size
 	}, nil
 }
 
-// Voxelize performs voxelization with a single uniform cell size.
-func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
+// Voxelize performs voxelization with a single uniform cell size. Geometry
+// cells are marked using model; colors are sampled from colorModel. Pass
+// the same model twice if the caller has no separate color mesh.
+func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) ([]voxel.ActiveCell, map[voxel.CellKey]int, [3]float32, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("empty model")
+	}
+	if colorModel == nil {
+		colorModel = model
 	}
 
 	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
@@ -293,7 +303,7 @@ func Voxelize(ctx context.Context, model *loader.LoadedModel, cellSize, layerH f
 	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
 	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
 
-	si := voxel.NewSpatialIndex(model, cellSize*2)
+	si := voxel.NewSpatialIndex(colorModel, cellSize*2)
 
 	tVoxelize := time.Now()
 	p := regionParams{

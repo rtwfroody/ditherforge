@@ -83,10 +83,12 @@
   let noSimplify = $state(false);
   let uniformGrid = $state(false);
   let stats = $state(false);
+  let alphaWrap = $state(false);
+  let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
+  let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
   let stickers = $state<StickerUI[]>([]);
   let placingStickerIndex = $state(-1);
   const placingSticker = $derived(placingStickerIndex >= 0 ? stickers[placingStickerIndex] ?? null : null);
-  let previewScale = $state(1); // set when input-mesh event includes it
 
   // Recent files (persisted in localStorage).
   const MAX_RECENT = 10;
@@ -235,10 +237,15 @@
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
-  EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number }) => {
+  EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number; extentMM?: number }) => {
     if (event.gen < latestGen) return;
     inputMeshUrl = event.url;
-    if (event.previewScale) previewScale = event.previewScale;
+    if (event.extentMM !== undefined && (nativeExtentMM === null || !approxEqual(nativeExtentMM, event.extentMM))) {
+      nativeExtentMM = event.extentMM;
+    }
+    if (event.previewScale !== undefined) {
+      applyPreviewScale(event.previewScale);
+    }
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
@@ -347,7 +354,8 @@
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
-          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats];
+          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats,
+          alphaWrap, alphaWrapAlpha, alphaWrapOffset, reloadSeq];
     if (!initialized) {
       initialized = true;
       return;
@@ -393,11 +401,15 @@
 
   function handleStickerPlace(point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) {
     if (placingStickerIndex < 0 || placingStickerIndex >= stickers.length) return;
-    // Convert from preview-scaled coordinates to pipeline coordinates.
+    // Convert from preview-scaled coordinates to pipeline coordinates. Use
+    // calibratedPreviewScale so the new sticker lands in the same frame as
+    // existing stickers, even if knobs were just changed and the backend
+    // hasn't yet re-run the pipeline.
+    const ps = calibratedPreviewScale ?? 1;
     const unscaled: [number, number, number] = [
-      point[0] / previewScale,
-      point[1] / previewScale,
-      point[2] / previewScale,
+      point[0] / ps,
+      point[1] / ps,
+      point[2] / ps,
     ];
     stickers[placingStickerIndex] = {
       ...stickers[placingStickerIndex],
@@ -408,6 +420,86 @@
     stickers = stickers;
     placingStickerIndex = -1;
   }
+
+  // Sticker coords live in pipeline-scaled units. The pipeline's previewScale
+  // (= unitScale/totalScale, emitted by the backend on each input-mesh) is
+  // the single scale sticker coords are calibrated against. When it changes,
+  // we rescale stickers by the inverse ratio. null means "sticker coords
+  // carry no known calibration — adopt whatever we next observe/predict,
+  // without rescaling" (set on fresh load and applySettings, since saved
+  // coords are consistent with the accompanying knobs).
+  let calibratedPreviewScale: number | null = $state(null);
+  // Native max extent of the loaded model in mm (scale=1.0, size=unset).
+  // Reported by the backend; enables predicting previewScale synchronously
+  // so sticker rescales happen on knob change rather than after pipeline re-run.
+  let nativeExtentMM: number | null = $state(null);
+
+  // predictPreviewScale algebraically mirrors backend's `unitScale/totalScale`.
+  // Values match within float32 precision; see SCALE_EPS for the numerical slack.
+  //   size mode:  totalScale = Size/nativeExtentFile
+  //               previewScale = unitScale*nativeExtentFile/Size = extentMM/Size
+  //   scale mode: totalScale = unitScale*Scale → previewScale = 1/Scale
+  // Returns null when inputs are incomplete (in size mode, when extentMM is
+  // not yet known — typical just after load).
+  function predictPreviewScale(mode: 'size' | 'scale', sizeStr: string, scaleStr: string): number | null {
+    if (mode === 'size') {
+      if (nativeExtentMM === null || nativeExtentMM <= 0) return null;
+      const s = parseFloat(sizeStr);
+      if (!isFinite(s) || s <= 0) return null;
+      return nativeExtentMM / s;
+    }
+    const k = parseFloat(scaleStr);
+    if (!isFinite(k) || k <= 0) return null;
+    return 1 / k;
+  }
+
+  // Tolerance for treating two previewScales (or extents) as equal. Backend
+  // reports float32 values; frontend predictions go through a different
+  // arithmetic path, so exact equality is unreliable. Without a tolerance,
+  // float-roundoff micro-rescales would retrigger the pipeline in a loop.
+  const SCALE_EPS = 1e-5;
+  function approxEqual(a: number, b: number) {
+    const d = Math.abs(a - b);
+    const m = Math.max(Math.abs(a), Math.abs(b));
+    return d <= SCALE_EPS * (m > 0 ? m : 1);
+  }
+
+  // Move sticker calibration to newPS. If uncalibrated (null) adopt. If
+  // already at newPS within tolerance, do nothing (don't overwrite, to avoid
+  // waking up reactive readers for a no-op). Otherwise rescale stickers by
+  // the totalScale ratio (= oldPS/newPS) and update the calibration.
+  function applyPreviewScale(newPS: number) {
+    const cur = calibratedPreviewScale;
+    if (cur === null) {
+      calibratedPreviewScale = newPS;
+      return;
+    }
+    if (approxEqual(cur, newPS)) return;
+    const ratio = cur / newPS;
+    if (stickers.some(s => s.center !== null)) {
+      stickers = stickers.map(s => s.center ? {
+        ...s,
+        center: [s.center[0] * ratio, s.center[1] * ratio, s.center[2] * ratio] as [number, number, number],
+        scale: s.scale * ratio,
+      } : s);
+    }
+    calibratedPreviewScale = newPS;
+  }
+
+  // Synchronous rescale on any knob change: if we can predict the new
+  // previewScale, apply it immediately so stickers track the knobs without
+  // waiting for the backend pipeline. Otherwise the input-mesh handler will
+  // catch up with the authoritative value.
+  //
+  // Termination: applyPreviewScale writes calibratedPreviewScale, which is
+  // read inside this effect (transitively, via applyPreviewScale → cur read).
+  // That re-triggers the effect once; on re-entry predictPreviewScale returns
+  // the same p, applyPreviewScale's approxEqual guard fires, no write occurs,
+  // and the effect stops.
+  $effect(() => {
+    const p = predictPreviewScale(sizeMode, sizeValue, scaleValue);
+    if (p !== null) applyPreviewScale(p);
+  });
 
   let reloadSeq = $state(0);
   let objectIndex = $state(-1); // -1 = all objects, >=0 = specific object
@@ -448,6 +540,8 @@
     // Warp pins reference colors sampled from the previous model; clear too.
     stickers = [];
     placingStickerIndex = -1;
+    calibratedPreviewScale = null;
+    nativeExtentMM = null;
     warpPins = [];
     pickingPinIndex = -1;
     reloadSeq++;
@@ -456,10 +550,8 @@
     settingsPath = '';
     DefaultSettingsPath(path).then(p => settingsPath = p).catch(() => {});
     addRecentFile(path);
-    // Force a pipeline run even if the path didn't change (file on disk may
-    // have changed). The $effect won't fire when inputFile is unchanged, so
-    // schedule explicitly.
-    scheduleProcess(0);
+    // The $effect tracks reloadSeq, so bumping it above ensures the pipeline
+    // runs even when the path is unchanged (file on disk may have changed).
   }
 
   // Reset the camera pose whenever the input model changes — no matter
@@ -504,10 +596,20 @@
       noSimplify,
       uniformGrid,
       stats,
+      alphaWrap,
+      alphaWrapAlpha: String(alphaWrapAlpha),
+      alphaWrapOffset: String(alphaWrapOffset),
     };
   }
 
   function applySettings(s: any) {
+    // Saved sticker coords match the saved size/scale settings. Clear
+    // calibration so the next prediction/event is adopted without rescaling.
+    // Also clear the cached extent: if this settings file points at a
+    // different input model, the old extent would produce a bogus prediction
+    // before the backend replies with the true extent.
+    calibratedPreviewScale = null;
+    nativeExtentMM = null;
     if (s.inputFile !== undefined) inputFile = s.inputFile;
     objectIndex = s.objectIndex ?? -1;
     if (s.sizeMode !== undefined) sizeMode = s.sizeMode;
@@ -556,6 +658,9 @@
     if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
     if (s.uniformGrid !== undefined) uniformGrid = s.uniformGrid;
     if (s.stats !== undefined) stats = s.stats;
+    if (s.alphaWrap !== undefined) alphaWrap = s.alphaWrap;
+    if (s.alphaWrapAlpha !== undefined) alphaWrapAlpha = s.alphaWrapAlpha;
+    if (s.alphaWrapOffset !== undefined) alphaWrapOffset = s.alphaWrapOffset;
   }
 
   async function handleSave() {
@@ -711,6 +816,9 @@
       NoMerge: noMerge,
       NoSimplify: noSimplify,
       UniformGrid: uniformGrid,
+      AlphaWrap: alphaWrap,
+      AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
+      AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
       Force: force,
       ReloadSeq: reloadSeq,
       ObjectIndex: objectIndex,
@@ -1088,6 +1196,31 @@
                 Stats
               </label>
             </div>
+
+            <div class="space-y-2 pt-2 border-t">
+              <label class="flex items-center gap-2 text-sm font-medium">
+                <Checkbox bind:checked={alphaWrap} />
+                Alpha-wrap (clean geometry for 3D printing)
+              </label>
+              {#if alphaWrap}
+                <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground">Alpha (mm)</span>
+                    <input type="number" step="0.1" min="0"
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                           class="h-9 rounded border bg-background px-2"
+                           bind:value={alphaWrapAlpha} />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground">Offset (mm)</span>
+                    <input type="number" step="0.01" min="0"
+                           placeholder="auto (alpha / 30)"
+                           class="h-9 rounded border bg-background px-2"
+                           bind:value={alphaWrapOffset} />
+                  </label>
+                </div>
+              {/if}
+            </div>
           </div>
         </details>
       </Card.Content>
@@ -1107,7 +1240,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * previewScale} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
+      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />

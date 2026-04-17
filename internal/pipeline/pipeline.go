@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/alphawrap"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
@@ -53,6 +54,9 @@ type Options struct {
 	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
 	Stickers       []Sticker `json:"Stickers,omitempty"`
 	ObjectIndex    int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
+	AlphaWrap       bool    // enable CGAL Alpha_wrap_3 post-load mesh cleanup
+	AlphaWrapAlpha  float32 // mm; 0 = auto (5 × NozzleDiameter)
+	AlphaWrapOffset float32 // mm; 0 = auto (alpha / 30)
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
@@ -76,7 +80,7 @@ type WarpPin struct {
 
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
-	OnInputMesh func(*MeshData, float32) // mesh data and preview scale
+	OnInputMesh func(*MeshData, float32, float32) // mesh, preview scale, native extent mm
 	OnPalette   func([][3]uint8, []string)
 	Progress    progress.Tracker
 }
@@ -147,7 +151,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Extract callbacks, using safe defaults for nil.
-	var onInputMesh func(*MeshData, float32)
+	var onInputMesh func(*MeshData, float32, float32)
 	var onPalette func([][3]uint8, []string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
@@ -184,9 +188,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	lo := cache.getLoad()
 
-	// Force check (between load and voxelize).
+	// Force check (between load and voxelize). Use the original (unwrapped)
+	// mesh — the wrap inflates extents by `offset` on every side.
 	if !opts.Force {
-		ext := modelMaxExtent(lo.Model)
+		ext := modelMaxExtent(lo.ColorModel)
 		if ext > 300 {
 			return &ProcessResult{
 				NeedsForce:    true,
@@ -236,7 +241,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			}
 			mesh = &scaled
 		}
-		onInputMesh(mesh, lo.PreviewScale)
+		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM)
 	}
 
 	// Stage 3: Voxelize (uses decals from sticker stage)
@@ -334,7 +339,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Build output preview mesh from merge result + palette.
 	// Scale vertices to match the preview's coordinate space so both
 	// viewers use the same scale.
-	outModel := buildOutputModel(lo.Model, mo)
+	// Use ColorModel as the texture source — shell geometry comes from mo;
+	// only Textures is read from the source, and the wrapped mesh has none.
+	outModel := buildOutputModel(lo.ColorModel, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
 	if lo.PreviewScale != 1 {
 		for i := range outputMesh.Vertices {
@@ -400,7 +407,7 @@ func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int,
 		return 0, fmt.Errorf("pipeline has not been run yet")
 	}
 
-	outModel := buildOutputModel(lo.Model, mo)
+	outModel := buildOutputModel(lo.ColorModel, mo)
 
 	fmt.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
@@ -440,32 +447,39 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	unitScale := unitScaleForExt(inputExt)
 	scale := unitScale * opts.Scale
 
-	fmt.Printf("Loading %s...", opts.Input)
-	tLoad := time.Now()
-	model, err := loadModel(opts.Input, scale, opts.ObjectIndex)
-	if err != nil {
-		return fmt.Errorf("loading %s: %w", inputExt, err)
+	raw := cache.getRaw(opts)
+	if raw == nil {
+		fmt.Printf("Loading %s...", opts.Input)
+		tLoad := time.Now()
+		loaded, err := loadModel(opts.Input, opts.ObjectIndex)
+		if err != nil {
+			return fmt.Errorf("loading %s: %w", inputExt, err)
+		}
+		fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(loaded.Vertices), len(loaded.Faces), time.Since(tLoad).Seconds())
+		cache.setRaw(opts, loaded)
+		raw = loaded
 	}
-	fmt.Printf(" %d vertices, %d faces in %.1fs\n", len(model.Vertices), len(model.Faces), time.Since(tLoad).Seconds())
+	// Work on a clone so scale/normalize/base-color don't mutate the cached raw.
+	model := loader.CloneForEdit(raw)
 
 	// Track the total scale applied so we can convert output mesh
 	// vertices back to preview scale (which uses unitScale only).
 	totalScale := scale
 
-	// Auto-scale to --size if specified.
+	// Auto-scale to --size if specified: fold the size-correction factor into
+	// totalScale so we do one in-place vertex scale below.
 	if opts.Size != nil {
-		ext := modelMaxExtent(model)
+		ext := modelMaxExtent(model) * scale
 		if ext != *opts.Size {
-			rescale := *opts.Size / ext
-			totalScale = scale * rescale
-			fmt.Printf("  Rescaling to %.0f mm...", *opts.Size)
-			tRescale := time.Now()
-			model, err = loadModel(opts.Input, totalScale, opts.ObjectIndex)
-			if err != nil {
-				return fmt.Errorf("loading %s (rescaled): %w", inputExt, err)
-			}
-			fmt.Printf(" done in %.1fs\n", time.Since(tRescale).Seconds())
+			totalScale = scale * (*opts.Size / ext)
 		}
+	}
+
+	if totalScale != 1 {
+		fmt.Printf("  Scaling by %g...", totalScale)
+		tScale := time.Now()
+		loader.ScaleModel(model, totalScale)
+		fmt.Printf(" done in %.1fms\n", float64(time.Since(tScale))/float64(time.Millisecond))
 	}
 
 	// Normalize Z so the model bottom sits at z=0. This ensures the
@@ -484,10 +498,58 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 		return ctx.Err()
 	}
 
+	// Native extent in mm: modelMaxExtent(model) = nativeExtentFile * totalScale,
+	// so nativeExtentFile = modelMaxExtent/totalScale, and nativeExtentMM =
+	// nativeExtentFile * unitScale.
+	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
+
+	// Alpha-wrap (mesh cleanup for 3D printing). The wrapped mesh replaces
+	// the geometry used for voxelization, decimation, and clipping; the
+	// original is kept for color sampling and sticker placement.
+	geomModel := model
+	if opts.AlphaWrap {
+		alpha := opts.AlphaWrapAlpha
+		if alpha <= 0 {
+			alpha = opts.NozzleDiameter
+		}
+		offset := opts.AlphaWrapOffset
+		if offset <= 0 {
+			offset = alpha / 30
+		}
+		fmt.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm...", alpha, offset)
+		tWrap := time.Now()
+		wrapped, err := alphawrap.Wrap(model, alpha, offset)
+		if err != nil {
+			return fmt.Errorf("alpha-wrap: %w", err)
+		}
+		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
+			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
+		geomModel = wrapped
+	}
+
+	// If the geometry mesh grew relative to the original (e.g. alpha-wrap
+	// with positive offset), inflate the original along vertex normals so
+	// its surface roughly matches. The sample mesh is used only for per-voxel
+	// color lookup — grown cells project onto corresponding original surface
+	// points instead of clumping at convex edges.
+	sampleModel := model
+	if geomModel != model {
+		origExt := modelMaxExtent(model)
+		geomExt := modelMaxExtent(geomModel)
+		inflateOffset := (geomExt - origExt) / 2
+		if inflateOffset > 1e-4 {
+			fmt.Printf("  Inflating color-sample mesh by %.3f mm\n", inflateOffset)
+			sampleModel = loader.InflateAlongNormals(model, inflateOffset)
+		}
+	}
+
 	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
-		Model:        model,
+		Model:        geomModel,
+		ColorModel:   model,
+		SampleModel:  sampleModel,
 		InputMesh:    buildInputMeshData(model),
 		PreviewScale: unitScale / totalScale,
+		ExtentMM:     nativeExtentMM,
 	})
 	return nil
 }
@@ -523,7 +585,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 
 	fmt.Println("Voxelizing...")
 	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, layer0Size, upperSize, layerH, tracker, so.Decals)
+		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.SampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -538,7 +600,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		})
 	} else {
 		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, cellSize, layerH, tracker, so.Decals)
+		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, lo.SampleModel, cellSize, layerH, tracker, so.Decals)
 		if err != nil {
 			return fmt.Errorf("voxelize: %w", err)
 		}
@@ -561,7 +623,9 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		return nil
 	}
 
-	model := lo.Model
+	// Stickers are placed against the original mesh (which carries UVs and
+	// user-visible geometry), not the alpha-wrapped geometry.
+	model := lo.ColorModel
 	adj := voxel.BuildTriAdjacency(model)
 	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 
@@ -714,6 +778,34 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 		fmt.Printf("  Snapped cell colors toward palette by delta E %.1f\n", opts.ColorSnap)
 	}
 
+	// Put the most-used color in slot 0 so 3mf-aware slicers use it for
+	// infill (the first filament handles non-color regions). Only reorder
+	// when slot 0 is auto-selected: locked colors occupy slots 0..N-1, so
+	// slot 0 is unlocked iff there are no locked colors at all. Use a
+	// nearest-neighbor assignment as a cheap proxy for dither output —
+	// dithering rarely changes which color dominates. Runs after snap so
+	// the count reflects the cells dither will see.
+	if len(pcfg.Locked) == 0 && len(pal) > 1 {
+		assigns, err := voxel.AssignColors(ctx, cells, pal)
+		if err != nil {
+			return err
+		}
+		counts := make([]int, len(pal))
+		for _, a := range assigns {
+			counts[a]++
+		}
+		best := 0
+		for i := 1; i < len(counts); i++ {
+			if counts[i] > counts[best] {
+				best = i
+			}
+		}
+		if best != 0 {
+			pal[0], pal[best] = pal[best], pal[0]
+			palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
+		}
+	}
+
 	cache.setStage(StagePalette, stageKey(StagePalette, opts), &paletteOutput{
 		Palette:       pal,
 		PaletteLabels: palLabels,
@@ -746,7 +838,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 	}
 	fmt.Printf("  Dithered (%s) %d cells in %.1fs\n", ditherMode, len(cells), time.Since(tDither).Seconds())
 
-	// Print per-color usage, sorted by count descending.
+	// Per-color usage counts.
 	counts := make([]int, len(pal))
 	for _, a := range assignments {
 		counts[a]++

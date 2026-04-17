@@ -18,17 +18,17 @@ import (
 
 const defaultGray = 180
 
-// loadModel dispatches to the correct loader based on file extension and applies
-// the given scale factor.
-func loadModel(path string, scale float32, objectIndex int) (*loader.LoadedModel, error) {
+// loadModel dispatches to the correct loader based on file extension. Returned
+// vertices are in file units — apply loader.ScaleModel to convert to mm.
+func loadModel(path string, objectIndex int) (*loader.LoadedModel, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".glb":
-		return loader.LoadGLB(path, scale, objectIndex)
+		return loader.LoadGLB(path, objectIndex)
 	case ".3mf":
-		return loader.Load3MF(path, scale, objectIndex)
+		return loader.Load3MF(path, objectIndex)
 	case ".stl":
-		return loader.LoadSTL(path, scale, objectIndex)
+		return loader.LoadSTL(path, objectIndex)
 	default:
 		return nil, fmt.Errorf("unsupported format %q (use .glb, .3mf, or .stl)", ext)
 	}

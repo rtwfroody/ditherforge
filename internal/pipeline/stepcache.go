@@ -33,11 +33,20 @@ const (
 // re-run when settings change.
 type StageCache struct {
 	stages [numStages]*cachedStage
+	// raw caches the pristine parsed model (file units, no scale/normalize/
+	// base-color override). It survives Scale/Size/BaseColor changes so the
+	// file parse isn't repeated when only a scale-dependent knob moves.
+	raw *cachedRaw
 }
 
 type cachedStage struct {
 	key    uint64
 	output any
+}
+
+type cachedRaw struct {
+	key   uint64
+	model *loader.LoadedModel
 }
 
 // NewStageCache returns an empty stage cache.
@@ -48,9 +57,23 @@ func NewStageCache() *StageCache {
 // Per-stage output types.
 
 type loadOutput struct {
-	Model        *loader.LoadedModel
+	// Model is the geometry model used for voxelization, decimation, and
+	// clip-shell construction. When alpha-wrap is enabled, Model is the
+	// wrapped (cleaned) mesh; otherwise it aliases ColorModel.
+	Model *loader.LoadedModel
+	// ColorModel is the original loaded mesh, carrying UVs, textures, and
+	// materials. Used for color sampling and sticker placement. When
+	// alpha-wrap is disabled, Model == ColorModel.
+	ColorModel *loader.LoadedModel
+	// SampleModel is the mesh used for per-voxel color sampling. When the
+	// geometry mesh (Model) has been grown by a step like alpha-wrap,
+	// SampleModel is the original mesh inflated along vertex normals so its
+	// surface roughly matches Model's. Otherwise SampleModel aliases
+	// ColorModel.
+	SampleModel  *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
+	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
 }
 
 type voxelizeOutput struct {
@@ -115,13 +138,16 @@ type mergeOutput struct {
 // is type-safe and free of format-string ambiguities.
 
 type loadSettings struct {
-	Input       string
-	Scale       float32
-	HasSize     bool
-	Size        float32
-	ReloadSeq   int64
-	ObjectIndex int
-	BaseColor   string
+	Input           string
+	Scale           float32
+	HasSize         bool
+	Size            float32
+	ReloadSeq       int64
+	ObjectIndex     int
+	BaseColor       string
+	AlphaWrap       bool
+	AlphaWrapAlpha  float32
+	AlphaWrapOffset float32
 }
 
 type voxelizeSettings struct {
@@ -201,7 +227,16 @@ func writeInt(h hash.Hash64, i int) {
 func settingsForStage(stage StageID, opts Options) any {
 	switch stage {
 	case StageLoad:
-		s := loadSettings{Input: opts.Input, Scale: opts.Scale, ReloadSeq: opts.ReloadSeq, ObjectIndex: opts.ObjectIndex, BaseColor: opts.BaseColor}
+		s := loadSettings{
+			Input:           opts.Input,
+			Scale:           opts.Scale,
+			ReloadSeq:       opts.ReloadSeq,
+			ObjectIndex:     opts.ObjectIndex,
+			BaseColor:       opts.BaseColor,
+			AlphaWrap:       opts.AlphaWrap,
+			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
+			AlphaWrapOffset: opts.AlphaWrapOffset,
+		}
 		if opts.Size != nil {
 			s.HasSize = true
 			s.Size = *opts.Size
@@ -256,6 +291,9 @@ func stageKey(stage StageID, opts Options) uint64 {
 		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
 		writeString(h, v.BaseColor)
+		writeBool(h, v.AlphaWrap)
+		writeFloat32(h, v.AlphaWrapAlpha)
+		writeFloat32(h, v.AlphaWrapOffset)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
@@ -416,4 +454,28 @@ func (c *StageCache) getMerge() *mergeOutput {
 
 func (c *StageCache) setStage(stage StageID, key uint64, output any) {
 	c.stages[stage] = &cachedStage{key: key, output: output}
+}
+
+// rawLoadKey hashes only the inputs that affect the raw file parse.
+// Invariant: any Options field consumed by loadModel (preview.go) must appear
+// here, or the raw cache will return a stale model after that field changes.
+func rawLoadKey(opts Options) uint64 {
+	h := fnv.New64a()
+	writeString(h, opts.Input)
+	binary.Write(h, binary.LittleEndian, opts.ReloadSeq)
+	writeInt(h, opts.ObjectIndex)
+	return h.Sum64()
+}
+
+// getRaw returns the cached pristine model, or nil if the key has changed.
+func (c *StageCache) getRaw(opts Options) *loader.LoadedModel {
+	k := rawLoadKey(opts)
+	if c.raw == nil || c.raw.key != k {
+		return nil
+	}
+	return c.raw.model
+}
+
+func (c *StageCache) setRaw(opts Options, m *loader.LoadedModel) {
+	c.raw = &cachedRaw{key: rawLoadKey(opts), model: m}
 }

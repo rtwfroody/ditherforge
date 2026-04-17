@@ -62,6 +62,7 @@ type meshEvent struct {
 	Gen          int64   `json:"gen"`
 	URL          string  `json:"url"`
 	PreviewScale float32 `json:"previewScale,omitempty"`
+	ExtentMM     float32 `json:"extentMM,omitempty"` // native max extent in mm, for input-mesh
 }
 
 // NewApp creates a new App instance.
@@ -142,7 +143,9 @@ func (a *App) Export3MF() (string, error) {
 	defer a.mu.Unlock()
 
 	defaultName := "output.3mf"
+	defaultDir := ""
 	if a.lastOpts.Input != "" {
+		defaultDir = filepath.Dir(a.lastOpts.Input)
 		base := filepath.Base(a.lastOpts.Input)
 		ext := filepath.Ext(base)
 		stem := strings.TrimSuffix(base, ext)
@@ -154,8 +157,9 @@ func (a *App) Export3MF() (string, error) {
 	}
 
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
-		Title:           "Save Output",
-		DefaultFilename: defaultName,
+		Title:            "Save Output",
+		DefaultFilename:  defaultName,
+		DefaultDirectory: defaultDir,
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},
 		},
@@ -285,14 +289,14 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancelMu.Unlock()
 
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
-		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32) {
+		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
 			a.lastInputID = a.meshes.Store(mesh)
-			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale})
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale, ExtentMM: extentMM})
 		},
 		OnPalette: func(pal [][3]uint8, labels []string) {
 			colors := make([]map[string]string, len(pal))
@@ -529,24 +533,32 @@ type ColorSlotSetting struct {
 
 // Settings contains all user-configurable settings.
 type Settings struct {
-	InputFile           string             `json:"inputFile,omitempty"`
-	SizeMode            string             `json:"sizeMode"`
-	SizeValue           string             `json:"sizeValue"`
-	ScaleValue          string             `json:"scaleValue"`
-	NozzleDiameter      string             `json:"nozzleDiameter"`
-	LayerHeight         string             `json:"layerHeight"`
+	InputFile           string              `json:"inputFile,omitempty"`
+	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
+	// the frontend maps nil → -1 ("all objects"), which differs from 0 ("first object").
+	ObjectIndex         *int                `json:"objectIndex,omitempty"`
+	SizeMode            string              `json:"sizeMode"`
+	SizeValue           string              `json:"sizeValue"`
+	ScaleValue          string              `json:"scaleValue"`
+	NozzleDiameter      string              `json:"nozzleDiameter"`
+	LayerHeight         string              `json:"layerHeight"`
+	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
-	InventoryCollection string             `json:"inventoryCollection"`
-	Brightness          float64            `json:"brightness"`
-	Contrast            float64            `json:"contrast"`
-	Saturation          float64            `json:"saturation"`
-	WarpPins            []WarpPinSetting   `json:"warpPins"`
-	Stickers            []StickerSetting   `json:"stickers,omitempty"`
-	Dither              string             `json:"dither"`
-	ColorSnap           float64            `json:"colorSnap"`
-	NoMerge             bool               `json:"noMerge"`
-	NoSimplify          bool               `json:"noSimplify"`
-	Stats               bool               `json:"stats"`
+	InventoryCollection string              `json:"inventoryCollection"`
+	Brightness          float64             `json:"brightness"`
+	Contrast            float64             `json:"contrast"`
+	Saturation          float64             `json:"saturation"`
+	WarpPins            []WarpPinSetting    `json:"warpPins"`
+	Stickers            []StickerSetting    `json:"stickers,omitempty"`
+	Dither              string              `json:"dither"`
+	ColorSnap           float64             `json:"colorSnap"`
+	NoMerge             bool                `json:"noMerge"`
+	NoSimplify          bool                `json:"noSimplify"`
+	UniformGrid         bool                `json:"uniformGrid"`
+	Stats               bool                `json:"stats"`
+	AlphaWrap           bool                `json:"alphaWrap"`
+	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
+	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
 }
 
 // SaveSettings writes settings to the given path.
