@@ -101,8 +101,6 @@ jobs:
             exit 1
           fi
 
-          # Ad-hoc sign so macOS allows right-click → Open.
-          codesign --force --deep --sign - build/bin/ditherforge.app
 
       # --- CLI binaries ---
 
@@ -204,7 +202,6 @@ jobs:
           lipo -create -output ditherforge-cli \
             ditherforge-cli-darwin-amd64 \
             ditherforge-cli-darwin-arm64
-          codesign --force --sign - ditherforge-cli
           mkdir -p pkg
           cp ditherforge-cli pkg/
           cp README.md LICENSE pkg/
