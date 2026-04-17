@@ -133,7 +133,6 @@ export namespace main {
 	    colorSnap: number;
 	    noMerge: boolean;
 	    noSimplify: boolean;
-	    uniformGrid: boolean;
 	    stats: boolean;
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
@@ -164,7 +163,6 @@ export namespace main {
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
 	        this.noSimplify = source["noSimplify"];
-	        this.uniformGrid = source["uniformGrid"];
 	        this.stats = source["stats"];
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
@@ -288,7 +286,6 @@ export namespace pipeline {
 	    Dither: string;
 	    NoMerge: boolean;
 	    NoSimplify: boolean;
-	    UniformGrid: boolean;
 	    Size?: number;
 	    Force: boolean;
 	    ReloadSeq: number;
@@ -324,7 +321,6 @@ export namespace pipeline {
 	        this.Dither = source["Dither"];
 	        this.NoMerge = source["NoMerge"];
 	        this.NoSimplify = source["NoSimplify"];
-	        this.UniformGrid = source["UniformGrid"];
 	        this.Size = source["Size"];
 	        this.Force = source["Force"];
 	        this.ReloadSeq = source["ReloadSeq"];

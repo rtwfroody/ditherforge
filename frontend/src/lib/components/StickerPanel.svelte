@@ -2,6 +2,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Label } from '$lib/components/ui/label';
   import { Slider } from '$lib/components/ui/slider';
+  import HelpTip from '$lib/components/HelpTip.svelte';
   import { ImageIcon, TrashIcon, CrosshairIcon } from '@lucide/svelte';
 
   export type StickerUI = {
@@ -32,7 +33,12 @@
 
 <div class="space-y-3">
   <div class="flex items-center justify-between">
-    <Label>Stickers</Label>
+    <div class="flex items-center gap-1.5">
+      <Label>Stickers</Label>
+      <HelpTip>
+        Overlay images onto the model surface. Add an image, then click on the model to position it. Stickers are baked into the color output.
+      </HelpTip>
+    </div>
     <Button variant="outline" size="sm" onclick={onAdd}>
       <ImageIcon class="w-3.5 h-3.5 mr-1" />Add
     </Button>
@@ -77,7 +83,12 @@
 
       <div class="space-y-1">
         <div class="flex items-center justify-between">
-          <span class="text-xs">Scale</span>
+          <span class="text-xs flex items-center gap-1.5">
+            Scale
+            <HelpTip>
+              Size of the sticker on the model, in millimeters along its longest dimension.
+            </HelpTip>
+          </span>
           <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.scale.toFixed(1)} mm</span>
         </div>
         <Slider type="single" min={1} max={200} step={1} value={sticker.scale}
@@ -86,7 +97,12 @@
 
       <div class="space-y-1">
         <div class="flex items-center justify-between">
-          <span class="text-xs">Rotation</span>
+          <span class="text-xs flex items-center gap-1.5">
+            Rotation
+            <HelpTip>
+              Rotate the sticker around the surface normal at its placement point.
+            </HelpTip>
+          </span>
           <span class="text-[10px] text-muted-foreground w-8 text-right">{sticker.rotation}°</span>
         </div>
         <Slider type="single" min={0} max={360} step={1} value={sticker.rotation}
@@ -94,7 +110,12 @@
       </div>
 
       <div class="space-y-1">
-        <span class="text-xs">Mode</span>
+        <span class="text-xs flex items-center gap-1.5">
+          Mode
+          <HelpTip>
+            Unfold drapes the sticker over the surface (good for curved shapes). Projection stamps it from a single direction (good for flat faces, can stretch on curves).
+          </HelpTip>
+        </span>
         <div class="flex gap-3 text-xs">
           <label class="flex items-center gap-1">
             <input type="radio" name={"sticker-mode-" + i} value="unfold"
@@ -114,7 +135,12 @@
       {#if sticker.mode === 'unfold'}
         <div class="space-y-1">
           <div class="flex items-center justify-between">
-            <span class="text-xs">Surface bend limit</span>
+            <span class="text-xs flex items-center gap-1.5">
+              Surface bend limit
+              <HelpTip>
+                Maximum angle the sticker will wrap around sharp edges before stopping. 0 disables the limit (wraps freely).
+              </HelpTip>
+            </span>
             <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.maxAngle === 0 ? 'off' : sticker.maxAngle + '°'}</span>
           </div>
           <Slider type="single" min={0} max={180} step={5} value={sticker.maxAngle}

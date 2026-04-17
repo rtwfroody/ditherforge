@@ -3,6 +3,7 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import * as Select from '$lib/components/ui/select';
+  import type { Snippet } from 'svelte';
 
   let {
     value = $bindable(''),
@@ -11,6 +12,7 @@
     presets,
     unit,
     step,
+    help,
   }: {
     value: string;
     label: string;
@@ -18,13 +20,17 @@
     presets: { value: string; label: string }[];
     unit: string;
     step: number;
+    help?: Snippet;
   } = $props();
 
   let custom = $state(false);
 </script>
 
 <div class="space-y-2">
-  <Label for={id}>{label}</Label>
+  <div class="flex items-center gap-1.5">
+    <Label for={id}>{label}</Label>
+    {#if help}{@render help()}{/if}
+  </div>
   {#if custom}
     <div class="flex gap-2">
       <Input {id} bind:value type="number" {step} class="flex-1" />

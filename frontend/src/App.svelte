@@ -10,6 +10,8 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
+  import * as Tooltip from '$lib/components/ui/tooltip';
+  import HelpTip from '$lib/components/HelpTip.svelte';
   import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import PresetSelect from '$lib/components/PresetSelect.svelte';
@@ -81,7 +83,6 @@
   let colorSnap = $state(5);
   let noMerge = $state(false);
   let noSimplify = $state(false);
-  let uniformGrid = $state(false);
   let stats = $state(false);
   let alphaWrap = $state(false);
   let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
@@ -354,7 +355,7 @@
           brightness, contrast, saturation,
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
-          dither, colorSnap, noMerge, noSimplify, uniformGrid, stats,
+          dither, colorSnap, noMerge, noSimplify, stats,
           alphaWrap, alphaWrapAlpha, alphaWrapOffset, reloadSeq];
     if (!initialized) {
       initialized = true;
@@ -594,7 +595,6 @@
       colorSnap,
       noMerge,
       noSimplify,
-      uniformGrid,
       stats,
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
@@ -656,7 +656,6 @@
     if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
     if (s.noMerge !== undefined) noMerge = s.noMerge;
     if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
-    if (s.uniformGrid !== undefined) uniformGrid = s.uniformGrid;
     if (s.stats !== undefined) stats = s.stats;
     if (s.alphaWrap !== undefined) alphaWrap = s.alphaWrap;
     if (s.alphaWrapAlpha !== undefined) alphaWrapAlpha = s.alphaWrapAlpha;
@@ -815,7 +814,6 @@
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
-      UniformGrid: uniformGrid,
       AlphaWrap: alphaWrap,
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
       AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
@@ -891,6 +889,8 @@
   }
 </script>
 
+<Tooltip.Provider>
+
 <main class="h-screen flex flex-col">
   <!-- Menu bar -->
   <Menubar.Root class="rounded-none border-b border-t-0 border-x-0">
@@ -957,7 +957,7 @@
       <Card.Content class="pt-6 space-y-4">
         <!-- Core settings -->
         <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
-          <div class="flex items-center gap-4">
+          <div class="flex items-center gap-3">
             <label class="flex items-center gap-1.5 text-sm font-medium">
               <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
               Size (mm)
@@ -966,8 +966,16 @@
               <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
               Scale
             </label>
+            <HelpTip>
+              Size sets the longest dimension of the output in millimeters. Scale multiplies the model's native size.
+            </HelpTip>
           </div>
-          <span class="text-sm font-medium">Base color</span>
+          <div class="flex items-center gap-1.5">
+            <span class="text-sm font-medium">Base color</span>
+            <HelpTip>
+              Color used for faces that aren't covered by the model's texture. Pick one to override the model's default.
+            </HelpTip>
+          </div>
           {#if sizeMode === 'size'}
             <Input id="size" bind:value={sizeValue} type="number" step={1} />
           {:else}
@@ -1010,7 +1018,13 @@
               { value: '0.6', label: '0.6 mm' },
               { value: '0.8', label: '0.8 mm' },
             ]}
-          />
+          >
+            {#snippet help()}
+              <HelpTip>
+                Your printer's nozzle diameter. Sets the finest horizontal detail the output can represent.
+              </HelpTip>
+            {/snippet}
+          </PresetSelect>
           <PresetSelect
             bind:value={layerHeight}
             label="Layer height (mm)"
@@ -1025,7 +1039,13 @@
               { value: '0.24', label: '0.24 mm' },
               { value: '0.28', label: '0.28 mm' },
             ]}
-          />
+          >
+            {#snippet help()}
+              <HelpTip>
+                Vertical resolution of the print. Must match the layer height used when slicing.
+              </HelpTip>
+            {/snippet}
+          </PresetSelect>
         </div>
 
         <Separator />
@@ -1044,21 +1064,36 @@
         <div class="space-y-3">
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label>Brightness</Label>
+              <div class="flex items-center gap-1.5">
+                <Label>Brightness</Label>
+                <HelpTip>
+                  Shift the input texture lighter or darker before dithering.
+                </HelpTip>
+              </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
             </div>
             <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label>Contrast</Label>
+              <div class="flex items-center gap-1.5">
+                <Label>Contrast</Label>
+                <HelpTip>
+                  Stretch or compress the tonal range of the input texture before dithering.
+                </HelpTip>
+              </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
             </div>
             <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label>Saturation</Label>
+              <div class="flex items-center gap-1.5">
+                <Label>Saturation</Label>
+                <HelpTip>
+                  Make colors more vivid or closer to gray before dithering.
+                </HelpTip>
+              </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
             </div>
             <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
@@ -1081,7 +1116,12 @@
         <div class="space-y-4">
           <!-- Color palette grid -->
           <div class="space-y-2">
-            <Label>Palette</Label>
+            <div class="flex items-center gap-1.5">
+              <Label>Palette</Label>
+              <HelpTip>
+                Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
+              </HelpTip>
+            </div>
             <div class="grid grid-cols-4 gap-2">
               {#each colorSlots as slot, i}
                 {@const resolved = resolvedBySlot[i]}
@@ -1140,7 +1180,12 @@
 
           <!-- Remaining color source -->
           <div class="space-y-2">
-            <Label>Unlocked colors from</Label>
+            <div class="flex items-center gap-1.5">
+              <Label>Unlocked colors from</Label>
+              <HelpTip>
+                Filament collection the auto-picker draws from for unlocked palette slots. Manage collections from the Filaments menu.
+              </HelpTip>
+            </div>
             <CollectionSelect
               bind:selected={inventoryCollection}
               onchange={loadInventoryCollectionColors}
@@ -1150,7 +1195,12 @@
           <!-- Color snap -->
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label>Color snap (delta E)</Label>
+              <div class="flex items-center gap-1.5">
+                <Label>Color snap (delta E)</Label>
+                <HelpTip>
+                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                </HelpTip>
+              </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
             </div>
             <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} />
@@ -1165,7 +1215,12 @@
           <div class="mt-3 space-y-4">
             <div class="grid grid-cols-2 gap-4">
               <div class="space-y-2">
-                <Label for="dither">Dither mode</Label>
+                <div class="flex items-center gap-1.5">
+                  <Label for="dither">Dither mode</Label>
+                  <HelpTip>
+                    Algorithm used to blend palette colors across the surface. "dizzy" is the default ordered dither; "none" disables dithering entirely.
+                  </HelpTip>
+                </div>
                 <Select.Root type="single" bind:value={dither}>
                   <Select.Trigger class="w-full">
                     {dither || 'Select...'}
@@ -1182,18 +1237,23 @@
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noMerge} />
                 No merge
+                <HelpTip>
+                  Skip merging adjacent same-color voxels into larger regions. Produces more primitives but can preserve fine dither detail.
+                </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noSimplify} />
                 No simplify
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={uniformGrid} />
-                Uniform grid
+                <HelpTip>
+                  Skip mesh simplification. Keeps the raw per-voxel geometry, which is accurate but dramatically larger.
+                </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={stats} />
                 Stats
+                <HelpTip>
+                  Log summary statistics (triangle counts, color usage, timings) to the terminal.
+                </HelpTip>
               </label>
             </div>
 
@@ -1201,18 +1261,31 @@
               <label class="flex items-center gap-2 text-sm font-medium">
                 <Checkbox bind:checked={alphaWrap} />
                 Alpha-wrap (clean geometry for 3D printing)
+                <HelpTip>
+                  Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
+                </HelpTip>
               </label>
               {#if alphaWrap}
                 <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
                   <label class="flex flex-col gap-1">
-                    <span class="text-muted-foreground">Alpha (mm)</span>
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Alpha (mm)
+                      <HelpTip>
+                        Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
+                      </HelpTip>
+                    </span>
                     <input type="number" step="0.1" min="0"
                            placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
                            class="h-9 rounded border bg-background px-2"
                            bind:value={alphaWrapAlpha} />
                   </label>
                   <label class="flex flex-col gap-1">
-                    <span class="text-muted-foreground">Offset (mm)</span>
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Offset (mm)
+                      <HelpTip>
+                        How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
+                      </HelpTip>
+                    </span>
                     <input type="number" step="0.01" min="0"
                            placeholder="auto (alpha / 30)"
                            class="h-9 rounded border bg-background px-2"
@@ -1347,3 +1420,5 @@
   bind:open={objectPickerOpen}
   onSelect={onObjectSelected}
 />
+
+</Tooltip.Provider>

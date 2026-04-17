@@ -554,7 +554,6 @@ type Settings struct {
 	ColorSnap           float64             `json:"colorSnap"`
 	NoMerge             bool                `json:"noMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
-	UniformGrid         bool                `json:"uniformGrid"`
 	Stats               bool                `json:"stats"`
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`

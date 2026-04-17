@@ -83,7 +83,6 @@ type voxelizeOutput struct {
 	Layer0Size    float32
 	UpperSize     float32
 	LayerH        float32
-	TwoGrid       bool
 }
 
 type stickerOutput struct {
@@ -153,7 +152,6 @@ type loadSettings struct {
 type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
-	UniformGrid    bool
 }
 
 type stickerSettings struct {
@@ -243,7 +241,7 @@ func settingsForStage(stage StageID, opts Options) any {
 		}
 		return s
 	case StageVoxelize:
-		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight, UniformGrid: opts.UniformGrid}
+		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StageSticker:
 		return stickerSettings{Stickers: opts.Stickers}
 	case StageColorAdjust:
@@ -297,7 +295,6 @@ func stageKey(stage StageID, opts Options) uint64 {
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
-		writeBool(h, v.UniformGrid)
 	case stickerSettings:
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {

@@ -45,7 +45,6 @@ type Options struct {
 	Dither         string
 	NoMerge        bool
 	NoSimplify     bool
-	UniformGrid    bool
 	Size           *float32
 	Force          bool
 	ReloadSeq      int64 // bumped to force re-read of the same input file
@@ -581,39 +580,20 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	layer0Size := opts.NozzleDiameter * squarevoxel.Layer0CellScale
 	upperSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	layerH := opts.LayerHeight
-	twoGrid := !opts.UniformGrid
 
 	fmt.Println("Voxelizing...")
-	if twoGrid {
-		result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.SampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
-		if err != nil {
-			return fmt.Errorf("voxelize: %w", err)
-		}
-		cache.setStage(StageVoxelize, stageKey(StageVoxelize, opts), &voxelizeOutput{
-			Cells:         result.Cells,
-			CellAssignMap: result.CellAssignMap,
-			MinV:          result.MinV,
-			Layer0Size:    layer0Size,
-			UpperSize:     upperSize,
-			LayerH:        layerH,
-			TwoGrid:       true,
-		})
-	} else {
-		cellSize := layer0Size
-		cells, cellAssignMap, minV, err := squarevoxel.Voxelize(ctx, lo.Model, lo.SampleModel, cellSize, layerH, tracker, so.Decals)
-		if err != nil {
-			return fmt.Errorf("voxelize: %w", err)
-		}
-		cache.setStage(StageVoxelize, stageKey(StageVoxelize, opts), &voxelizeOutput{
-			Cells:         cells,
-			CellAssignMap: cellAssignMap,
-			MinV:          minV,
-			Layer0Size:    cellSize,
-			UpperSize:     cellSize,
-			LayerH:        layerH,
-			TwoGrid:       false,
-		})
+	result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.SampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
+	if err != nil {
+		return fmt.Errorf("voxelize: %w", err)
 	}
+	cache.setStage(StageVoxelize, stageKey(StageVoxelize, opts), &voxelizeOutput{
+		Cells:         result.Cells,
+		CellAssignMap: result.CellAssignMap,
+		MinV:          result.MinV,
+		Layer0Size:    layer0Size,
+		UpperSize:     upperSize,
+		LayerH:        layerH,
+	})
 	return nil
 }
 
@@ -824,12 +804,8 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 	var err error
 	switch ditherMode {
 	case "dizzy":
-		if vo.TwoGrid {
-			neighbors := voxel.BuildTwoGridNeighbors(cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
-			assignments, err = voxel.DitherWithNeighbors(ctx, cells, pal, neighbors)
-		} else {
-			assignments, err = voxel.DitherCellsDizzy(ctx, cells, pal)
-		}
+		neighbors := voxel.BuildTwoGridNeighbors(cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
+		assignments, err = voxel.DitherWithNeighbors(ctx, cells, pal, neighbors)
 	default:
 		assignments, err = voxel.AssignColors(ctx, cells, pal)
 	}
@@ -856,13 +832,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 
 	// Flood fill per grid, then merge patch maps.
 	tFlood := time.Now()
-	var patchMap map[voxel.CellKey]int
-	var numPatches int
-	if vo.TwoGrid {
-		patchMap, numPatches, err = floodFillTwoGrids(ctx, cells, assignments)
-	} else {
-		patchMap, numPatches, err = voxel.FloodFillPatches(ctx, cells, assignments)
-	}
+	patchMap, numPatches, err := floodFillTwoGrids(ctx, cells, assignments)
 	if err != nil {
 		return err
 	}
@@ -926,24 +896,15 @@ func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignment
 
 func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput) error {
 	tClip := time.Now()
-	var shellVerts [][3]float32
-	var shellFaces [][3]uint32
-	var shellAssignments []int32
-	var err error
-	if vo.TwoGrid {
-		cfg := voxel.TwoGridConfig{
-			MinV:       vo.MinV,
-			Layer0Size: vo.Layer0Size,
-			UpperSize:  vo.UpperSize,
-			LayerH:     vo.LayerH,
-			SeamZ:      vo.MinV[2] + 0.5*vo.LayerH,
-		}
-		shellVerts, shellFaces, shellAssignments, err = voxel.ClipMeshByPatchesTwoGrid(
-			ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg)
-	} else {
-		shellVerts, shellFaces, shellAssignments, err = voxel.ClipMeshByPatches(
-			ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, vo.MinV, vo.Layer0Size, vo.LayerH)
+	cfg := voxel.TwoGridConfig{
+		MinV:       vo.MinV,
+		Layer0Size: vo.Layer0Size,
+		UpperSize:  vo.UpperSize,
+		LayerH:     vo.LayerH,
+		SeamZ:      vo.MinV[2] + 0.5*vo.LayerH,
 	}
+	shellVerts, shellFaces, shellAssignments, err := voxel.ClipMeshByPatchesTwoGrid(
+		ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg)
 	if err != nil {
 		return fmt.Errorf("clip: %w", err)
 	}

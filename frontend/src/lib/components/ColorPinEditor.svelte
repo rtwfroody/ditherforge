@@ -6,6 +6,7 @@
   import * as Select from '$lib/components/ui/select';
   import { contrastColor } from '$lib/utils';
   import { collectionStore } from '$lib/stores/collections.svelte';
+  import HelpTip from '$lib/components/HelpTip.svelte';
   import { XIcon, PlusIcon, PipetteIcon } from '@lucide/svelte';
 
   type WarpPin = {
@@ -92,7 +93,12 @@
 
 <div class="space-y-2">
   <div class="flex items-center justify-between">
-    <Label>Color Pins</Label>
+    <div class="flex items-center gap-1.5">
+      <Label>Color Pins</Label>
+      <HelpTip>
+        Nudge a source color toward a specific filament to eliminate dither speckle in solid-color regions. Use this when a solid-color area is being dithered from multiple filaments and you'd rather shift the color slightly so it prints in just one.
+      </HelpTip>
+    </div>
     <Button variant="ghost" size="sm" onclick={addPin} class="h-6 px-2" disabled={pins.length >= MAX_PINS}>
       <PlusIcon class="h-3 w-3 mr-1" />Add
     </Button>
@@ -107,6 +113,9 @@
             class="w-6 h-6 rounded border shrink-0"
             style="background: {pin.sourceHex && /^#[0-9a-fA-F]{6}$/.test(pin.sourceHex) ? pin.sourceHex : '#888'};"
           ></div>
+          <HelpTip>
+            Source color on the input model to pin. Use the eyedropper to sample it from the model, or paste a hex value.
+          </HelpTip>
           <Button
             variant="ghost"
             size="sm"
@@ -132,9 +141,13 @@
           class="h-7 px-2 rounded border cursor-pointer flex items-center gap-1 text-xs shrink-0 {targetPickerIndex === i ? 'ring-2 ring-primary' : ''}"
           style="background: {pin.targetHex || '#888'}; color: {contrastColor(pin.targetHex || '#888')};"
           onclick={() => openTargetPicker(i)}
+          title="Target filament for this pin"
         >
           {pin.targetLabel || pin.targetHex || 'Pick...'}
         </button>
+        <HelpTip>
+          Filament to push the source color toward. Click to choose from a collection.
+        </HelpTip>
 
         <Button variant="ghost" size="sm" class="h-6 w-6 p-0 shrink-0" onclick={() => removePin(i)}>
           <XIcon class="h-3 w-3" />
@@ -143,7 +156,12 @@
 
       <!-- Strength slider -->
       <div class="flex items-center gap-2">
-        <span class="text-xs text-muted-foreground w-14 shrink-0">Reach</span>
+        <span class="text-xs text-muted-foreground w-14 shrink-0 flex items-center gap-1.5">
+          Reach
+          <HelpTip>
+            How broadly (in CIELAB color distance) this pin affects neighboring colors. Higher = more colors pulled toward the target; lower = only near-exact matches.
+          </HelpTip>
+        </span>
         <Slider
           type="single"
           min={1}
