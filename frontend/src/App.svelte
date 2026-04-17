@@ -8,7 +8,6 @@
   import * as Select from '$lib/components/ui/select';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import * as Dialog from '$lib/components/ui/dialog';
-  import { Separator } from '$lib/components/ui/separator';
   import { Slider } from '$lib/components/ui/slider';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import HelpTip from '$lib/components/HelpTip.svelte';
@@ -954,8 +953,12 @@
     <p class="text-sm text-muted-foreground mb-4">Convert textured 3D models to multi-material 3MF files</p>
 
     <Card.Root class="shrink-0">
-      <Card.Content class="pt-6 space-y-4">
-        <!-- Core settings -->
+      <Card.Content class="pt-6 space-y-6">
+        <!-- Model -->
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          <span>Model</span>
+          <div class="flex-1 h-px bg-border"></div>
+        </div>
         <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
           <div class="flex items-center gap-3">
             <label class="flex items-center gap-1.5 text-sm font-medium">
@@ -1048,70 +1051,6 @@
           </PresetSelect>
         </div>
 
-        <Separator />
-
-        <!-- Stickers -->
-        <StickerPanel
-          bind:stickers={stickers}
-          bind:placingIndex={placingStickerIndex}
-          onAdd={addSticker}
-          onRemove={removeSticker}
-        />
-
-        <Separator />
-
-        <!-- Color adjustments -->
-        <div class="space-y-3">
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Brightness</Label>
-                <HelpTip>
-                  Shift the input texture lighter or darker before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} />
-          </div>
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Contrast</Label>
-                <HelpTip>
-                  Stretch or compress the tonal range of the input texture before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} />
-          </div>
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Saturation</Label>
-                <HelpTip>
-                  Make colors more vivid or closer to gray before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
-          </div>
-        </div>
-
-        <Separator />
-
-        <!-- Color pins -->
-        <ColorPinEditor
-          bind:pins={warpPins}
-          loadCollectionColors={GetCollectionColors}
-          bind:pickingIndex={pickingPinIndex}
-          onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
-        />
-
-        <Separator />
-
         <!-- Alpha-wrap -->
         <div class="space-y-2">
           <label class="flex items-center gap-2 text-sm font-medium">
@@ -1151,18 +1090,95 @@
           {/if}
         </div>
 
-        <Separator />
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          <span>Stickers</span>
+          <div class="flex-1 h-px bg-border"></div>
+        </div>
 
-        <!-- Color settings -->
+        <StickerPanel
+          bind:stickers={stickers}
+          bind:placingIndex={placingStickerIndex}
+          onAdd={addSticker}
+          onRemove={removeSticker}
+        />
+
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          <span>Color</span>
+          <div class="flex-1 h-px bg-border"></div>
+        </div>
+
+        <div class="space-y-3">
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <Label>Brightness</Label>
+                <HelpTip>
+                  Shift the input texture lighter or darker before dithering.
+                </HelpTip>
+              </div>
+              <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
+            </div>
+            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} />
+          </div>
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <Label>Contrast</Label>
+                <HelpTip>
+                  Stretch or compress the tonal range of the input texture before dithering.
+                </HelpTip>
+              </div>
+              <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
+            </div>
+            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} />
+          </div>
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <Label>Saturation</Label>
+                <HelpTip>
+                  Make colors more vivid or closer to gray before dithering.
+                </HelpTip>
+              </div>
+              <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
+            </div>
+            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
+          </div>
+        </div>
+
+        <ColorPinEditor
+          bind:pins={warpPins}
+          loadCollectionColors={GetCollectionColors}
+          bind:pickingIndex={pickingPinIndex}
+          onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
+        />
+
+        <!-- Color snap -->
+        <div class="space-y-1">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+              <Label>Color snap (delta E)</Label>
+              <HelpTip>
+                CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+              </HelpTip>
+            </div>
+            <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+          </div>
+          <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
+        </div>
+
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          <span>Filament</span>
+          <HelpTip>
+            Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
+          </HelpTip>
+          <div class="flex-1 h-px bg-border"></div>
+        </div>
+
+        <!-- Filament settings -->
         <div class="space-y-4">
           <!-- Color palette grid -->
           <div class="space-y-2">
-            <div class="flex items-center gap-1.5">
-              <Label>Palette</Label>
-              <HelpTip>
-                Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
-              </HelpTip>
-            </div>
             <div class="grid grid-cols-4 gap-2">
               {#each colorSlots as slot, i}
                 {@const resolved = resolvedBySlot[i]}
@@ -1232,27 +1248,14 @@
               onchange={loadInventoryCollectionColors}
             />
           </div>
-
-          <!-- Color snap -->
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Color snap (delta E)</Label>
-                <HelpTip>
-                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-            </div>
-            <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
-          </div>
         </div>
 
-        <Separator />
-
         <!-- Advanced (collapsed) -->
-        <details>
-          <summary class="text-sm font-medium cursor-pointer select-none">Advanced</summary>
+        <details class="group">
+          <summary class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground cursor-pointer select-none">
+            <span>Advanced</span>
+            <div class="flex-1 h-px bg-border"></div>
+          </summary>
           <div class="mt-3 space-y-4">
             <div class="space-y-2">
               <div class="flex items-center gap-1.5">
