@@ -3,7 +3,7 @@
 package cgalwrap
 
 /*
-#cgo CXXFLAGS: -std=c++17
+#cgo CXXFLAGS: -std=c++17 -O2
 #cgo darwin CXXFLAGS: -I/opt/homebrew/include -I/usr/local/include
 #cgo LDFLAGS: -lgmp -lmpfr
 #cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib
