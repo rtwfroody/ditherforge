@@ -94,6 +94,16 @@ jobs:
             ditherforge-gui-arm64 ditherforge-gui-amd64
           rm ditherforge-gui-arm64 ditherforge-gui-amd64
 
+          # Verify no Homebrew dylib dependencies leaked into the binary.
+          if otool -L build/bin/ditherforge.app/Contents/MacOS/ditherforge | grep -q /opt/homebrew; then
+            echo "::error::Binary still links against Homebrew dylibs"
+            otool -L build/bin/ditherforge.app/Contents/MacOS/ditherforge
+            exit 1
+          fi
+
+          # Ad-hoc sign so macOS allows right-click → Open.
+          codesign --force --deep --sign - build/bin/ditherforge.app
+
       # --- CLI binaries ---
 
       - name: Build CLI (with CGAL)
@@ -190,10 +200,11 @@ jobs:
             -ov -format UDZO \
             "ditherforge-${VERSION}-macos-universal.dmg"
 
-          # CLI: universal binary via lipo, then tar.gz
+          # CLI: universal binary via lipo, sign, then tar.gz
           lipo -create -output ditherforge-cli \
             ditherforge-cli-darwin-amd64 \
             ditherforge-cli-darwin-arm64
+          codesign --force --sign - ditherforge-cli
           mkdir -p pkg
           cp ditherforge-cli pkg/
           cp README.md LICENSE pkg/

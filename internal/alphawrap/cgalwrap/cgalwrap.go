@@ -5,8 +5,8 @@ package cgalwrap
 /*
 #cgo CXXFLAGS: -std=c++17 -O3 -DNDEBUG
 #cgo darwin CXXFLAGS: -I/opt/homebrew/include -I/usr/local/include
-#cgo LDFLAGS: -lgmp -lmpfr
-#cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib
+#cgo !darwin LDFLAGS: -lgmp -lmpfr
+#cgo darwin LDFLAGS: /opt/homebrew/lib/libmpfr.a /opt/homebrew/lib/libgmp.a
 #include "wrap.h"
 */
 import "C"
