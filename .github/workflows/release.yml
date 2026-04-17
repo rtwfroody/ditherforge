@@ -54,6 +54,41 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cgal gmp mpfr
 
+      - name: Restore draco-c cache
+        if: runner.os == 'macOS'
+        id: draco-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/draco-c-install
+          key: draco-c-macos-arm64-v1
+
+      - name: Build draco-c for arm64
+        if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/qmuntal/draco-c.git /tmp/draco-c
+          cmake -S /tmp/draco-c -B /tmp/draco-c/build \
+            -DDRACO_POINT_CLOUD_COMPRESSION=ON \
+            -DDRACO_MESH_COMPRESSION=ON \
+            -DDRACO_STANDARD_EDGEBREAKER=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/draco-c/build --config Release
+          mkdir -p /tmp/draco-c-install/lib /tmp/draco-c-install/include
+          cp /tmp/draco-c/build/libdraco_c.a /tmp/draco-c-install/lib/
+          cp /tmp/draco-c/build/draco_c/include/draco/c_api.h /tmp/draco-c-install/include/
+
+      - name: Save draco-c cache
+        if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/draco-c-install
+          key: draco-c-macos-arm64-v1
+
+      - name: Install draco-c
+        if: runner.os == 'macOS'
+        run: |
+          sudo cp /tmp/draco-c-install/lib/libdraco_c.a /usr/local/lib/
+          sudo cp /tmp/draco-c-install/include/c_api.h /usr/local/include/
+
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
         shell: bash
@@ -82,7 +117,8 @@ jobs:
         shell: bash
         run: |
           # Build arm64 with CGAL and Draco linked in.
-          wails build -platform darwin/arm64 -tags draco,cgal
+          # customenv tells draco-go to use our system libdraco_c instead of its bundled one.
+          CGO_LDFLAGS="-L/usr/local/lib" wails build -platform darwin/arm64 -tags customenv,draco,cgal
           cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-arm64
 
           # Build amd64 without CGAL (no cross-compiled GMP/MPFR available).
@@ -112,9 +148,15 @@ jobs:
             GOARCH="${target#*/}"
             EXT=""
             if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            TAGS="draco,cgal"
+            EXTRA_LDFLAGS=""
+            if [ "$(uname)" = "Darwin" ]; then
+              TAGS="customenv,draco,cgal"
+              EXTRA_LDFLAGS="-L/usr/local/lib"
+            fi
             echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL and Draco)..."
-            CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -tags draco,cgal -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+            CGO_ENABLED=1 CGO_LDFLAGS="${CGO_LDFLAGS} ${EXTRA_LDFLAGS}" GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -tags "$TAGS" -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
           done
 
       - name: Build CLI (without CGAL, cross-compile)
