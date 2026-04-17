@@ -21,7 +21,7 @@ jobs:
             cgal_cli_targets: "linux/amd64"
           - os: windows-latest
             platform: windows-amd64
-            wails_flags: "-tags cgal"
+            wails_flags: "-tags draco,cgal"
             cli_targets: "windows/amd64"
             cgal_cli_targets: "windows/amd64"
           - os: macos-latest
@@ -81,8 +81,8 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          # Build arm64 with CGAL linked in.
-          wails build -platform darwin/arm64 -tags cgal
+          # Build arm64 with CGAL and Draco linked in.
+          wails build -platform darwin/arm64 -tags draco,cgal
           cp build/bin/ditherforge.app/Contents/MacOS/ditherforge ditherforge-gui-arm64
 
           # Build amd64 without CGAL (no cross-compiled GMP/MPFR available).
@@ -112,9 +112,9 @@ jobs:
             GOARCH="${target#*/}"
             EXT=""
             if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-            echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL)..."
+            echo "Building CLI for ${GOOS}/${GOARCH} (with CGAL and Draco)..."
             CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -tags cgal -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
+              go build -tags draco,cgal -o "ditherforge-cli-${GOOS}-${GOARCH}${EXT}" ./cmd/ditherforge
           done
 
       - name: Build CLI (without CGAL, cross-compile)
