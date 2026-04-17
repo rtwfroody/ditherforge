@@ -99,8 +99,8 @@
         Nudge a source color toward a specific filament to eliminate dither speckle in solid-color regions. Use this when a solid-color area is being dithered from multiple filaments and you'd rather shift the color slightly so it prints in just one.
       </HelpTip>
     </div>
-    <Button variant="ghost" size="sm" onclick={addPin} class="h-6 px-2" disabled={pins.length >= MAX_PINS}>
-      <PlusIcon class="h-3 w-3 mr-1" />Add
+    <Button variant="outline" size="sm" onclick={addPin} disabled={pins.length >= MAX_PINS}>
+      <PlusIcon class="w-3.5 h-3.5 mr-1" />Add
     </Button>
   </div>
 
@@ -204,8 +204,4 @@
       {/if}
     </div>
   {/each}
-
-  {#if pins.length === 0}
-    <p class="text-xs text-muted-foreground">No color pins. Add one to map a specific color to a filament.</p>
-  {/if}
 </div>

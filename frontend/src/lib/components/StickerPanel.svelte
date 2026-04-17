@@ -149,8 +149,4 @@
       {/if}
     </div>
   {/each}
-
-  {#if stickers.length === 0}
-    <p class="text-xs text-muted-foreground">No stickers added yet.</p>
-  {/if}
 </div>

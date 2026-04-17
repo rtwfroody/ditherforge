@@ -439,7 +439,6 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 | Dither mode | `dizzy` | `dizzy`: random traversal with error diffusion, blue-noise-like output. `none`: nearest palette color, no dithering. |
 | No merge | off | Disables coplanar triangle merging in the final mesh |
 | No simplify | off | Disables QEM mesh decimation before clipping |
-| Uniform grid | off | Uses a single voxel size for all layers instead of the wider first-layer grid |
 | Stats | off | Logs face counts per material to the status bar |
 
 ---

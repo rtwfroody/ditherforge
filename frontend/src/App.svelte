@@ -1112,8 +1112,63 @@
 
         <Separator />
 
+        <!-- Alpha-wrap -->
+        <div class="space-y-2">
+          <label class="flex items-center gap-2 text-sm font-medium">
+            <Checkbox bind:checked={alphaWrap} />
+            Alpha-wrap (clean geometry for 3D printing)
+            <HelpTip>
+              Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
+            </HelpTip>
+          </label>
+          {#if alphaWrap}
+            <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
+              <label class="flex flex-col gap-1">
+                <span class="text-muted-foreground flex items-center gap-1.5">
+                  Alpha (mm)
+                  <HelpTip>
+                    Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
+                  </HelpTip>
+                </span>
+                <input type="number" step="0.1" min="0"
+                       placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                       class="h-9 rounded border bg-background px-2"
+                       bind:value={alphaWrapAlpha} />
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-muted-foreground flex items-center gap-1.5">
+                  Offset (mm)
+                  <HelpTip>
+                    How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
+                  </HelpTip>
+                </span>
+                <input type="number" step="0.01" min="0"
+                       placeholder="auto (alpha / 30)"
+                       class="h-9 rounded border bg-background px-2"
+                       bind:value={alphaWrapOffset} />
+              </label>
+            </div>
+          {/if}
+        </div>
+
+        <Separator />
+
         <!-- Color settings -->
         <div class="space-y-4">
+          <!-- Color snap -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5">
+                <Label>Color snap (delta E)</Label>
+                <HelpTip>
+                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                </HelpTip>
+              </div>
+              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+            </div>
+            <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
+          </div>
+
           <!-- Color palette grid -->
           <div class="space-y-2">
             <div class="flex items-center gap-1.5">
@@ -1191,20 +1246,6 @@
               onchange={loadInventoryCollectionColors}
             />
           </div>
-
-          <!-- Color snap -->
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Color snap (delta E)</Label>
-                <HelpTip>
-                  CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-            </div>
-            <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} />
-          </div>
         </div>
 
         <Separator />
@@ -1213,24 +1254,22 @@
         <details>
           <summary class="text-sm font-medium cursor-pointer select-none">Advanced</summary>
           <div class="mt-3 space-y-4">
-            <div class="grid grid-cols-2 gap-4">
-              <div class="space-y-2">
-                <div class="flex items-center gap-1.5">
-                  <Label for="dither">Dither mode</Label>
-                  <HelpTip>
-                    Algorithm used to blend palette colors across the surface. "dizzy" is the default ordered dither; "none" disables dithering entirely.
-                  </HelpTip>
-                </div>
-                <Select.Root type="single" bind:value={dither}>
-                  <Select.Trigger class="w-full">
-                    {dither || 'Select...'}
-                  </Select.Trigger>
-                  <Select.Content>
-                    <Select.Item value="dizzy">dizzy</Select.Item>
-                    <Select.Item value="none">none</Select.Item>
-                  </Select.Content>
-                </Select.Root>
+            <div class="space-y-2">
+              <div class="flex items-center gap-1.5">
+                <Label for="dither">Dither mode</Label>
+                <HelpTip>
+                  Algorithm used to blend palette colors across the surface. "dizzy" is the default ordered dither; "none" disables dithering entirely.
+                </HelpTip>
               </div>
+              <Select.Root type="single" bind:value={dither}>
+                <Select.Trigger class="w-full">
+                  {dither || 'Select...'}
+                </Select.Trigger>
+                <Select.Content>
+                  <Select.Item value="dizzy">dizzy</Select.Item>
+                  <Select.Item value="none">none</Select.Item>
+                </Select.Content>
+              </Select.Root>
             </div>
 
             <div class="flex flex-wrap gap-x-6 gap-y-3">
@@ -1255,44 +1294,6 @@
                   Log summary statistics (triangle counts, color usage, timings) to the terminal.
                 </HelpTip>
               </label>
-            </div>
-
-            <div class="space-y-2 pt-2 border-t">
-              <label class="flex items-center gap-2 text-sm font-medium">
-                <Checkbox bind:checked={alphaWrap} />
-                Alpha-wrap (clean geometry for 3D printing)
-                <HelpTip>
-                  Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
-                </HelpTip>
-              </label>
-              {#if alphaWrap}
-                <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
-                  <label class="flex flex-col gap-1">
-                    <span class="text-muted-foreground flex items-center gap-1.5">
-                      Alpha (mm)
-                      <HelpTip>
-                        Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
-                      </HelpTip>
-                    </span>
-                    <input type="number" step="0.1" min="0"
-                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
-                           class="h-9 rounded border bg-background px-2"
-                           bind:value={alphaWrapAlpha} />
-                  </label>
-                  <label class="flex flex-col gap-1">
-                    <span class="text-muted-foreground flex items-center gap-1.5">
-                      Offset (mm)
-                      <HelpTip>
-                        How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
-                      </HelpTip>
-                    </span>
-                    <input type="number" step="0.01" min="0"
-                           placeholder="auto (alpha / 30)"
-                           class="h-9 rounded border bg-background px-2"
-                           bind:value={alphaWrapOffset} />
-                  </label>
-                </div>
-              {/if}
             </div>
           </div>
         </details>
