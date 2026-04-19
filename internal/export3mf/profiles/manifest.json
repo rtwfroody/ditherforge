@@ -1,0 +1,705 @@
+{
+  "printers": [
+    {
+      "id": "snapmaker_u1",
+      "display_name": "Snapmaker U1",
+      "nozzles": [
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Snapmaker U1 (0.4 nozzle)",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08 Extra Fine @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.08.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12 Fine @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16 Optimal @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20 Standard @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24 Draft @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.24.json"
+            },
+            {
+              "layer_height": 0.28,
+              "name": "0.28 Extra Draft @Snapmaker U1 (0.4 nozzle)",
+              "file": "process_0.4_0.28.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "snapmaker_j1",
+      "display_name": "Snapmaker J1",
+      "nozzles": [
+        {
+          "diameter": "0.2",
+          "printer_settings_id": "Snapmaker J1 (0.2 nozzle)",
+          "machine_file": "machine_0.2.json",
+          "processes": [
+            {
+              "layer_height": 0.06,
+              "name": "0.06 Standard @Snapmaker J1 (0.2 nozzle)",
+              "file": "process_0.2_0.06.json"
+            },
+            {
+              "layer_height": 0.1,
+              "name": "0.10 Standard @Snapmaker J1 (0.2 nozzle)",
+              "file": "process_0.2_0.10.json"
+            },
+            {
+              "layer_height": 0.14,
+              "name": "0.14 Standard @Snapmaker J1 (0.2 nozzle)",
+              "file": "process_0.2_0.14.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Snapmaker J1 (0.4 nozzle)",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08 Extra Fine @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.08.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12 Fine @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16 Optimal @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20 Standard @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24 Draft @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.24.json"
+            },
+            {
+              "layer_height": 0.28,
+              "name": "0.28 Extra Draft @Snapmaker J1 (0.4 nozzle)",
+              "file": "process_0.4_0.28.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Snapmaker J1 (0.6 nozzle)",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18 Standard @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.18.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24 Standard @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.24.json"
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30 Standard @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.30.json"
+            },
+            {
+              "layer_height": 0.34,
+              "name": "0.34 Standard @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.34.json"
+            },
+            {
+              "layer_height": 0.38,
+              "name": "0.38 Standard @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.38.json"
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42 Draft @Snapmaker J1 (0.6 nozzle)",
+              "file": "process_0.6_0.42.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Snapmaker J1 (0.8 nozzle)",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.24,
+              "name": "0.24 Standard @Snapmaker J1 (0.8 nozzle)",
+              "file": "process_0.8_0.24.json"
+            },
+            {
+              "layer_height": 0.32,
+              "name": "0.32 Standard @Snapmaker J1 (0.8 nozzle)",
+              "file": "process_0.8_0.32.json"
+            },
+            {
+              "layer_height": 0.36,
+              "name": "0.36 Standard @Snapmaker J1 (0.8 nozzle)",
+              "file": "process_0.8_0.36.json"
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40 Standard @Snapmaker J1 (0.8 nozzle)",
+              "file": "process_0.8_0.40.json"
+            },
+            {
+              "layer_height": 0.48,
+              "name": "0.48 Draft @Snapmaker J1 (0.8 nozzle)",
+              "file": "process_0.8_0.48.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prusa_xl",
+      "display_name": "Prusa XL (2 tools)",
+      "nozzles": [
+        {
+          "diameter": "0.25",
+          "printer_settings_id": "Prusa XL 0.25 nozzle",
+          "machine_file": "machine_0.25.json",
+          "processes": [
+            {
+              "layer_height": 0.05,
+              "name": "0.05mm Detail @Prusa XL 0.25",
+              "file": "process_0.25_0.05.json"
+            },
+            {
+              "layer_height": 0.07,
+              "name": "0.07mm Detail @Prusa XL 0.25",
+              "file": "process_0.25_0.07.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Speed @Prusa XL 0.25",
+              "file": "process_0.25_0.12.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Speed @Prusa XL 0.25",
+              "file": "process_0.25_0.15.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.3",
+          "printer_settings_id": "Prusa XL 0.3 nozzle",
+          "machine_file": "machine_0.3.json",
+          "processes": [
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Structural @Prusa XL 0.3",
+              "file": "process_0.3_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Speed @Prusa XL 0.3",
+              "file": "process_0.3_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 0.3",
+              "file": "process_0.3_0.20.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Prusa XL 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm FastDetail @Prusa XL 0.4",
+              "file": "process_0.4_0.10.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Speed @Prusa XL 0.4",
+              "file": "process_0.4_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 0.4",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Structural @Prusa XL 0.4",
+              "file": "process_0.4_0.25.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.5",
+          "printer_settings_id": "Prusa XL 0.5 nozzle",
+          "machine_file": "machine_0.5.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Structural @Prusa XL 0.5",
+              "file": "process_0.5_0.10.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Structural @Prusa XL 0.5",
+              "file": "process_0.5_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 0.5",
+              "file": "process_0.5_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Speed @Prusa XL 0.5",
+              "file": "process_0.5_0.25.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Prusa XL 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Structural @Prusa XL 0.6",
+              "file": "process_0.6_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 0.6",
+              "file": "process_0.6_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Speed @Prusa XL 0.6",
+              "file": "process_0.6_0.25.json"
+            },
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Speed @Prusa XL 0.6",
+              "file": "process_0.6_0.32.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Prusa XL 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Detail @Prusa XL 0.8",
+              "file": "process_0.8_0.30.json"
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40mm Quality @Prusa XL 0.8",
+              "file": "process_0.8_0.40.json"
+            },
+            {
+              "layer_height": 0.55,
+              "name": "0.55mm Draft @Prusa XL 0.8",
+              "file": "process_0.8_0.55.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "prusa_xl_5t",
+      "display_name": "Prusa XL (5 tools)",
+      "nozzles": [
+        {
+          "diameter": "0.25",
+          "printer_settings_id": "Prusa XL 5T 0.25 nozzle",
+          "machine_file": "machine_0.25.json",
+          "processes": [
+            {
+              "layer_height": 0.05,
+              "name": "0.05mm Detail @Prusa XL 5T 0.25",
+              "file": "process_0.25_0.05.json"
+            },
+            {
+              "layer_height": 0.07,
+              "name": "0.07mm Detail @Prusa XL 5T 0.25",
+              "file": "process_0.25_0.07.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Speed @Prusa XL 5T 0.25",
+              "file": "process_0.25_0.12.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Speed @Prusa XL 5T 0.25",
+              "file": "process_0.25_0.15.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.3",
+          "printer_settings_id": "Prusa XL 5T 0.3 nozzle",
+          "machine_file": "machine_0.3.json",
+          "processes": [
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Structural @Prusa XL 5T 0.3",
+              "file": "process_0.3_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Speed @Prusa XL 5T 0.3",
+              "file": "process_0.3_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 5T 0.3",
+              "file": "process_0.3_0.20.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Prusa XL 5T 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm FastDetail @Prusa XL 5T 0.4",
+              "file": "process_0.4_0.10.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Speed @Prusa XL 5T 0.4",
+              "file": "process_0.4_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 5T 0.4",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Structural @Prusa XL 5T 0.4",
+              "file": "process_0.4_0.25.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.5",
+          "printer_settings_id": "Prusa XL 5T 0.5 nozzle",
+          "machine_file": "machine_0.5.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Structural @Prusa XL 5T 0.5",
+              "file": "process_0.5_0.10.json"
+            },
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Structural @Prusa XL 5T 0.5",
+              "file": "process_0.5_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 5T 0.5",
+              "file": "process_0.5_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Speed @Prusa XL 5T 0.5",
+              "file": "process_0.5_0.25.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Prusa XL 5T 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.15,
+              "name": "0.15mm Structural @Prusa XL 5T 0.6",
+              "file": "process_0.6_0.15.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Speed @Prusa XL 5T 0.6",
+              "file": "process_0.6_0.20.json"
+            },
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Speed @Prusa XL 5T 0.6",
+              "file": "process_0.6_0.25.json"
+            },
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Speed @Prusa XL 5T 0.6",
+              "file": "process_0.6_0.32.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Prusa XL 5T 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Detail @Prusa XL 5T 0.8",
+              "file": "process_0.8_0.30.json"
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40mm Quality @Prusa XL 5T 0.8",
+              "file": "process_0.8_0.40.json"
+            },
+            {
+              "layer_height": 0.55,
+              "name": "0.55mm Draft @Prusa XL 5T 0.8",
+              "file": "process_0.8_0.55.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bambu_h2d",
+      "display_name": "Bambu Lab H2D",
+      "nozzles": [
+        {
+          "diameter": "0.2",
+          "printer_settings_id": "Bambu Lab H2D 0.2 nozzle",
+          "machine_file": "machine_0.2.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+              "file": "process_0.2_0.08.json"
+            },
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Standard @BBL H2D 0.2 nozzle",
+              "file": "process_0.2_0.10.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+              "file": "process_0.2_0.12.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Bambu Lab H2D 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08mm Extra Fine @BBL H2D",
+              "file": "process_0.4_0.08.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Fine @BBL H2D",
+              "file": "process_0.4_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Standard @BBL H2D",
+              "file": "process_0.4_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @BBL H2D",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @BBL H2D",
+              "file": "process_0.4_0.24.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Bambu Lab H2D 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18mm Balanced Quality @BBL H2D 0.6 nozzle",
+              "file": "process_0.6_0.18.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+              "file": "process_0.6_0.24.json"
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @BBL H2D 0.6 nozzle",
+              "file": "process_0.6_0.30.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Bambu Lab H2D 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+              "file": "process_0.8_0.24.json"
+            },
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+              "file": "process_0.8_0.32.json"
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40mm Standard @BBL H2D 0.8 nozzle",
+              "file": "process_0.8_0.40.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bambu_h2d_pro",
+      "display_name": "Bambu Lab H2D Pro",
+      "nozzles": [
+        {
+          "diameter": "0.2",
+          "printer_settings_id": "Bambu Lab H2D Pro 0.2 nozzle",
+          "machine_file": "machine_0.2.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08mm Extra Fine @BBL H2DP 0.2 nozzle",
+              "file": "process_0.2_0.08.json"
+            },
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Standard @BBL H2DP 0.2 nozzle",
+              "file": "process_0.2_0.10.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Balanced Quality @BBL H2DP 0.2 nozzle",
+              "file": "process_0.2_0.12.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Bambu Lab H2D Pro 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.08,
+              "name": "0.08mm Extra Fine @BBL H2DP",
+              "file": "process_0.4_0.08.json"
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Fine @BBL H2DP",
+              "file": "process_0.4_0.12.json"
+            },
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Standard @BBL H2DP",
+              "file": "process_0.4_0.16.json"
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @BBL H2DP",
+              "file": "process_0.4_0.20.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @BBL H2DP",
+              "file": "process_0.4_0.24.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Bambu Lab H2D Pro 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18mm Balanced Quality @BBL H2DP 0.6 nozzle",
+              "file": "process_0.6_0.18.json"
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Balanced Strength @BBL H2DP 0.6 nozzle",
+              "file": "process_0.6_0.24.json"
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @BBL H2DP 0.6 nozzle",
+              "file": "process_0.6_0.30.json"
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Bambu Lab H2D Pro 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Balanced Quality @BBL H2DP 0.8 nozzle",
+              "file": "process_0.8_0.24.json"
+            },
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Balanced Strength @BBL H2DP 0.8 nozzle",
+              "file": "process_0.8_0.32.json"
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40mm Standard @BBL H2DP 0.8 nozzle",
+              "file": "process_0.8_0.40.json"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -13,7 +13,6 @@
   import HelpTip from '$lib/components/HelpTip.svelte';
   import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
-  import PresetSelect from '$lib/components/PresetSelect.svelte';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
   import CollectionSelect from '$lib/components/CollectionSelect.svelte';
@@ -24,7 +23,8 @@
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, EnumerateObjects } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, EnumerateObjects, ListPrinters } from '../wailsjs/go/main/App';
+  import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { pipeline, loader } from '../wailsjs/go/models';
@@ -59,8 +59,59 @@
   let sizeMode: 'size' | 'scale' = $state('size');
   let sizeValue = $state('100');
   let scaleValue = $state('1.0');
+  // Printer registry — populated on mount via ListPrinters(). Defines the
+  // allowed nozzle diameters and layer heights for the selected printer.
+  let printers = $state<main.PrinterOption[]>([]);
+  let printerId = $state('snapmaker_u1');
   let nozzleDiameter = $state('0.4');
   let layerHeight = $state('0.20');
+
+  const currentPrinter = $derived<main.PrinterOption | undefined>(
+    printers.find(p => p.id === printerId)
+  );
+  const currentNozzle = $derived<main.NozzleOption | undefined>(
+    currentPrinter?.nozzles.find(n => n.diameter === nozzleDiameter)
+  );
+
+  function fmtLayerHeight(lh: number): string {
+    return lh.toFixed(2);
+  }
+
+  // When the printer changes, snap nozzle + layer height to something valid
+  // for the new printer. Preserve the user's current choice if possible.
+  // If the registry has loaded and the selected printer isn't in it, fall
+  // back to the default (first printer in registry).
+  function reconcilePrinterSelection() {
+    if (printers.length === 0) return; // registry not loaded yet
+    let printer = printers.find(p => p.id === printerId);
+    if (!printer) {
+      printer = printers[0];
+      printerId = printer.id;
+    }
+    if (!printer.nozzles.find(n => n.diameter === nozzleDiameter)) {
+      const pick = printer.nozzles.find(n => n.diameter === '0.4')
+        ?? printer.nozzles[0];
+      nozzleDiameter = pick?.diameter ?? '';
+    }
+    const noz = printer.nozzles.find(n => n.diameter === nozzleDiameter);
+    if (!noz) return;
+    const current = parseFloat(layerHeight);
+    const available = noz.layerHeights;
+    if (!available.length) return;
+    if (!available.find(v => Math.abs(v - current) < 1e-6)) {
+      // Snap to closest available layer height, preferring 0.20 if equally far.
+      let best = available[0];
+      let bestD = Math.abs(best - current);
+      for (const v of available) {
+        const d = Math.abs(v - current);
+        if (d < bestD || (d === bestD && Math.abs(v - 0.20) < Math.abs(best - 0.20))) {
+          best = v;
+          bestD = d;
+        }
+      }
+      layerHeight = fmtLayerHeight(best);
+    }
+  }
   // Base color for untextured faces: null = use model default, or {hex, label, collection}.
   let baseColor = $state<ColorInfo | null>(null);
   let baseColorPickerOpen = $state(false);
@@ -348,7 +399,7 @@
   let initialized = false;
   $effect(() => {
     // Read all form values to establish tracking.
-    void [inputFile, sizeMode, sizeValue, scaleValue, nozzleDiameter,
+    void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
           layerHeight, baseColor, ...colorSlots,
           inventoryCollectionColors,
           brightness, contrast, saturation,
@@ -571,6 +622,7 @@
       sizeMode,
       sizeValue: String(sizeValue),
       scaleValue: String(scaleValue),
+      printer: printerId,
       nozzleDiameter: String(nozzleDiameter),
       layerHeight: String(layerHeight),
       baseColor: baseColor ? { hex: baseColor.hex, label: baseColor.label, collection: baseColor.collection } : null,
@@ -614,8 +666,12 @@
     if (s.sizeMode !== undefined) sizeMode = s.sizeMode;
     if (s.sizeValue !== undefined) sizeValue = s.sizeValue;
     if (s.scaleValue !== undefined) scaleValue = s.scaleValue;
+    if (s.printer !== undefined) printerId = s.printer;
+    // Legacy settings files used "nozzle"; newer ones use "nozzleDiameter".
     if (s.nozzleDiameter !== undefined) nozzleDiameter = s.nozzleDiameter;
+    else if (s.nozzle !== undefined) nozzleDiameter = s.nozzle;
     if (s.layerHeight !== undefined) layerHeight = s.layerHeight;
+    reconcilePrinterSelection();
     if (s.baseColor !== undefined) baseColor = s.baseColor ? { hex: s.baseColor.hex, label: s.baseColor.label || '', collection: s.baseColor.collection || '' } : null;
     if (s.colorSlots !== undefined) {
       colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
@@ -785,6 +841,21 @@
   // Load initial inventory collection colors.
   loadInventoryCollectionColors(inventoryCollection);
 
+  // Load printer registry from Go. Fallback: leave printers empty and the
+  // UI will show a minimal select rather than crashing.
+  (async () => {
+    try {
+      const list = await ListPrinters();
+      printers = list ?? [];
+      // After printers load, ensure nozzle/layer-height are valid for the
+      // currently selected printer. This also handles the case where a
+      // saved settings file picked a printer we now resolve properly.
+      reconcilePrinterSelection();
+    } catch (err) {
+      log(`ListPrinters failed: ${err}`);
+    }
+  })();
+
   // Parse hex "#RRGGBB" to [r, g, b] array.
   function hexToRgb(hex: string): number[] {
     const h = hex.replace('#', '');
@@ -804,6 +875,7 @@
       BaseColor: baseColor?.hex ?? '',
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
+      Printer: printerId,
       InventoryFile: '',
       InventoryColors: invColors,
       InventoryLabels: invLabels,
@@ -954,6 +1026,73 @@
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-6">
+        <!-- Printer -->
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+          <span>Printer</span>
+          <div class="flex-1 h-px bg-border"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
+          <div class="col-span-2 flex items-center gap-1.5">
+            <span class="text-sm font-medium">Printer</span>
+            <HelpTip>
+              Target printer for the exported 3MF. Nozzle and layer height
+              options adapt to what the selected printer supports.
+            </HelpTip>
+          </div>
+          <select
+            class="col-span-2 h-9 rounded-md border border-input bg-background px-2 text-sm"
+            bind:value={printerId}
+            onchange={() => reconcilePrinterSelection()}
+          >
+            {#each printers as p (p.id)}
+              <option value={p.id}>{p.displayName}</option>
+            {/each}
+            {#if printers.length === 0}
+              <option value={printerId}>{printerId}</option>
+            {/if}
+          </select>
+
+          <div class="flex items-center gap-1.5">
+            <span class="text-sm font-medium">Nozzle (mm)</span>
+            <HelpTip>
+              Nozzle diameter variant for the selected printer. Also sets the
+              finest horizontal detail the output can represent.
+            </HelpTip>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-sm font-medium">Layer height (mm)</span>
+            <HelpTip>
+              Vertical resolution of the print. Must match the layer height
+              used when slicing.
+            </HelpTip>
+          </div>
+          <select
+            class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            bind:value={nozzleDiameter}
+            onchange={() => reconcilePrinterSelection()}
+          >
+            {#if currentPrinter}
+              {#each currentPrinter.nozzles as n (n.diameter)}
+                <option value={n.diameter}>{n.diameter}</option>
+              {/each}
+            {:else}
+              <option value={nozzleDiameter}>{nozzleDiameter}</option>
+            {/if}
+          </select>
+          <select
+            class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            bind:value={layerHeight}
+          >
+            {#if currentNozzle}
+              {#each currentNozzle.layerHeights as lh (lh)}
+                <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}</option>
+              {/each}
+            {:else}
+              <option value={layerHeight}>{layerHeight}</option>
+            {/if}
+          </select>
+        </div>
+
         <!-- Model -->
         <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
           <span>Model</span>
@@ -1009,46 +1148,6 @@
               />
             </div>
           {/if}
-          <PresetSelect
-            bind:value={nozzleDiameter}
-            label="Nozzle diameter (mm)"
-            id="nozzle"
-            unit="mm"
-            step={0.1}
-            presets={[
-              { value: '0.2', label: '0.2 mm' },
-              { value: '0.4', label: '0.4 mm' },
-              { value: '0.6', label: '0.6 mm' },
-              { value: '0.8', label: '0.8 mm' },
-            ]}
-          >
-            {#snippet help()}
-              <HelpTip>
-                Your printer's nozzle diameter. Sets the finest horizontal detail the output can represent.
-              </HelpTip>
-            {/snippet}
-          </PresetSelect>
-          <PresetSelect
-            bind:value={layerHeight}
-            label="Layer height (mm)"
-            id="layer"
-            unit="mm"
-            step={0.04}
-            presets={[
-              { value: '0.08', label: '0.08 mm' },
-              { value: '0.12', label: '0.12 mm' },
-              { value: '0.16', label: '0.16 mm' },
-              { value: '0.20', label: '0.20 mm' },
-              { value: '0.24', label: '0.24 mm' },
-              { value: '0.28', label: '0.28 mm' },
-            ]}
-          >
-            {#snippet help()}
-              <HelpTip>
-                Vertical resolution of the print. Must match the layer height used when slicing.
-              </HelpTip>
-            {/snippet}
-          </PresetSelect>
         </div>
 
         <!-- Alpha-wrap -->

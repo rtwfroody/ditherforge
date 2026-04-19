@@ -19,6 +19,7 @@ import (
 	"golang.org/x/image/draw"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
+	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
@@ -171,7 +172,11 @@ func (a *App) Export3MF() (string, error) {
 		return "", nil
 	}
 
-	_, err = pipeline.ExportFile(a.cache, path, a.lastOpts.LayerHeight)
+	_, err = pipeline.ExportFile(a.cache, path, export3mf.Options{
+		PrinterID:      a.lastOpts.Printer,
+		NozzleDiameter: a.lastOpts.NozzleDiameter,
+		LayerHeight:    a.lastOpts.LayerHeight,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -362,6 +367,53 @@ func (a *App) Version() string {
 	return pipeline.Version
 }
 
+// PrinterOption describes one printer + its nozzle/layer-height options for
+// the frontend printer selector. Layer heights are in mm.
+type PrinterOption struct {
+	ID          string          `json:"id"`
+	DisplayName string          `json:"displayName"`
+	Nozzles     []NozzleOption  `json:"nozzles"`
+}
+
+// NozzleOption lists the layer heights available for one nozzle variant.
+type NozzleOption struct {
+	Diameter     string    `json:"diameter"`
+	LayerHeights []float32 `json:"layerHeights"`
+}
+
+// ListPrinters returns the supported printer profiles the frontend can offer.
+func (a *App) ListPrinters() ([]PrinterOption, error) {
+	printers, err := export3mf.Registry()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PrinterOption, 0, len(printers))
+	for _, p := range printers {
+		nozzles := make([]NozzleOption, 0, len(p.Nozzles))
+		for _, n := range p.Nozzles {
+			lhs := make([]float32, 0, len(n.Processes))
+			seen := map[float32]struct{}{}
+			for _, pp := range n.Processes {
+				if _, ok := seen[pp.LayerHeight]; ok {
+					continue
+				}
+				seen[pp.LayerHeight] = struct{}{}
+				lhs = append(lhs, pp.LayerHeight)
+			}
+			nozzles = append(nozzles, NozzleOption{
+				Diameter:     n.Diameter,
+				LayerHeights: lhs,
+			})
+		}
+		out = append(out, PrinterOption{
+			ID:          p.ID,
+			DisplayName: p.DisplayName,
+			Nozzles:     nozzles,
+		})
+	}
+	return out, nil
+}
+
 // CollectionInfo describes a collection for the frontend.
 type CollectionInfo struct {
 	Name    string `json:"name"`
@@ -540,6 +592,7 @@ type Settings struct {
 	SizeMode            string              `json:"sizeMode"`
 	SizeValue           string              `json:"sizeValue"`
 	ScaleValue          string              `json:"scaleValue"`
+	Printer             string              `json:"printer,omitempty"`
 	NozzleDiameter      string              `json:"nozzleDiameter"`
 	LayerHeight         string              `json:"layerHeight"`
 	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`

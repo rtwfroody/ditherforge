@@ -36,6 +36,7 @@ type Args struct {
 	BaseColor      string   `arg:"--base-color" help:"Hex color for untextured faces (e.g. #FF0000)"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
+	Printer        string   `arg:"--printer" help:"Target printer profile id (e.g. snapmaker_u1, snapmaker_j1, prusa_xl, prusa_xl_5t, bambu_h2d, bambu_h2d_pro); defaults to snapmaker_u1"`
 	Brightness     float32  `arg:"--brightness" default:"0" help:"Brightness adjustment (-100 to +100)"`
 	Contrast       float32  `arg:"--contrast" default:"0" help:"Contrast adjustment (-100 to +100)"`
 	Saturation     float32  `arg:"--saturation" default:"0" help:"Saturation adjustment (-100 to +100)"`
@@ -84,6 +85,7 @@ func main() {
 		BaseColor:      args.BaseColor,
 		NozzleDiameter: args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
+		Printer:        args.Printer,
 		Brightness:     args.Brightness,
 		Contrast:       args.Contrast,
 		Saturation:     args.Saturation,

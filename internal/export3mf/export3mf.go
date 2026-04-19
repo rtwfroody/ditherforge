@@ -4,7 +4,6 @@ package export3mf
 import (
 	"archive/zip"
 	"crypto/rand"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,40 +12,6 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
-
-//go:embed snapmaker_u1_04.json
-var snapmakerU1Profile []byte
-
-//go:embed process_0.08.json
-var process008 []byte
-
-//go:embed process_0.12.json
-var process012 []byte
-
-//go:embed process_0.16.json
-var process016 []byte
-
-//go:embed process_0.2.json
-var process020 []byte
-
-//go:embed process_0.24.json
-var process024 []byte
-
-//go:embed process_0.28.json
-var process028 []byte
-
-// processProfiles maps layer heights to their embedded process profiles.
-var processProfiles = []struct {
-	layerHeight float32
-	data        []byte
-}{
-	{0.08, process008},
-	{0.12, process012},
-	{0.16, process016},
-	{0.20, process020},
-	{0.24, process024},
-	{0.28, process028},
-}
 
 // MaxFilaments is the maximum number of palette colors supported by 3MF export.
 const MaxFilaments = 16
@@ -78,14 +43,48 @@ const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http:/
 
 const rels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`
 
+// Options configures which printer profile to embed in the 3MF.
+type Options struct {
+	PrinterID      string  // e.g. "snapmaker_u1"; empty = DefaultPrinterID
+	NozzleDiameter float32 // e.g. 0.4; 0 = printer's default nozzle
+	LayerHeight    float32 // matched to closest available process profile
+}
+
 // Export writes a single mesh with per-face palette assignments to a 3MF file.
-func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, layerHeight float32) error {
+func Export(model *loader.LoadedModel, assignments []int32, outputPath string, paletteRGB [][3]uint8, opts Options) error {
+	printerID := opts.PrinterID
+	if printerID == "" {
+		printerID = DefaultPrinterID
+	}
+	printer := FindPrinter(printerID)
+	if printer == nil {
+		return fmt.Errorf("unknown printer %q", printerID)
+	}
+	var nozzle *Nozzle
+	if opts.NozzleDiameter == 0 {
+		nozzle = printer.FindNozzle(DefaultNozzleForPrinter(printer))
+	} else {
+		nozzle = printer.FindNozzleByDiameter(opts.NozzleDiameter)
+	}
+	if nozzle == nil {
+		return fmt.Errorf("printer %q has no %.2fmm nozzle", printerID, opts.NozzleDiameter)
+	}
+	if len(nozzle.Processes) == 0 {
+		return fmt.Errorf("printer %q nozzle %s has no process profiles available", printerID, nozzle.Diameter)
+	}
+	machineProfile, err := nozzle.loadMachineProfile(printer.ID)
+	if err != nil {
+		return err
+	}
+	plateX, plateY, err := bedCenter(machineProfile)
+	if err != nil {
+		return fmt.Errorf("%s: %w", printer.ID, err)
+	}
+
 	objUUID := newUUID()
 	instUUID := newUUID()
 	buildUUID := newUUID()
 
-	// Compute translation to center on build plate.
-	const plateX, plateY = 135.5, 136.0
 	var minX, maxX, minY, maxY, minZ float32
 	if len(model.Vertices) > 0 {
 		verts := model.Vertices
@@ -171,7 +170,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 		return err
 	}
 	if paletteRGB != nil {
-		ps, err := buildProjectSettings(paletteRGB, layerHeight)
+		ps, err := buildProjectSettings(printer, nozzle, machineProfile, paletteRGB, opts.LayerHeight)
 		if err != nil {
 			return err
 		}
@@ -232,41 +231,39 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 	return sb.String(), nil
 }
 
-func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, error) {
-	// Start with the embedded Snapmaker U1 (0.4mm nozzle) machine profile.
-	data := map[string]interface{}{}
-	if err := json.Unmarshal(snapmakerU1Profile, &data); err != nil {
-		return "", fmt.Errorf("parsing embedded profile: %w", err)
-	}
+func buildProjectSettings(printer *Printer, nozzle *Nozzle, machineProfile map[string]any, paletteRGB [][3]uint8, layerHeight float32) (string, error) {
+	// machineProfile is freshly unmarshalled per call by loadMachineProfile,
+	// so top-level assignments here are safe without a deep copy.
+	data := machineProfile
+
+	// Strip the "name" field (it's the machine profile name; we set
+	// printer_settings_id explicitly below and name the project separately).
+	delete(data, "name")
 
 	// Merge the closest process profile by layer height.
-	bestIdx := 0
-	bestDist := float32(1e9)
-	for i, pp := range processProfiles {
-		d := pp.layerHeight - layerHeight
-		if d < 0 {
-			d = -d
+	var processName string
+	if pp := nozzle.ClosestProcess(layerHeight); pp != nil {
+		processData, err := loadProcessProfile(printer.ID, pp)
+		if err != nil {
+			return "", err
 		}
-		if d < bestDist {
-			bestDist = d
-			bestIdx = i
+		if n, _ := processData["name"].(string); n != "" {
+			processName = n
 		}
-	}
-	var processData map[string]interface{}
-	if err := json.Unmarshal(processProfiles[bestIdx].data, &processData); err != nil {
-		return "", fmt.Errorf("parsing embedded process profile: %w", err)
-	}
-	processName, _ := processData["name"].(string)
-	for k, v := range processData {
-		data[k] = v
+		delete(processData, "name")
+		for k, v := range processData {
+			data[k] = v
+		}
 	}
 
 	data["name"] = "project_settings"
-	data["print_settings_id"] = processName
-	data["printer_settings_id"] = "Snapmaker U1 (0.4 nozzle)"
+	if processName != "" {
+		data["print_settings_id"] = processName
+	}
+	data["printer_settings_id"] = nozzle.PrinterSettingsID
 	data["printer_technology"] = "FFF"
 
-	// Set filament info.
+	// Filament info.
 	hexColors := make([]string, len(paletteRGB))
 	for i, p := range paletteRGB {
 		hexColors[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
@@ -290,11 +287,9 @@ func buildProjectSettings(paletteRGB [][3]uint8, layerHeight float32) (string, e
 	// Without this, OrcaSlicer ignores customized values. The first element
 	// lists print settings (semicolon-separated); remaining elements are for
 	// per-filament and printer overrides (currently empty).
-	// Settings set here: mmu_segmented_region_max_width (above).
-	// Settings from process JSON: enable_support, prime_tower_width, prime_volume.
 	nFilaments := len(paletteRGB)
 	diffSettings := make([]string, 2+nFilaments) // print + filaments + printer
-	diffSettings[0] = "mmu_segmented_region_max_width;enable_support;prime_tower_width;prime_volume"
+	diffSettings[0] = "mmu_segmented_region_max_width"
 	data["different_settings_to_system"] = diffSettings
 
 	b, err := json.MarshalIndent(data, "", "  ")

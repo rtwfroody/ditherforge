@@ -22,6 +22,8 @@ export function IsBusy():Promise<boolean>;
 
 export function ListCollections():Promise<Array<main.CollectionInfo>>;
 
+export function ListPrinters():Promise<Array<main.PrinterOption>>;
+
 export function LoadSettingsFile(arg1:string):Promise<main.LoadSettingsResult>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;

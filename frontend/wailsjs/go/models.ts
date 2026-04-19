@@ -119,6 +119,7 @@ export namespace main {
 	    sizeMode: string;
 	    sizeValue: string;
 	    scaleValue: string;
+	    printer?: string;
 	    nozzleDiameter: string;
 	    layerHeight: string;
 	    baseColor?: ColorSlotSetting;
@@ -149,6 +150,7 @@ export namespace main {
 	        this.sizeMode = source["sizeMode"];
 	        this.sizeValue = source["sizeValue"];
 	        this.scaleValue = source["scaleValue"];
+	        this.printer = source["printer"];
 	        this.nozzleDiameter = source["nozzleDiameter"];
 	        this.layerHeight = source["layerHeight"];
 	        this.baseColor = this.convertValues(source["baseColor"], ColorSlotSetting);
@@ -199,6 +201,54 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
 	        this.settings = this.convertValues(source["settings"], Settings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class NozzleOption {
+	    diameter: string;
+	    layerHeights: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new NozzleOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.diameter = source["diameter"];
+	        this.layerHeights = source["layerHeights"];
+	    }
+	}
+	export class PrinterOption {
+	    id: string;
+	    displayName: string;
+	    nozzles: NozzleOption[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PrinterOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.displayName = source["displayName"];
+	        this.nozzles = this.convertValues(source["nozzles"], NozzleOption);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -277,6 +327,7 @@ export namespace pipeline {
 	    BaseColor: string;
 	    NozzleDiameter: number;
 	    LayerHeight: number;
+	    Printer: string;
 	    InventoryFile: string;
 	    InventoryColors?: number[][];
 	    InventoryLabels?: string[];
@@ -312,6 +363,7 @@ export namespace pipeline {
 	        this.BaseColor = source["BaseColor"];
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
+	        this.Printer = source["Printer"];
 	        this.InventoryFile = source["InventoryFile"];
 	        this.InventoryColors = source["InventoryColors"];
 	        this.InventoryLabels = source["InventoryLabels"];

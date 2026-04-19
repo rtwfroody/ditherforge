@@ -37,6 +37,10 @@ type Options struct {
 	BaseColor      string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
 	NozzleDiameter float32
 	LayerHeight    float32
+	// Printer is the printer profile ID (e.g. "snapmaker_u1") used when
+	// writing the 3MF project settings. Empty = export3mf.DefaultPrinterID.
+	// NozzleDiameter selects the matching nozzle variant within that printer.
+	Printer string
 	InventoryFile    string
 	InventoryColors  [][3]uint8 `json:"InventoryColors,omitempty"`
 	InventoryLabels  []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
@@ -383,7 +387,11 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 		}, nil, nil
 	}
 
-	faceCount, err := ExportFile(cache, opts.Output, opts.LayerHeight)
+	faceCount, err := ExportFile(cache, opts.Output, export3mf.Options{
+		PrinterID:      opts.Printer,
+		NozzleDiameter: opts.NozzleDiameter,
+		LayerHeight:    opts.LayerHeight,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -400,7 +408,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 
 // ExportFile writes a 3MF file using cached pipeline results.
 // Returns the number of faces in the output.
-func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int, error) {
+func ExportFile(cache *StageCache, outputPath string, exportOpts export3mf.Options) (int, error) {
 	lo := cache.getLoad()
 	po := cache.getPalette()
 	mo := cache.getMerge()
@@ -412,7 +420,7 @@ func ExportFile(cache *StageCache, outputPath string, layerHeight float32) (int,
 
 	fmt.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
-	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, layerHeight); err != nil {
+	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, exportOpts); err != nil {
 		return 0, fmt.Errorf("exporting 3MF: %w", err)
 	}
 	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())

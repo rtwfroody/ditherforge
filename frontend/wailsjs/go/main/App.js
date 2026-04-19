@@ -38,6 +38,10 @@ export function ListCollections() {
   return window['go']['main']['App']['ListCollections']();
 }
 
+export function ListPrinters() {
+  return window['go']['main']['App']['ListPrinters']();
+}
+
 export function LoadSettingsFile(arg1) {
   return window['go']['main']['App']['LoadSettingsFile'](arg1);
 }
