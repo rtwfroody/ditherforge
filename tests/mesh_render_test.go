@@ -99,7 +99,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		decimModel, err := squarevoxel.DecimateMesh(ctx, model, len(cells), cellSize, false)
+		decimModel, err := squarevoxel.DecimateMesh(ctx, model, len(cells), cellSize, false, progress.NullTracker{})
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return

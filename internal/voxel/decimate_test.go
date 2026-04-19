@@ -30,7 +30,7 @@ func makeBox() ([][3]float32, [][3]uint32) {
 
 func TestDecimate_TargetAboveInput(t *testing.T) {
 	verts, faces := makeBox()
-	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 100, 1.0)
+	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 100, 1.0, nil)
 	if err != nil {
 		t.Fatalf("Decimate: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestDecimate_PreservesWatertight(t *testing.T) {
 	}
 
 	// Decimate to fewer faces.
-	_, outFaces, err := Decimate(context.Background(), verts, faces, 8, 1.0)
+	_, outFaces, err := Decimate(context.Background(), verts, faces, 8, 1.0, nil)
 	if err != nil {
 		t.Fatalf("Decimate: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDecimate_ReducesFaces(t *testing.T) {
 		}
 	}
 
-	_, outFaces, err := Decimate(context.Background(), verts, faces, 4, 10.0)
+	_, outFaces, err := Decimate(context.Background(), verts, faces, 4, 10.0, nil)
 	if err != nil {
 		t.Fatalf("Decimate: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDecimate_ReducesFaces(t *testing.T) {
 func TestDecimate_SingleTriangle(t *testing.T) {
 	verts := [][3]float32{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}
 	faces := [][3]uint32{{0, 1, 2}}
-	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 0, 1.0)
+	outVerts, outFaces, err := Decimate(context.Background(), verts, faces, 0, 1.0, nil)
 	if err != nil {
 		t.Fatalf("Decimate: %v", err)
 	}

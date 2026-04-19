@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
 // quadric is a symmetric 4×4 matrix stored as 10 upper-triangle elements.
@@ -145,12 +147,20 @@ type decimator struct {
 // or when no more safe collapses exist. cellSize is used to prioritize
 // collapsing edges shorter than a voxel — their cost is scaled down so
 // sub-voxel detail is removed first regardless of QEM error.
-func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64) ([][3]float32, [][3]uint32, error) {
+//
+// If tracker is non-nil, it receives periodic StageProgress("Decimating")
+// updates measured in faces removed. The caller is responsible for the
+// corresponding StageStart/StageDone.
+func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64, tracker progress.Tracker) ([][3]float32, [][3]uint32, error) {
 	if len(faces) <= targetFaces {
 		return verts, faces, nil
 	}
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
 
 	tStart := time.Now()
+	initialFaces := len(faces)
 
 	d := &decimator{
 		verts:        make([][3]float32, len(verts)),
@@ -215,8 +225,11 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 	// Collapse edges.
 	collapseCount := 0
 	for d.activeFaces > targetFaces && d.h.Len() > 0 {
-		if collapseCount%1000 == 0 && ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+		if collapseCount%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			tracker.StageProgress("Decimating", initialFaces-d.activeFaces)
 		}
 		collapseCount++
 		c := heap.Pop(&d.h).(*collapseEntry)

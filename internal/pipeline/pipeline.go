@@ -200,12 +200,12 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Stage 1: Decimate (only depends on geometry + grid params, not stickers)
+	// DecimateMesh emits its own "Decimating" stage events (with a progress
+	// bar), so don't double-emit here.
 	if startFrom <= StageDecimate {
-		tracker.StageStart(stageNames[StageDecimate], false, 0)
-		if err := runDecimate(ctx, cache, opts, lo); err != nil {
+		if err := runDecimate(ctx, cache, opts, lo, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageDecimate])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -244,12 +244,13 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Stage 3: Voxelize (uses decals from sticker stage)
+	// VoxelizeTwoGrids emits its own "Voxelizing" and "Coloring cells" stages
+	// so the two phases appear as distinct steps in the UI instead of
+	// overlapping.
 	if startFrom <= StageVoxelize {
-		tracker.StageStart(stageNames[StageVoxelize], false, 0)
 		if err := runVoxelize(ctx, cache, opts, lo, so, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageVoxelize])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -710,11 +711,11 @@ func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *col
 	return nil
 }
 
-func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput) error {
+func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
 	fmt.Println("Decimating...")
 	cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	targetCells := squarevoxel.CountSurfaceCells(ctx, lo.Model, opts.NozzleDiameter, opts.LayerHeight)
-	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, targetCells, cellSize, opts.NoSimplify)
+	decimModel, err := squarevoxel.DecimateMesh(ctx, lo.Model, targetCells, cellSize, opts.NoSimplify, tracker)
 	if err != nil {
 		return fmt.Errorf("decimate: %w", err)
 	}

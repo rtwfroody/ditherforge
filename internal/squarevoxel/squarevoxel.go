@@ -37,17 +37,30 @@ type regionParams struct {
 }
 
 // voxelizeRegion finds cell keys that overlap the model in the given Z-range.
+// Increments counter and emits StageProgress("Voxelizing", current) once per
+// 1000-face chunk. Pass progress.NullTracker{} and a discard counter to
+// silence reporting.
 func voxelizeRegion(
 	ctx context.Context,
 	model *loader.LoadedModel,
 	p regionParams,
+	tracker progress.Tracker,
+	counter *atomic.Int64,
 ) map[voxel.CellKey]struct{} {
 	halfExtent := [3]float32{p.CellSize / 2, p.CellSize / 2, p.LayerH / 2}
 	cellSet := make(map[voxel.CellKey]struct{})
+	chunk := int64(0)
 	for fi := range model.Faces {
-		if fi%1000 == 0 && ctx.Err() != nil {
-			return cellSet
+		if fi%1000 == 0 {
+			if ctx.Err() != nil {
+				counter.Add(chunk)
+				return cellSet
+			}
+			counter.Add(chunk)
+			chunk = 0
+			tracker.StageProgress("Voxelizing", int(counter.Load()))
 		}
+		chunk++
 		f := model.Faces[fi]
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
@@ -83,6 +96,7 @@ func voxelizeRegion(
 			}
 		}
 	}
+	counter.Add(chunk)
 	return cellSet
 }
 
@@ -206,6 +220,18 @@ func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel
 	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
 	si := voxel.NewSpatialIndex(colorModel, maxCellSize*2)
 
+	// "Voxelizing" covers just the geometry-traversal phase here. The
+	// color-sampling phase below is a separate stage ("Coloring cells")
+	// with its own progress bar, so the UI shows them sequentially instead
+	// of leaving "Voxelizing" running throughout. Total work is faces
+	// processed across both regions (or just one if nLayers <= 1).
+	regions := 1
+	if nLayers > 1 {
+		regions = 2
+	}
+	tracker.StageStart("Voxelizing", true, len(model.Faces)*regions)
+	var voxCounter atomic.Int64
+
 	tVoxelize := time.Now()
 
 	// First layer: grid 0 (wide voxels)
@@ -216,7 +242,7 @@ func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel
 		MinV: minV, NCols: nCols0, NRows: nRows0,
 		LayerLo: 0, LayerHi: 0,
 	}
-	cellSet0 := voxelizeRegion(ctx, model, p0)
+	cellSet0 := voxelizeRegion(ctx, model, p0, tracker, &voxCounter)
 
 	// Remaining layers: grid 1 (narrow voxels)
 	var cellSet1 map[voxel.CellKey]struct{}
@@ -228,12 +254,14 @@ func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel
 			MinV: minV, NCols: nCols1, NRows: nRows1,
 			LayerLo: 1, LayerHi: nLayers - 1,
 		}
-		cellSet1 = voxelizeRegion(ctx, model, p1)
+		cellSet1 = voxelizeRegion(ctx, model, p1, tracker, &voxCounter)
 	}
 
 	totalCells := len(cellSet0) + len(cellSet1)
 	fmt.Printf("  Voxelized: %d cells (layer0: %d, upper: %d) in %.1fs\n",
 		totalCells, len(cellSet0), len(cellSet1), time.Since(tVoxelize).Seconds())
+
+	tracker.StageDone("Voxelizing")
 
 	// Color cells
 	tColor := time.Now()
@@ -305,14 +333,20 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 
 	si := voxel.NewSpatialIndex(colorModel, cellSize*2)
 
+	// See VoxelizeTwoGrids for the rationale on splitting into two stages.
+	tracker.StageStart("Voxelizing", true, len(model.Faces))
+	var voxCounter atomic.Int64
+
 	tVoxelize := time.Now()
 	p := regionParams{
 		Grid: 0, CellSize: cellSize, LayerH: layerH,
 		MinV: minV, NCols: nCols, NRows: nRows,
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
-	cellSet := voxelizeRegion(ctx, model, p)
+	cellSet := voxelizeRegion(ctx, model, p, tracker, &voxCounter)
 	fmt.Printf("  Voxelized: %d cells in %.1fs\n", len(cellSet), time.Since(tVoxelize).Seconds())
+
+	tracker.StageDone("Voxelizing")
 
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, len(cellSet))
@@ -360,14 +394,21 @@ func CountSurfaceCells(ctx context.Context, model *loader.LoadedModel, nozzleDia
 		MinV: minV, NCols: nCols, NRows: nRows,
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
-	cellSet := voxelizeRegion(ctx, model, p)
+	var discard atomic.Int64
+	cellSet := voxelizeRegion(ctx, model, p, progress.NullTracker{}, &discard)
 	return len(cellSet)
 }
 
 // DecimateMesh simplifies the model geometry purely based on shape, targeting
 // roughly one triangle per surface voxel cell.
-func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells int, cellSize float32, noSimplify bool) (*loader.LoadedModel, error) {
+//
+// Emits its own "Decimating" stage events (including a progress bar when
+// decimation is actually performed). The caller should not also emit
+// StageStart/StageDone for this stage.
+func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) (*loader.LoadedModel, error) {
 	if noSimplify {
+		tracker.StageStart("Decimating", false, 0)
+		tracker.StageDone("Decimating")
 		return model, nil
 	}
 
@@ -380,7 +421,10 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 	// Target ~1 triangle per surface cell. Clipping recreates geometry
 	// at voxel boundaries, so the decimated mesh just needs a rough hull.
 	if targetCells < len(opaqueFaces) {
-		decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetCells, float64(cellSize))
+		tracker.StageStart("Decimating", true, len(opaqueFaces)-targetCells)
+		defer tracker.StageDone("Decimating")
+
+		decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetCells, float64(cellSize), tracker)
 		if err != nil {
 			return nil, err
 		}
@@ -391,5 +435,7 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 			Faces:    decFaces,
 		}, nil
 	}
+	tracker.StageStart("Decimating", false, 0)
+	tracker.StageDone("Decimating")
 	return model, nil
 }
