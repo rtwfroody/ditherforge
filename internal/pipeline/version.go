@@ -1,4 +1,4 @@
 package pipeline
 
 // Version is the application version string.
-const Version = "ditherforge 0.6.2"
+const Version = "ditherforge 0.6.3"
