@@ -68,10 +68,11 @@
 
   // Reusable vector to avoid per-frame allocation.
   const tmpDir = new THREE.Vector3();
+  const tmpSize = new THREE.Vector2();
 
   // Render the gizmo after the main scene in a small viewport.
   // Only render when the main scene also rendered (on-demand mode).
-  useTask((delta: number) => {
+  useTask(() => {
     if (!shouldRender()) return;
     const gl = renderer;
     const cam = camera.current;
@@ -83,22 +84,25 @@
     gizmoCamera.lookAt(0, 0, 0);
 
     // Render into bottom-left corner without clearing the color buffer.
+    // Three.js's setViewport/setScissor take CSS pixels and multiply by
+    // pixelRatio internally. Don't pre-multiply here, or on HiDPI displays
+    // the restored viewport ends up pixelRatio^2 too large and the main
+    // scene is drawn with NDC origin shifted off to the right.
     const oldAutoClear = gl.autoClear;
     gl.autoClear = false;
-
-    const pixelRatio = gl.getPixelRatio();
-    const w = size * pixelRatio;
-    const h = size * pixelRatio;
-
-    gl.setViewport(0, 0, w, h);
-    gl.setScissor(0, 0, w, h);
+    gl.setViewport(0, 0, size, size);
+    gl.setScissor(0, 0, size, size);
     gl.setScissorTest(true);
-    gl.clearDepth();
-    gl.render(gizmoScene, gizmoCamera);
-
-    // Restore full viewport.
-    gl.setScissorTest(false);
-    gl.setViewport(0, 0, gl.domElement.width, gl.domElement.height);
-    gl.autoClear = oldAutoClear;
+    try {
+      gl.clearDepth();
+      gl.render(gizmoScene, gizmoCamera);
+    } finally {
+      // Restore full viewport using the renderer's CSS size (NOT
+      // domElement.width/height, which are drawing-buffer pixels).
+      gl.setScissorTest(false);
+      gl.getSize(tmpSize);
+      gl.setViewport(0, 0, tmpSize.x, tmpSize.y);
+      gl.autoClear = oldAutoClear;
+    }
   }, { autoInvalidate: false, stage: postRenderStage });
 </script>
