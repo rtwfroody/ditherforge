@@ -332,11 +332,16 @@ func BuildNeighbors(cells []ActiveCell) [][]Neighbor {
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.
 func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
-	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells))
+	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells), nil)
 }
 
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
-func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor) ([]int32, error) {
+// If tracker is non-nil, emits StageProgress("Dithering", current) every 1000
+// cells. Caller owns StageStart/StageDone.
+func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
 	n := len(cells)
 
 	rng := rand.New(rand.NewSource(42))
@@ -347,8 +352,11 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	processed := make([]bool, n)
 
 	for oi, idx := range order {
-		if oi%1000 == 0 && ctx.Err() != nil {
-			return nil, ctx.Err()
+		if oi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", oi)
 		}
 		r := ClampF(float32(cells[idx].Color[0])+errBuf[idx][0], 0, 255)
 		g := ClampF(float32(cells[idx].Color[1])+errBuf[idx][1], 0, 255)

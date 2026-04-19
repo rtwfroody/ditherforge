@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
@@ -178,12 +179,12 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Stage 0: Load
+	// runLoad emits its own "Loading" stage (and "Alpha-wrap" sub-stage when
+	// enabled), so don't double-emit here.
 	if startFrom <= StageLoad {
-		tracker.StageStart(stageNames[StageLoad], false, 0)
-		if err := runLoad(ctx, cache, opts); err != nil {
+		if err := runLoad(ctx, cache, opts, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageLoad])
 	}
 	lo := cache.getLoad()
 
@@ -301,12 +302,12 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Stage 6: Dither + flood fill
+	// runDither emits its own "Dithering" and "Flood fill" stages so the two
+	// phases each get their own progress bar.
 	if startFrom <= StageDither {
-		tracker.StageStart(stageNames[StageDither], false, 0)
-		if err := runDither(ctx, cache, opts, po, vo); err != nil {
+		if err := runDither(ctx, cache, opts, po, vo, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageDither])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -314,24 +315,24 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	do := cache.getDither()
 
 	// Stage 7: Clip
+	// ClipMeshByPatchesTwoGrid emits its own "Clipping" stage with a
+	// progress bar fed by worker counters.
 	if startFrom <= StageClip {
-		tracker.StageStart(stageNames[StageClip], false, 0)
-		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo); err != nil {
+		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageClip])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
 	// Stage 8: Merge
+	// MergeCoplanarTriangles emits its own "Merging" stage. The NoMerge
+	// path emits an instant start+done from runMerge.
 	if startFrom <= StageMerge {
-		tracker.StageStart(stageNames[StageMerge], false, 0)
-		if err := runMerge(ctx, cache, opts); err != nil {
+		if err := runMerge(ctx, cache, opts, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageMerge])
 	}
 
 	mo := cache.getMerge()
@@ -442,7 +443,9 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 
 // --- Per-stage helpers ---
 
-func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
+func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) error {
+	loading := progress.BeginStage(tracker, "Loading", false, 0)
+	defer loading.Done()
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
 	unitScale := unitScaleForExt(inputExt)
 	scale := unitScale * opts.Scale
@@ -503,11 +506,16 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 	// nativeExtentFile * unitScale.
 	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
+	loading.Done()
+
 	// Alpha-wrap (mesh cleanup for 3D printing). The wrapped mesh replaces
 	// the geometry used for voxelization, decimation, and clipping; the
-	// original is kept for color sampling and sticker placement.
+	// original is kept for color sampling and sticker placement. Reported
+	// as a separate stage (spinner only — CGAL gives no progress signal).
 	geomModel := model
 	if opts.AlphaWrap {
+		wrap := progress.BeginStage(tracker, "Alpha-wrap", false, 0)
+		defer wrap.Done()
 		alpha := opts.AlphaWrapAlpha
 		if alpha <= 0 {
 			alpha = opts.NozzleDiameter
@@ -525,6 +533,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options) error {
 		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
 			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
 		geomModel = wrapped
+		wrap.Done()
 	}
 
 	// If the geometry mesh grew relative to the original (e.g. alpha-wrap
@@ -795,7 +804,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 	return nil
 }
 
-func runDither(ctx context.Context, cache *StageCache, opts Options, po *paletteOutput, vo *voxelizeOutput) error {
+func runDither(ctx context.Context, cache *StageCache, opts Options, po *paletteOutput, vo *voxelizeOutput, tracker progress.Tracker) error {
 	ditherMode := opts.Dither
 	cells := po.Cells
 	pal := po.Palette
@@ -806,9 +815,15 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 	switch ditherMode {
 	case "dizzy":
 		neighbors := voxel.BuildTwoGridNeighbors(cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
-		assignments, err = voxel.DitherWithNeighbors(ctx, cells, pal, neighbors)
+		tracker.StageStart("Dithering", true, len(cells))
+		assignments, err = voxel.DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+		tracker.StageDone("Dithering")
 	default:
+		// AssignColors is a fast linear pass; report as a spinner so the UI
+		// still shows the stage occurring.
+		tracker.StageStart("Dithering", false, 0)
 		assignments, err = voxel.AssignColors(ctx, cells, pal)
+		tracker.StageDone("Dithering")
 	}
 	if err != nil {
 		return err
@@ -831,9 +846,12 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 		fmt.Printf("    #%02X%02X%02X: %d cells (%.1f%%)\n", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
 	}
 
-	// Flood fill per grid, then merge patch maps.
+	// Flood fill per grid, then merge patch maps. floodFillTwoGrids drives
+	// a shared atomic counter across both grids so the bar fills monotonically.
+	tracker.StageStart("Flood fill", true, len(cells))
 	tFlood := time.Now()
-	patchMap, numPatches, err := floodFillTwoGrids(ctx, cells, assignments)
+	patchMap, numPatches, err := floodFillTwoGrids(ctx, cells, assignments, tracker)
+	tracker.StageDone("Flood fill")
 	if err != nil {
 		return err
 	}
@@ -857,7 +875,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 }
 
 // floodFillTwoGrids runs flood fill separately for each grid and merges results.
-func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32) (map[voxel.CellKey]int, int, error) {
+func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
 	// Partition cells by grid.
 	var cells0, cells1 []voxel.ActiveCell
 	var assign0, assign1 []int32
@@ -875,11 +893,12 @@ func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignment
 		}
 	}
 
-	pm0, n0, err := voxel.FloodFillPatches(ctx, cells0, assign0)
+	var counter atomic.Int64
+	pm0, n0, err := voxel.FloodFillPatches(ctx, cells0, assign0, tracker, &counter)
 	if err != nil {
 		return nil, 0, err
 	}
-	pm1, n1, err := voxel.FloodFillPatches(ctx, cells1, assign1)
+	pm1, n1, err := voxel.FloodFillPatches(ctx, cells1, assign1, tracker, &counter)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -895,7 +914,7 @@ func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignment
 	return merged, n0 + n1, nil
 }
 
-func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput) error {
+func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput, tracker progress.Tracker) error {
 	tClip := time.Now()
 	cfg := voxel.TwoGridConfig{
 		MinV:       vo.MinV,
@@ -905,7 +924,7 @@ func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOut
 		SeamZ:      vo.MinV[2] + 0.5*vo.LayerH,
 	}
 	shellVerts, shellFaces, shellAssignments, err := voxel.ClipMeshByPatchesTwoGrid(
-		ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg)
+		ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg, tracker)
 	if err != nil {
 		return fmt.Errorf("clip: %w", err)
 	}
@@ -920,7 +939,7 @@ func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOut
 	return nil
 }
 
-func runMerge(ctx context.Context, cache *StageCache, opts Options) error {
+func runMerge(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) error {
 	co := cache.getClip()
 	shellVerts := co.ShellVerts
 	shellFaces := co.ShellFaces
@@ -930,11 +949,15 @@ func runMerge(ctx context.Context, cache *StageCache, opts Options) error {
 		tMerge := time.Now()
 		before := len(shellFaces)
 		var err error
-		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments)
+		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments, tracker)
 		if err != nil {
 			return fmt.Errorf("merge: %w", err)
 		}
 		fmt.Printf("  Merged shell: %d -> %d faces in %.1fs\n", before, len(shellFaces), time.Since(tMerge).Seconds())
+	} else {
+		// Emit an instant Merging stage so the UI shows the step.
+		tracker.StageStart("Merging", false, 0)
+		tracker.StageDone("Merging")
 	}
 	fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
 

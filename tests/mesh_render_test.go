@@ -11,13 +11,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
-	"github.com/rtwfroody/ditherforge/internal/render"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/render"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -116,7 +117,8 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		patchMap, numPatches, err := voxel.FloodFillPatches(ctx, cells, assignments)
+		var ffCounter atomic.Int64
+		patchMap, numPatches, err := voxel.FloodFillPatches(ctx, cells, assignments, progress.NullTracker{}, &ffCounter)
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return
@@ -134,7 +136,7 @@ func getRemeshResult(t *testing.T, modelPath string) *remeshResult {
 			return
 		}
 
-		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments)
+		shellFaces, shellAssignments, err = voxel.MergeCoplanarTriangles(ctx, shellVerts, shellFaces, shellAssignments, nil)
 		if err != nil {
 			entry.result = &remeshResult{err: err}
 			return

@@ -3,12 +3,21 @@ package voxel
 import (
 	"context"
 	"math"
+
+	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
 // MergeCoplanarTriangles reduces triangle count by finding connected groups of
 // coplanar same-material triangles, extracting each group's boundary polygon,
 // and re-triangulating with ear clipping.
-func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]uint32, []int32, error) {
+//
+// Emits two stages: "Grouping faces" (BFS over faces) and "Merging" (per-group
+// ear clipping). The caller should not also emit StageStart/StageDone for
+// these stages.
+func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32, tracker progress.Tracker) ([][3]uint32, []int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
 	nFaces := len(faces)
 
 	type edgeKey struct{ a, b uint32 }
@@ -38,7 +47,16 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 	}
 	var groups [][]int
 
+	grouping := progress.BeginStage(tracker, "Grouping faces", true, nFaces)
+	defer grouping.Done()
+
 	for fi := 0; fi < nFaces; fi++ {
+		if fi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			grouping.Progress(fi)
+		}
 		if groupID[fi] >= 0 {
 			continue
 		}
@@ -72,14 +90,21 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 		}
 		groups = append(groups, group)
 	}
+	grouping.Done()
 
 	newFaces := make([][3]uint32, 0, nFaces)
 	newAssignments := make([]int32, 0, nFaces)
 	replaced := make([]bool, nFaces)
 
+	merging := progress.BeginStage(tracker, "Merging", true, len(groups))
+	defer merging.Done()
+
 	for gi, group := range groups {
-		if gi%1000 == 0 && ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+		if gi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			merging.Progress(gi)
 		}
 		if len(group) < 2 {
 			continue

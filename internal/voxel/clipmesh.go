@@ -6,8 +6,10 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
 // ClipPolygonByPlane clips a convex polygon against an axis-aligned plane.
@@ -354,6 +356,10 @@ func CentroidToCellTwoGrid(p [3]float32, cfg TwoGridConfig) CellKey {
 
 // ClipMeshByPatchesTwoGrid clips the mesh using two different XY grids.
 //
+// Emits its own "Clipping" stage events, including a progress bar fed by a
+// shared atomic counter that workers bump per face. The caller should not
+// also emit StageStart/StageDone for this stage.
+//
 // TODO: refactor to share the common worker/clip/dedup logic with
 // ClipMeshByPatches — the two functions are ~80% identical.
 func ClipMeshByPatchesTwoGrid(
@@ -362,7 +368,11 @@ func ClipMeshByPatchesTwoGrid(
 	patchMap map[CellKey]int,
 	patchAssignment []int32,
 	cfg TwoGridConfig,
+	tracker progress.Tracker,
 ) ([][3]float32, [][3]uint32, []int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
 	// Build boundary planes per grid.
 	// Z planes are global (shared by both grids). X/Y planes are per-grid.
 	zPlaneSet := make(map[float32]struct{})
@@ -431,6 +441,10 @@ func ClipMeshByPatchesTwoGrid(
 	results := make([]workerResult, numWorkers)
 	chunkSize := (nFaces + numWorkers - 1) / numWorkers
 
+	tracker.StageStart("Clipping", true, nFaces)
+	defer tracker.StageDone("Clipping")
+	var clipCounter atomic.Int64
+
 	var wg sync.WaitGroup
 	for w := range numWorkers {
 		lo := w * chunkSize
@@ -449,10 +463,18 @@ func ClipMeshByPatchesTwoGrid(
 			wFaces := make([][3]uint32, 0, estFaces)
 			wAssign := make([]int32, 0, estFaces)
 
+			chunk := int64(0)
 			for fi := faceStart; fi < faceEnd; fi++ {
-				if (fi-faceStart)%1000 == 0 && ctx.Err() != nil {
-					return
+				if (fi-faceStart)%1000 == 0 {
+					if ctx.Err() != nil {
+						clipCounter.Add(chunk)
+						return
+					}
+					clipCounter.Add(chunk)
+					chunk = 0
+					tracker.StageProgress("Clipping", int(clipCounter.Load()))
 				}
+				chunk++
 				if FaceAlpha(fi, model) < 128 {
 					continue
 				}
@@ -510,6 +532,7 @@ func ClipMeshByPatchesTwoGrid(
 				}
 			}
 
+			clipCounter.Add(chunk)
 			results[workerIdx] = workerResult{vd: wvd, faces: wFaces, assignments: wAssign}
 		}(w, lo, hi)
 	}
