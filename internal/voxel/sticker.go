@@ -1,6 +1,7 @@
 package voxel
 
 import (
+	"context"
 	"image"
 	"math"
 
@@ -61,6 +62,7 @@ type bfsEntry struct {
 // is placed by preserving the 3D triangle's shape in UV space. This makes
 // the sticker follow the surface rather than projecting through corners.
 func BuildStickerDecal(
+	ctx context.Context,
 	model *loader.LoadedModel,
 	adj *TriAdjacency,
 	img image.Image,
@@ -71,7 +73,7 @@ func BuildStickerDecal(
 	scale float64,
 	rotationDeg float64,
 	maxAngleDeg float64,
-) *StickerDecal {
+) (*StickerDecal, error) {
 	t, b, _ := buildStickerTangentFrame(normal, up, rotationDeg)
 
 	// Sticker dimensions in world units.
@@ -151,7 +153,12 @@ func BuildStickerDecal(
 	queue := []bfsEntry{{tri: seedTri, tc: seedTangent}}
 	visited[seedTri] = true
 
+	iter := 0
 	for len(queue) > 0 {
+		if iter%1000 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		iter++
 		entry := queue[0]
 		queue = queue[1:]
 
@@ -244,7 +251,7 @@ func BuildStickerDecal(
 		}
 	}
 
-	return decal
+	return decal, nil
 }
 
 // unfoldVertex computes the 2D position of a new vertex C by unfolding the 3D
@@ -402,6 +409,7 @@ const projectionMinCosAngle = float32(0.1)
 // regions. A fully correct implementation would require triangle clipping
 // in UV space.
 func BuildStickerDecalProjection(
+	ctx context.Context,
 	model *loader.LoadedModel,
 	img image.Image,
 	center [3]float64,
@@ -409,7 +417,7 @@ func BuildStickerDecalProjection(
 	up [3]float64,
 	scale float64,
 	rotationDeg float64,
-) *StickerDecal {
+) (*StickerDecal, error) {
 	t, b, n := buildStickerTangentFrame(normal, up, rotationDeg)
 
 	imgBounds := img.Bounds()
@@ -446,6 +454,9 @@ func BuildStickerDecalProjection(
 	// normal happens to point +Z.
 	var cands []candidate
 	for fi := range model.Faces {
+		if fi%1000 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		tri := int32(fi)
 		f := model.Faces[tri]
 		v0 := model.Vertices[f[0]]
@@ -493,7 +504,7 @@ func BuildStickerDecalProjection(
 		TriUVs: make(map[int32][3][2]float32),
 	}
 	if len(cands) == 0 {
-		return decal
+		return decal, nil
 	}
 
 	// Occlusion test: for each candidate, check if any OTHER candidate is
@@ -505,6 +516,9 @@ func BuildStickerDecalProjection(
 	const baryEps = float32(1e-4)
 	depthEps := float32(scale) * 1e-4
 	for i, c := range cands {
+		if i%1000 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		occluded := false
 		for j, other := range cands {
 			if i == j {
@@ -533,7 +547,7 @@ func BuildStickerDecalProjection(
 		}
 	}
 
-	return decal
+	return decal, nil
 }
 
 // barycentric2D returns barycentric coords of (px,py) relative to the 2D

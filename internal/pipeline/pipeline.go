@@ -648,8 +648,11 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 
 		var decal *voxel.StickerDecal
 		if s.Mode == "projection" {
-			decal = voxel.BuildStickerDecalProjection(model, img,
+			decal, err = voxel.BuildStickerDecalProjection(ctx, model, img,
 				s.Center, s.Normal, s.Up, s.Scale, s.Rotation)
+			if err != nil {
+				return err
+			}
 			if len(decal.TriUVs) == 0 {
 				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
 				continue
@@ -660,8 +663,11 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
 				continue
 			}
-			decal = voxel.BuildStickerDecal(model, adj, img,
+			decal, err = voxel.BuildStickerDecal(ctx, model, adj, img,
 				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle)
+			if err != nil {
+				return err
+			}
 		}
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		decals = append(decals, decal)
