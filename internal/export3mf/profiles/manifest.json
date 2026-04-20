@@ -517,7 +517,9 @@
               "name": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
               "file": "process_0.2_0.12.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.2.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2D 0.2 nozzle"
         },
         {
           "diameter": "0.4",
@@ -549,7 +551,9 @@
               "name": "0.24mm Standard @BBL H2D",
               "file": "process_0.4_0.24.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.4.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2D"
         },
         {
           "diameter": "0.6",
@@ -571,7 +575,9 @@
               "name": "0.30mm Standard @BBL H2D 0.6 nozzle",
               "file": "process_0.6_0.30.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.6.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2D 0.6 nozzle"
         },
         {
           "diameter": "0.8",
@@ -593,7 +599,9 @@
               "name": "0.40mm Standard @BBL H2D 0.8 nozzle",
               "file": "process_0.8_0.40.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.8.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2D 0.8 nozzle"
         }
       ],
       "is_bambu": true
@@ -622,7 +630,9 @@
               "name": "0.12mm Balanced Quality @BBL H2DP 0.2 nozzle",
               "file": "process_0.2_0.12.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.2.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2DP 0.2 nozzle"
         },
         {
           "diameter": "0.4",
@@ -654,7 +664,9 @@
               "name": "0.24mm Standard @BBL H2DP",
               "file": "process_0.4_0.24.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.4.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2DP"
         },
         {
           "diameter": "0.6",
@@ -676,7 +688,9 @@
               "name": "0.30mm Standard @BBL H2DP 0.6 nozzle",
               "file": "process_0.6_0.30.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.6.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2DP 0.6 nozzle"
         },
         {
           "diameter": "0.8",
@@ -698,7 +712,9 @@
               "name": "0.40mm Standard @BBL H2DP 0.8 nozzle",
               "file": "process_0.8_0.40.json"
             }
-          ]
+          ],
+          "filament_file": "filament_0.8.json",
+          "filament_settings_id": "Bambu PLA Basic @BBL H2DP 0.8 nozzle"
         }
       ],
       "is_bambu": true

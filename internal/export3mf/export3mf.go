@@ -83,6 +83,9 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	if err != nil {
 		return err
 	}
+	if printer.IsBambu {
+		return exportBambu(model, assignments, outputPath, paletteRGB, printer, nozzle, machineProfile, opts)
+	}
 	plateX, plateY, err := bedCenter(machineProfile)
 	if err != nil {
 		return fmt.Errorf("%s: %w", printer.ID, err)

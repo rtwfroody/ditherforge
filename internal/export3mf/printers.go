@@ -30,6 +30,10 @@ type Nozzle struct {
 	PrinterSettingsID string           `json:"printer_settings_id"`
 	MachineFile       string           `json:"machine_file"`
 	Processes         []ProcessProfile `json:"processes"`
+	// FilamentFile is the flattened filament profile (Bambu PLA Basic) used
+	// as the seed for BBL-project exports; only populated for Bambu printers.
+	FilamentFile       string `json:"filament_file,omitempty"`
+	FilamentSettingsID string `json:"filament_settings_id,omitempty"`
 }
 
 // Printer is a supported printer model.
@@ -165,6 +169,24 @@ func loadProcessProfile(printerID string, pp *ProcessProfile) (map[string]any, e
 	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("parse process profile %q: %w", p, err)
+	}
+	return out, nil
+}
+
+// loadFilamentProfile reads and parses this nozzle's flattened filament profile.
+// Only populated for Bambu printers (Snapmaker/Prusa exports don't need one).
+func (n *Nozzle) loadFilamentProfile(printerID string) (map[string]any, error) {
+	if n.FilamentFile == "" {
+		return nil, fmt.Errorf("no filament profile for %s nozzle %s", printerID, n.Diameter)
+	}
+	p := path.Join("profiles", printerID, n.FilamentFile)
+	data, err := profilesFS.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("read filament profile %q: %w", p, err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("parse filament profile %q: %w", p, err)
 	}
 	return out, nil
 }
