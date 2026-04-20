@@ -365,6 +365,9 @@ func buildBambuProjectSettings(
 	}
 
 	// Merge filament profile — but expand each array to the needed size.
+	// OrcaSlicer validates array lengths strictly: per-filament options get
+	// length N (num_filaments), per-(filament × extruder-variant) options get
+	// length N × variantCount. See perVariantFilamentOptions.
 	fid, _ := filament["filament_id"].(string)
 	if fid == "" {
 		return "", fmt.Errorf("filament profile for %s nozzle %s is missing filament_id",
@@ -374,25 +377,13 @@ func buildBambuProjectSettings(
 	for k, v := range filament {
 		arr, ok := v.([]any)
 		if !ok {
-			// Scalar values (e.g. single strings) pass through as-is.
 			data[k] = v
 			continue
 		}
-		switch len(arr) {
-		case 1:
-			// Per-filament single value: replicate N times.
-			data[k] = repeatAny(arr[0], N)
-		case variantCount:
-			// Per-filament × per-variant: interleave variantCount-sized block N times.
-			out := make([]any, 0, N*variantCount)
-			for i := 0; i < N; i++ {
-				out = append(out, arr...)
-			}
-			data[k] = out
-		default:
-			// Unknown pattern — pass through. Bambu will size-check explicit
-			// filament_* keys; anything else is noise for our purposes.
-			data[k] = v
+		if perVariantFilamentOptions[k] {
+			data[k] = expandPerVariant(arr, N, variantCount)
+		} else {
+			data[k] = expandPerFilament(arr, N)
 		}
 	}
 
@@ -462,13 +453,94 @@ func buildBambuProjectSettings(
 	return string(b), nil
 }
 
-// repeatAny returns a fresh slice containing v repeated n times.
-func repeatAny(v any, n int) []any {
-	out := make([]any, n)
-	for i := range out {
-		out[i] = v
+// perVariantFilamentOptions names the config keys that OrcaSlicer sizes to
+// num_filaments × num_extruder_variants in project_settings.config, as opposed
+// to the more common per-filament shape (length num_filaments).
+//
+// Source: `filament_options_with_variant` in OrcaSlicer's
+// src/libslic3r/PrintConfig.cpp, plus filament_self_index which is populated
+// by a separate PresetBundle path but sized the same way. Keep this set in
+// sync with that upstream declaration.
+var perVariantFilamentOptions = map[string]bool{
+	// filament_options_with_variant
+	"filament_flow_ratio":                    true,
+	"filament_max_volumetric_speed":          true,
+	"filament_extruder_variant":              true,
+	"filament_retraction_length":             true,
+	"filament_z_hop":                         true,
+	"filament_z_hop_types":                   true,
+	"filament_retract_lift_above":            true,
+	"filament_retract_lift_below":            true,
+	"filament_retract_lift_enforce":          true,
+	"filament_retract_restart_extra":         true,
+	"filament_retraction_speed":              true,
+	"filament_deretraction_speed":            true,
+	"filament_retraction_minimum_travel":     true,
+	"filament_retract_when_changing_layer":   true,
+	"filament_wipe":                          true,
+	"filament_wipe_distance":                 true,
+	"filament_retract_before_wipe":           true,
+	"filament_long_retractions_when_cut":     true,
+	"filament_retraction_distances_when_cut": true,
+	"long_retractions_when_ec":               true,
+	"retraction_distances_when_ec":           true,
+	"nozzle_temperature_initial_layer":       true,
+	"nozzle_temperature":                     true,
+	"filament_flush_volumetric_speed":        true,
+	"filament_flush_temp":                    true,
+	"volumetric_speed_coefficients":          true,
+	"filament_adaptive_volumetric_speed":     true,
+	"filament_ironing_flow":                  true,
+	"filament_ironing_spacing":               true,
+	"filament_ironing_inset":                 true,
+	"filament_ironing_speed":                 true,
+	// Sized the same way by PresetBundle.cpp:3505-3512 even though it's not
+	// in filament_options_with_variant.
+	"filament_self_index": true,
+}
+
+// expandPerFilament stretches a filament-preset array to length N.
+// Length 1 replicates. An already-sized-N array is returned as-is. Any other
+// length is passed through unchanged — BambuStudio will size-check on import
+// and the mismatch will surface rather than be silently rewritten.
+func expandPerFilament(arr []any, N int) []any {
+	switch len(arr) {
+	case 1:
+		out := make([]any, N)
+		for i := range out {
+			out[i] = arr[0]
+		}
+		return out
+	case N:
+		return arr
+	default:
+		return arr
 	}
-	return out
+}
+
+// expandPerVariant stretches a filament-preset array to length N×variantCount
+// (the shape OrcaSlicer expects for per-(filament × extruder-variant) options).
+// Length 1 replicates the single value across every filament and every
+// variant; length variantCount repeats the variantCount-wide block for each
+// filament. Any other length is passed through unchanged so a mismatch
+// surfaces on import rather than being silently rewritten.
+func expandPerVariant(arr []any, N, variantCount int) []any {
+	switch len(arr) {
+	case 1:
+		out := make([]any, N*variantCount)
+		for i := range out {
+			out[i] = arr[0]
+		}
+		return out
+	case variantCount:
+		out := make([]any, 0, N*variantCount)
+		for i := 0; i < N; i++ {
+			out = append(out, arr...)
+		}
+		return out
+	default:
+		return arr
+	}
 }
 
 // extractVariants reads machine.extruder_variant_list[0] as a comma-separated
