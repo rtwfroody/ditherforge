@@ -100,7 +100,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          VERSION=$(grep 'VersionSemver = ' internal/pipeline/version.go | sed 's/.*"\(.*\)".*/\1/')
           if [ -z "$VERSION" ]; then echo "::error::Failed to extract version"; exit 1; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -272,7 +272,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep 'Version = "ditherforge' internal/pipeline/version.go | sed 's/.*ditherforge \(.*\)".*/\1/')
+          VERSION=$(grep 'VersionSemver = ' internal/pipeline/version.go | sed 's/.*"\(.*\)".*/\1/')
           if [ -z "$VERSION" ]; then echo "::error::Failed to extract version"; exit 1; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 

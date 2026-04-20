@@ -391,6 +391,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 		PrinterID:      opts.Printer,
 		NozzleDiameter: opts.NozzleDiameter,
 		LayerHeight:    opts.LayerHeight,
+		AppVersion:     VersionSemver,
 	})
 	if err != nil {
 		return nil, nil, err

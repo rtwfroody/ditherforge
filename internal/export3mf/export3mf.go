@@ -48,6 +48,10 @@ type Options struct {
 	PrinterID      string  // e.g. "snapmaker_u1"; empty = DefaultPrinterID
 	NozzleDiameter float32 // e.g. 0.4; 0 = printer's default nozzle
 	LayerHeight    float32 // matched to closest available process profile
+	// AppVersion is the ditherforge semver (e.g. "0.6.3"), used to build the
+	// BambuStudio-<semver>+ditherforge Application tag that makes Bambu
+	// Studio/OrcaSlicer accept the file as a native project.
+	AppVersion string
 }
 
 // Export writes a single mesh with per-face palette assignments to a 3MF file.
@@ -116,13 +120,26 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 
 	objectRels := `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>`
 
+	// Attribute ditherforge via standard 3MF metadata. We intentionally do NOT
+	// prefix Application with "BambuStudio-" / "OrcaSlicer-": doing so sets
+	// m_is_bbl_3mf in Bambu Studio's importer, which then strictly parses
+	// project_settings.config and expects plate/slice files we don't emit.
+	appVersion := opts.AppVersion
+	if appVersion == "" {
+		appVersion = "0.0.0"
+	}
+	applicationTag := fmt.Sprintf("ditherforge-%s", appVersion)
+
 	mainModel := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
 		`<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" unit="millimeter" xml:lang="en-US" requiredextensions="p">`+
+		`<metadata name="Application">%s</metadata>`+
+		`<metadata name="Designer">ditherforge</metadata>`+
+		`<metadata name="Title">ditherforge output</metadata>`+
 		`<resources><object id="2" p:UUID="%s" type="model">`+
 		`<components><component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="%s" transform="%s"/></components>`+
 		`</object></resources>`+
 		`<build p:UUID="%s"><item objectid="2" p:UUID="%s" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/></build>`+
-		`</model>`, objUUID, newUUID(), transform, buildUUID, instUUID)
+		`</model>`, applicationTag, objUUID, newUUID(), transform, buildUUID, instUUID)
 
 	modelSettings := buildModelSettings(model)
 

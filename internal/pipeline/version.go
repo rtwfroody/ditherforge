@@ -1,4 +1,8 @@
 package pipeline
 
-// Version is the application version string.
-const Version = "ditherforge 0.6.3"
+// VersionSemver is the bare semver portion of the application version.
+// Keep this in sync with Version below; the release workflow greps Version.
+const VersionSemver = "0.6.3"
+
+// Version is the application version string shown in UIs and CLI --version.
+const Version = "ditherforge " + VersionSemver
