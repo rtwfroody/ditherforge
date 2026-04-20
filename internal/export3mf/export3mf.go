@@ -95,30 +95,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	instUUID := newUUID()
 	buildUUID := newUUID()
 
-	var minX, maxX, minY, maxY, minZ float32
-	if len(model.Vertices) > 0 {
-		verts := model.Vertices
-		minX, maxX = verts[0][0], verts[0][0]
-		minY, maxY = verts[0][1], verts[0][1]
-		minZ = verts[0][2]
-		for _, v := range verts[1:] {
-			if v[0] < minX {
-				minX = v[0]
-			}
-			if v[0] > maxX {
-				maxX = v[0]
-			}
-			if v[1] < minY {
-				minY = v[1]
-			}
-			if v[1] > maxY {
-				maxY = v[1]
-			}
-			if v[2] < minZ {
-				minZ = v[2]
-			}
-		}
-	}
+	minX, maxX, minY, maxY, minZ := meshExtents(model)
 	tx := plateX - float64(minX+maxX)/2
 	ty := plateY - float64(minY+maxY)/2
 	tz := -float64(minZ)
@@ -193,11 +170,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	if err := writeEntry("3D/_rels/3dmodel.model.rels", objectRels); err != nil {
 		return err
 	}
-	objectModel, err := buildObjectModel(model, assignments)
-	if err != nil {
-		return err
-	}
-	if err := writeEntry("3D/Objects/object_1.model", objectModel); err != nil {
+	if err := writeEntry("3D/Objects/object_1.model", buildObjectModel(model, assignments, newUUID())); err != nil {
 		return err
 	}
 	if err := writeEntry("Metadata/model_settings.config", modelSettings); err != nil {
@@ -213,16 +186,22 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 		}
 	}
 	if paletteRGB != nil && len(assignments) == len(model.Faces) {
-		if thumb, err := renderThumbnail(model, assignments, paletteRGB, thumbnailSize); err == nil {
-			_ = writeBinary(thumbnailPath, thumb)
+		thumb, err := renderThumbnail(model, assignments, paletteRGB, thumbnailSize)
+		if err != nil {
+			return fmt.Errorf("render thumbnail: %w", err)
+		}
+		if err := writeBinary(thumbnailPath, thumb); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, error) {
-	objUUID := newUUID()
+// buildObjectModel writes the inner /3D/Objects/object_1.model with vertices,
+// triangles, and paint_color assignments. Shared by the generic and Bambu
+// export paths; they differ only in how objUUID is sourced.
+func buildObjectModel(model *loader.LoadedModel, assignments []int32, objUUID string) string {
 	var sb strings.Builder
 
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
@@ -267,7 +246,7 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32) (string, e
 
 	sb.WriteString(`</mesh></object></resources><build/></model>`)
 
-	return sb.String(), nil
+	return sb.String()
 }
 
 func buildProjectSettings(printer *Printer, nozzle *Nozzle, machineProfile map[string]any, paletteRGB [][3]uint8, layerHeight float32) (string, error) {

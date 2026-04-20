@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -57,7 +56,7 @@ func exportBambu(
 		return err
 	}
 
-	variantCount := parseVariantCount(machineProfile)
+	variants := extractVariants(machineProfile)
 
 	plateX, plateY, err := bedCenter(machineProfile)
 	if err != nil {
@@ -73,6 +72,12 @@ func exportBambu(
 	// UUID scheme matches BambuStudio exports: object/item UUIDs are
 	// "<counter>-<suffix>" using the suffix pool for that resource; build
 	// UUID is random.
+	//
+	// componentID uses a distinct suffix (not the sub-object pool) to match
+	// what BambuStudio emits. Its importer wires the outer <component> to
+	// the inner <object id="1"> via objectid + p:path, not by UUID, so the
+	// values can differ. Keeping the counter at 0x10000 mirrors the
+	// reference so the file looks round-tripped through BambuStudio.
 	objID := newBambuUUID(1, bambuObjectUUIDSuffix)
 	subObjID := newBambuUUID(1, bambuSubObjectUUIDSuffix)
 	componentID := newBambuUUID(0x10000, "-b206-40ff-9872-83e8017abed1")
@@ -87,12 +92,9 @@ func exportBambu(
 	creationDate := time.Now().UTC().Format("2006-01-02")
 
 	mainModel := buildBambuMainModel(applicationTag, creationDate, objID, buildID, componentID, buildItemID, buildTransform)
-	objectModel, err := buildBambuObjectModel(model, assignments, subObjID)
-	if err != nil {
-		return err
-	}
-	modelSettings := buildBambuModelSettings(model, float64(nozzle.diameterFloat()))
-	projectSettings, err := buildBambuProjectSettings(printer, nozzle, machineProfile, filamentProfile, paletteRGB, opts.LayerHeight, variantCount)
+	objectModel := buildObjectModel(model, assignments, subObjID)
+	modelSettings := buildBambuModelSettings(model)
+	projectSettings, err := buildBambuProjectSettings(printer, nozzle, machineProfile, filamentProfile, paletteRGB, opts.LayerHeight, variants)
 	if err != nil {
 		return err
 	}
@@ -185,34 +187,6 @@ func newBambuUUID(index int, suffix string) string {
 	return fmt.Sprintf("%08x%s", index, suffix)
 }
 
-// parseVariantCount counts comma-separated variants in extruder_variant_list[0].
-// Returns 1 if the machine profile is single-variant (A1-style).
-func parseVariantCount(machine map[string]any) int {
-	raw, ok := machine["extruder_variant_list"]
-	if !ok {
-		return 1
-	}
-	list, ok := raw.([]any)
-	if !ok || len(list) == 0 {
-		return 1
-	}
-	first, ok := list[0].(string)
-	if !ok {
-		return 1
-	}
-	parts := strings.Split(first, ",")
-	n := 0
-	for _, p := range parts {
-		if strings.TrimSpace(p) != "" {
-			n++
-		}
-	}
-	if n == 0 {
-		return 1
-	}
-	return n
-}
-
 // meshExtents returns the axis-aligned bounding box of the model.
 func meshExtents(model *loader.LoadedModel) (minX, maxX, minY, maxY, minZ float32) {
 	if len(model.Vertices) == 0 {
@@ -287,50 +261,7 @@ func buildBambuMainModel(appTag, creationDate, objUUID, buildUUID, componentUUID
 		buildUUID, buildItemUUID, buildTransform)
 }
 
-func buildBambuObjectModel(model *loader.LoadedModel, assignments []int32, subObjUUID string) (string, error) {
-	var sb strings.Builder
-	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
-	sb.WriteString(`<model unit="millimeter" xml:lang="en-US"`)
-	sb.WriteString(` xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"`)
-	sb.WriteString(` xmlns:BambuStudio="http://schemas.bambulab.com/package/2021"`)
-	sb.WriteString(` xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"`)
-	sb.WriteString(` requiredextensions="p">`)
-	sb.WriteString(`<metadata name="BambuStudio:3mfVersion">1</metadata>`)
-	sb.WriteString(`<resources>`)
-	fmt.Fprintf(&sb, `<object id="1" p:UUID="%s" type="model">`, subObjUUID)
-	sb.WriteString(`<mesh><vertices>`)
-	for _, v := range model.Vertices {
-		fmt.Fprintf(&sb, `<vertex x="%.6f" y="%.6f" z="%.6f"/>`, v[0], v[1], v[2])
-	}
-	sb.WriteString(`</vertices>`)
-
-	type snapV struct{ x, y, z int32 }
-	snapped := make([]snapV, len(model.Vertices))
-	for i, v := range model.Vertices {
-		snapped[i] = snapV{
-			int32(math.Round(float64(v[0]) * 1e6)),
-			int32(math.Round(float64(v[1]) * 1e6)),
-			int32(math.Round(float64(v[2]) * 1e6)),
-		}
-	}
-
-	sb.WriteString(`<triangles>`)
-	for fi, face := range model.Faces {
-		s0, s1, s2 := snapped[face[0]], snapped[face[1]], snapped[face[2]]
-		if s0 == s1 || s1 == s2 || s0 == s2 {
-			continue
-		}
-		pc := paintColor(int(assignments[fi]))
-		fmt.Fprintf(&sb, `<triangle v1="%d" v2="%d" v3="%d" paint_color="%s"/>`,
-			face[0], face[1], face[2], pc)
-	}
-	sb.WriteString(`</triangles>`)
-
-	sb.WriteString(`</mesh></object></resources><build/></model>`)
-	return sb.String(), nil
-}
-
-func buildBambuModelSettings(model *loader.LoadedModel, _ float64) string {
+func buildBambuModelSettings(model *loader.LoadedModel) string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
 	sb.WriteString("\n<config>")
@@ -397,7 +328,7 @@ func buildBambuPlateJSON(model *loader.LoadedModel, nozzle *Nozzle) string {
 }
 
 // buildBambuProjectSettings merges machine + process + filament profiles and
-// expands filament_* arrays to match num_filaments × variantCount. The result
+// expands filament_* arrays to match num_filaments × len(variants). The result
 // satisfies BambuStudio's PresetBundle validator (filament_colour nonempty;
 // filament_extruder_variant / filament_self_index size match).
 func buildBambuProjectSettings(
@@ -407,9 +338,10 @@ func buildBambuProjectSettings(
 	filament map[string]any,
 	paletteRGB [][3]uint8,
 	layerHeight float32,
-	variantCount int,
+	variants []string,
 ) (string, error) {
 	N := len(paletteRGB)
+	variantCount := len(variants)
 	data := make(map[string]any, len(machine)+len(filament)+32)
 	for k, v := range machine {
 		data[k] = v
@@ -433,9 +365,10 @@ func buildBambuProjectSettings(
 	}
 
 	// Merge filament profile — but expand each array to the needed size.
-	filamentIDFromProfile := ""
-	if id, _ := filament["filament_id"].(string); id != "" {
-		filamentIDFromProfile = id
+	fid, _ := filament["filament_id"].(string)
+	if fid == "" {
+		return "", fmt.Errorf("filament profile for %s nozzle %s is missing filament_id",
+			printer.ID, nozzle.Diameter)
 	}
 	delete(filament, "name")
 	for k, v := range filament {
@@ -481,10 +414,6 @@ func buildBambuProjectSettings(
 	filamentIDs := make([]any, N)
 	filamentMultiColour := make([]any, N)
 	filamentMap := make([]any, N)
-	fid := filamentIDFromProfile
-	if fid == "" {
-		fid = "GFA00" // Bambu PLA Basic generic ID.
-	}
 	for i, p := range paletteRGB {
 		hexColors[i] = fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		filamentSettingsIDs[i] = nozzle.FilamentSettingsID
@@ -501,18 +430,11 @@ func buildBambuProjectSettings(
 	data["filament_map"] = filamentMap
 	data["filament_map_mode"] = "Auto For Flush"
 
-	// filament_extruder_variant: N × variantCount; one cycle per filament,
-	// pulled from the machine profile's extruder_variant_list[0].
-	variants := extractVariants(machine)
-	if len(variants) < variantCount {
-		for len(variants) < variantCount {
-			variants = append(variants, "Direct Drive Standard")
-		}
-	}
+	// filament_extruder_variant: N × variantCount; one cycle per filament.
 	fev := make([]any, 0, N*variantCount)
 	fsi := make([]any, 0, N*variantCount)
-	for i := 0; i < N; i++ {
-		for j := 0; j < variantCount; j++ {
+	for i := range N {
+		for j := range variantCount {
 			fev = append(fev, variants[j])
 			fsi = append(fsi, strconv.Itoa(i+1))
 		}
@@ -525,12 +447,11 @@ func buildBambuProjectSettings(
 	data["mmu_segmented_region_max_width"] = "1.5"
 
 	// different_settings_to_system: length N+2 (print, N filaments, printer).
+	// First entry flags the one print-setting we override; the rest stay empty.
 	diff := make([]any, 2+N)
 	diff[0] = "mmu_segmented_region_max_width"
-	for i := range diff {
-		if diff[i] == nil {
-			diff[i] = ""
-		}
+	for i := 1; i < len(diff); i++ {
+		diff[i] = ""
 	}
 	data["different_settings_to_system"] = diff
 
