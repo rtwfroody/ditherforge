@@ -663,8 +663,10 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
 				continue
 			}
+			cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 			decal, err = voxel.BuildStickerDecal(ctx, model, adj, img,
-				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle)
+				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle,
+				float64(cellSize))
 			if err != nil {
 				return err
 			}

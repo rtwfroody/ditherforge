@@ -73,6 +73,7 @@ func BuildStickerDecal(
 	scale float64,
 	rotationDeg float64,
 	maxAngleDeg float64,
+	voxelSize float64,
 ) (*StickerDecal, error) {
 	t, b, _ := buildStickerTangentFrame(normal, up, rotationDeg)
 
@@ -129,12 +130,30 @@ func BuildStickerDecal(
 		cosMaxAngle = float32(math.Cos(maxAngleDeg * math.Pi / 180))
 	}
 
-	// UV-space occupancy bitmap. Tracks which sticker pixels have already
-	// been claimed by a triangle. A new triangle is only accepted if it
-	// covers at least one unclaimed pixel, preventing the sticker from
-	// repeating when geodesic unfolding folds back on non-developable surfaces.
+	// UV-space occupancy bitmap. Tracks which regions of the sticker have
+	// been claimed. The BFS rejects a triangle whose pixel-center footprint
+	// is majority-claimed, preventing the sticker from repeating when
+	// geodesic unfolding folds back on non-developable surfaces.
+	//
+	// Resolution is decoupled from the sticker image: the grid must be fine
+	// enough that adjacent mesh triangles don't share pixel centers, else
+	// they falsely reject each other. The smallest feature that can survive
+	// the output pipeline is one voxel wide, so sizing the occupancy grid
+	// so that each voxel-length span is covered by several pixels gives
+	// adequate headroom. We oversample by 4× per voxel.
+	const occPixelsPerVoxel = 4
 	occW := imgBounds.Dx()
 	occH := imgBounds.Dy()
+	if voxelSize > 0 {
+		wVoxel := int(math.Ceil(scale / voxelSize * occPixelsPerVoxel))
+		hVoxel := int(math.Ceil(scale * aspect / voxelSize * occPixelsPerVoxel))
+		if wVoxel > occW {
+			occW = wVoxel
+		}
+		if hVoxel > occH {
+			occH = hVoxel
+		}
+	}
 	occupancy := make([]bool, occW*occH)
 
 	// triOverlapsTangentBounds checks if the triangle overlaps the sticker
@@ -169,8 +188,15 @@ func BuildStickerDecal(
 		// Convert to UV for occupancy check and decal storage.
 		uvs := tangentTrisToUV(entry.tc)
 
-		// Only accept this triangle if it covers at least one new pixel.
-		if !occupancyClaimTriangle(uvs, occupancy, occW, occH) {
+		// Fold-back detection: rasterize the triangle into the occupancy
+		// bitmap and reject if most of its pixel-center footprint is
+		// already claimed by a previously accepted triangle. On a faceted
+		// or bumpy surface, two geodesic paths from the seed may legitimately
+		// try to paint the same sticker region twice — we keep only the
+		// first. This can leave visible "seams" along fold-back boundaries
+		// on non-developable geometry, which is an inherent tradeoff: the
+		// alternative is visible sticker duplication.
+		if !checkAndPaintTriangle(uvs, occupancy, occW, occH) {
 			continue
 		}
 
@@ -307,46 +333,87 @@ func unfoldVertex(posA, posB, posC [3]float32, flatA, flatB, flatCurrent [2]floa
 	}
 }
 
-// occupancyClaimTriangle rasterizes a triangle in UV space into the occupancy
-// bitmap. Returns true if at least one pixel was newly claimed (i.e., the
-// triangle covers some previously unclaimed area). All pixels covered by the
-// triangle are marked as claimed regardless of the return value.
-func occupancyClaimTriangle(uvs [3][2]float32, occ []bool, w, h int) bool {
-	// Compute AABB in pixel coordinates, clipped to bitmap.
+// checkAndPaintTriangle rasterizes the triangle's UV footprint into the
+// occupancy bitmap. If the majority of covered pixel centers are already
+// claimed by earlier triangles (a geodesic fold-back), the bitmap is left
+// unchanged and false is returned. Otherwise the covered pixels are marked
+// claimed and true is returned.
+//
+// Using the same "pixel center inside triangle" test as the claim step
+// guarantees that adjacent triangles have disjoint footprints — so two
+// sub-pixel neighbors along a shared edge never mutually reject, even when
+// the sticker is scaled far larger than the individual mesh triangles.
+//
+// Sub-pixel triangles (no pixel center lands inside) are always accepted
+// and leave the occupancy bitmap untouched.
+func checkAndPaintTriangle(uvs [3][2]float32, occ []bool, w, h int) bool {
 	fw, fh := float32(w), float32(h)
 	minPx := int(max(0, min(uvs[0][0], min(uvs[1][0], uvs[2][0]))*fw))
 	maxPx := int(min(fw-1, max(uvs[0][0], max(uvs[1][0], uvs[2][0]))*fw))
 	minPy := int(max(0, min(uvs[0][1], min(uvs[1][1], uvs[2][1]))*fh))
 	maxPy := int(min(fh-1, max(uvs[0][1], max(uvs[1][1], uvs[2][1]))*fh))
 
-	claimedNew := false
+	var pixels []int
+	claimed := 0
 	for py := minPy; py <= maxPy; py++ {
 		for px := minPx; px <= maxPx; px++ {
-			// Sample point at pixel center.
 			u := (float32(px) + 0.5) / fw
 			v := (float32(py) + 0.5) / fh
-			if !pointInTriangle2D(u, v, uvs) {
+			if !pointStrictlyInsideTriangle2D(u, v, uvs) {
 				continue
 			}
 			idx := py*w + px
-			if !occ[idx] {
-				claimedNew = true
+			pixels = append(pixels, idx)
+			if occ[idx] {
+				claimed++
 			}
-			occ[idx] = true
 		}
 	}
-	return claimedNew
+	if len(pixels) > 0 && claimed*2 >= len(pixels) {
+		return false
+	}
+	for _, idx := range pixels {
+		occ[idx] = true
+	}
+	return true
 }
 
-// pointInTriangle2D returns true if point (px,py) is inside the 2D triangle
-// defined by uvs, using barycentric coordinate sign tests.
-func pointInTriangle2D(px, py float32, uvs [3][2]float32) bool {
-	d1 := (px-uvs[1][0])*(uvs[0][1]-uvs[1][1]) - (uvs[0][0]-uvs[1][0])*(py-uvs[1][1])
-	d2 := (px-uvs[2][0])*(uvs[1][1]-uvs[2][1]) - (uvs[1][0]-uvs[2][0])*(py-uvs[2][1])
-	d3 := (px-uvs[0][0])*(uvs[2][1]-uvs[0][1]) - (uvs[2][0]-uvs[0][0])*(py-uvs[0][1])
-	hasNeg := (d1 < 0) || (d2 < 0) || (d3 < 0)
-	hasPos := (d1 > 0) || (d2 > 0) || (d3 > 0)
-	return !(hasNeg && hasPos)
+// pointStrictlyInsideTriangle2D returns true if (px,py) is strictly inside
+// the 2D triangle defined by uvs, with a small barycentric margin (eps=1e-4,
+// ~1000× float32 relative precision) that excludes points within roundoff
+// distance of any edge. The margin is essential for occupancy tracking:
+// without it, a pixel center that lies near-exactly on a shared edge
+// between two triangles can be reported as "inside" both due to roundoff,
+// causing adjacent triangles to wrongly fight over the pixel. Excluding
+// the margin from both sides leaves the thin band near each edge unclaimed,
+// which is harmless.
+func pointStrictlyInsideTriangle2D(px, py float32, uvs [3][2]float32) bool {
+	x0, y0 := uvs[0][0], uvs[0][1]
+	x1, y1 := uvs[1][0], uvs[1][1]
+	x2, y2 := uvs[2][0], uvs[2][1]
+
+	// Edge functions (signed double-areas of sub-triangles).
+	f0 := (x1-x0)*(py-y0) - (y1-y0)*(px-x0) // edge V0→V1
+	f1 := (x2-x1)*(py-y1) - (y2-y1)*(px-x1) // edge V1→V2
+	f2 := (x0-x2)*(py-y2) - (y0-y2)*(px-x2) // edge V2→V0
+
+	twoArea := f0 + f1 + f2
+	absTwoArea := twoArea
+	if absTwoArea < 0 {
+		absTwoArea = -absTwoArea
+	}
+	if absTwoArea < 1e-20 {
+		return false // degenerate
+	}
+
+	// Barycentric coordinate > eps on all three edges means the point is
+	// strictly inside, away from any edge.
+	const eps = 1e-4
+	threshold := eps * absTwoArea
+	if twoArea > 0 {
+		return f0 > threshold && f1 > threshold && f2 > threshold
+	}
+	return f0 < -threshold && f1 < -threshold && f2 < -threshold
 }
 
 // buildStickerTangentFrame returns (t, b, n): the sticker's tangent, bitangent,
