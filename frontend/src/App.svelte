@@ -35,7 +35,7 @@
   }
 
   // Shorten a path for display. Always shows at least the full filename.
-  function shortenPath(path: string, maxLen = 40): string {
+  function shortenPath(path: string, maxLen = 80): string {
     if (path.length <= maxLen) return path;
     const name = path.split(/[/\\]/).pop() ?? path;
     if (name.length >= maxLen - 3) return name;
@@ -1005,7 +1005,7 @@
     </Menubar.Menu>
     <div class="ml-auto flex items-center gap-2 pr-2">
       {#if settingsPath || inputFile}
-        <span class="text-xs text-muted-foreground truncate max-w-64" title={settingsPath || inputFile}>{shortenPath(settingsPath || inputFile)}</span>
+        <span class="text-xs text-muted-foreground" title={settingsPath || inputFile}>{shortenPath(settingsPath || inputFile)}</span>
       {/if}
       <button
         class="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
