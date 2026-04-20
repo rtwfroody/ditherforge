@@ -595,7 +595,8 @@
             }
           ]
         }
-      ]
+      ],
+      "is_bambu": true
     },
     {
       "id": "bambu_h2d_pro",
@@ -699,7 +700,8 @@
             }
           ]
         }
-      ]
+      ],
+      "is_bambu": true
     }
   ]
 }

@@ -37,6 +37,10 @@ type Printer struct {
 	ID          string   `json:"id"`
 	DisplayName string   `json:"display_name"`
 	Nozzles     []Nozzle `json:"nozzles"`
+	// IsBambu marks printers that expect a Bambu Studio/OrcaSlicer BBL-project
+	// 3MF (extra Metadata files, UUID suffixes, plate-item transform). Non-Bambu
+	// printers get a generic 3MF with project_settings.config only.
+	IsBambu bool `json:"is_bambu,omitempty"`
 }
 
 // manifest is the root object in profiles/manifest.json.
