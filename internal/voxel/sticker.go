@@ -507,11 +507,13 @@ func BuildStickerDecalProjection(
 	}
 
 	type candidate struct {
-		tri    int32
-		tcs    [3][2]float32 // tangent-plane coords per vertex
-		depths [3]float32    // depth along +n per vertex
-		cx, cy float32       // centroid tangent coords
-		cdepth float32       // centroid depth
+		tri        int32
+		tcs        [3][2]float32 // tangent-plane coords per vertex
+		depths     [3]float32    // depth along +n per vertex
+		cx, cy     float32       // centroid tangent coords
+		cdepth     float32       // centroid depth
+		minU, maxU float32       // tangent-plane AABB
+		minV, maxV float32
 	}
 
 	// Gather candidates: front-facing (well past edge-on) triangles whose
@@ -563,6 +565,8 @@ func BuildStickerDecalProjection(
 			cx:     (u0 + u1 + u2) / 3,
 			cy:     (b0 + b1 + b2) / 3,
 			cdepth: (d0 + d1 + d2) / 3,
+			minU:   minU, maxU: maxU,
+			minV: minV, maxV: maxV,
 		})
 	}
 
@@ -576,21 +580,70 @@ func BuildStickerDecalProjection(
 
 	// Occlusion test: for each candidate, check if any OTHER candidate is
 	// closer to the projector at its centroid (t,b). If so, drop it.
-	// O(n²) in candidates; acceptable for typical sticker sizes.
+	//
+	// Accelerate with a uniform 2D grid over the sticker rectangle: each cell
+	// lists candidates whose tangent-plane AABB overlaps that cell. To test a
+	// candidate's centroid, only candidates in the containing cell need a
+	// point-in-triangle query. This turns an O(N²) sweep into ~O(N·N/cells).
 	//
 	// depthEps scales with sticker size so coplanar surfaces within 0.01%
 	// of the sticker's width are treated as ties rather than occluders.
 	const baryEps = float32(1e-4)
 	depthEps := float32(scale) * 1e-4
+
+	rectW := 2 * fHalfW
+	rectH := 2 * fHalfH
+	if rectW <= 0 || rectH <= 0 {
+		return decal, nil
+	}
+	gridDim := int(math.Sqrt(float64(len(cands))))
+	if gridDim < 1 {
+		gridDim = 1
+	}
+	if gridDim > 256 {
+		gridDim = 256
+	}
+	invCellU := float32(gridDim) / rectW
+	invCellV := float32(gridDim) / rectH
+	clampCell := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v >= gridDim {
+			return gridDim - 1
+		}
+		return v
+	}
+	cellOf := func(u, v float32) (int, int) {
+		ix := int((u + fHalfW) * invCellU)
+		iy := int((v + fHalfH) * invCellV)
+		return clampCell(ix), clampCell(iy)
+	}
+	grid := make([][]int32, gridDim*gridDim)
+	for i := range cands {
+		c := &cands[i]
+		ix0, iy0 := cellOf(c.minU, c.minV)
+		ix1, iy1 := cellOf(c.maxU, c.maxV)
+		for iy := iy0; iy <= iy1; iy++ {
+			row := iy * gridDim
+			for ix := ix0; ix <= ix1; ix++ {
+				grid[row+ix] = append(grid[row+ix], int32(i))
+			}
+		}
+	}
+
 	for i, c := range cands {
 		if i%1000 == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		ix, iy := cellOf(c.cx, c.cy)
+		bucket := grid[iy*gridDim+ix]
 		occluded := false
-		for j, other := range cands {
-			if i == j {
+		for _, j := range bucket {
+			if int(j) == i {
 				continue
 			}
+			other := &cands[j]
 			bary, ok := barycentric2D(c.cx, c.cy, other.tcs)
 			if !ok {
 				continue
