@@ -192,6 +192,11 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 	lo := cache.getLoad()
 
+	// Apply base color override on top of the (possibly cached) load output.
+	// Cheap and idempotent: runs every invocation so load/decimate/sticker
+	// caches don't need to invalidate on base-color changes.
+	applyBaseColor(cache, lo, opts)
+
 	// Force check (between load and voxelize). Use the original (unwrapped)
 	// mesh — the wrap inflates extents by `offset` on every side.
 	if !opts.Force {
@@ -496,10 +501,8 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progr
 	// first voxel layer aligns with grid layer 0.
 	normalizeZ(model)
 
-	// Apply base color override for untextured faces.
-	if opts.BaseColor != "" {
-		applyBaseColorOverride(model, opts.BaseColor)
-	}
+	// Base color is applied by applyBaseColor() in RunCached — kept out of
+	// the load cache so color changes don't invalidate it.
 
 	ex := modelExtents(model)
 	fmt.Printf("  Extent: %.1f x %.1f x %.1f mm\n", ex[0], ex[1], ex[2])
@@ -591,6 +594,37 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 			model.FaceBaseColor[i] = rgba
 		}
 	}
+}
+
+// applyBaseColor resets lo.ColorModel / lo.SampleModel FaceBaseColor from the
+// pristine raw model and reapplies opts.BaseColor, then rebuilds lo.InputMesh
+// so the preview reflects the new colors. Idempotent — a no-op when
+// lo.appliedBaseColor already matches opts.BaseColor.
+//
+// Invariant: whenever lo is present, raw is too. runLoad always calls
+// setRaw before populating the load stage, and nothing clears raw in isolation.
+func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
+	if lo.appliedBaseColor == opts.BaseColor {
+		return
+	}
+	raw := cache.getRaw(opts)
+	if raw == nil {
+		panic("applyBaseColor: raw cache missing but load cache present")
+	}
+	// Reset to pristine. CloneForEdit / InflateAlongNormals preserve
+	// FaceBaseColor length, so the copy targets always match raw.
+	copy(lo.ColorModel.FaceBaseColor, raw.FaceBaseColor)
+	if lo.SampleModel != lo.ColorModel {
+		copy(lo.SampleModel.FaceBaseColor, raw.FaceBaseColor)
+	}
+	if opts.BaseColor != "" {
+		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
+		if lo.SampleModel != lo.ColorModel {
+			applyBaseColorOverride(lo.SampleModel, opts.BaseColor)
+		}
+	}
+	lo.InputMesh = buildInputMeshData(lo.ColorModel)
+	lo.appliedBaseColor = opts.BaseColor
 }
 
 func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, so *stickerOutput, tracker progress.Tracker) error {

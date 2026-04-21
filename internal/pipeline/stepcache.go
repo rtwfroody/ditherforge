@@ -74,6 +74,12 @@ type loadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
+	// appliedBaseColor tracks the base color currently applied to ColorModel /
+	// SampleModel FaceBaseColor slices. Empty string means pristine (no
+	// override currently applied). applyBaseColor() resets from raw and
+	// re-applies when this diverges from opts.BaseColor, so
+	// load/decimate/sticker caches survive color changes.
+	appliedBaseColor string
 }
 
 type voxelizeOutput struct {
@@ -143,15 +149,19 @@ type loadSettings struct {
 	Size            float32
 	ReloadSeq       int64
 	ObjectIndex     int
-	BaseColor       string
 	AlphaWrap       bool
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
 }
 
+// BaseColor lives on voxelizeSettings (not loadSettings) because it only
+// affects voxel cell coloring. A cheap per-run step reapplies the override
+// to the cached ColorModel before voxelize, so Load/Decimate/Sticker caches
+// survive base-color changes.
 type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
+	BaseColor      string
 }
 
 type stickerSettings struct {
@@ -230,7 +240,6 @@ func settingsForStage(stage StageID, opts Options) any {
 			Scale:           opts.Scale,
 			ReloadSeq:       opts.ReloadSeq,
 			ObjectIndex:     opts.ObjectIndex,
-			BaseColor:       opts.BaseColor,
 			AlphaWrap:       opts.AlphaWrap,
 			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
 			AlphaWrapOffset: opts.AlphaWrapOffset,
@@ -241,7 +250,11 @@ func settingsForStage(stage StageID, opts Options) any {
 		}
 		return s
 	case StageVoxelize:
-		return voxelizeSettings{NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
+		return voxelizeSettings{
+			NozzleDiameter: opts.NozzleDiameter,
+			LayerHeight:    opts.LayerHeight,
+			BaseColor:      opts.BaseColor,
+		}
 	case StageSticker:
 		return stickerSettings{Stickers: opts.Stickers}
 	case StageColorAdjust:
@@ -288,13 +301,13 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.Size)
 		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
-		writeString(h, v.BaseColor)
 		writeBool(h, v.AlphaWrap)
 		writeFloat32(h, v.AlphaWrapAlpha)
 		writeFloat32(h, v.AlphaWrapOffset)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
+		writeString(h, v.BaseColor)
 	case stickerSettings:
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {
