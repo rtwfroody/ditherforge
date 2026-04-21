@@ -48,19 +48,37 @@ func FindSeedTriangle(point [3]float64, model *loader.LoadedModel, si *SpatialIn
 var edgeVertIdx = [3][2]int{{0, 1}, {1, 2}, {2, 0}}
 var edgeOtherIdx = [3]int{2, 0, 1} // the vertex NOT on the edge
 
-// bfsEntry carries a triangle and its tangent-plane coordinates through the BFS.
-// Tangent coords are in world units (isotropic); converted to UV when storing.
+// bfsEntry carries a triangle and its tangent-plane coordinates through the
+// BFS. Each triangle gets its own per-vertex tc built by unfolding across
+// the shared edge with its parent — this keeps the BFS numerically stable
+// even when two BFS paths reach the same 3D vertex via different accumulated
+// distortions. The function-local vertUV map is populated as a SIDE EFFECT
+// of BFS (first-triangle-to-touch-a-vertex wins) to seed the ARAP initial
+// layout without feeding the cache back into unfoldVertex, which would
+// compound divergence.
 type bfsEntry struct {
 	tri int32
 	tc  [3][2]float32
 }
 
 // BuildStickerDecal creates a decal by flood-filling from a seed triangle
-// across the mesh adjacency. The seed triangle's UVs are computed by planar
-// projection. Subsequent triangles get their UVs by geodesic unfolding:
-// shared edge vertices keep their UVs from the parent, and the new vertex
-// is placed by preserving the 3D triangle's shape in UV space. This makes
-// the sticker follow the surface rather than projecting through corners.
+// across the mesh adjacency and then relaxing the layout with ARAP. The
+// initial layout is a Discrete Exponential Map (Schmidt 2006): the seed
+// triangle's UVs come from planar projection onto the sticker's tangent
+// plane, and every subsequent triangle is unfolded across its shared edge
+// with the BFS parent, preserving 3D edge length and interior angle.
+// Per-vertex UVs are memoized (first BFS visit wins) so every triangle that
+// touches a vertex agrees on its UV, guaranteeing edge continuity even
+// across BFS cross-edges.
+//
+// DEM on its own is great on flat/developable regions but compresses badly
+// on curved surfaces because cross-edge vertex reuse feeds inconsistent
+// edge lengths into downstream unfolds. The layout is therefore passed to
+// arapRegion.Solve — a local/global ARAP parameterization (Liu/Zhou/Wang
+// 2008) that pins the seed vertices and relaxes everything else to be
+// as-rigid-as-possible with respect to the 3D geometry. Occupancy
+// rejection runs on the final relaxed UVs, so ARAP gets a chance to fix
+// distortion before we decide which triangles to keep.
 func BuildStickerDecal(
 	ctx context.Context,
 	model *loader.LoadedModel,
@@ -110,18 +128,16 @@ func BuildStickerDecal(
 		return [3][2]float32{tangentToUV(tc[0]), tangentToUV(tc[1]), tangentToUV(tc[2])}
 	}
 
-	// Compute seed triangle tangent coords.
-	seedFace := model.Faces[seedTri]
-	seedTangent := [3][2]float32{
-		planarTangent(model.Vertices[seedFace[0]]),
-		planarTangent(model.Vertices[seedFace[1]]),
-		planarTangent(model.Vertices[seedFace[2]]),
-	}
-
 	decal := &StickerDecal{
 		Image:  img,
 		TriUVs: make(map[int32][3][2]float32),
 	}
+
+	// Per-vertex UV map populated as a side effect of the BFS below (first
+	// triangle to touch a vertex wins). Consumed by ARAP as its initial
+	// per-vertex layout; never read back into the BFS unfold.
+	vertUV := make(map[[3]float32][2]float32)
+	seedFace := model.Faces[seedTri]
 
 	// Precompute cosine threshold for max angle check.
 	// A maxAngleDeg of 0 means no limit.
@@ -166,11 +182,20 @@ func BuildStickerDecal(
 		return maxU >= -fHalfW && minU <= fHalfW && maxV >= -fHalfH && minV <= fHalfH
 	}
 
-	// BFS flood-fill from seed triangle. Coordinates are in tangent-plane
-	// space (world units) so that unfoldVertex operates in an isotropic space.
+	// DEM flood fill. Occupancy is NOT applied during BFS: compressed or
+	// distorted DEM triangles would get rejected before ARAP has a chance
+	// to fix them, pruning BFS and shrinking coverage. Instead we gate only
+	// on triOverlapsTangentBounds (which stops BFS at the sticker edge) and
+	// run occupancy later on the relaxed UVs.
 	visited := make([]bool, len(model.Faces))
-	queue := []bfsEntry{{tri: seedTri, tc: seedTangent}}
+	seedTC := [3][2]float32{
+		planarTangent(model.Vertices[seedFace[0]]),
+		planarTangent(model.Vertices[seedFace[1]]),
+		planarTangent(model.Vertices[seedFace[2]]),
+	}
+	queue := []bfsEntry{{tri: seedTri, tc: seedTC}}
 	visited[seedTri] = true
+	var acceptedTris []int32
 
 	iter := 0
 	for len(queue) > 0 {
@@ -184,23 +209,19 @@ func BuildStickerDecal(
 		if !triOverlapsTangentBounds(entry.tc) {
 			continue
 		}
+		acceptedTris = append(acceptedTris, entry.tri)
 
-		// Convert to UV for occupancy check and decal storage.
-		uvs := tangentTrisToUV(entry.tc)
-
-		// Fold-back detection: rasterize the triangle into the occupancy
-		// bitmap and reject if most of its pixel-center footprint is
-		// already claimed by a previously accepted triangle. On a faceted
-		// or bumpy surface, two geodesic paths from the seed may legitimately
-		// try to paint the same sticker region twice — we keep only the
-		// first. This can leave visible "seams" along fold-back boundaries
-		// on non-developable geometry, which is an inherent tradeoff: the
-		// alternative is visible sticker duplication.
-		if !checkAndPaintTriangle(uvs, occupancy, occW, occH) {
-			continue
+		// Populate vertUV as a side effect (first-triangle-to-touch-a-vertex
+		// wins). ARAP reads this to seed its initial layout; the BFS itself
+		// does NOT read back from vertUV, which would compound divergence
+		// across non-developable regions.
+		face := model.Faces[entry.tri]
+		for k := 0; k < 3; k++ {
+			snap := SnapPos(model.Vertices[face[k]])
+			if _, ok := vertUV[snap]; !ok {
+				vertUV[snap] = entry.tc[k]
+			}
 		}
-
-		decal.TriUVs[entry.tri] = uvs
 
 		// Expand to neighbors through each edge.
 		var curNormal [3]float32
@@ -211,8 +232,6 @@ func BuildStickerDecal(
 			if ni < 0 || visited[ni] {
 				continue
 			}
-
-			// Skip neighbor if the angle between face normals exceeds the limit.
 			if cosMaxAngle > -1 {
 				n2 := faceNormal32(model, ni)
 				dot := curNormal[0]*n2[0] + curNormal[1]*n2[1] + curNormal[2]*n2[2]
@@ -220,7 +239,6 @@ func BuildStickerDecal(
 					continue
 				}
 			}
-
 			visited[ni] = true
 
 			// Find which edge of the neighbor connects back.
@@ -232,49 +250,80 @@ func BuildStickerDecal(
 				}
 			}
 			if nej < 0 {
-				continue // shouldn't happen in a well-formed adjacency
+				continue
 			}
 
-			// Shared edge: vertices of current tri's edge ei.
-			curFace := model.Faces[entry.tri]
-			i0, i1 := edgeVertIdx[ei][0], edgeVertIdx[ei][1]
-			tcA := entry.tc[i0]
-			tcB := entry.tc[i1]
-			posA := model.Vertices[curFace[i0]]
-
-			// The current triangle's third vertex (not on the shared edge).
-			tcCurrent := entry.tc[edgeOtherIdx[ei]]
-
-			// Neighbor's vertices: shared edge is at edgeVertIdx[nej],
-			// and the new vertex is at edgeOtherIdx[nej].
+			curI0 := edgeVertIdx[ei][0]
+			curI1 := edgeVertIdx[ei][1]
+			nbrI0 := edgeVertIdx[nej][0]
+			nbrI1 := edgeVertIdx[nej][1]
+			nbrOther := edgeOtherIdx[nej]
 			nFace := model.Faces[ni]
-			nj0, nj1 := edgeVertIdx[nej][0], edgeVertIdx[nej][1]
-			posD := model.Vertices[nFace[nj0]]
-			posE := model.Vertices[nFace[nj1]]
-			posNew := model.Vertices[nFace[edgeOtherIdx[nej]]]
 
-			// Match neighbor's shared edge vertices to our tangent coords.
-			// The shared edge may be traversed in reverse order.
-			var tcD, tcE [2]float32
-			snapA := SnapPos(posA)
-			snapD := SnapPos(posD)
-			if snapA == snapD {
-				tcD, tcE = tcA, tcB
+			// Map neighbor edge endpoints to current tc by matching positions.
+			var tcA, tcB [2]float32
+			if SnapPos(model.Vertices[face[curI0]]) == SnapPos(model.Vertices[nFace[nbrI0]]) {
+				tcA = entry.tc[curI0]
+				tcB = entry.tc[curI1]
 			} else {
-				tcD, tcE = tcB, tcA
+				tcA = entry.tc[curI1]
+				tcB = entry.tc[curI0]
 			}
+			nbrPosA := model.Vertices[nFace[nbrI0]]
+			nbrPosB := model.Vertices[nFace[nbrI1]]
+			nbrPosC := model.Vertices[nFace[nbrOther]]
 
-			// Unfold the new vertex into tangent space (isotropic).
-			tcNew := unfoldVertex(posD, posE, posNew, tcD, tcE, tcCurrent)
+			flatCurrent := entry.tc[edgeOtherIdx[ei]]
+			tcC := unfoldVertex(nbrPosA, nbrPosB, nbrPosC, tcA, tcB, flatCurrent)
 
-			// Build the neighbor's full tangent-coord array in face-vertex order.
-			var nTCs [3][2]float32
-			nTCs[nj0] = tcD
-			nTCs[nj1] = tcE
-			nTCs[edgeOtherIdx[nej]] = tcNew
-
-			queue = append(queue, bfsEntry{tri: ni, tc: nTCs})
+			var nTC [3][2]float32
+			nTC[nbrI0] = tcA
+			nTC[nbrI1] = tcB
+			nTC[nbrOther] = tcC
+			queue = append(queue, bfsEntry{tri: ni, tc: nTC})
 		}
+	}
+
+	if len(acceptedTris) == 0 {
+		return decal, nil
+	}
+
+	// ARAP relaxation: fix DEM distortion by iteratively rotating each
+	// triangle's reference frame to match the current UV layout, then
+	// solving a cotangent-Laplacian system to redistribute vertex UVs
+	// so the layout is as-rigid-as-possible relative to 3D geometry.
+	// The seed triangle's three vertices are pinned so the sticker's
+	// position/orientation/scale are preserved.
+	const arapOuterIters = 10
+	const cgInnerIters = 50
+	region := buildArapRegion(model, acceptedTris, vertUV, seedTri)
+	region.Solve(arapOuterIters, cgInnerIters)
+	// If ARAP produced non-finite UVs (e.g. an ill-conditioned decal that
+	// CG couldn't handle), keep the DEM layout rather than overwrite with
+	// garbage — the decal will still render, just without the relaxation.
+	region.writeBack(vertUV)
+
+	// Rebuild per-triangle UVs from the relaxed vertex UVs and apply the
+	// occupancy rasterizer. After ARAP, the 2D layout matches 3D edge
+	// lengths closely, so genuine fold-backs (non-developable surface
+	// wrapping back on itself) are the main thing the rasterizer catches.
+	for _, triIdx := range acceptedTris {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		f := model.Faces[triIdx]
+		var tc [3][2]float32
+		for k := 0; k < 3; k++ {
+			tc[k] = vertUV[SnapPos(model.Vertices[f[k]])]
+		}
+		if !triOverlapsTangentBounds(tc) {
+			continue
+		}
+		uvs := tangentTrisToUV(tc)
+		if !checkAndPaintTriangle(uvs, occupancy, occW, occH) {
+			continue
+		}
+		decal.TriUVs[triIdx] = uvs
 	}
 
 	return decal, nil
