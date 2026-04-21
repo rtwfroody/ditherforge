@@ -66,7 +66,7 @@ func TestArapFlatFanStaysPut(t *testing.T) {
 	before := make([][2]float32, region.nV)
 	copy(before, region.uv)
 
-	region.Solve(5, 30)
+	region.Solve(5, 30, nil)
 
 	for i, u := range region.uv {
 		dx := u[0] - before[i][0]
@@ -150,7 +150,7 @@ func TestArapReducesDistortion(t *testing.T) {
 	}
 
 	e0 := energy()
-	region.Solve(10, 50)
+	region.Solve(10, 50, nil)
 	e1 := energy()
 	if e1 >= e0 {
 		t.Fatalf("ARAP did not reduce energy: %g -> %g", e0, e1)
@@ -216,7 +216,7 @@ func TestBuildStickerDecalCoverageCylinderStrip(t *testing.T) {
 	}
 
 	decal, err := BuildStickerDecal(context.Background(), model, adj, img,
-		seed, center, normal, up, scale, 0, 0, 0)
+		seed, center, normal, up, scale, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

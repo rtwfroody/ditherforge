@@ -285,11 +285,16 @@ func (r *arapRegion) arapGlobal(rots [][2][2]float32, cgInnerIters int) {
 // Solve runs the local/global ARAP iterations. cgInnerIters caps the inner
 // CG iterations per global step; the outer loop runs arapOuterIters times.
 // In practice, a dozen outer iterations reach a visually stable layout and
-// CG converges well under 50 iters for a few-thousand-vertex decal.
-func (r *arapRegion) Solve(arapOuterIters, cgInnerIters int) {
+// CG converges well under 50 iters for a few-thousand-vertex decal. If
+// onIter is non-nil it is called after each outer iteration with the
+// 0-based iteration index — useful for progress reporting.
+func (r *arapRegion) Solve(arapOuterIters, cgInnerIters int, onIter func(i int)) {
 	for i := 0; i < arapOuterIters; i++ {
 		rots := r.arapLocal()
 		r.arapGlobal(rots, cgInnerIters)
+		if onIter != nil {
+			onIter(i)
+		}
 	}
 }
 

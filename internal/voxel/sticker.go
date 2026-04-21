@@ -92,7 +92,17 @@ func BuildStickerDecal(
 	rotationDeg float64,
 	maxAngleDeg float64,
 	voxelSize float64,
+	onProgress func(float64),
 ) (*StickerDecal, error) {
+	reportProgress := func(f float64) {
+		if onProgress != nil {
+			onProgress(f)
+		}
+	}
+	reportProgress(0)
+	// Guarantee the sticker's segment of the aggregate bar completes, even
+	// on the early-return paths (empty accepted set, ctx cancel, etc).
+	defer reportProgress(1.0)
 	t, b, _ := buildStickerTangentFrame(normal, up, rotationDeg)
 
 	// Sticker dimensions in world units.
@@ -198,9 +208,19 @@ func BuildStickerDecal(
 	var acceptedTris []int32
 
 	iter := 0
+	totalFaces := len(model.Faces)
 	for len(queue) > 0 {
-		if iter%1000 == 0 && ctx.Err() != nil {
-			return nil, ctx.Err()
+		if iter%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if totalFaces > 0 {
+				frac := float64(iter) / float64(totalFaces)
+				if frac > 1 {
+					frac = 1
+				}
+				reportProgress(0.60 * frac)
+			}
 		}
 		iter++
 		entry := queue[0]
@@ -294,10 +314,13 @@ func BuildStickerDecal(
 	// so the layout is as-rigid-as-possible relative to 3D geometry.
 	// The seed triangle's three vertices are pinned so the sticker's
 	// position/orientation/scale are preserved.
+	reportProgress(0.60)
 	const arapOuterIters = 10
 	const cgInnerIters = 50
 	region := buildArapRegion(model, acceptedTris, vertUV, seedTri)
-	region.Solve(arapOuterIters, cgInnerIters)
+	region.Solve(arapOuterIters, cgInnerIters, func(i int) {
+		reportProgress(0.60 + 0.30*float64(i+1)/float64(arapOuterIters))
+	})
 	// If ARAP produced non-finite UVs (e.g. an ill-conditioned decal that
 	// CG couldn't handle), keep the DEM layout rather than overwrite with
 	// garbage — the decal will still render, just without the relaxation.
@@ -307,9 +330,12 @@ func BuildStickerDecal(
 	// occupancy rasterizer. After ARAP, the 2D layout matches 3D edge
 	// lengths closely, so genuine fold-backs (non-developable surface
 	// wrapping back on itself) are the main thing the rasterizer catches.
-	for _, triIdx := range acceptedTris {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	for idx, triIdx := range acceptedTris {
+		if idx%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			reportProgress(0.90 + 0.10*float64(idx)/float64(len(acceptedTris)))
 		}
 		f := model.Faces[triIdx]
 		var tc [3][2]float32
@@ -533,7 +559,15 @@ func BuildStickerDecalProjection(
 	up [3]float64,
 	scale float64,
 	rotationDeg float64,
+	onProgress func(float64),
 ) (*StickerDecal, error) {
+	reportProgress := func(f float64) {
+		if onProgress != nil {
+			onProgress(f)
+		}
+	}
+	reportProgress(0)
+	defer reportProgress(1.0)
 	t, b, n := buildStickerTangentFrame(normal, up, rotationDeg)
 
 	imgBounds := img.Bounds()
@@ -571,9 +605,15 @@ func BuildStickerDecalProjection(
 	// which would spuriously pass the front-face test when the sticker
 	// normal happens to point +Z.
 	var cands []candidate
+	totalFaces := len(model.Faces)
 	for fi := range model.Faces {
-		if fi%1000 == 0 && ctx.Err() != nil {
-			return nil, ctx.Err()
+		if fi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if totalFaces > 0 {
+				reportProgress(0.60 * float64(fi) / float64(totalFaces))
+			}
 		}
 		tri := int32(fi)
 		f := model.Faces[tri]
@@ -681,9 +721,13 @@ func BuildStickerDecalProjection(
 		}
 	}
 
+	reportProgress(0.60)
 	for i, c := range cands {
-		if i%1000 == 0 && ctx.Err() != nil {
-			return nil, ctx.Err()
+		if i%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			reportProgress(0.60 + 0.40*float64(i)/float64(len(cands)))
 		}
 		ix, iy := cellOf(c.cx, c.cy)
 		bucket := grid[iy*gridDim+ix]

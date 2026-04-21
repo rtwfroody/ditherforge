@@ -78,7 +78,7 @@ func TestBuildStickerDecalBasic(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0)
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestBuildStickerDecalDoesNotWrapThrough(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0)
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

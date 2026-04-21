@@ -218,11 +218,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Stage 2: Sticker (builds decals from mesh, before voxelization)
 	if startFrom <= StageSticker {
-		tracker.StageStart(stageNames[StageSticker], false, 0)
-		if err := runSticker(ctx, cache, opts, lo); err != nil {
+		if err := runSticker(ctx, cache, opts, lo, tracker); err != nil {
 			return nil, err
 		}
-		tracker.StageDone(stageNames[StageSticker])
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -616,7 +614,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput) error {
+func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
 	if len(opts.Stickers) == 0 {
 		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{})
 		return nil
@@ -628,8 +626,26 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 	adj := voxel.BuildTriAdjacency(model)
 	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 
+	// One aggregate stage across all stickers. Each sticker gets an equal
+	// 1000-unit segment; the builder reports [0,1] of its local progress
+	// which we map into that segment.
+	const stickerUnits = 1000
+	stage := progress.BeginStage(tracker, stageNames[StageSticker], true, len(opts.Stickers)*stickerUnits)
+	defer stage.Done()
+
 	var decals []*voxel.StickerDecal
-	for _, s := range opts.Stickers {
+	for i, s := range opts.Stickers {
+		base := i * stickerUnits
+		onProgress := func(frac float64) {
+			if frac < 0 {
+				frac = 0
+			}
+			if frac > 1 {
+				frac = 1
+			}
+			stage.Progress(base + int(frac*float64(stickerUnits)))
+		}
+
 		f, err := os.Open(s.ImagePath)
 		if err != nil {
 			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
@@ -643,36 +659,40 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		bounds := img.Bounds()
 		if bounds.Dx() == 0 || bounds.Dy() == 0 {
 			fmt.Printf("  Sticker %s: 0x0 image, skipping\n", s.ImagePath)
+			stage.Progress(base + stickerUnits)
 			continue
 		}
 
 		var decal *voxel.StickerDecal
 		if s.Mode == "projection" {
 			decal, err = voxel.BuildStickerDecalProjection(ctx, model, img,
-				s.Center, s.Normal, s.Up, s.Scale, s.Rotation)
+				s.Center, s.Normal, s.Up, s.Scale, s.Rotation, onProgress)
 			if err != nil {
 				return err
 			}
 			if len(decal.TriUVs) == 0 {
 				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
+				stage.Progress(base + stickerUnits)
 				continue
 			}
 		} else {
 			seedTri := voxel.FindSeedTriangle(s.Center, model, si)
 			if seedTri < 0 {
 				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
+				stage.Progress(base + stickerUnits)
 				continue
 			}
 			cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 			decal, err = voxel.BuildStickerDecal(ctx, model, adj, img,
 				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle,
-				float64(cellSize))
+				float64(cellSize), onProgress)
 			if err != nil {
 				return err
 			}
 		}
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		decals = append(decals, decal)
+		stage.Progress(base + stickerUnits)
 	}
 
 	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{
