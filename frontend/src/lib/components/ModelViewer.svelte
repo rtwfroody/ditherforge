@@ -18,6 +18,14 @@
 
   import { SharedCamera } from './SharedCamera.svelte';
 
+  // View-space light directions ported from OrcaSlicer's
+  // resources/shaders/110/mm_gouraud.fs. DirectionalLight is scale-invariant
+  // (only the direction target-to-light matters), so the magnitude here is
+  // just "big enough to read as a position."
+  const LIGHT_TOP_DIR = [-0.4575, 0.4575, 0.7625] as const;
+  const LIGHT_FRONT_DIR = [0.6985, 0.1397, 0.6985] as const;
+  const LIGHT_POS_SCALE = 10;
+
   type WarpPin = { sourceHex: string; targetHex: string; sigma: number };
   type StageInfo = {
     name: string;
@@ -311,7 +319,10 @@
   }
 
   function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null): THREE.MeshStandardMaterial {
-    const mat = new THREE.MeshStandardMaterial(opts);
+    // Defaults tuned to match Orca's Phong look: roughness ~0.55 gives a
+    // subtle specular lobe (Orca uses shininess=20), metalness=0 keeps colors
+    // true-to-hue. Caller opts win on conflict.
+    const mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0, ...opts });
     const hasSticker = !!stickerTex;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBrightness = colorUniforms.uBrightness;
@@ -740,6 +751,18 @@
   let scene = $state<SceneData | null>(null);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number]; near: number; far: number } | null>(null);
   let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
+  // View-space light refs: lights and their shared target are children of the
+  // camera; a $effect wires each light to target the in-camera Object3D so the
+  // light direction tracks the view (matches Orca's view-space shading).
+  let keyLightRef = $state<THREE.DirectionalLight | undefined>(undefined);
+  let fillLightRef = $state<THREE.DirectionalLight | undefined>(undefined);
+  let lightTargetRef = $state<THREE.Object3D | undefined>(undefined);
+  // The effect re-runs as each bind:ref resolves on mount; the final run
+  // (when all three are defined) is what actually wires the targets.
+  $effect(() => {
+    if (lightTargetRef && keyLightRef) keyLightRef.target = lightTargetRef;
+    if (lightTargetRef && fillLightRef) fillLightRef.target = lightTargetRef;
+  });
 
   let buildId = 0;
 
@@ -901,11 +924,27 @@
             enabled={!pickMode && !stickerPlaceMode}
             onchange={handleControlsChange}
           />
+          <!-- Lights + target parented to the camera so lighting is view-space
+               (matches Orca's mm_gouraud shader). Intensities tuned for
+               stronger shadows than the previous world-space setup. -->
+          <!-- Target must stay a camera child: the lights' world-space
+               direction is (target - light), and camera-parenting both keeps
+               that vector rotating with the view. -->
+          <T.Object3D bind:ref={lightTargetRef} />
+          <T.DirectionalLight
+            bind:ref={keyLightRef}
+            position={[LIGHT_TOP_DIR[0] * LIGHT_POS_SCALE, LIGHT_TOP_DIR[1] * LIGHT_POS_SCALE, LIGHT_TOP_DIR[2] * LIGHT_POS_SCALE]}
+            intensity={1.2}
+          />
+          <T.DirectionalLight
+            bind:ref={fillLightRef}
+            position={[LIGHT_FRONT_DIR[0] * LIGHT_POS_SCALE, LIGHT_FRONT_DIR[1] * LIGHT_POS_SCALE, LIGHT_FRONT_DIR[2] * LIGHT_POS_SCALE]}
+            intensity={0.25}
+          />
         </T.PerspectiveCamera>
 
-        <T.AmbientLight intensity={0.6} />
-        <T.DirectionalLight position={[1, 2, 3]} intensity={0.8} />
-        <T.DirectionalLight position={[-1, -1, -2]} intensity={0.3} />
+        <!-- Ambient is direction-less, so it stays world-space. -->
+        <T.AmbientLight intensity={0.2} />
 
         {#each scene.meshes as mesh}
           <T.Mesh geometry={mesh.geometry} material={mesh.material} />
