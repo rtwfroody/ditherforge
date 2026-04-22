@@ -1040,7 +1040,7 @@
             </HelpTip>
           </div>
           <select
-            class="col-span-2 h-9 rounded-md border border-input bg-background px-2 text-sm"
+            class="col-span-2 h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
             bind:value={printerId}
             onchange={() => reconcilePrinterSelection()}
           >
@@ -1067,7 +1067,7 @@
             </HelpTip>
           </div>
           <select
-            class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
             bind:value={nozzleDiameter}
             onchange={() => reconcilePrinterSelection()}
           >
@@ -1080,7 +1080,7 @@
             {/if}
           </select>
           <select
-            class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
             bind:value={layerHeight}
           >
             {#if currentNozzle}
@@ -1170,7 +1170,7 @@
                 </span>
                 <input type="number" step="0.1" min="0"
                        placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
-                       class="h-9 rounded border bg-background px-2"
+                       class="h-9 rounded border bg-background text-foreground px-2"
                        bind:value={alphaWrapAlpha} />
               </label>
               <label class="flex flex-col gap-1">
@@ -1182,7 +1182,7 @@
                 </span>
                 <input type="number" step="0.01" min="0"
                        placeholder="auto (alpha / 30)"
-                       class="h-9 rounded border bg-background px-2"
+                       class="h-9 rounded border bg-background text-foreground px-2"
                        bind:value={alphaWrapOffset} />
               </label>
             </div>
