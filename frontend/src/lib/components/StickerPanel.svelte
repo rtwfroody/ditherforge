@@ -48,8 +48,13 @@
     <div class="border rounded-md p-2 space-y-2">
       <div class="flex gap-2">
         {#if sticker.thumbnail}
-          <img src={sticker.thumbnail} alt={sticker.fileName} title={sticker.imagePath}
-            class="w-12 h-12 object-contain rounded border shrink-0" />
+          <!-- Wrapper holds the border + clips the rotated image at its edges;
+               CSS rotate() is CW, matching the sticker's on-surface rotation. -->
+          <div class="w-12 h-12 rounded border shrink-0 overflow-hidden bg-muted/20" title={sticker.imagePath}>
+            <img src={sticker.thumbnail} alt={sticker.fileName}
+              class="w-full h-full object-contain"
+              style="transform: rotate({sticker.rotation}deg)" />
+          </div>
         {/if}
         <div class="flex-1 min-w-0 space-y-0.5">
           <div class="flex items-center justify-between gap-1">

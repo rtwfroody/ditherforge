@@ -79,6 +79,9 @@ type bfsEntry struct {
 // as-rigid-as-possible with respect to the 3D geometry. Occupancy
 // rejection runs on the final relaxed UVs, so ARAP gets a chance to fix
 // distortion before we decide which triangles to keep.
+//
+// Positive rotationDeg rotates the sticker clockwise when viewed from outside
+// the surface (i.e. looking down the normal toward the mesh).
 func BuildStickerDecal(
 	ctx context.Context,
 	model *loader.LoadedModel,
@@ -495,6 +498,8 @@ func pointStrictlyInsideTriangle2D(px, py float32, uvs [3][2]float32) bool {
 // and normal in world coordinates. Matches the convention used by both decal
 // builders and the frontend's floating-billboard preview: n along the surface
 // normal, t across, b up on the surface; rotationDeg rotates (t,b) around n.
+// Positive rotationDeg rotates the sticker image clockwise when viewed from
+// outside the surface (matches the intuitive thumbnail rotation in the UI).
 // If up is nearly parallel to normal, a world axis is substituted.
 func buildStickerTangentFrame(normal, up [3]float64, rotationDeg float64) (t, b, n [3]float64) {
 	n = normalize3(normal)
@@ -514,7 +519,8 @@ func buildStickerTangentFrame(normal, up [3]float64, rotationDeg float64) (t, b,
 	b = normalize3(cross3(n, t))
 
 	if rotationDeg != 0 {
-		rad := rotationDeg * math.Pi / 180
+		// Negate so positive rotationDeg is CW from the outside-viewer's POV.
+		rad := -rotationDeg * math.Pi / 180
 		cosR := math.Cos(rad)
 		sinR := math.Sin(rad)
 		newT := [3]float64{
@@ -550,6 +556,9 @@ const projectionMinCosAngle = float32(0.1)
 // hidden) are kept whole, so the sticker can bleed through onto hidden
 // regions. A fully correct implementation would require triangle clipping
 // in UV space.
+//
+// Positive rotationDeg rotates the sticker clockwise when viewed from outside
+// the surface (i.e. looking down the normal toward the mesh).
 func BuildStickerDecalProjection(
 	ctx context.Context,
 	model *loader.LoadedModel,

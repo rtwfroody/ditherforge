@@ -146,9 +146,11 @@
     tScratch.copy(crossScratch).normalize();
     bScratch.crossVectors(nScratch, tScratch).normalize();
 
-    // Apply rotation around normal (same convention as backend).
+    // Apply rotation around normal. Positive stickerRotation is CW viewed
+    // from outside the surface (matches the thumbnail + backend bake); the
+    // underlying matrix below is CCW-positive, so negate the angle.
     if (stickerRotation !== 0) {
-      const rad = stickerRotation * Math.PI / 180;
+      const rad = -stickerRotation * Math.PI / 180;
       const cosR = Math.cos(rad);
       const sinR = Math.sin(rad);
       // newT = cosR*t + sinR*b; newB = -sinR*t + cosR*b.
