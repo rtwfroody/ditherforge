@@ -90,6 +90,12 @@ func (a *App) shutdown(ctx context.Context) {
 	close(a.reqCh)
 }
 
+// Quit terminates the application. Bound so the frontend's File > Exit
+// menu item can trigger the same shutdown path as the window close button.
+func (a *App) Quit() {
+	wailsRuntime.Quit(a.ctx)
+}
+
 // CreateCollection creates a new empty user collection.
 func (a *App) CreateCollection(name string) error {
 	return a.collections.Create(name, nil)

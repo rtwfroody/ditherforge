@@ -34,6 +34,8 @@ export function OpenStickerImage():Promise<string>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
+export function Quit():Promise<void>;
+
 export function ReadStickerThumbnail(arg1:string):Promise<string>;
 
 export function RenameCollection(arg1:string,arg2:string):Promise<void>;
