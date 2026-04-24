@@ -159,6 +159,38 @@ func CloneForEdit(m *LoadedModel) *LoadedModel {
 	return &c
 }
 
+// DeepCloneForMutation returns a copy of m with every per-vertex and per-face
+// slice duplicated into fresh backing arrays, so callers can append to any of
+// them without touching the original (or any shallow clone of it). Textures
+// is left shared — images are treated as immutable.
+func DeepCloneForMutation(m *LoadedModel) *LoadedModel {
+	c := *m
+	c.Vertices = append([][3]float32(nil), m.Vertices...)
+	c.Faces = append([][3]uint32(nil), m.Faces...)
+	if m.UVs != nil {
+		c.UVs = append([][2]float32(nil), m.UVs...)
+	}
+	if m.VertexColors != nil {
+		c.VertexColors = append([][4]uint8(nil), m.VertexColors...)
+	}
+	if m.FaceTextureIdx != nil {
+		c.FaceTextureIdx = append([]int32(nil), m.FaceTextureIdx...)
+	}
+	if m.FaceAlpha != nil {
+		c.FaceAlpha = append([]float32(nil), m.FaceAlpha...)
+	}
+	if m.FaceBaseColor != nil {
+		c.FaceBaseColor = append([][4]uint8(nil), m.FaceBaseColor...)
+	}
+	if m.NoTextureMask != nil {
+		c.NoTextureMask = append([]bool(nil), m.NoTextureMask...)
+	}
+	if m.FaceMeshIdx != nil {
+		c.FaceMeshIdx = append([]int32(nil), m.FaceMeshIdx...)
+	}
+	return &c
+}
+
 // ScaleModel multiplies every vertex by s in place. No-op for s == 1.
 func ScaleModel(m *LoadedModel, s float32) {
 	if s == 1 {

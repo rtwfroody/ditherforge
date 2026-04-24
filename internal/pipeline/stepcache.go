@@ -94,6 +94,12 @@ type voxelizeOutput struct {
 type stickerOutput struct {
 	Decals []*voxel.StickerDecal
 	Adj    *voxel.TriAdjacency // cached for potential reuse
+	// Model is a scratch clone of loadOutput.ColorModel mutated by the sticker
+	// stage (the BFS subdivides pathologically-large triangles in place).
+	// Decal TriUVs index into this model's Faces, not the original ColorModel's,
+	// so downstream color sampling and preview rendering must use Model when
+	// set. nil when no stickers were built.
+	Model *loader.LoadedModel
 }
 
 type colorAdjustOutput struct {

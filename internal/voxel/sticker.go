@@ -210,6 +210,14 @@ func BuildStickerDecal(
 	visited[seedTri] = true
 	var acceptedTris []int32
 
+	// Triangles larger than this in 3D are subdivided during BFS accept.
+	// DEM preserves 3D edge length, so triangles much larger than the sticker
+	// produce UVs that run far outside the sticker rect — the occupancy
+	// rasterizer then rejects them in bulk, leaving "missing" patches on
+	// coarsely-triangulated meshes. Splitting them into quarter-size children
+	// keeps per-triangle UV spans bounded.
+	subdivideThreshold := float32(math.Max(halfW, halfH))
+
 	iter := 0
 	totalFaces := len(model.Faces)
 	for len(queue) > 0 {
@@ -232,26 +240,43 @@ func BuildStickerDecal(
 		if !triOverlapsTangentBounds(entry.tc) {
 			continue
 		}
-		acceptedTris = append(acceptedTris, entry.tri)
 
-		// Populate vertUV as a side effect (first-triangle-to-touch-a-vertex
-		// wins). ARAP reads this to seed its initial layout; the BFS itself
-		// does NOT read back from vertUV, which would compound divergence
-		// across non-developable regions.
-		face := model.Faces[entry.tri]
-		for k := 0; k < 3; k++ {
-			snap := SnapPos(model.Vertices[face[k]])
-			if _, ok := vertUV[snap]; !ok {
-				vertUV[snap] = entry.tc[k]
-			}
-		}
+		// Save original face/neighbors before potential in-place subdivision.
+		// Subdivision may overwrite model.Faces[entry.tri] with one of its
+		// children, but adj.Neighbors[entry.tri] is unchanged because adj was
+		// built once up-front.
+		origFace := model.Faces[entry.tri]
+		origNeighbors := adj.Neighbors[entry.tri]
 
-		// Expand to neighbors through each edge.
+		// Accept (possibly splitting into smaller children if the triangle's
+		// 3D extent exceeds the sticker's scale).
+		acceptTriSubdividing(model, &acceptedTris, vertUV, &visited,
+			entry.tri, origFace, entry.tc, subdivideThreshold,
+			triOverlapsTangentBounds)
+
+		// Expand to neighbors through each original edge. We use origFace
+		// rather than model.Faces[entry.tri] because subdivision may have
+		// replaced the latter with a child sub-triangle.
+		v0 := model.Vertices[origFace[0]]
+		v1 := model.Vertices[origFace[1]]
+		v2 := model.Vertices[origFace[2]]
 		var curNormal [3]float32
 		if cosMaxAngle > -1 {
-			curNormal = faceNormal32(model, entry.tri)
+			curNormal = triNormalFromVerts(v0, v1, v2)
 		}
-		for ei, ni := range adj.Neighbors[entry.tri] {
+		// If this triangle's tc has drifted far outside the sticker rect
+		// (DEM runaway from a pathologically-large parent), a DEM unfold
+		// across its edges would propagate the bad layout indefinitely. Fall
+		// back to planar tangent-plane projection for the neighbors so BFS
+		// keeps walking past the poisoned region instead of stalling.
+		// Note: this only rescues BFS coverage. vertUV is first-write-wins,
+		// so vertices at the DEM/reset seam keep whichever tc arrived first
+		// (typically the DEM path), and ARAP starts from a discontinuous
+		// layout across that seam. ARAP's Laplacian absorbs most of the
+		// discontinuity, but stickers on coarsely-triangulated meshes may
+		// show a visible seam where the reset began.
+		reset := tcRunaway(entry.tc, fHalfW, fHalfH)
+		for ei, ni := range origNeighbors {
 			if ni < 0 || visited[ni] {
 				continue
 			}
@@ -264,7 +289,10 @@ func BuildStickerDecal(
 			}
 			visited[ni] = true
 
-			// Find which edge of the neighbor connects back.
+			// Find which edge of the neighbor connects back. entry.tri is
+			// always an original pre-sticker face index (BFS never enqueues
+			// subdivided children), so the equality still matches adj's
+			// pre-sticker-stage records even after our in-place subdivision.
 			nej := -1
 			for e := 0; e < 3; e++ {
 				if adj.Neighbors[ni][e] == entry.tri {
@@ -276,33 +304,42 @@ func BuildStickerDecal(
 				continue
 			}
 
-			curI0 := edgeVertIdx[ei][0]
-			curI1 := edgeVertIdx[ei][1]
 			nbrI0 := edgeVertIdx[nej][0]
 			nbrI1 := edgeVertIdx[nej][1]
 			nbrOther := edgeOtherIdx[nej]
 			nFace := model.Faces[ni]
 
-			// Map neighbor edge endpoints to current tc by matching positions.
-			var tcA, tcB [2]float32
-			if SnapPos(model.Vertices[face[curI0]]) == SnapPos(model.Vertices[nFace[nbrI0]]) {
-				tcA = entry.tc[curI0]
-				tcB = entry.tc[curI1]
-			} else {
-				tcA = entry.tc[curI1]
-				tcB = entry.tc[curI0]
-			}
-			nbrPosA := model.Vertices[nFace[nbrI0]]
-			nbrPosB := model.Vertices[nFace[nbrI1]]
-			nbrPosC := model.Vertices[nFace[nbrOther]]
-
-			flatCurrent := entry.tc[edgeOtherIdx[ei]]
-			tcC := unfoldVertex(nbrPosA, nbrPosB, nbrPosC, tcA, tcB, flatCurrent)
-
 			var nTC [3][2]float32
-			nTC[nbrI0] = tcA
-			nTC[nbrI1] = tcB
-			nTC[nbrOther] = tcC
+			if reset {
+				// Planar projection reset.
+				nTC = [3][2]float32{
+					planarTangent(model.Vertices[nFace[0]]),
+					planarTangent(model.Vertices[nFace[1]]),
+					planarTangent(model.Vertices[nFace[2]]),
+				}
+			} else {
+				curI0 := edgeVertIdx[ei][0]
+				curI1 := edgeVertIdx[ei][1]
+				// Map neighbor edge endpoints to current tc by matching positions.
+				var tcA, tcB [2]float32
+				if SnapPos(model.Vertices[origFace[curI0]]) == SnapPos(model.Vertices[nFace[nbrI0]]) {
+					tcA = entry.tc[curI0]
+					tcB = entry.tc[curI1]
+				} else {
+					tcA = entry.tc[curI1]
+					tcB = entry.tc[curI0]
+				}
+				nbrPosA := model.Vertices[nFace[nbrI0]]
+				nbrPosB := model.Vertices[nFace[nbrI1]]
+				nbrPosC := model.Vertices[nFace[nbrOther]]
+
+				flatCurrent := entry.tc[edgeOtherIdx[ei]]
+				tcC := unfoldVertex(nbrPosA, nbrPosB, nbrPosC, tcA, tcB, flatCurrent)
+
+				nTC[nbrI0] = tcA
+				nTC[nbrI1] = tcB
+				nTC[nbrOther] = tcC
+			}
 			queue = append(queue, bfsEntry{tri: ni, tc: nTC})
 		}
 	}
@@ -841,9 +878,12 @@ func CompositeStickerColor(base [4]uint8, triIdx int32, bary [3]float32, decals 
 // faceNormal32 computes the unit normal of a triangle by cross product.
 func faceNormal32(model *loader.LoadedModel, tri int32) [3]float32 {
 	f := model.Faces[tri]
-	v0 := model.Vertices[f[0]]
-	v1 := model.Vertices[f[1]]
-	v2 := model.Vertices[f[2]]
+	return triNormalFromVerts(model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+}
+
+// triNormalFromVerts computes the unit normal of a triangle given its three
+// vertex positions directly.
+func triNormalFromVerts(v0, v1, v2 [3]float32) [3]float32 {
 	ax, ay, az := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
 	bx, by, bz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
 	nx := ay*bz - az*by
@@ -854,6 +894,180 @@ func faceNormal32(model *loader.LoadedModel, tri int32) [3]float32 {
 		return [3]float32{0, 0, 1}
 	}
 	return [3]float32{nx / l, ny / l, nz / l}
+}
+
+// acceptTriSubdividing either accepts the triangle (adds triIdx to
+// acceptedTris and seeds vertUV) if its 3D edges are all ≤ threshold, or
+// splits it with a 1-to-4 midpoint subdivision and recurses. Children whose
+// tc no longer overlaps the sticker rect are dropped, so pathological parent
+// triangles whose tc AABB straddles the rect get clipped to just the portion
+// that actually falls inside.
+//
+// The parent's entry in model.Faces is reused for the corner child at vertex
+// 0; the other three children are appended. Child per-vertex UVs are
+// produced by linearly interpolating the parent's tc across midpoints —
+// valid because DEM unfold maps a single triangle isometrically, so any
+// sub-region's UVs are the corresponding linear interpolation of the
+// parent's UVs.
+//
+// Adjacency is NOT maintained for subdivided children: BFS never expands
+// through them. The parent's original adjacency is used for neighbor
+// expansion (caller captures origFace/origNeighbors before calling us). The
+// children's face indices are pre-marked visited so that no later BFS
+// expansion stumbles onto them.
+func acceptTriSubdividing(
+	model *loader.LoadedModel,
+	acceptedTris *[]int32,
+	vertUV map[[3]float32][2]float32,
+	visited *[]bool,
+	triIdx int32,
+	face [3]uint32,
+	tc [3][2]float32,
+	threshold float32,
+	overlapsRect func(tc [3][2]float32) bool,
+) {
+	if !overlapsRect(tc) {
+		return
+	}
+
+	v0 := model.Vertices[face[0]]
+	v1 := model.Vertices[face[1]]
+	v2 := model.Vertices[face[2]]
+	l01 := edgeLen3D(v0, v1)
+	l12 := edgeLen3D(v1, v2)
+	l20 := edgeLen3D(v2, v0)
+	maxEdge := l01
+	if l12 > maxEdge {
+		maxEdge = l12
+	}
+	if l20 > maxEdge {
+		maxEdge = l20
+	}
+
+	if maxEdge <= threshold {
+		*acceptedTris = append(*acceptedTris, triIdx)
+		for k := 0; k < 3; k++ {
+			snap := SnapPos(model.Vertices[face[k]])
+			if _, ok := vertUV[snap]; !ok {
+				vertUV[snap] = tc[k]
+			}
+		}
+		return
+	}
+
+	// Midpoint subdivision. mAB = midpoint of edge v0-v1, etc.
+	mAB := [3]float32{(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2}
+	mBC := [3]float32{(v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2, (v1[2] + v2[2]) / 2}
+	mCA := [3]float32{(v2[0] + v0[0]) / 2, (v2[1] + v0[1]) / 2, (v2[2] + v0[2]) / 2}
+
+	mABIdx := appendMidpointVertex(model, face[0], face[1], mAB)
+	mBCIdx := appendMidpointVertex(model, face[1], face[2], mBC)
+	mCAIdx := appendMidpointVertex(model, face[2], face[0], mCA)
+
+	tcAB := [2]float32{(tc[0][0] + tc[1][0]) / 2, (tc[0][1] + tc[1][1]) / 2}
+	tcBC := [2]float32{(tc[1][0] + tc[2][0]) / 2, (tc[1][1] + tc[2][1]) / 2}
+	tcCA := [2]float32{(tc[2][0] + tc[0][0]) / 2, (tc[2][1] + tc[0][1]) / 2}
+
+	child0Face := [3]uint32{face[0], mABIdx, mCAIdx} // corner at v0
+	child1Face := [3]uint32{mABIdx, face[1], mBCIdx} // corner at v1
+	child2Face := [3]uint32{mCAIdx, mBCIdx, face[2]} // corner at v2
+	child3Face := [3]uint32{mABIdx, mBCIdx, mCAIdx}  // central inverted triangle
+
+	// Parent's face index is reused for child0; the other three are appended.
+	// Per-face attribute arrays inherit the parent's values (material,
+	// texture, base color, etc.) so they stay aligned with model.Faces.
+	model.Faces[triIdx] = child0Face
+	child1Idx := appendSubdividedFace(model, int(triIdx), child1Face)
+	child2Idx := appendSubdividedFace(model, int(triIdx), child2Face)
+	child3Idx := appendSubdividedFace(model, int(triIdx), child3Face)
+
+	*visited = append(*visited, true, true, true)
+
+	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
+		triIdx, child0Face, [3][2]float32{tc[0], tcAB, tcCA}, threshold, overlapsRect)
+	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
+		child1Idx, child1Face, [3][2]float32{tcAB, tc[1], tcBC}, threshold, overlapsRect)
+	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
+		child2Idx, child2Face, [3][2]float32{tcCA, tcBC, tc[2]}, threshold, overlapsRect)
+	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
+		child3Idx, child3Face, [3][2]float32{tcAB, tcBC, tcCA}, threshold, overlapsRect)
+}
+
+func edgeLen3D(a, b [3]float32) float32 {
+	dx := a[0] - b[0]
+	dy := a[1] - b[1]
+	dz := a[2] - b[2]
+	return float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
+}
+
+// appendMidpointVertex appends a vertex at `pos` and, if present, per-vertex
+// attribute entries (UVs, VertexColors) to keep those slices aligned with
+// model.Vertices. Attributes are averaged from the two endpoint vertices for
+// a reasonable guess when this vertex is reached in a shaded preview.
+func appendMidpointVertex(model *loader.LoadedModel, aIdx, bIdx uint32, pos [3]float32) uint32 {
+	idx := uint32(len(model.Vertices))
+	model.Vertices = append(model.Vertices, pos)
+	if model.UVs != nil {
+		ua := model.UVs[aIdx]
+		ub := model.UVs[bIdx]
+		model.UVs = append(model.UVs, [2]float32{(ua[0] + ub[0]) / 2, (ua[1] + ub[1]) / 2})
+	}
+	if model.VertexColors != nil {
+		ca := model.VertexColors[aIdx]
+		cb := model.VertexColors[bIdx]
+		model.VertexColors = append(model.VertexColors, [4]uint8{
+			uint8((uint16(ca[0]) + uint16(cb[0])) / 2),
+			uint8((uint16(ca[1]) + uint16(cb[1])) / 2),
+			uint8((uint16(ca[2]) + uint16(cb[2])) / 2),
+			uint8((uint16(ca[3]) + uint16(cb[3])) / 2),
+		})
+	}
+	return idx
+}
+
+// appendSubdividedFace appends a new face that is a sub-triangle of the face
+// at parentIdx, copying every per-face attribute from the parent so every
+// per-face slice stays aligned with model.Faces. Returns the new face index.
+func appendSubdividedFace(model *loader.LoadedModel, parentIdx int, face [3]uint32) int32 {
+	idx := int32(len(model.Faces))
+	model.Faces = append(model.Faces, face)
+	if model.FaceTextureIdx != nil {
+		model.FaceTextureIdx = append(model.FaceTextureIdx, model.FaceTextureIdx[parentIdx])
+	}
+	if model.FaceAlpha != nil {
+		model.FaceAlpha = append(model.FaceAlpha, model.FaceAlpha[parentIdx])
+	}
+	if model.FaceBaseColor != nil {
+		model.FaceBaseColor = append(model.FaceBaseColor, model.FaceBaseColor[parentIdx])
+	}
+	if model.NoTextureMask != nil {
+		model.NoTextureMask = append(model.NoTextureMask, model.NoTextureMask[parentIdx])
+	}
+	if model.FaceMeshIdx != nil {
+		model.FaceMeshIdx = append(model.FaceMeshIdx, model.FaceMeshIdx[parentIdx])
+	}
+	return idx
+}
+
+// tcRunaway returns true when any vertex of the triangle's tc sits more than
+// 2× the sticker's half-extent outside the sticker rect. DEM unfold of a
+// pathologically large mesh triangle produces tc values like that; propagating
+// them through BFS poisons downstream neighbors' unfolds, so we stop here.
+// The 2× pad lets legitimate triangles that barely poke past the sticker
+// boundary continue to propagate.
+func tcRunaway(tc [3][2]float32, fHalfW, fHalfH float32) bool {
+	const padMul = 2
+	limitU := padMul * fHalfW
+	limitV := padMul * fHalfH
+	for k := 0; k < 3; k++ {
+		if tc[k][0] > limitU || tc[k][0] < -limitU {
+			return true
+		}
+		if tc[k][1] > limitV || tc[k][1] < -limitV {
+			return true
+		}
+	}
+	return false
 }
 
 // Vector math helpers.

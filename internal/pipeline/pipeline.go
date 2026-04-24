@@ -234,8 +234,15 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Send input mesh (with sticker overlay) to the preview after stickers
 	// are built so the input viewer shows decals on the original geometry.
-	if onInputMesh != nil && lo.InputMesh != nil {
-		mesh := lo.InputMesh
+	// If the sticker stage produced a scratch model (with subdivided faces),
+	// build the preview from it so decal TriUVs line up with the face list;
+	// otherwise use the unmodified ColorModel.
+	if onInputMesh != nil && lo.ColorModel != nil {
+		previewModel := lo.ColorModel
+		if so != nil && so.Model != nil {
+			previewModel = so.Model
+		}
+		mesh := buildInputMeshData(previewModel)
 		if so != nil && len(so.Decals) > 0 {
 			mesh = attachStickerOverlay(mesh, so.Decals)
 		}
@@ -632,8 +639,16 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	upperSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	layerH := opts.LayerHeight
 
+	// Sticker stage may have subdivided triangles into a scratch model; its
+	// face indices are what decal TriUVs reference, so color sampling must
+	// use that model. Falls back to lo.SampleModel when no stickers ran.
+	sampleModel := lo.SampleModel
+	if so != nil && so.Model != nil {
+		sampleModel = so.Model
+	}
+
 	fmt.Println("Voxelizing...")
-	result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, lo.SampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
+	result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, sampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
 	if err != nil {
 		return fmt.Errorf("voxelize: %w", err)
 	}
@@ -655,8 +670,13 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 	}
 
 	// Stickers are placed against the original mesh (which carries UVs and
-	// user-visible geometry), not the alpha-wrapped geometry.
-	model := lo.ColorModel
+	// user-visible geometry), not the alpha-wrapped geometry. We work on a
+	// scratch deep-clone so the BFS can subdivide pathologically-large
+	// triangles in place without mutating the cached lo.ColorModel (which
+	// would compound across re-runs) and without aliasing lo.SampleModel
+	// (shallow clones share face-indexed slices — writing through would
+	// corrupt color sampling with out-of-range indices).
+	model := loader.DeepCloneForMutation(lo.ColorModel)
 	adj := voxel.BuildTriAdjacency(model)
 	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 
@@ -732,6 +752,7 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{
 		Decals: decals,
 		Adj:    adj,
+		Model:  model,
 	})
 	return nil
 }
