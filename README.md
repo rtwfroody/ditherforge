@@ -1,6 +1,6 @@
 # DitherForge
 
-![Golden Pheasant printed with DitherForge](images/golden_pheasant.jpg)
+![Colorful fish printed with Ditherforge](images/fish-collage.png)
 
 Convert textured 3D models (GLB or 3MF) into multi-color 3D-printable files
 (3MF) for multi-filament printers.
@@ -331,9 +331,10 @@ go test -timeout 10m ./...
 
 These models work well with DitherForge and are free to download:
 
-| Model | Author | Source | License |
-|-------|--------|--------|---------|
-| Golden Pheasant | iRahulRajput | [Sketchfab](https://sketchfab.com/3d-models/golden-pheasant-f9b3decb485c4a7c9d97cf70b17cbd29) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) |
+| Model | Author | Source | License | Notes |
+|-------|--------|--------|---------|-------|
+| Golden Pheasant | iRahulRajput | [Sketchfab](https://sketchfab.com/3d-models/golden-pheasant-f9b3decb485c4a7c9d97cf70b17cbd29) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) | |
+| Colorful Fish | Kamilla Kraus | [Fab](https://www.fab.com/listings/e8431f81-ca7f-43bb-a28d-d5589037491c) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) | Enable alpha wrap to clean up the model's mesh. |
 
 ---
 
@@ -442,10 +443,6 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 | Stats | off | Logs face counts per material to the status bar |
 
 ---
-
-## Known Issues
-
-- Sometimes generates features too thin for the slicer to print.
 
 ## Status
 
