@@ -206,3 +206,140 @@ func TestCompositeStickerColorNoDecal(t *testing.T) {
 		t.Errorf("no decal should leave base unchanged, got %v", result)
 	}
 }
+
+// TestBuildStickerDecalSubdividesPathologicalTriangle: a mesh with a single
+// triangle whose 3D edges are multiples of the sticker extent. Without
+// subdivision, DEM would hand the triangle a single UV that spans far outside
+// [0,1]², and the occupancy rasterizer would hand back a decal with one
+// triangle whose sticker coverage is visually wrong. With subdivision,
+// acceptTriSubdividing should produce multiple sub-triangles, each with a UV
+// diameter small enough to fit inside the sticker rect.
+func TestBuildStickerDecalSubdividesPathologicalTriangle(t *testing.T) {
+	t.Parallel()
+	// One big triangle, 20 units wide in 3D; sticker is 4 units wide,
+	// so halfW = halfH = 2 and the subdivision threshold is 2.
+	model := &loader.LoadedModel{
+		Vertices: [][3]float32{
+			{-10, -10, 0},
+			{10, -10, 0},
+			{0, 10, 0},
+		},
+		Faces:         [][3]uint32{{0, 1, 2}},
+		FaceBaseColor: [][4]uint8{{128, 128, 128, 255}},
+	}
+	adj := BuildTriAdjacency(model)
+	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 255})
+
+	center := [3]float64{0, 0, 0}
+	normal := [3]float64{0, 0, 1}
+	up := [3]float64{0, 1, 0}
+	scale := 4.0
+
+	si := NewSpatialIndex(model, 2)
+	seedTri := FindSeedTriangle(center, model, si)
+	if seedTri < 0 {
+		t.Fatal("no seed triangle found")
+	}
+
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img,
+		seedTri, center, normal, up, scale, 0, 0, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Subdivision must have produced more than the one original triangle.
+	if len(decal.TriUVs) < 2 {
+		t.Fatalf("expected subdivision to yield multiple triangles, got %d",
+			len(decal.TriUVs))
+	}
+
+	// Every triangle's UV footprint must fit inside the sticker rect —
+	// that's the invariant subdivision is supposed to enforce. Without
+	// subdivision the single original triangle's UV span would be 5×
+	// the rect width.
+	const maxUVSpan = 1.1 // a tiny slop on [0,1]²
+	for triIdx, uvs := range decal.TriUVs {
+		minU, maxU := uvs[0][0], uvs[0][0]
+		minV, maxV := uvs[0][1], uvs[0][1]
+		for _, uv := range uvs[1:] {
+			if uv[0] < minU {
+				minU = uv[0]
+			}
+			if uv[0] > maxU {
+				maxU = uv[0]
+			}
+			if uv[1] < minV {
+				minV = uv[1]
+			}
+			if uv[1] > maxV {
+				maxV = uv[1]
+			}
+		}
+		if maxU-minU > maxUVSpan || maxV-minV > maxUVSpan {
+			t.Errorf("tri %d UV span exceeds rect: span=(%.3f, %.3f) uvs=%v",
+				triIdx, maxU-minU, maxV-minV, uvs)
+		}
+		// The AABB must also actually overlap [0,1]² — the gate in
+		// acceptTriSubdividing uses rect overlap, so a tri that slipped
+		// through must have a non-empty intersection with the rect.
+		if maxU < 0 || minU > 1 || maxV < 0 || minV > 1 {
+			t.Errorf("tri %d UV AABB does not overlap [0,1]²: uvs=%v",
+				triIdx, uvs)
+		}
+	}
+	t.Logf("subdivided decal covers %d triangles", len(decal.TriUVs))
+}
+
+// TestTcRunaway: the planar-reset branch in the BFS only fires when
+// `tcRunaway` returns true, so a direct predicate test is the cheapest way
+// to guard that the threshold matches the documented 2× pad.
+func TestTcRunaway(t *testing.T) {
+	t.Parallel()
+	const halfW, halfH float32 = 4, 6
+
+	cases := []struct {
+		name string
+		tc   [3][2]float32
+		want bool
+	}{
+		{
+			name: "all inside rect",
+			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 3}},
+			want: false,
+		},
+		{
+			name: "just past rect but within 2x pad",
+			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 7}},
+			want: false,
+		},
+		{
+			name: "exactly at 2x pad boundary (tcRunaway uses strict >, so this is inside)",
+			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 2 * halfH}},
+			want: false,
+		},
+		{
+			name: "U runaway past 2x halfW",
+			tc:   [3][2]float32{{-1, -1}, {2*halfW + 0.1, 1}, {0, 0}},
+			want: true,
+		},
+		{
+			name: "V runaway past 2x halfH",
+			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 2*halfH + 0.1}},
+			want: true,
+		},
+		{
+			name: "negative-side runaway",
+			tc:   [3][2]float32{{-1, -1}, {-2 * halfW * 1.5, 1}, {0, 0}},
+			want: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := tcRunaway(c.tc, halfW, halfH)
+			if got != c.want {
+				t.Errorf("tcRunaway(%v) = %v; want %v", c.tc, got, c.want)
+			}
+		})
+	}
+}
