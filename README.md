@@ -219,16 +219,16 @@ compatible with OrcaSlicer and BambuStudio.
 1. **Load** — reads a GLB, 3MF, or STL file and scales it to millimeters. The
    model bottom is normalized to Z = 0. For files with multiple objects, the
    selected object (or all objects) is processed.
-2. **Stickers** — maps each sticker image onto the mesh. "Unfold" mode
+2. **Decimate** — reduces the triangle count of the input mesh using QEM mesh
+   decimation, before stickers and clipping run on it.
+3. **Stickers** — maps each sticker image onto the mesh. "Unfold" mode
    flood-fills from the placement point across mesh adjacency; "Projection"
    mode projects the image along the sticker normal onto the frontmost
    surface. Sticker colors are alpha-composited over the base texture.
-3. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
+4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
    upper cells are narrower (`nozzle × 1.05`).
-4. **Decimate** — reduces the triangle count of the input mesh before clipping,
-   using QEM mesh decimation.
 5. **Color adjust** — applies brightness, contrast, and saturation.
 6. **Color warp** — applies color pin remappings using Gaussian RBF
    interpolation in CIELAB color space.
@@ -242,6 +242,9 @@ compatible with OrcaSlicer and BambuStudio.
    each fragment a palette color.
 10. **Merge** — merges coplanar triangles to reduce face count.
 11. **Export** — writes a 3MF file with per-face material assignments.
+
+If **Alpha-wrap** is enabled (Advanced section), it runs between Load and
+Decimate to produce a watertight shell of the input mesh.
 
 Each stage is cached by its settings hash. Changing a downstream parameter
 (e.g., dithering mode) skips all upstream stages on the next run.
@@ -279,10 +282,14 @@ selection. Use the GUI to configure those and save a JSON settings file.
 | `--dither` | `dizzy` | Dithering mode: `none` or `dizzy` |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
+| `--printer` | `snapmaker_u1` | Target printer profile id (`snapmaker_u1`, `snapmaker_j1`, `prusa_xl`, `prusa_xl_5t`, `bambu_h2d`, `bambu_h2d_pro`) |
 | `--color-snap` | `5` | Pre-dither color snap distance in delta E (0 to disable) |
 | `--output` | `<input>.3mf` | Output file path |
 | `--no-merge` | — | Skip coplanar triangle merging |
 | `--no-simplify` | — | Skip QEM mesh decimation before clipping |
+| `--alpha-wrap` | — | Clean the input mesh with CGAL Alpha-wrap before voxelization |
+| `--alpha-wrap-alpha` | nozzle diameter | Alpha-wrap probe radius in mm |
+| `--alpha-wrap-offset` | alpha / 30 | Alpha-wrap offset distance in mm |
 | `--force` | — | Bypass the 300 mm extent size check |
 | `--stats` | — | Print face counts per material |
 
@@ -293,7 +300,7 @@ basic colors (cyan, magenta, yellow, black, white, red, green, blue).
 
 ## Building from Source
 
-Requires Go 1.21+, Node.js 20+, and the [Wails](https://wails.io/) CLI.
+Requires Go 1.24+, Node.js 20.19+ (or 22.12+), and the [Wails](https://wails.io/) CLI.
 
 Install Wails:
 
@@ -344,6 +351,7 @@ These models work well with DitherForge and are free to download:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| Printer | Snapmaker U1 | Target printer profile. Restricts which nozzle and layer-height values are selectable, and determines which printer/process settings are embedded in the exported 3MF. |
 | Size (mm) | 100 | Scale the model so its largest extent equals this value in mm |
 | Scale | 1.0 | Relative scale multiplier |
 | Nozzle diameter | 0.4 mm | Controls voxel cell width. First layer: `nozzle × 1.275`. Upper layers: `nozzle × 1.05`. |
@@ -440,12 +448,18 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 | Dither mode | `dizzy` | `dizzy`: random traversal with error diffusion, blue-noise-like output. `none`: nearest palette color, no dithering. |
 | No merge | off | Disables coplanar triangle merging in the final mesh |
 | No simplify | off | Disables QEM mesh decimation before clipping |
+| Alpha-wrap | off | Wraps the input mesh with a watertight shell (CGAL Alpha-wrap) to fix self-intersections, thin walls, and other geometry that slicers choke on. Can be slow on large models. |
+| Alpha (mm) | nozzle diameter | Alpha-wrap probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
+| Offset (mm) | alpha / 30 | How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
 | Stats | off | Logs face counts per material to the status bar |
 
 ---
 
 ## Status
 
-Early development. The output 3MF includes embedded printer profiles for the
-Snapmaker U1 with a 0.4 mm nozzle. Other printers may need manual profile
-adjustment in the slicer.
+Ready for use. The output 3MF includes embedded printer/process profiles
+for the Snapmaker U1, Snapmaker J1, Prusa XL (2 tools), Prusa XL (5 tools),
+Bambu Lab H2D, and Bambu Lab H2D Pro across their supported nozzle and
+layer-height combinations. Only the Snapmaker U1 path has been tested
+end-to-end on real hardware; the other profiles are wired up but unverified,
+and may need manual adjustment in the slicer.
