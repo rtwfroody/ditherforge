@@ -88,6 +88,9 @@ func filterInventory(inv []palette.InventoryEntry, locked []palette.InventoryEnt
 
 // BilinearSample samples a texture at normalized UV coordinates.
 // Returns RGBA; alpha is 255 for textures without transparency.
+//
+// Values are premultiplied to match color.Color.RGBA() semantics: for NRGBA
+// sources, RGB channels are scaled by A/255.
 func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	bounds := img.Bounds()
 	W := float32(bounds.Max.X - bounds.Min.X)
@@ -99,6 +102,7 @@ func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	px := u * (W - 1)
 	py := v * (H - 1)
 
+	// Relative (0-based within bounds) coordinates for the four corners.
 	x0 := int(px)
 	y0 := int(py)
 	x1 := x0 + 1
@@ -113,37 +117,103 @@ func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	fx := px - float32(x0)
 	fy := py - float32(y0)
 
-	x0 += bounds.Min.X
-	y0 += bounds.Min.Y
-	x1 += bounds.Min.X
-	y1 += bounds.Min.Y
+	// Fast paths avoid the per-sample virtual dispatch of img.At().RGBA(),
+	// which dominates the "Coloring cells" stage on textured models.
+	// image.Decode produces *image.NRGBA for most PNGs and *image.YCbCr for
+	// JPEGs; the RGBA case covers atlases and pre-premultiplied sources.
+	switch src := img.(type) {
+	case *image.NRGBA:
+		return bilinearSampleNRGBA(src, x0, y0, x1, y1, fx, fy)
+	case *image.RGBA:
+		return bilinearSampleRGBA(src, x0, y0, x1, y1, fx, fy)
+	default:
+		return bilinearSampleGeneric(img, x0+bounds.Min.X, y0+bounds.Min.Y,
+			x1+bounds.Min.X, y1+bounds.Min.Y, fx, fy)
+	}
+}
 
+func bilinearLerp(a, b, c, d, fx, fy float32) uint8 {
+	v := a*(1-fx)*(1-fy) + b*fx*(1-fy) + c*(1-fx)*fy + d*fx*fy
+	if v < 0 {
+		v = 0
+	}
+	if v > 255 {
+		v = 255
+	}
+	return uint8(v + 0.5)
+}
+
+// bilinearSampleNRGBA reads pixels directly from the Pix buffer and
+// premultiplies by alpha to match the NRGBA.RGBA() conversion done in the
+// generic path.
+func bilinearSampleNRGBA(src *image.NRGBA, x0, y0, x1, y1 int, fx, fy float32) [4]uint8 {
+	pix := src.Pix
+	stride := src.Stride
+	// Coordinates are 0-based within src.Rect; Pix is row-major at that origin.
+	i00 := y0*stride + x0*4
+	i10 := y0*stride + x1*4
+	i01 := y1*stride + x0*4
+	i11 := y1*stride + x1*4
+
+	r00, g00, b00, a00 := nrgbaPremul(pix, i00)
+	r10, g10, b10, a10 := nrgbaPremul(pix, i10)
+	r01, g01, b01, a01 := nrgbaPremul(pix, i01)
+	r11, g11, b11, a11 := nrgbaPremul(pix, i11)
+
+	return [4]uint8{
+		bilinearLerp(r00, r10, r01, r11, fx, fy),
+		bilinearLerp(g00, g10, g01, g11, fx, fy),
+		bilinearLerp(b00, b10, b01, b11, fx, fy),
+		bilinearLerp(a00, a10, a01, a11, fx, fy),
+	}
+}
+
+func nrgbaPremul(pix []uint8, i int) (float32, float32, float32, float32) {
+	a := uint32(pix[i+3])
+	// Mirror NRGBA.RGBA() exactly so rounding matches the generic path:
+	// stdlib computes R*0x101*A/0xff as a 16-bit value; we then take the
+	// high byte as the 8-bit sample value.
+	r := (uint32(pix[i]) * 0x101 * a / 0xff) >> 8
+	g := (uint32(pix[i+1]) * 0x101 * a / 0xff) >> 8
+	b := (uint32(pix[i+2]) * 0x101 * a / 0xff) >> 8
+	return float32(r), float32(g), float32(b), float32(a)
+}
+
+// bilinearSampleRGBA reads directly from the Pix buffer. RGBA is already
+// premultiplied, so no conversion is needed.
+func bilinearSampleRGBA(src *image.RGBA, x0, y0, x1, y1 int, fx, fy float32) [4]uint8 {
+	pix := src.Pix
+	stride := src.Stride
+	i00 := y0*stride + x0*4
+	i10 := y0*stride + x1*4
+	i01 := y1*stride + x0*4
+	i11 := y1*stride + x1*4
+
+	return [4]uint8{
+		bilinearLerp(float32(pix[i00]), float32(pix[i10]), float32(pix[i01]), float32(pix[i11]), fx, fy),
+		bilinearLerp(float32(pix[i00+1]), float32(pix[i10+1]), float32(pix[i01+1]), float32(pix[i11+1]), fx, fy),
+		bilinearLerp(float32(pix[i00+2]), float32(pix[i10+2]), float32(pix[i01+2]), float32(pix[i11+2]), fx, fy),
+		bilinearLerp(float32(pix[i00+3]), float32(pix[i10+3]), float32(pix[i01+3]), float32(pix[i11+3]), fx, fy),
+	}
+}
+
+// bilinearSampleGeneric is the original image.Image-based path. Used for
+// sources like *image.YCbCr (JPEG), *image.Paletted, and *image.Gray.
+func bilinearSampleGeneric(img image.Image, x0, y0, x1, y1 int, fx, fy float32) [4]uint8 {
 	sample := func(x, y int) (float32, float32, float32, float32) {
 		r, g, b, a := img.At(x, y).RGBA()
 		return float32(r >> 8), float32(g >> 8), float32(b >> 8), float32(a >> 8)
 	}
-
 	r00, g00, b00, a00 := sample(x0, y0)
 	r10, g10, b10, a10 := sample(x1, y0)
 	r01, g01, b01, a01 := sample(x0, y1)
 	r11, g11, b11, a11 := sample(x1, y1)
 
-	lerp := func(a, b, c, d, fx, fy float32) uint8 {
-		v := a*(1-fx)*(1-fy) + b*fx*(1-fy) + c*(1-fx)*fy + d*fx*fy
-		if v < 0 {
-			v = 0
-		}
-		if v > 255 {
-			v = 255
-		}
-		return uint8(v + 0.5)
-	}
-
 	return [4]uint8{
-		lerp(r00, r10, r01, r11, fx, fy),
-		lerp(g00, g10, g01, g11, fx, fy),
-		lerp(b00, b10, b01, b11, fx, fy),
-		lerp(a00, a10, a01, a11, fx, fy),
+		bilinearLerp(r00, r10, r01, r11, fx, fy),
+		bilinearLerp(g00, g10, g01, g11, fx, fy),
+		bilinearLerp(b00, b10, b01, b11, fx, fy),
+		bilinearLerp(a00, a10, a01, a11, fx, fy),
 	}
 }
 
