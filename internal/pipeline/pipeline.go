@@ -906,7 +906,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 	var err error
 	switch ditherMode {
 	case "dizzy":
-		neighbors := voxel.BuildTwoGridNeighbors(cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
+		neighbors := vo.getNeighbors()
 		tracker.StageStart("Dithering", true, len(cells))
 		assignments, err = voxel.DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
 		tracker.StageDone("Dithering")

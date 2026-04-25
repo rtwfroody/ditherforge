@@ -89,6 +89,22 @@ type voxelizeOutput struct {
 	Layer0Size    float32
 	UpperSize     float32
 	LayerH        float32
+
+	// neighbors caches the two-grid neighbor table. Voxel topology only
+	// changes on StageVoxelize, so dither re-runs (same cells, different
+	// dither mode) can reuse the table instead of rebuilding it. Valid for
+	// the lifetime of this voxelizeOutput; never mutate Cells in place.
+	neighbors [][]voxel.Neighbor
+}
+
+// neighbors returns the two-grid neighbor table, building it on first call.
+// Pipeline stages are driven by a single worker (see app.pipelineWorker),
+// so a plain nil-check suffices — no mutex needed.
+func (vo *voxelizeOutput) getNeighbors() [][]voxel.Neighbor {
+	if vo.neighbors == nil {
+		vo.neighbors = voxel.BuildTwoGridNeighbors(vo.Cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
+	}
+	return vo.neighbors
 }
 
 type stickerOutput struct {
