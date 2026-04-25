@@ -126,11 +126,20 @@
   let brightness = $state(0);
   let contrast = $state(0);
   let saturation = $state(0);
+  // Committed shadows: brightness/contrast/saturation/colorSnap update
+  // continuously during slider drag for live preview, but the pipeline-
+  // triggering $effect and the Process payload read the *committed*
+  // versions, which only update on slider release. This avoids spawning
+  // a backend pipeline run every 300ms while the user is still dragging.
+  let committedBrightness = $state(0);
+  let committedContrast = $state(0);
+  let committedSaturation = $state(0);
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
   let dither = $state('dizzy');
   let colorSnap = $state(5);
+  let committedColorSnap = $state(5);
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
@@ -402,10 +411,10 @@
     void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
           layerHeight, baseColor, ...colorSlots,
           inventoryCollectionColors,
-          brightness, contrast, saturation,
+          committedBrightness, committedContrast, committedSaturation,
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
-          dither, colorSnap, noMerge, noSimplify, stats,
+          dither, committedColorSnap, noMerge, noSimplify, stats,
           alphaWrap, alphaWrapAlpha, alphaWrapOffset, reloadSeq];
     if (!initialized) {
       initialized = true;
@@ -680,9 +689,9 @@
       inventoryCollection = s.inventoryCollection;
       loadInventoryCollectionColors(inventoryCollection);
     }
-    if (s.brightness !== undefined) brightness = s.brightness;
-    if (s.contrast !== undefined) contrast = s.contrast;
-    if (s.saturation !== undefined) saturation = s.saturation;
+    if (s.brightness !== undefined) { brightness = s.brightness; committedBrightness = s.brightness; }
+    if (s.contrast !== undefined) { contrast = s.contrast; committedContrast = s.contrast; }
+    if (s.saturation !== undefined) { saturation = s.saturation; committedSaturation = s.saturation; }
     if (s.warpPins !== undefined) {
       warpPins = s.warpPins.map((p: any) => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel || '', sigma: p.sigma }));
     }
@@ -708,7 +717,7 @@
       });
     }
     if (s.dither !== undefined) dither = s.dither;
-    if (s.colorSnap !== undefined) colorSnap = s.colorSnap;
+    if (s.colorSnap !== undefined) { colorSnap = s.colorSnap; committedColorSnap = s.colorSnap; }
     if (s.noMerge !== undefined) noMerge = s.noMerge;
     if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
     if (s.stats !== undefined) stats = s.stats;
@@ -879,9 +888,9 @@
       InventoryFile: '',
       InventoryColors: invColors,
       InventoryLabels: invLabels,
-      Brightness: brightness,
-      Contrast: contrast,
-      Saturation: saturation,
+      Brightness: committedBrightness,
+      Contrast: committedContrast,
+      Saturation: committedSaturation,
       Dither: dither,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
@@ -892,7 +901,7 @@
       ReloadSeq: reloadSeq,
       ObjectIndex: objectIndex,
       Stats: stats,
-      ColorSnap: colorSnap,
+      ColorSnap: committedColorSnap,
       WarpPins: warpPins
         .filter(p => /^#[0-9a-fA-F]{6}$/.test(p.sourceHex) && /^#[0-9a-fA-F]{6}$/.test(p.targetHex))
         .map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, sigma: p.sigma })),
@@ -1219,7 +1228,7 @@
               </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
             </div>
-            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} />
+            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} onValueCommit={(v: number) => committedBrightness = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
@@ -1231,7 +1240,7 @@
               </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
             </div>
-            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} />
+            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} onValueCommit={(v: number) => committedContrast = v} />
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
@@ -1243,7 +1252,7 @@
               </div>
               <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
             </div>
-            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} />
+            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} onValueCommit={(v: number) => committedSaturation = v} />
           </div>
         </div>
 
@@ -1265,7 +1274,7 @@
             </div>
             <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
           </div>
-          <Slider type="single" min={0} max={50} step={1} bind:value={colorSnap} />
+          <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
         </div>
 
         <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
