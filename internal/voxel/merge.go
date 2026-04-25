@@ -64,10 +64,11 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 		group := []int{fi}
 		groupID[fi] = gid
 
-		queue := []int{fi}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
+		stack := make([]int, 1, 16)
+		stack[0] = fi
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
 			f := faces[cur]
 			for i := 0; i < 3; i++ {
 				e := makeEdge(f[i], f[(i+1)%3])
@@ -84,7 +85,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 					}
 					groupID[nfi] = gid
 					group = append(group, int(nfi))
-					queue = append(queue, int(nfi))
+					stack = append(stack, int(nfi))
 				}
 			}
 		}
