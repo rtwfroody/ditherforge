@@ -162,8 +162,10 @@ type loadSettings struct {
 
 // BaseColor lives on voxelizeSettings (not loadSettings) because it only
 // affects voxel cell coloring. A cheap per-run step reapplies the override
-// to the cached ColorModel before voxelize, so Load/Decimate/Sticker caches
-// survive base-color changes.
+// to the cached ColorModel before voxelize, so Load/Decimate caches
+// survive base-color changes. Sticker is invalidated on base-color change
+// because runSticker deep-clones ColorModel into so.Model and the per-run
+// reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
 	NozzleDiameter float32
 	LayerHeight    float32
@@ -172,6 +174,9 @@ type voxelizeSettings struct {
 
 type stickerSettings struct {
 	Stickers []Sticker
+	// BaseColor is included so a base-color change invalidates the sticker
+	// stage. See voxelizeSettings doc above for the reason.
+	BaseColor string
 }
 
 type colorAdjustSettings struct {
@@ -262,7 +267,7 @@ func settingsForStage(stage StageID, opts Options) any {
 			BaseColor:      opts.BaseColor,
 		}
 	case StageSticker:
-		return stickerSettings{Stickers: opts.Stickers}
+		return stickerSettings{Stickers: opts.Stickers, BaseColor: opts.BaseColor}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -315,6 +320,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.LayerHeight)
 		writeString(h, v.BaseColor)
 	case stickerSettings:
+		writeString(h, v.BaseColor)
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {
 			writeString(h, s.ImagePath)
