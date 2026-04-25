@@ -290,6 +290,111 @@ func TestBuildStickerDecalSubdividesPathologicalTriangle(t *testing.T) {
 	t.Logf("subdivided decal covers %d triangles", len(decal.TriUVs))
 }
 
+// TestBuildStickerDecalRespectsCallerIsolation: guards the shared-Faces
+// aliasing regression that caused an alpha-wrap + sticker crash before the
+// pipeline started deep-cloning via loader.DeepCloneForMutation. When
+// alpha-wrap is on, InflateAlongNormals → CloneForEdit produces a
+// SampleModel that SHARES its Faces backing with ColorModel. If the sticker
+// stage mutates ColorModel.Faces in place, those writes reach SampleModel
+// and the voxelizer panics indexing SampleModel.Vertices with midpoint
+// indices that only exist in ColorModel.Vertices.
+//
+// This test proves the property at the BuildStickerDecal boundary: given a
+// deep-cloned "scratch" model, the subdivision must not touch any shallow
+// sibling that still holds the pre-clone Faces backing. It catches a
+// regression where DeepCloneForMutation reverts to a shallow copy. It does
+// NOT catch the orthogonal regression of `runSticker` (or a future caller)
+// dropping the DeepCloneForMutation call and passing lo.ColorModel directly
+// — that would require a pipeline-layer smoke test.
+func TestBuildStickerDecalRespectsCallerIsolation(t *testing.T) {
+	t.Parallel()
+	// Pathological 20-unit triangle under a 4-unit sticker — guaranteed to
+	// trigger subdivision, which overwrites model.Faces[0] and appends new
+	// faces. Without caller isolation those writes would reach the sibling.
+	orig := &loader.LoadedModel{
+		Vertices: [][3]float32{
+			{-10, -10, 0},
+			{10, -10, 0},
+			{0, 10, 0},
+		},
+		Faces:         [][3]uint32{{0, 1, 2}},
+		FaceBaseColor: [][4]uint8{{128, 128, 128, 255}},
+	}
+
+	// Simulate the alpha-wrap layout: a shallow clone that shares the
+	// Faces backing with orig. InflateAlongNormals does exactly this —
+	// it uses CloneForEdit which only duplicates Vertices/FaceBaseColor.
+	sibling := loader.CloneForEdit(orig)
+	// Confirm the alias up front: if CloneForEdit ever starts deep-copying
+	// Faces, this whole test becomes vacuous, so fail loudly here rather
+	// than silently passing later.
+	orig.Faces[0][0] = 42
+	if sibling.Faces[0][0] != 42 {
+		t.Fatal("test setup broken: CloneForEdit should share Faces backing")
+	}
+	orig.Faces[0][0] = 0
+
+	siblingFacesLenBefore := len(sibling.Faces)
+	// Snapshot by value — [3]uint32 is an array, not a slice, so this is a
+	// genuine copy that survives any later mutation of sibling.Faces[0].
+	siblingFace0Before := sibling.Faces[0]
+
+	// Mirror what runSticker does: deep-clone before letting the BFS mutate.
+	scratch := loader.DeepCloneForMutation(orig)
+	adj := BuildTriAdjacency(scratch)
+	img := makeTestImage(4, 4, color.NRGBA{255, 0, 0, 255})
+
+	center := [3]float64{0, 0, 0}
+	normal := [3]float64{0, 0, 1}
+	up := [3]float64{0, 1, 0}
+	scale := 4.0
+
+	si := NewSpatialIndex(scratch, 2)
+	seedTri := FindSeedTriangle(center, scratch, si)
+	if seedTri < 0 {
+		t.Fatal("no seed triangle found")
+	}
+	decal, err := BuildStickerDecal(context.Background(), scratch, adj, img,
+		seedTri, center, normal, up, scale, 0, 0, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: confirm the BFS actually subdivided (otherwise the test
+	// isn't exercising the mutation path that triggered the bug).
+	if len(decal.TriUVs) < 2 {
+		t.Fatalf("expected subdivision (multiple decal tris), got %d — test "+
+			"geometry is not exercising the mutation path",
+			len(decal.TriUVs))
+	}
+	if len(scratch.Faces) <= siblingFacesLenBefore {
+		t.Fatalf("scratch.Faces did not grow from subdivision (got %d, want > %d)",
+			len(scratch.Faces), siblingFacesLenBefore)
+	}
+
+	// The actual regression assertions: sibling's shared-backing slices
+	// must be untouched.
+	if len(sibling.Faces) != siblingFacesLenBefore {
+		t.Errorf("sibling.Faces length changed: %d → %d (subdivision leaked across aliased backing)",
+			siblingFacesLenBefore, len(sibling.Faces))
+	}
+	if sibling.Faces[0] != siblingFace0Before {
+		t.Errorf("sibling.Faces[0] corrupted by subdivision: %v → %v",
+			siblingFace0Before, sibling.Faces[0])
+	}
+	// And the indices in sibling.Faces must still be in range for
+	// sibling.Vertices — the specific crash was an out-of-bounds index
+	// created when a subdivided midpoint index got written through. Stop
+	// at the first violation; one is plenty to identify the regression.
+	for i, f := range sibling.Faces {
+		for j, vi := range f {
+			if int(vi) >= len(sibling.Vertices) {
+				t.Fatalf("sibling.Faces[%d][%d]=%d exceeds len(sibling.Vertices)=%d",
+					i, j, vi, len(sibling.Vertices))
+			}
+		}
+	}
+}
+
 // TestTcRunaway: the planar-reset branch in the BFS only fires when
 // `tcRunaway` returns true, so a direct predicate test is the cheapest way
 // to guard that the threshold matches the documented 2× pad.
