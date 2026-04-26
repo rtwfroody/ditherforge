@@ -77,12 +77,23 @@ type bfsEntry struct {
 // edge lengths into downstream unfolds. The layout is therefore passed to
 // arapRegion.Solve — a local/global ARAP parameterization (Liu/Zhou/Wang
 // 2008) that pins the seed vertices and relaxes everything else to be
-// as-rigid-as-possible with respect to the 3D geometry. Occupancy
-// rejection runs on the final relaxed UVs, so ARAP gets a chance to fix
-// distortion before we decide which triangles to keep.
+// as-rigid-as-possible with respect to the 3D geometry.
 //
 // Positive rotationDeg rotates the sticker clockwise when viewed from outside
 // the surface (i.e. looking down the normal toward the mesh).
+//
+// KNOWN LIMITATION (closed/highly-curved meshes): BFS uses unfolded tc to
+// bound expansion, with a planar tangent reset at tcRunaway to keep BFS
+// from stalling on coarse meshes with very large triangles. On curved or
+// closed shapes the reset can bridge geodesically-disjoint regions back
+// into the rect, and ARAP — given that wider input — folds them on top
+// of the local patch. Visually the sticker can appear stretched or
+// repeat several times across the surface. The proper fix is to decouple
+// region selection from parameterization: extract a true geodesic disk
+// around the seed (heat method or fast marching for surface distance)
+// and feed only that disk into ARAP. The current heuristic-based
+// approach has been tuned against base.json (works well) but degrades
+// on more curved meshes like top.json.
 func BuildStickerDecal(
 	ctx context.Context,
 	model *loader.LoadedModel,
