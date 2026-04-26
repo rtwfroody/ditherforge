@@ -144,14 +144,15 @@ To place a sticker:
 
 Each sticker has two modes, selected with radio buttons:
 
-- **Unfold** (default) — flood-fills from the clicked triangle across the
-  mesh, unfolding each triangle into the sticker's tangent plane. The sticker
-  wraps around curves following the surface. A **Surface bend limit** slider
-  stops the flood-fill at sharp edges (0° = no limit).
-- **Projection** — projects the sticker along its normal, like a slide
-  projector. The image lands on whatever front-facing surface is closest along
-  the projection direction and does not wrap around corners. Useful for flat
-  labels on complex or non-developable geometry.
+- **Projection** (default) — projects the sticker along its normal, like a
+  slide projector. The image lands on whatever front-facing surface is closest
+  along the projection direction and does not wrap around corners. Works well
+  on most shapes, including complex or non-developable geometry.
+- **Unfold** — flood-fills from the clicked triangle across the mesh,
+  unfolding each triangle into the sticker's tangent plane. The sticker wraps
+  around curves following the surface. A **Surface bend limit** slider stops
+  the flood-fill at sharp edges (0° = no limit). Best on developable patches
+  (cylinders, cones, gentle curves).
 
 There is no hard limit on the number of stickers. They are composited over the
 base model color during voxelization and are affected by the brightness,
@@ -221,10 +222,11 @@ compatible with OrcaSlicer and BambuStudio.
    selected object (or all objects) is processed.
 2. **Decimate** — reduces the triangle count of the input mesh using QEM mesh
    decimation, before stickers and clipping run on it.
-3. **Stickers** — maps each sticker image onto the mesh. "Unfold" mode
-   flood-fills from the placement point across mesh adjacency; "Projection"
-   mode projects the image along the sticker normal onto the frontmost
-   surface. Sticker colors are alpha-composited over the base texture.
+3. **Stickers** — maps each sticker image onto the mesh. "Projection" mode
+   (the default) projects the image along the sticker normal onto the
+   frontmost surface; "Unfold" mode flood-fills from the placement point
+   across mesh adjacency. Sticker colors are alpha-composited over the base
+   texture.
 4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
@@ -352,11 +354,9 @@ These models work well with DitherForge and are free to download:
 On surfaces that curve sharply or wrap back on themselves (e.g. the
 outside of a bowl, the rim of a cup) an unfold-mode sticker can come out
 stretched horizontally or repeated several times across the model
-instead of appearing once at the placement.
-
-If you see this, switch the sticker to **projection** mode. Projection
-mode is best when the surface where the sticker lands is fairly flat
-and faces roughly toward you.
+instead of appearing once at the placement. This is why **projection**
+is the default mode; switch to unfold only on developable patches like
+cylinders or gentle curves where wrapping around the surface matters.
 
 ---
 
@@ -392,7 +392,7 @@ Stickers composite PNG or JPEG images onto the model surface before voxelization
 | Placement | Set by clicking a point on the input model. A floating billboard preview follows the cursor during placement. |
 | Scale | Size of the sticker on the surface, in mm |
 | Rotation | Rotation of the sticker around the surface normal (0–360°) |
-| Mode | **Unfold** flood-fills across mesh adjacency, wrapping around curves. **Projection** projects the image along the normal onto the nearest front-facing surface. |
+| Mode | **Projection** (default) projects the image along the normal onto the nearest front-facing surface. **Unfold** flood-fills across mesh adjacency, wrapping around curves. |
 | Surface bend limit | (Unfold mode only.) Stops flood-fill where adjacent faces exceed this angle. 0 = no limit. |
 
 Multiple stickers can be added. They are applied in order and composited over

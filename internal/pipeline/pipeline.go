@@ -72,7 +72,7 @@ type Sticker struct {
 	Scale    float64 `json:"Scale"`    // world-unit width of sticker
 	Rotation float64 `json:"Rotation"` // degrees, around surface normal
 	MaxAngle float64 `json:"MaxAngle"` // max inter-triangle angle (degrees) for flood-fill; 0 = no limit
-	Mode     string  `json:"Mode"`     // "unfold" (default) or "projection"
+	Mode     string  `json:"Mode"`     // "projection" (default) or "unfold"
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
@@ -749,6 +749,11 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 
 	var decals []*voxel.StickerDecal
 	for i, s := range opts.Stickers {
+		// Normalize empty Mode (legacy settings before the field existed) to
+		// the current default. Internally Mode must always be a known value.
+		if s.Mode == "" {
+			s.Mode = "projection"
+		}
 		base := i * stickerUnits
 		onProgress := func(frac float64) {
 			if frac < 0 {
@@ -778,18 +783,8 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		}
 
 		var decal *voxel.StickerDecal
-		if s.Mode == "projection" {
-			decal, err = voxel.BuildStickerDecalProjection(ctx, model, img,
-				s.Center, s.Normal, s.Up, s.Scale, s.Rotation, onProgress)
-			if err != nil {
-				return err
-			}
-			if len(decal.TriUVs) == 0 {
-				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
-				stage.Progress(base + stickerUnits)
-				continue
-			}
-		} else {
+		switch s.Mode {
+		case "unfold":
 			seedTri := voxel.FindSeedTriangle(s.Center, model, si)
 			if seedTri < 0 {
 				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
@@ -802,6 +797,19 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 			if err != nil {
 				return err
 			}
+		case "projection":
+			decal, err = voxel.BuildStickerDecalProjection(ctx, model, img,
+				s.Center, s.Normal, s.Up, s.Scale, s.Rotation, onProgress)
+			if err != nil {
+				return err
+			}
+			if len(decal.TriUVs) == 0 {
+				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
+				stage.Progress(base + stickerUnits)
+				continue
+			}
+		default:
+			return fmt.Errorf("sticker %s: unknown mode %q", s.ImagePath, s.Mode)
 		}
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		// Warn the user when the LSCM solve didn't converge cleanly —

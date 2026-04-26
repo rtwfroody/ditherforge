@@ -733,6 +733,13 @@ func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	if sf.DitherForge.URL == "" {
 		return nil, fmt.Errorf("not a DitherForge settings file (missing _ditherforge metadata)")
 	}
+	// Migrate legacy stickers that predate the Mode field (or were saved by a
+	// version where unfold was the default and Mode was omitempty).
+	for i := range sf.Settings.Stickers {
+		if sf.Settings.Stickers[i].Mode == "" {
+			sf.Settings.Stickers[i].Mode = "unfold"
+		}
+	}
 	return &LoadSettingsResult{
 		Path:     path,
 		Settings: sf.Settings,

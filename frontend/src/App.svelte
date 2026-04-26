@@ -470,7 +470,7 @@
       scale: 20,
       rotation: 0,
       maxAngle: 0,
-      mode: 'unfold',
+      mode: 'projection',
     }];
     // Automatically enter placement mode for the new sticker.
     placingStickerIndex = stickers.length - 1;
