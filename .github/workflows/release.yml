@@ -284,38 +284,78 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
-      - name: Create or update release
+      - name: Create or update releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Delete existing "latest" release and tag if present.
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          git tag -f latest
-          git push -f origin latest
-
           VERSION="${{ steps.version.outputs.version }}"
           SHORT_SHA="${GITHUB_SHA:0:8}"
-          cat > notes.md <<EOF
-          Automated build from main branch (v${VERSION}, commit ${SHORT_SHA}).
+
+          # Clean up old single-release setup if it still exists.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+
+          # Refresh the two rolling tags. These are intentionally rolling
+          # (always point at the latest main build), so force-push and
+          # release-recreate are expected here, not destructive of history.
+          for tag in latest-gui latest-cli; do
+            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+            git tag -f "$tag"
+            git push -f origin "$tag"
+          done
+
+          # Sort assets into per-release directories. GUI assets are named
+          # ditherforge-<version>-<platform>; CLI assets are named
+          # ditherforge-cli-<version>-<platform>. The CLI case arm MUST come
+          # first — both names start with "ditherforge-", so reordering would
+          # silently misroute every CLI artifact into the GUI release.
+          mkdir gui-assets cli-assets
+          for f in artifacts/*; do
+            case "$(basename "$f")" in
+              ditherforge-cli-*) cp "$f" cli-assets/ ;;
+              ditherforge-*)     cp "$f" gui-assets/ ;;
+            esac
+          done
+
+          # GUI release: marked as the repo's "Latest" so it gets the green
+          # badge on the Releases page and is pinned to the top (where most
+          # users look first).
+          cat > gui-notes.md <<EOF
+          Latest GUI build from main branch (v${VERSION}, commit ${SHORT_SHA}).
 
           ## Downloads
 
-          **GUI (desktop app):**
           - Linux: \`ditherforge-${VERSION}-linux-amd64.tar.gz\`
           - Windows: \`ditherforge-${VERSION}-windows-amd64.zip\`
           - macOS: \`ditherforge-${VERSION}-macos-universal.dmg\`
 
-          **CLI only:**
+          For the command-line build, see the **Latest CLI build** release.
+          EOF
+          sed -i 's/^          //' gui-notes.md
+
+          gh release create latest-gui \
+            --title "Latest GUI build (v${VERSION})" \
+            --notes-file gui-notes.md \
+            --latest \
+            gui-assets/*
+
+          # CLI release: kept as a prerelease so it doesn't compete for the
+          # "Latest" badge and visually signals "for advanced users".
+          cat > cli-notes.md <<EOF
+          Latest CLI build from main branch (v${VERSION}, commit ${SHORT_SHA}).
+
+          ## Downloads
+
           - Linux amd64: \`ditherforge-cli-${VERSION}-linux-amd64.tar.gz\`
           - Linux arm64: \`ditherforge-cli-${VERSION}-linux-arm64.tar.gz\`
           - Windows: \`ditherforge-cli-${VERSION}-windows-amd64.zip\`
           - macOS universal: \`ditherforge-cli-${VERSION}-macos-universal.tar.gz\`
-          EOF
-          # Strip leading whitespace from heredoc (YAML indentation).
-          sed -i 's/^          //' notes.md
 
-          gh release create latest \
-            --title "Latest build (v${VERSION})" \
-            --notes-file notes.md \
+          For the desktop app, see the **Latest GUI build** release.
+          EOF
+          sed -i 's/^          //' cli-notes.md
+
+          gh release create latest-cli \
+            --title "Latest CLI build (v${VERSION})" \
+            --notes-file cli-notes.md \
             --prerelease \
-            artifacts/*
+            cli-assets/*
