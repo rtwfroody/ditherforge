@@ -268,10 +268,31 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 	return uint8(ClampF(a+0.5, 0, 255))
 }
 
-// SampleNearestColor finds the closest surface point to p, then samples the
-// texture color and alpha there. If decals are provided, sticker textures are
-// composited over the base color. Returns RGBA.
+// SampleNearestColor finds the closest surface point to p on `model`, then
+// samples the texture color and alpha there. If decals are provided,
+// sticker textures are composited over the base color. Returns RGBA.
+//
+// When stickers live on a *different* mesh than the base color sample
+// model (alpha-wrap mode: original mesh carries texture/UV, wrap mesh
+// carries decals), call SampleNearestColorWithSticker instead.
 func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf, decals []*StickerDecal) [4]uint8 {
+	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, nil, nil, nil)
+}
+
+// SampleNearestColorWithSticker is the two-mesh form of SampleNearestColor.
+// When stickerModel is nil (or aliases model), behavior is identical to
+// SampleNearestColor: a single nearest-tri lookup against `model` is used
+// for both base color and sticker compositing. When stickerModel is a
+// distinct mesh, a second nearest-tri lookup against stickerModel/stickerSI
+// is performed and decals are composited based on that result. stickerBuf
+// must be a separate SearchBuf sized for stickerModel; passing nil reuses
+// `buf` (safe because the two lookups don't overlap in time).
+func SampleNearestColorWithSticker(
+	p [3]float32,
+	model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf,
+	decals []*StickerDecal,
+	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
 	bestDistSq := float32(math.MaxFloat32)
 	bestTri := int32(-1)
@@ -335,9 +356,38 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 		rgba = [4]uint8{bc[0], bc[1], bc[2], a}
 	}
 
-	// Composite sticker decals over the base color.
+	// Composite sticker decals over the base color. When stickers live on
+	// a separate mesh (alpha-wrap mode), do an independent nearest-tri
+	// lookup against that mesh; decal TriUVs index into it, not into the
+	// color sample mesh.
 	if len(decals) > 0 {
-		rgba = CompositeStickerColor(rgba, bestTri, bary, decals)
+		if stickerModel == nil || stickerModel == model {
+			rgba = CompositeStickerColor(rgba, bestTri, bary, decals)
+		} else {
+			sBuf := stickerBuf
+			if sBuf == nil {
+				sBuf = buf
+			}
+			sCands := stickerSI.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, sBuf)
+			sBestDistSq := float32(math.MaxFloat32)
+			sBestTri := int32(-1)
+			var sBestS, sBestT float32
+			for _, ti := range sCands {
+				f := stickerModel.Faces[ti]
+				r := ClosestPointOnTriangle(p,
+					stickerModel.Vertices[f[0]], stickerModel.Vertices[f[1]], stickerModel.Vertices[f[2]])
+				if r.DistSq < sBestDistSq {
+					sBestDistSq = r.DistSq
+					sBestTri = ti
+					sBestS = r.S
+					sBestT = r.T
+				}
+			}
+			if sBestTri >= 0 {
+				sBary := [3]float32{1 - sBestS - sBestT, sBestS, sBestT}
+				rgba = CompositeStickerColor(rgba, sBestTri, sBary, decals)
+			}
+		}
 	}
 
 	return rgba

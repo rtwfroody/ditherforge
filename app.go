@@ -38,6 +38,7 @@ type App struct {
 	pipeGen      atomic.Int64         // generation counter for pipeline requests
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
+	lastOverlayID string              // mesh handler ID for the alpha-wrap sticker overlay
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
 	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
 	collections   *collection.Manager    // filament collection manager
@@ -309,6 +310,24 @@ func (a *App) processOne(req pipelineRequest) {
 			a.lastInputID = a.meshes.Store(mesh)
 			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale, ExtentMM: extentMM})
 		},
+		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
+			// Alpha-wrap mode: stickers are carried by a separate mesh
+			// that renders just outside the input mesh. The pipeline
+			// fires this with mesh=nil when the overlay should be
+			// cleared (alpha-wrap off, or no stickers), so the frontend
+			// can drop any stale overlay deterministically.
+			if a.lastOverlayID != "" {
+				a.meshes.Remove(a.lastOverlayID)
+				a.lastOverlayID = ""
+			}
+			url := ""
+			if mesh != nil {
+				a.lastOverlayID = a.meshes.Store(mesh)
+				url = "/mesh/" + a.lastOverlayID
+			}
+			wailsRuntime.EventsEmit(a.ctx, "input-overlay-mesh",
+				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
+		},
 		OnPalette: func(pal [][3]uint8, labels []string) {
 			colors := make([]map[string]string, len(pal))
 			for i, c := range pal {
@@ -324,6 +343,12 @@ func (a *App) processOne(req pipelineRequest) {
 			wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{
 				"gen":    req.gen,
 				"colors": colors,
+			})
+		},
+		OnWarning: func(msg string) {
+			wailsRuntime.EventsEmit(a.ctx, "pipeline-warning", map[string]any{
+				"gen":     req.gen,
+				"message": msg,
 			})
 		},
 		Progress: &guiTracker{appCtx: a.ctx, gen: req.gen},

@@ -110,12 +110,19 @@ func (vo *voxelizeOutput) getNeighbors() [][]voxel.Neighbor {
 type stickerOutput struct {
 	Decals []*voxel.StickerDecal
 	Adj    *voxel.TriAdjacency // cached for potential reuse
-	// Model is a scratch clone of loadOutput.ColorModel mutated by the sticker
-	// stage (the BFS subdivides pathologically-large triangles in place).
-	// Decal TriUVs index into this model's Faces, not the original ColorModel's,
-	// so downstream color sampling and preview rendering must use Model when
-	// set. nil when no stickers were built.
+	// Model is the sticker substrate (scratch clone of either ColorModel or
+	// the alpha-wrapped Model, depending on opts.AlphaWrap). The BFS may
+	// have subdivided pathologically-large triangles in place. Decal TriUVs
+	// index into THIS model's Faces, so downstream sampling and preview
+	// rendering must use Model. nil when no stickers were built.
 	Model *loader.LoadedModel
+	// SI is a spatial index built over Model, cached so runVoxelize can
+	// reuse it without rebuilding (the wrap mesh can be ~100k faces).
+	SI *voxel.SpatialIndex
+	// FromAlphaWrap is true when Model is a clone of the wrap mesh rather
+	// than ColorModel. Voxelize uses this to decide whether to do a single
+	// nearest-tri lookup (Model == sample model) or two separate lookups.
+	FromAlphaWrap bool
 }
 
 type colorAdjustOutput struct {
@@ -193,6 +200,17 @@ type stickerSettings struct {
 	// BaseColor is included so a base-color change invalidates the sticker
 	// stage. See voxelizeSettings doc above for the reason.
 	BaseColor string
+	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
+	// original mesh), so decals built for one substrate are invalid when
+	// the toggle changes.
+	//
+	// AlphaWrapAlpha and AlphaWrapOffset are intentionally NOT included
+	// here. Both are part of loadSettings, so changing them invalidates
+	// StageLoad and the cascade re-runs every later stage including this
+	// one. Adding them here would be redundant. If a future refactor
+	// switches to fine-grained invalidation that doesn't cascade, this
+	// struct must grow those fields too.
+	AlphaWrap bool
 }
 
 type colorAdjustSettings struct {
@@ -283,7 +301,7 @@ func settingsForStage(stage StageID, opts Options) any {
 			BaseColor:      opts.BaseColor,
 		}
 	case StageSticker:
-		return stickerSettings{Stickers: opts.Stickers, BaseColor: opts.BaseColor}
+		return stickerSettings{Stickers: opts.Stickers, BaseColor: opts.BaseColor, AlphaWrap: opts.AlphaWrap}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -337,6 +355,7 @@ func stageKey(stage StageID, opts Options) uint64 {
 		writeString(h, v.BaseColor)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
+		writeBool(h, v.AlphaWrap)
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {
 			writeString(h, s.ImagePath)

@@ -85,8 +85,19 @@ type WarpPin struct {
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
 	OnInputMesh func(*MeshData, float32, float32) // mesh, preview scale, native extent mm
-	OnPalette   func([][3]uint8, []string)
-	Progress    progress.Tracker
+	// OnStickerOverlay is fired when stickers are placed on a mesh
+	// distinct from the input mesh — i.e. the alpha-wrap surface. The
+	// overlay should be rendered on top of the input mesh, biased
+	// slightly toward the camera to avoid z-fighting. nil call when
+	// alpha-wrap is off (the overlay is already baked into the input
+	// mesh's StickerUVs in that case).
+	OnStickerOverlay func(*MeshData, float32)
+	OnPalette        func([][3]uint8, []string)
+	// OnWarning is called for non-fatal user-facing notices (e.g. an
+	// LSCM solve that didn't converge cleanly). The frontend should
+	// surface these via a non-blocking toast or status line.
+	OnWarning func(string)
+	Progress  progress.Tracker
 }
 
 // stageNames maps StageID to a human-readable name for progress reporting.
@@ -156,11 +167,15 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Extract callbacks, using safe defaults for nil.
 	var onInputMesh func(*MeshData, float32, float32)
+	var onStickerOverlay func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
+	var onWarning func(string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
 		onInputMesh = cb.OnInputMesh
+		onStickerOverlay = cb.OnStickerOverlay
 		onPalette = cb.OnPalette
+		onWarning = cb.OnWarning
 		if cb.Progress != nil {
 			tracker = cb.Progress
 		}
@@ -223,7 +238,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Stage 2: Sticker (builds decals from mesh, before voxelization)
 	if startFrom <= StageSticker {
-		if err := runSticker(ctx, cache, opts, lo, tracker); err != nil {
+		if err := runSticker(ctx, cache, opts, lo, tracker, onWarning); err != nil {
 			return nil, err
 		}
 	}
@@ -233,29 +248,47 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	so := cache.getSticker()
 
 	// Send input mesh (with sticker overlay) to the preview after stickers
-	// are built so the input viewer shows decals on the original geometry.
-	// If the sticker stage produced a scratch model (with subdivided faces),
-	// build the preview from it so decal TriUVs line up with the face list;
-	// otherwise use the unmodified ColorModel.
+	// are built. Two cases:
+	//
+	//   alpha-wrap OFF: stickers live on so.Model (a clone of ColorModel
+	//     with subdivided faces). Bake decals into that preview so face
+	//     indices line up. No separate overlay.
+	//
+	//   alpha-wrap ON: input mesh is lo.ColorModel (textured original);
+	//     decals key into so.Model (the wrap). Emit two meshes via
+	//     separate callbacks so the frontend can layer them.
 	if onInputMesh != nil && lo.ColorModel != nil {
 		previewModel := lo.ColorModel
-		if so != nil && so.Model != nil {
+		var bakedDecals []*voxel.StickerDecal
+		if so != nil && so.Model != nil && !so.FromAlphaWrap {
+			// Sticker scratch is the textured model — bake decals into the
+			// single mesh as before.
 			previewModel = so.Model
+			bakedDecals = so.Decals
 		}
 		mesh := buildInputMeshData(previewModel)
-		if so != nil && len(so.Decals) > 0 {
-			mesh = attachStickerOverlay(mesh, so.Decals)
+		if len(bakedDecals) > 0 {
+			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
-		if lo.PreviewScale != 1 {
-			scaled := *mesh
-			scaled.Vertices = make([]float32, len(mesh.Vertices))
-			copy(scaled.Vertices, mesh.Vertices)
-			for i := range scaled.Vertices {
-				scaled.Vertices[i] *= lo.PreviewScale
-			}
-			mesh = &scaled
-		}
+		mesh = scalePreviewMesh(mesh, lo.PreviewScale)
 		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM)
+
+		// Alpha-wrap case: emit only the sticker-bearing wrap triangles
+		// as a separate overlay so the textured input mesh underneath
+		// remains visible everywhere there isn't a sticker. Always call
+		// the callback (with nil mesh in the no-overlay case) so the
+		// frontend can clear any stale overlay from a previous run
+		// without racing against the input-mesh event.
+		if onStickerOverlay != nil {
+			var overlay *MeshData
+			if so != nil && so.FromAlphaWrap && len(so.Decals) > 0 {
+				overlay = buildStickerOverlayMesh(so.Model, so.Decals)
+				if overlay != nil {
+					overlay = scalePreviewMesh(overlay, lo.PreviewScale)
+				}
+			}
+			onStickerOverlay(overlay, lo.PreviewScale)
+		}
 	}
 
 	// Stage 3: Voxelize (uses decals from sticker stage)
@@ -639,16 +672,33 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	upperSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	layerH := opts.LayerHeight
 
-	// Sticker stage may have subdivided triangles into a scratch model; its
-	// face indices are what decal TriUVs reference, so color sampling must
-	// use that model. Falls back to lo.SampleModel when no stickers ran.
+	// Two cases for sample-vs-sticker mesh wiring:
+	//
+	//   alpha-wrap OFF (so.FromAlphaWrap == false): so.Model is a clone of
+	//     lo.ColorModel, so it carries UVs/textures AND decals. Use it for
+	//     both color and sticker sampling — single nearest-tri lookup per
+	//     cell.
+	//
+	//   alpha-wrap ON: so.Model is a clone of the wrap (no UVs/textures);
+	//     decals key into it. lo.SampleModel still carries the original
+	//     mesh's UVs/textures. Use lo.SampleModel for color and so.Model
+	//     for stickers — two lookups per cell.
 	sampleModel := lo.SampleModel
+	var stickerModel *loader.LoadedModel
+	var stickerSI *voxel.SpatialIndex
 	if so != nil && so.Model != nil {
-		sampleModel = so.Model
+		if so.FromAlphaWrap {
+			stickerModel = so.Model
+			stickerSI = so.SI
+		} else {
+			sampleModel = so.Model
+		}
 	}
 
 	fmt.Println("Voxelizing...")
-	result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, sampleModel, layer0Size, upperSize, layerH, tracker, so.Decals)
+	result, err := squarevoxel.VoxelizeTwoGrids(ctx, lo.Model, sampleModel,
+		stickerModel, stickerSI,
+		layer0Size, upperSize, layerH, tracker, so.Decals)
 	if err != nil {
 		return fmt.Errorf("voxelize: %w", err)
 	}
@@ -663,20 +713,30 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	return nil
 }
 
-func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
+func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker, onWarning func(string)) error {
 	if len(opts.Stickers) == 0 {
 		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{})
 		return nil
 	}
 
-	// Stickers are placed against the original mesh (which carries UVs and
-	// user-visible geometry), not the alpha-wrapped geometry. We work on a
-	// scratch deep-clone so the BFS can subdivide pathologically-large
-	// triangles in place without mutating the cached lo.ColorModel (which
-	// would compound across re-runs) and without aliasing lo.SampleModel
-	// (shallow clones share face-indexed slices — writing through would
-	// corrupt color sampling with out-of-range indices).
-	model := loader.DeepCloneForMutation(lo.ColorModel)
+	// Pick the sticker substrate. With alpha-wrap on, the wrap mesh is the
+	// canonical sticker carrier — the original mesh's surface is too dirty
+	// (slivers, near-degenerate tris, interior-facing fragments) for LSCM
+	// to converge cleanly on real-world meshes. With alpha-wrap off,
+	// stickers go on the original mesh as before; the user accepts the
+	// quality tradeoff in exchange for skipping the alpha-wrap cost.
+	//
+	// Either way we deep-clone so the BFS can subdivide in place without
+	// mutating the cached lo.Model / lo.ColorModel (which would compound
+	// across re-runs) and without aliasing lo.SampleModel (shallow clones
+	// share face-indexed slices).
+	var sourceModel *loader.LoadedModel
+	if opts.AlphaWrap {
+		sourceModel = lo.Model
+	} else {
+		sourceModel = lo.ColorModel
+	}
+	model := loader.DeepCloneForMutation(sourceModel)
 	adj := voxel.BuildTriAdjacency(model)
 	si := voxel.NewSpatialIndex(model, 2) // cell size for spatial queries
 
@@ -736,23 +796,32 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 				stage.Progress(base + stickerUnits)
 				continue
 			}
-			cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 			decal, err = voxel.BuildStickerDecal(ctx, model, adj, img,
 				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle,
-				float64(cellSize), onProgress)
+				onProgress)
 			if err != nil {
 				return err
 			}
 		}
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
+		// Warn the user when the LSCM solve didn't converge cleanly —
+		// the decal will render with visible distortion. Threshold
+		// matches SolveLSCM's "non-convergence" cutoff.
+		if decal.LSCMResidual > 1e-5 && onWarning != nil {
+			onWarning(fmt.Sprintf(
+				"Sticker %q didn't unfold cleanly (residual %.1e). The mesh in this region has very-poor-quality triangles; the sticker may look distorted. Try alpha-wrap or a different placement.",
+				filepath.Base(s.ImagePath), decal.LSCMResidual))
+		}
 		decals = append(decals, decal)
 		stage.Progress(base + stickerUnits)
 	}
 
 	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{
-		Decals: decals,
-		Adj:    adj,
-		Model:  model,
+		Decals:        decals,
+		Adj:           adj,
+		Model:         model,
+		SI:            si,
+		FromAlphaWrap: opts.AlphaWrap,
 	})
 	return nil
 }

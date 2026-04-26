@@ -229,13 +229,16 @@
   // UI state.
   let running = $state(false);
   let statusMessage = $state('');
-  let statusType: 'idle' | 'success' | 'error' = $state('idle');
+  let statusType: 'idle' | 'success' | 'error' | 'warning' = $state('idle');
   let version = $state('');
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
 
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
+  // Optional alpha-wrap sticker overlay. Rendered just outside the input
+  // mesh in the input viewer; carries decals when alpha-wrap is on.
+  let inputOverlayMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
 
@@ -300,12 +303,21 @@
   EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number; extentMM?: number }) => {
     if (event.gen < latestGen) return;
     inputMeshUrl = event.url;
+    // The overlay is set/cleared deterministically by the
+    // 'input-overlay-mesh' event the pipeline fires after this one, so
+    // we don't need to clear it here.
     if (event.extentMM !== undefined && (nativeExtentMM === null || !approxEqual(nativeExtentMM, event.extentMM))) {
       nativeExtentMM = event.extentMM;
     }
     if (event.previewScale !== undefined) {
       applyPreviewScale(event.previewScale);
     }
+  });
+  EventsOn('input-overlay-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen < latestGen) return;
+    // Empty url means the pipeline explicitly told us there's no overlay
+    // (e.g. alpha-wrap turned off). Clear the previous overlay if any.
+    inputOverlayMeshUrl = event.url || undefined;
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
@@ -316,8 +328,12 @@
   EventsOn('pipeline-done', (event: { gen: number; duration: number }) => {
     if (event.gen < latestGen) return;
     running = false;
-    statusMessage = `Done! (${event.duration.toFixed(1)}s)`;
-    statusType = 'success';
+    // Preserve any warning emitted during the run; don't overwrite it
+    // with "Done!".
+    if (statusType !== 'warning') {
+      statusMessage = `Done! (${event.duration.toFixed(1)}s)`;
+      statusType = 'success';
+    }
   });
   EventsOn('pipeline-error', (event: { gen: number; message: string }) => {
     if (event.gen < latestGen) return;
@@ -325,6 +341,13 @@
     inputError = event.message;
     statusMessage = `Error: ${event.message}`;
     statusType = 'error';
+  });
+  EventsOn('pipeline-warning', (event: { gen: number; message: string }) => {
+    if (event.gen < latestGen) return;
+    if (statusType !== 'error') {
+      statusMessage = event.message;
+      statusType = 'warning';
+    }
   });
   EventsOn('pipeline-needs-force', (event: { gen: number; extentMM: number }) => {
     if (event.gen < latestGen) return;
@@ -594,6 +617,7 @@
 
   function proceedWithInput(path: string) {
     inputMeshUrl = undefined;
+    inputOverlayMeshUrl = undefined;
     outputMeshUrl = undefined;
     inputFile = path;
     // Stickers are tied to the previous model's geometry; clear them.
@@ -1415,7 +1439,7 @@
 
     {#if statusMessage}
     <div class="mt-4">
-      <p class="text-sm {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : 'text-muted-foreground'}">
+      <p class="text-sm {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : statusType === 'warning' ? 'text-yellow-500' : 'text-muted-foreground'}">
         {statusMessage}
       </p>
     </div>
@@ -1427,7 +1451,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
+      <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />

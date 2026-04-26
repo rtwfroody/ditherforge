@@ -101,10 +101,15 @@ func voxelizeRegion(
 }
 
 // colorCells samples colors for all keys in cellSet and returns ActiveCells.
+//
+// stickerModel/stickerSI may be nil; when non-nil and distinct from
+// colorModel, decal lookups go against that mesh (alpha-wrap mode).
 func colorCells(
 	ctx context.Context,
 	colorModel *loader.LoadedModel,
 	si *voxel.SpatialIndex,
+	stickerModel *loader.LoadedModel,
+	stickerSI *voxel.SpatialIndex,
 	cellSet map[voxel.CellKey]struct{},
 	p regionParams,
 	tracker progress.Tracker,
@@ -128,6 +133,8 @@ func colorCells(
 	var wg sync.WaitGroup
 	chunkSize := (len(cellKeys) + numWorkers - 1) / numWorkers
 
+	separateSticker := stickerModel != nil && stickerModel != colorModel && stickerSI != nil
+
 	for w := range numWorkers {
 		lo := w * chunkSize
 		hi := lo + chunkSize
@@ -141,6 +148,10 @@ func colorCells(
 		go func(workerIdx int, keys []voxel.CellKey) {
 			defer wg.Done()
 			buf := voxel.NewSearchBuf(len(colorModel.Faces))
+			var stickerBuf *voxel.SearchBuf
+			if separateSticker {
+				stickerBuf = voxel.NewSearchBuf(len(stickerModel.Faces))
+			}
 			local := make([]voxel.ActiveCell, 0, len(keys))
 			for i, k := range keys {
 				if i%1000 == 0 && ctx.Err() != nil {
@@ -151,9 +162,17 @@ func colorCells(
 				cx := p.MinV[0] + float32(k.Col)*p.CellSize
 				cy := p.MinV[1] + float32(k.Row)*p.CellSize
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
-				rgba := voxel.SampleNearestColor(
-					[3]float32{cx, cy, cz},
-					colorModel, si, colorRadius, buf, decals)
+				var rgba [4]uint8
+				if separateSticker {
+					rgba = voxel.SampleNearestColorWithSticker(
+						[3]float32{cx, cy, cz},
+						colorModel, si, colorRadius, buf, decals,
+						stickerModel, stickerSI, stickerBuf)
+				} else {
+					rgba = voxel.SampleNearestColor(
+						[3]float32{cx, cy, cz},
+						colorModel, si, colorRadius, buf, decals)
+				}
 				if rgba[3] < 128 {
 					continue
 				}
@@ -191,9 +210,21 @@ type TwoGridResult struct {
 
 // VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size for
 // layer 0 and upperSize for layers 1+. Geometry cells are marked using
-// model; colors are sampled from colorModel. Pass the same model twice if
-// the caller has no separate color mesh.
-func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel, layer0Size, upperSize, layerH float32, tracker progress.Tracker, decals []*voxel.StickerDecal) (*TwoGridResult, error) {
+// model; base colors are sampled from colorModel. Pass the same model twice
+// if the caller has no separate color mesh.
+//
+// stickerModel/stickerSI carry decal UVs when stickers live on a different
+// mesh than the color sampler — typically the alpha-wrap mesh while
+// colorModel is the original textured mesh. Pass nil for both to use
+// colorModel for sticker lookups (which also covers the no-sticker case).
+func VoxelizeTwoGrids(
+	ctx context.Context,
+	model, colorModel *loader.LoadedModel,
+	stickerModel *loader.LoadedModel, stickerSI *voxel.SpatialIndex,
+	layer0Size, upperSize, layerH float32,
+	tracker progress.Tracker,
+	decals []*voxel.StickerDecal,
+) (*TwoGridResult, error) {
 	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("empty model")
 	}
@@ -268,11 +299,11 @@ func VoxelizeTwoGrids(ctx context.Context, model, colorModel *loader.LoadedModel
 	tracker.StageStart("Coloring cells", true, totalCells)
 	var counter atomic.Int64
 
-	cells0, err := colorCells(ctx, colorModel, si, cellSet0, p0, tracker, &counter, decals)
+	cells0, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI, cellSet0, p0, tracker, &counter, decals)
 	if err != nil {
 		return nil, err
 	}
-	cells1, err := colorCells(ctx, colorModel, si, cellSet1, regionParams{
+	cells1, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI, cellSet1, regionParams{
 		Grid: 1, CellSize: upperSize, LayerH: layerH,
 		MinV: minV, NCols: nCols1, NRows: nRows1,
 		LayerLo: 1, LayerHi: nLayers - 1,
@@ -351,7 +382,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, len(cellSet))
 	var counter atomic.Int64
-	cells, err := colorCells(ctx, model, si, cellSet, p, tracker, &counter, decals)
+	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}

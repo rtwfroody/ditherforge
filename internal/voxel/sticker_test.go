@@ -79,7 +79,7 @@ func TestBuildStickerDecalBasic(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0, nil)
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestBuildStickerDecalDoesNotWrapThrough(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 
-	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, 0, nil)
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img, seedTri, center, normal, up, scale, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestBuildStickerDecalSubdividesPathologicalTriangle(t *testing.T) {
 	}
 
 	decal, err := BuildStickerDecal(context.Background(), model, adj, img,
-		seedTri, center, normal, up, scale, 0, 0, 0, nil)
+		seedTri, center, normal, up, scale, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestBuildStickerDecalRespectsCallerIsolation(t *testing.T) {
 		t.Fatal("no seed triangle found")
 	}
 	decal, err := BuildStickerDecal(context.Background(), scratch, adj, img,
-		seedTri, center, normal, up, scale, 0, 0, 0, nil)
+		seedTri, center, normal, up, scale, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,60 +393,6 @@ func TestBuildStickerDecalRespectsCallerIsolation(t *testing.T) {
 					i, j, vi, len(sibling.Vertices))
 			}
 		}
-	}
-}
-
-// TestTcRunaway: the planar-reset branch in the BFS only fires when
-// `tcRunaway` returns true, so a direct predicate test is the cheapest way
-// to guard that the threshold matches the documented 2× pad.
-func TestTcRunaway(t *testing.T) {
-	t.Parallel()
-	const halfW, halfH float32 = 4, 6
-
-	cases := []struct {
-		name string
-		tc   [3][2]float32
-		want bool
-	}{
-		{
-			name: "all inside rect",
-			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 3}},
-			want: false,
-		},
-		{
-			name: "just past rect but within 2x pad",
-			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 7}},
-			want: false,
-		},
-		{
-			name: "exactly at 2x pad boundary (tcRunaway uses strict >, so this is inside)",
-			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 2 * halfH}},
-			want: false,
-		},
-		{
-			name: "U runaway past 2x halfW",
-			tc:   [3][2]float32{{-1, -1}, {2*halfW + 0.1, 1}, {0, 0}},
-			want: true,
-		},
-		{
-			name: "V runaway past 2x halfH",
-			tc:   [3][2]float32{{-1, -1}, {2, 1}, {0, 2*halfH + 0.1}},
-			want: true,
-		},
-		{
-			name: "negative-side runaway",
-			tc:   [3][2]float32{{-1, -1}, {-2 * halfW * 1.5, 1}, {0, 0}},
-			want: true,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			got := tcRunaway(c.tc, halfW, halfH)
-			if got != c.want {
-				t.Errorf("tcRunaway(%v) = %v; want %v", c.tc, got, c.want)
-			}
-		})
 	}
 }
 
@@ -562,7 +508,7 @@ func TestBuildStickerDecalUnfoldCoversCurvedSurface(t *testing.T) {
 	}
 
 	decal, err := BuildStickerDecal(context.Background(), model, adj, img,
-		seedTri, center, normal, up, scale, 0, 0, 0.4, nil)
+		seedTri, center, normal, up, scale, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

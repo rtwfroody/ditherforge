@@ -2,6 +2,7 @@ package voxel
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"math"
 	"sort"
@@ -15,6 +16,11 @@ import (
 type StickerDecal struct {
 	Image  image.Image
 	TriUVs map[int32][3][2]float32 // triangle index → per-vertex sticker UVs
+	// LSCMResidual is the final CG residual from the unfold solve.
+	// Above ~1e-5 means CG hit max iters without converging and the UVs
+	// may render with visible distortion. Zero for projection decals,
+	// degenerate seed cases, and any non-LSCM path.
+	LSCMResidual float64
 }
 
 // FindSeedTriangle returns the index of the triangle closest to the given
@@ -49,51 +55,38 @@ func FindSeedTriangle(point [3]float64, model *loader.LoadedModel, si *SpatialIn
 var edgeVertIdx = [3][2]int{{0, 1}, {1, 2}, {2, 0}}
 var edgeOtherIdx = [3]int{2, 0, 1} // the vertex NOT on the edge
 
-// bfsEntry carries a triangle and its tangent-plane coordinates through the
-// BFS. Each triangle gets its own per-vertex tc built by unfolding across
-// the shared edge with its parent — this keeps the BFS numerically stable
-// even when two BFS paths reach the same 3D vertex via different accumulated
-// distortions. The function-local vertUV map is populated as a SIDE EFFECT
-// of BFS (first-triangle-to-touch-a-vertex wins) to seed the ARAP initial
-// layout without feeding the cache back into unfoldVertex, which would
-// compound divergence.
-type bfsEntry struct {
-	tri int32
-	tc  [3][2]float32
-}
-
-// BuildStickerDecal creates a decal by flood-filling from a seed triangle
-// across the mesh adjacency and then relaxing the layout with ARAP. The
-// initial layout is a Discrete Exponential Map (Schmidt 2006): the seed
-// triangle's UVs come from planar projection onto the sticker's tangent
-// plane, and every subsequent triangle is unfolded across its shared edge
-// with the BFS parent, preserving 3D edge length and interior angle.
-// Per-vertex UVs are memoized (first BFS visit wins) so every triangle that
-// touches a vertex agrees on its UV, guaranteeing edge continuity even
-// across BFS cross-edges.
+// BuildStickerDecal creates a decal by flood-filling triangles around the
+// seed in tangent-plane coordinates (DEM-style unfold) and then solving
+// LSCM (Lévy 2002) on that region for a quasi-conformal parameterization.
 //
-// DEM on its own is great on flat/developable regions but compresses badly
-// on curved surfaces because cross-edge vertex reuse feeds inconsistent
-// edge lengths into downstream unfolds. The layout is therefore passed to
-// arapRegion.Solve — a local/global ARAP parameterization (Liu/Zhou/Wang
-// 2008) that pins the seed vertices and relaxes everything else to be
-// as-rigid-as-possible with respect to the 3D geometry.
+// Stage 1 — region selection (BFS). Starting at the seed triangle, BFS
+// walks across mesh adjacency, unfolding each new triangle across its
+// shared edge with the BFS parent into the tangent frame. The unfold
+// preserves 3D edge length and interior angle (DEM, Schmidt 2006), so
+// per-triangle tangent coords accumulate arc-length distance from the
+// seed. Expansion terminates at any triangle whose tangent-projected
+// AABB is fully outside the sticker rect, naturally bounding the region
+// by the rect in surface-distance terms. Without a planar-reset
+// fallback, BFS cannot bridge geodesically-disjoint regions of a closed
+// or curved mesh — the only way another patch of the surface could re-
+// enter the rect would be by literally walking to it across the surface.
+//
+// Stage 2 — subdivision. Triangles whose 3D extent exceeds the rect's
+// half-dimensions are split 1-to-4 in place; their children inherit
+// per-face attributes. Keeps per-triangle UV spans bounded so a coarse
+// mesh doesn't leave large unfilled patches inside the rect.
+//
+// Stage 3 — LSCM solve (SolveLSCM). Two seed-triangle vertices are pinned
+// to their tangent-plane projections, fixing position, rotation, and
+// uniform scale (the 4-dim conformal null space). The rest of the layout
+// comes from a single sparse Cholesky solve of the conformal-energy
+// normal equations. LSCM cannot produce triangle flips by construction
+// (no folded UV layouts → no "repetition" symptoms), and on developable
+// regions (cylinders, cones, any K=0 surface) the conformal map equals
+// the isometric unfold.
 //
 // Positive rotationDeg rotates the sticker clockwise when viewed from outside
 // the surface (i.e. looking down the normal toward the mesh).
-//
-// KNOWN LIMITATION (closed/highly-curved meshes): BFS uses unfolded tc to
-// bound expansion, with a planar tangent reset at tcRunaway to keep BFS
-// from stalling on coarse meshes with very large triangles. On curved or
-// closed shapes the reset can bridge geodesically-disjoint regions back
-// into the rect, and ARAP — given that wider input — folds them on top
-// of the local patch. Visually the sticker can appear stretched or
-// repeat several times across the surface. The proper fix is to decouple
-// region selection from parameterization: extract a true geodesic disk
-// around the seed (heat method or fast marching for surface distance)
-// and feed only that disk into ARAP. The current heuristic-based
-// approach has been tuned against base.json (works well) but degrades
-// on more curved meshes like top.json.
 func BuildStickerDecal(
 	ctx context.Context,
 	model *loader.LoadedModel,
@@ -106,7 +99,6 @@ func BuildStickerDecal(
 	scale float64,
 	rotationDeg float64,
 	maxAngleDeg float64,
-	voxelSize float64,
 	onProgress func(float64),
 ) (*StickerDecal, error) {
 	reportProgress := func(f float64) {
@@ -116,20 +108,17 @@ func BuildStickerDecal(
 	}
 	reportProgress(0)
 	// Guarantee the sticker's segment of the aggregate bar completes, even
-	// on the early-return paths (empty accepted set, ctx cancel, etc).
+	// on the early-return paths.
 	defer reportProgress(1.0)
 	t, b, _ := buildStickerTangentFrame(normal, up, rotationDeg)
 
-	// Sticker dimensions in world units.
 	imgBounds := img.Bounds()
 	aspect := float64(imgBounds.Dy()) / float64(imgBounds.Dx())
 	halfW := scale / 2
 	halfH := (scale * aspect) / 2
+	fHalfW := float32(halfW)
+	fHalfH := float32(halfH)
 
-	// planarTangent projects a vertex onto the tangent plane, returning
-	// coordinates in world units (isotropic). The BFS tracks these tangent
-	// coordinates so that unfoldVertex works in an isotropic space. We
-	// convert to UV only when storing in the decal or checking occupancy.
 	planarTangent := func(pos [3]float32) [2]float32 {
 		dx := float64(pos[0]) - center[0]
 		dy := float64(pos[1]) - center[1]
@@ -139,18 +128,11 @@ func BuildStickerDecal(
 			float32(dx*b[0] + dy*b[1] + dz*b[2]),
 		}
 	}
-
-	// tangentToUV converts tangent-plane coordinates to [0,1] UV.
-	fHalfW := float32(halfW)
-	fHalfH := float32(halfH)
 	tangentToUV := func(tc [2]float32) [2]float32 {
 		return [2]float32{
 			(tc[0]/fHalfW + 1) / 2,
 			(tc[1]/fHalfH + 1) / 2,
 		}
-	}
-	tangentTrisToUV := func(tc [3][2]float32) [3][2]float32 {
-		return [3][2]float32{tangentToUV(tc[0]), tangentToUV(tc[1]), tangentToUV(tc[2])}
 	}
 
 	decal := &StickerDecal{
@@ -158,127 +140,156 @@ func BuildStickerDecal(
 		TriUVs: make(map[int32][3][2]float32),
 	}
 
-	// Per-vertex UV map populated as a side effect of the BFS below (first
-	// triangle to touch a vertex wins). Consumed by ARAP as its initial
-	// per-vertex layout; never read back into the BFS unfold.
-	vertUV := make(map[[3]float32][2]float32)
+	if seedTri < 0 || int(seedTri) >= len(model.Faces) {
+		return decal, nil
+	}
+
+	// Capture seed-triangle vertices BEFORE subdivision can overwrite
+	// model.Faces[seedTri]. Two of these become the LSCM pins.
 	seedFace := model.Faces[seedTri]
+	pinPos0 := model.Vertices[seedFace[0]]
+	pinPos1 := model.Vertices[seedFace[1]]
+	pinUV0 := planarTangent(pinPos0)
+	pinUV1 := planarTangent(pinPos1)
 
-	// Precompute cosine threshold for max angle check.
-	// A maxAngleDeg of 0 means no limit.
-	cosMaxAngle := float32(-1) // accept all angles by default
-	if maxAngleDeg > 0 && maxAngleDeg < 180 {
-		cosMaxAngle = float32(math.Cos(maxAngleDeg * math.Pi / 180))
+	// Surface-deviation cap: drop a BFS triangle whose normal deviates
+	// from the *seed triangle's* normal by more than the threshold. This
+	// catches both sharp 90° folds (one step jumps the full 90°) and
+	// gradual fillets (each step is small but the cumulative angle grows
+	// monotonically until it exceeds the threshold). Default 89° admits
+	// almost-flat-from-seed surfaces; user-supplied maxAngleDeg overrides.
+	angleDeg := maxAngleDeg
+	if angleDeg <= 0 || angleDeg >= 180 {
+		angleDeg = 89
 	}
+	cosMaxFromSeed := float32(math.Cos(angleDeg * math.Pi / 180))
+	seedNormal := triNormalFromVerts(
+		model.Vertices[seedFace[0]],
+		model.Vertices[seedFace[1]],
+		model.Vertices[seedFace[2]],
+	)
+	rectHalfDiag := float32(math.Sqrt(halfW*halfW + halfH*halfH))
 
-	// triOverlapsTangentBounds checks if the triangle overlaps the sticker
-	// area in tangent-plane coordinates: [-halfW,halfW] x [-halfH,halfH].
-	triOverlapsTangentBounds := func(tc [3][2]float32) bool {
-		minU := min(tc[0][0], min(tc[1][0], tc[2][0]))
-		maxU := max(tc[0][0], max(tc[1][0], tc[2][0]))
-		minV := min(tc[0][1], min(tc[1][1], tc[2][1]))
-		maxV := max(tc[0][1], max(tc[1][1], tc[2][1]))
-		return maxU >= -fHalfW && minU <= fHalfW && maxV >= -fHalfH && minV <= fHalfH
+	// Stage 1: BFS-DEM. Each triangle gets per-vertex tangent coords by
+	// unfolding across its parent edge. Expansion stops at any triangle
+	// whose tangent AABB falls outside the rect; that bound is in
+	// arc-length terms (DEM preserves 3D edge length), so 45° of a
+	// cylinder really is "45° of arc," not chord. No planar-reset
+	// fallback: a triangle whose unfold drifts wildly outside the rect
+	// is pruned, full stop, which keeps BFS from leaking across the
+	// surface to a geodesically-distant region.
+	type bfsEntry struct {
+		tri int32
+		tc  [3][2]float32
 	}
-
-	// DEM flood fill. Occupancy is NOT applied during BFS: compressed or
-	// distorted DEM triangles would get rejected before ARAP has a chance
-	// to fix them, pruning BFS and shrinking coverage. Instead we gate only
-	// on triOverlapsTangentBounds (which stops BFS at the sticker edge) and
-	// run occupancy later on the relaxed UVs.
 	visited := make([]bool, len(model.Faces))
 	seedTC := [3][2]float32{
 		planarTangent(model.Vertices[seedFace[0]]),
 		planarTangent(model.Vertices[seedFace[1]]),
 		planarTangent(model.Vertices[seedFace[2]]),
 	}
-	queue := []bfsEntry{{tri: seedTri, tc: seedTC}}
-	visited[seedTri] = true
-	var acceptedTris []int32
-
-	// Triangles larger than this in 3D are subdivided during BFS accept.
-	// DEM preserves 3D edge length, so triangles much larger than the sticker
-	// produce UVs that run far outside the sticker rect — the occupancy
-	// rasterizer then rejects them in bulk, leaving "missing" patches on
-	// coarsely-triangulated meshes. Splitting them into quarter-size children
-	// keeps per-triangle UV spans bounded.
-	subdivideThreshold := float32(math.Max(halfW, halfH))
-
-	iter := 0
-	totalFaces := len(model.Faces)
-	for len(queue) > 0 {
-		if iter%1000 == 0 {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+	overlapsRect := func(tc [3][2]float32) bool {
+		minU := min(tc[0][0], min(tc[1][0], tc[2][0]))
+		maxU := max(tc[0][0], max(tc[1][0], tc[2][0]))
+		minV := min(tc[0][1], min(tc[1][1], tc[2][1]))
+		maxV := max(tc[0][1], max(tc[1][1], tc[2][1]))
+		return maxU >= -fHalfW && minU <= fHalfW && maxV >= -fHalfH && minV <= fHalfH
+	}
+	// tcRunaway: a triangle whose unfolded tc has any vertex more than 4×
+	// the rect half-width outside the rect can only happen when DEM
+	// unfolded a giant mesh triangle (e.g. a decimated flat region) across
+	// a huge shared edge, producing tc values that leap far past anything
+	// the sticker should reach. Including such a triangle puts the BFS
+	// chain on a totally unrelated part of the surface; drop it.
+	tcRunawayLimit := 4 * fHalfW
+	if 4*fHalfH > tcRunawayLimit {
+		tcRunawayLimit = 4 * fHalfH
+	}
+	tcRunaway := func(tc [3][2]float32) bool {
+		for k := 0; k < 3; k++ {
+			if tc[k][0] > tcRunawayLimit || tc[k][0] < -tcRunawayLimit {
+				return true
 			}
-			if totalFaces > 0 {
-				frac := float64(iter) / float64(totalFaces)
-				if frac > 1 {
-					frac = 1
-				}
-				reportProgress(0.60 * frac)
+			if tc[k][1] > tcRunawayLimit || tc[k][1] < -tcRunawayLimit {
+				return true
 			}
 		}
-		iter++
-		entry := queue[0]
-		queue = queue[1:]
+		return false
+	}
 
-		if !triOverlapsTangentBounds(entry.tc) {
+	// Reject obviously degenerate triangles (zero / near-zero area). Their
+	// cotangent weights blow up the LSCM matrix. Aspect-ratio slivers are
+	// filtered later, between BFS and LSCM, so vertices appearing only
+	// in slivers are kept out of the linear system and don't become
+	// "orphans" with no equations.
+	minTwiceArea := rectHalfDiag * rectHalfDiag * 1e-4
+	badTriangle := func(face [3]uint32) bool {
+		v0 := model.Vertices[face[0]]
+		v1 := model.Vertices[face[1]]
+		v2 := model.Vertices[face[2]]
+		ax, ay, az := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+		bx, by, bz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+		cx := ay*bz - az*by
+		cy := az*bx - ax*bz
+		cz := ax*by - ay*bx
+		twiceArea := float32(math.Sqrt(float64(cx*cx + cy*cy + cz*cz)))
+		return twiceArea < minTwiceArea
+	}
+	stack := []bfsEntry{{tri: seedTri, tc: seedTC}}
+	visited[seedTri] = true
+	var triSet []int32
+
+	// 3D-distance bound: a triangle whose 3D centroid is more than
+	// 2 × rect-half-diagonal from the click point cannot reasonably belong
+	// in the sticker, regardless of what its DEM-unfolded tc says. Without
+	// this, on a mesh with sharp 90° folds (e.g. a bowl rim transitioning
+	// to a top annulus), DEM unfolds the next panel BACK toward the seed
+	// in tangent space, and BFS happily walks across the fold and around
+	// the entire rim. Bounding by Euclidean distance from the click in 3D
+	// stops that walk at the actual physical extent of the sticker.
+	maxDist3D := 2 * rectHalfDiag
+	maxDist3DSq := maxDist3D * maxDist3D
+	clickF := [3]float32{float32(center[0]), float32(center[1]), float32(center[2])}
+	tooFar3D := func(face [3]uint32) bool {
+		cx := (model.Vertices[face[0]][0] + model.Vertices[face[1]][0] + model.Vertices[face[2]][0]) / 3
+		cy := (model.Vertices[face[0]][1] + model.Vertices[face[1]][1] + model.Vertices[face[2]][1]) / 3
+		cz := (model.Vertices[face[0]][2] + model.Vertices[face[1]][2] + model.Vertices[face[2]][2]) / 3
+		dx := cx - clickF[0]
+		dy := cy - clickF[1]
+		dz := cz - clickF[2]
+		return dx*dx+dy*dy+dz*dz > maxDist3DSq
+	}
+
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if !overlapsRect(entry.tc) {
 			continue
 		}
+		if tooFar3D(model.Faces[entry.tri]) {
+			continue
+		}
+		if badTriangle(model.Faces[entry.tri]) {
+			continue
+		}
+		triSet = append(triSet, entry.tri)
 
-		// Save original face/neighbors before potential in-place subdivision.
-		// Subdivision may overwrite model.Faces[entry.tri] with one of its
-		// children, but adj.Neighbors[entry.tri] is unchanged because adj was
-		// built once up-front.
 		origFace := model.Faces[entry.tri]
 		origNeighbors := adj.Neighbors[entry.tri]
 
-		// Accept (possibly splitting into smaller children if the triangle's
-		// 3D extent exceeds the sticker's scale).
-		acceptTriSubdividing(model, &acceptedTris, vertUV, &visited,
-			entry.tri, origFace, entry.tc, subdivideThreshold,
-			triOverlapsTangentBounds)
-
-		// Expand to neighbors through each original edge. We use origFace
-		// rather than model.Faces[entry.tri] because subdivision may have
-		// replaced the latter with a child sub-triangle.
-		v0 := model.Vertices[origFace[0]]
-		v1 := model.Vertices[origFace[1]]
-		v2 := model.Vertices[origFace[2]]
-		var curNormal [3]float32
-		if cosMaxAngle > -1 {
-			curNormal = triNormalFromVerts(v0, v1, v2)
-		}
-		// If this triangle's tc has drifted far outside the sticker rect
-		// (DEM runaway from a pathologically-large parent), a DEM unfold
-		// across its edges would propagate the bad layout indefinitely. Fall
-		// back to planar tangent-plane projection for the neighbors so BFS
-		// keeps walking past the poisoned region instead of stalling.
-		// Note: this only rescues BFS coverage. vertUV is first-write-wins,
-		// so vertices at the DEM/reset seam keep whichever tc arrived first
-		// (typically the DEM path), and ARAP starts from a discontinuous
-		// layout across that seam. ARAP's Laplacian absorbs most of the
-		// discontinuity, but stickers on coarsely-triangulated meshes may
-		// show a visible seam where the reset began.
-		reset := tcRunaway(entry.tc, fHalfW, fHalfH)
 		for ei, ni := range origNeighbors {
 			if ni < 0 || visited[ni] {
 				continue
 			}
-			if cosMaxAngle > -1 {
-				n2 := faceNormal32(model, ni)
-				dot := curNormal[0]*n2[0] + curNormal[1]*n2[1] + curNormal[2]*n2[2]
-				if dot < cosMaxAngle {
-					continue
-				}
+			n2 := faceNormal32(model, ni)
+			dot := seedNormal[0]*n2[0] + seedNormal[1]*n2[1] + seedNormal[2]*n2[2]
+			if dot < cosMaxFromSeed {
+				continue
 			}
 			visited[ni] = true
 
-			// Find which edge of the neighbor connects back. entry.tri is
-			// always an original pre-sticker face index (BFS never enqueues
-			// subdivided children), so the equality still matches adj's
-			// pre-sticker-stage records even after our in-place subdivision.
+			// Find which edge of ni connects back to entry.tri.
 			nej := -1
 			for e := 0; e < 3; e++ {
 				if adj.Neighbors[ni][e] == entry.tri {
@@ -289,95 +300,234 @@ func BuildStickerDecal(
 			if nej < 0 {
 				continue
 			}
-
 			nbrI0 := edgeVertIdx[nej][0]
 			nbrI1 := edgeVertIdx[nej][1]
 			nbrOther := edgeOtherIdx[nej]
 			nFace := model.Faces[ni]
 
-			var nTC [3][2]float32
-			if reset {
-				// Planar projection reset.
-				nTC = [3][2]float32{
-					planarTangent(model.Vertices[nFace[0]]),
-					planarTangent(model.Vertices[nFace[1]]),
-					planarTangent(model.Vertices[nFace[2]]),
-				}
+			curI0 := edgeVertIdx[ei][0]
+			curI1 := edgeVertIdx[ei][1]
+			var tcA, tcB [2]float32
+			if SnapPos(model.Vertices[origFace[curI0]]) == SnapPos(model.Vertices[nFace[nbrI0]]) {
+				tcA = entry.tc[curI0]
+				tcB = entry.tc[curI1]
 			} else {
-				curI0 := edgeVertIdx[ei][0]
-				curI1 := edgeVertIdx[ei][1]
-				// Map neighbor edge endpoints to current tc by matching positions.
-				var tcA, tcB [2]float32
-				if SnapPos(model.Vertices[origFace[curI0]]) == SnapPos(model.Vertices[nFace[nbrI0]]) {
-					tcA = entry.tc[curI0]
-					tcB = entry.tc[curI1]
-				} else {
-					tcA = entry.tc[curI1]
-					tcB = entry.tc[curI0]
-				}
-				nbrPosA := model.Vertices[nFace[nbrI0]]
-				nbrPosB := model.Vertices[nFace[nbrI1]]
-				nbrPosC := model.Vertices[nFace[nbrOther]]
-
-				flatCurrent := entry.tc[edgeOtherIdx[ei]]
-				tcC := unfoldVertex(nbrPosA, nbrPosB, nbrPosC, tcA, tcB, flatCurrent)
-
-				nTC[nbrI0] = tcA
-				nTC[nbrI1] = tcB
-				nTC[nbrOther] = tcC
+				tcA = entry.tc[curI1]
+				tcB = entry.tc[curI0]
 			}
-			queue = append(queue, bfsEntry{tri: ni, tc: nTC})
+			nbrPosA := model.Vertices[nFace[nbrI0]]
+			nbrPosB := model.Vertices[nFace[nbrI1]]
+			nbrPosC := model.Vertices[nFace[nbrOther]]
+			flatCurrent := entry.tc[edgeOtherIdx[ei]]
+			tcC := unfoldVertex(nbrPosA, nbrPosB, nbrPosC, tcA, tcB, flatCurrent)
+
+			var nTC [3][2]float32
+			nTC[nbrI0] = tcA
+			nTC[nbrI1] = tcB
+			nTC[nbrOther] = tcC
+
+			if tcRunaway(nTC) {
+				continue
+			}
+
+			stack = append(stack, bfsEntry{tri: ni, tc: nTC})
 		}
 	}
 
-	if len(acceptedTris) == 0 {
+	if len(triSet) == 0 {
 		return decal, nil
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	reportProgress(0.30)
 
-	// ARAP relaxation: fix DEM distortion by iteratively rotating each
-	// triangle's reference frame to match the current UV layout, then
-	// solving a cotangent-Laplacian system to redistribute vertex UVs
-	// so the layout is as-rigid-as-possible relative to 3D geometry.
-	// The seed triangle's three vertices are pinned so the sticker's
-	// position/orientation/scale are preserved.
-	reportProgress(0.60)
-	const arapOuterIters = 10
-	const cgInnerIters = 50
-	region := buildArapRegion(model, acceptedTris, vertUV, seedTri)
-	region.Solve(arapOuterIters, cgInnerIters, func(i int) {
-		reportProgress(0.60 + 0.30*float64(i+1)/float64(arapOuterIters))
-	})
-	// If ARAP produced non-finite UVs (e.g. an ill-conditioned decal that
-	// CG couldn't handle), keep the DEM layout rather than overwrite with
-	// garbage — the decal will still render, just without the relaxation.
-	region.writeBack(vertUV)
+	// Stage 2: subdivide oversized triangles in place. Each parent's index
+	// stays valid (its slot in model.Faces is reused for one child); other
+	// children are appended.
+	subdivideThreshold := float32(math.Max(halfW, halfH))
+	subdividedSet := make([]int32, 0, len(triSet))
+	for _, ti := range triSet {
+		subdividedSet = subdivideTriangle(model, ti, subdivideThreshold, subdividedSet)
+	}
+	triSet = subdividedSet
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
-	// Rebuild per-triangle UVs from the relaxed vertex UVs. We deliberately
-	// keep redundant UV coverage: SampleNearestColor disambiguates by 3D
-	// nearest-triangle, so two triangles whose UVs overlap (e.g. ARAP
-	// shrinking one sibling into another's footprint) is harmless. An
-	// earlier version ran an occupancy rasterizer that rejected such
-	// overlaps as fold-backs, but on real meshes with skinny tessellation
-	// it routinely dropped legitimate coverage and produced visible gaps.
-	for idx, triIdx := range acceptedTris {
-		if idx%1000 == 0 {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			reportProgress(0.90 + 0.10*float64(idx)/float64(len(acceptedTris)))
+	// Drop high-aspect-ratio slivers from the LSCM input. Their
+	// cotangent weights are extreme (∝ 1/area) and dominate the matrix,
+	// preventing CG from converging on real-world decimated meshes.
+	// Threshold 0.01 = ~1:100 aspect ratio (the metric is 2·area/maxEdge²,
+	// which for an isoceles tri with base b and height b/k equals 1/k).
+	// Slivers are also dropped from
+	// the rendered output, since their UVs would be undefined without
+	// LSCM coverage of their vertices.
+	preFilter := triSet
+	triSet = triSet[:0]
+	for _, ti := range preFilter {
+		f := model.Faces[ti]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+		ax, ay, az := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+		bx, by, bz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+		cx := ay*bz - az*by
+		cy := az*bx - ax*bz
+		cz := ax*by - ay*bx
+		twiceArea := float32(math.Sqrt(float64(cx*cx + cy*cy + cz*cz)))
+		maxE := edgeLen3D(v0, v1)
+		if l := edgeLen3D(v1, v2); l > maxE {
+			maxE = l
 		}
-		f := model.Faces[triIdx]
-		var tc [3][2]float32
-		for k := 0; k < 3; k++ {
-			tc[k] = vertUV[SnapPos(model.Vertices[f[k]])]
+		if l := edgeLen3D(v2, v0); l > maxE {
+			maxE = l
 		}
-		if !triOverlapsTangentBounds(tc) {
+		if maxE == 0 || twiceArea/(maxE*maxE) < 0.01 {
 			continue
 		}
-		decal.TriUVs[triIdx] = tangentTrisToUV(tc)
+		triSet = append(triSet, ti)
+	}
+	if len(triSet) == 0 {
+		return decal, nil
+	}
+	// If the seed triangle was a sliver, the original pin positions are
+	// no longer in triSet. Fall back to the first surviving triangle's
+	// vertices, with their tangent-plane projections.
+	seedInTriSet := false
+	for _, ti := range triSet {
+		if ti == seedTri {
+			seedInTriSet = true
+			break
+		}
+	}
+	if !seedInTriSet {
+		pinFace := model.Faces[triSet[0]]
+		pinPos0 = model.Vertices[pinFace[0]]
+		pinPos1 = model.Vertices[pinFace[1]]
+		pinUV0 = planarTangent(pinPos0)
+		pinUV1 = planarTangent(pinPos1)
+	}
+	reportProgress(0.60)
+
+	// Stage 3: LSCM solve.
+	vertUV, cgResid, err := SolveLSCM(model, triSet, pinPos0, pinPos1, pinUV0, pinUV1)
+	if err != nil {
+		// LSCM can fail on a fully-degenerate region. Surface the error
+		// to the caller so the pipeline can flag the sticker as broken
+		// rather than silently producing an empty decal.
+		return nil, fmt.Errorf("sticker LSCM solve failed: %w", err)
+	}
+	// Stash the CG residual on the decal so the caller can decide
+	// whether to warn the user. Anything above ~1e-5 means CG didn't
+	// converge cleanly and the sticker may render with visibly
+	// distorted UVs.
+	decal.LSCMResidual = cgResid
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	reportProgress(0.90)
+
+	// Emit per-triangle UVs in [0,1] space — including slivers, when
+	// their vertices were all reached by some LSCM-active triangle (so
+	// the UV is defined). Dropping a sliver in the output would leave a
+	// visible gap on the rendered surface.
+	for _, ti := range triSet {
+		f := model.Faces[ti]
+		var tc [3][2]float32
+		ok := true
+		for k := 0; k < 3; k++ {
+			uv, has := vertUV[SnapPos(model.Vertices[f[k]])]
+			if !has {
+				ok = false
+				break
+			}
+			tc[k] = uv
+		}
+		if !ok {
+			continue
+		}
+		minU := min(tc[0][0], min(tc[1][0], tc[2][0]))
+		maxU := max(tc[0][0], max(tc[1][0], tc[2][0]))
+		minV := min(tc[0][1], min(tc[1][1], tc[2][1]))
+		maxV := max(tc[0][1], max(tc[1][1], tc[2][1]))
+		if maxU < -fHalfW || minU > fHalfW || maxV < -fHalfH || minV > fHalfH {
+			continue
+		}
+		decal.TriUVs[ti] = [3][2]float32{
+			tangentToUV(tc[0]),
+			tangentToUV(tc[1]),
+			tangentToUV(tc[2]),
+		}
 	}
 
 	return decal, nil
+}
+
+// subdivideTriangle splits triIdx 1-to-4 if any 3D edge exceeds threshold,
+// recursing on each child. Otherwise appends triIdx to out unchanged. The
+// parent's face slot is reused for one child; the other three are appended
+// to model.Faces. Per-face attributes are inherited from the parent.
+//
+// maxDepth caps recursion: edge halving means depth N halves the edge by
+// 2^N, so depth 16 already halves a 1km edge to 1.5cm. The cap exists to
+// guard against pathological inputs where float midpoints fail to halve
+// distance (e.g. coincident endpoints producing a midpoint equal to one
+// of them); without it, an oversized edge could in theory recurse forever.
+func subdivideTriangle(
+	model *loader.LoadedModel,
+	triIdx int32,
+	threshold float32,
+	out []int32,
+) []int32 {
+	return subdivideTriangleDepth(model, triIdx, threshold, 0, out)
+}
+
+func subdivideTriangleDepth(
+	model *loader.LoadedModel,
+	triIdx int32,
+	threshold float32,
+	depth int,
+	out []int32,
+) []int32 {
+	const maxDepth = 16
+	face := model.Faces[triIdx]
+	v0 := model.Vertices[face[0]]
+	v1 := model.Vertices[face[1]]
+	v2 := model.Vertices[face[2]]
+	maxEdge := edgeLen3D(v0, v1)
+	if l := edgeLen3D(v1, v2); l > maxEdge {
+		maxEdge = l
+	}
+	if l := edgeLen3D(v2, v0); l > maxEdge {
+		maxEdge = l
+	}
+	if maxEdge <= threshold || depth >= maxDepth {
+		return append(out, triIdx)
+	}
+
+	mAB := [3]float32{(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2}
+	mBC := [3]float32{(v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2, (v1[2] + v2[2]) / 2}
+	mCA := [3]float32{(v2[0] + v0[0]) / 2, (v2[1] + v0[1]) / 2, (v2[2] + v0[2]) / 2}
+	mABIdx := appendMidpointVertex(model, face[0], face[1], mAB)
+	mBCIdx := appendMidpointVertex(model, face[1], face[2], mBC)
+	mCAIdx := appendMidpointVertex(model, face[2], face[0], mCA)
+
+	child0 := [3]uint32{face[0], mABIdx, mCAIdx}
+	child1 := [3]uint32{mABIdx, face[1], mBCIdx}
+	child2 := [3]uint32{mCAIdx, mBCIdx, face[2]}
+	child3 := [3]uint32{mABIdx, mBCIdx, mCAIdx}
+
+	model.Faces[triIdx] = child0
+	c1 := appendSubdividedFace(model, int(triIdx), child1)
+	c2 := appendSubdividedFace(model, int(triIdx), child2)
+	c3 := appendSubdividedFace(model, int(triIdx), child3)
+
+	out = subdivideTriangleDepth(model, triIdx, threshold, depth+1, out)
+	out = subdivideTriangleDepth(model, c1, threshold, depth+1, out)
+	out = subdivideTriangleDepth(model, c2, threshold, depth+1, out)
+	out = subdivideTriangleDepth(model, c3, threshold, depth+1, out)
+	return out
 }
 
 // unfoldVertex computes the 2D position of a new vertex C by unfolding the 3D
@@ -889,103 +1039,6 @@ func triNormalFromVerts(v0, v1, v2 [3]float32) [3]float32 {
 	return [3]float32{nx / l, ny / l, nz / l}
 }
 
-// acceptTriSubdividing either accepts the triangle (adds triIdx to
-// acceptedTris and seeds vertUV) if its 3D edges are all ≤ threshold, or
-// splits it with a 1-to-4 midpoint subdivision and recurses. Children whose
-// tc no longer overlaps the sticker rect are dropped, so pathological parent
-// triangles whose tc AABB straddles the rect get clipped to just the portion
-// that actually falls inside.
-//
-// The parent's entry in model.Faces is reused for the corner child at vertex
-// 0; the other three children are appended. Child per-vertex UVs are
-// produced by linearly interpolating the parent's tc across midpoints —
-// valid because DEM unfold maps a single triangle isometrically, so any
-// sub-region's UVs are the corresponding linear interpolation of the
-// parent's UVs.
-//
-// Adjacency is NOT maintained for subdivided children: BFS never expands
-// through them. The parent's original adjacency is used for neighbor
-// expansion (caller captures origFace/origNeighbors before calling us). The
-// children's face indices are pre-marked visited so that no later BFS
-// expansion stumbles onto them.
-func acceptTriSubdividing(
-	model *loader.LoadedModel,
-	acceptedTris *[]int32,
-	vertUV map[[3]float32][2]float32,
-	visited *[]bool,
-	triIdx int32,
-	face [3]uint32,
-	tc [3][2]float32,
-	threshold float32,
-	overlapsRect func(tc [3][2]float32) bool,
-) {
-	if !overlapsRect(tc) {
-		return
-	}
-
-	v0 := model.Vertices[face[0]]
-	v1 := model.Vertices[face[1]]
-	v2 := model.Vertices[face[2]]
-	l01 := edgeLen3D(v0, v1)
-	l12 := edgeLen3D(v1, v2)
-	l20 := edgeLen3D(v2, v0)
-	maxEdge := l01
-	if l12 > maxEdge {
-		maxEdge = l12
-	}
-	if l20 > maxEdge {
-		maxEdge = l20
-	}
-
-	if maxEdge <= threshold {
-		*acceptedTris = append(*acceptedTris, triIdx)
-		for k := 0; k < 3; k++ {
-			snap := SnapPos(model.Vertices[face[k]])
-			if _, ok := vertUV[snap]; !ok {
-				vertUV[snap] = tc[k]
-			}
-		}
-		return
-	}
-
-	// Midpoint subdivision. mAB = midpoint of edge v0-v1, etc.
-	mAB := [3]float32{(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2}
-	mBC := [3]float32{(v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2, (v1[2] + v2[2]) / 2}
-	mCA := [3]float32{(v2[0] + v0[0]) / 2, (v2[1] + v0[1]) / 2, (v2[2] + v0[2]) / 2}
-
-	mABIdx := appendMidpointVertex(model, face[0], face[1], mAB)
-	mBCIdx := appendMidpointVertex(model, face[1], face[2], mBC)
-	mCAIdx := appendMidpointVertex(model, face[2], face[0], mCA)
-
-	tcAB := [2]float32{(tc[0][0] + tc[1][0]) / 2, (tc[0][1] + tc[1][1]) / 2}
-	tcBC := [2]float32{(tc[1][0] + tc[2][0]) / 2, (tc[1][1] + tc[2][1]) / 2}
-	tcCA := [2]float32{(tc[2][0] + tc[0][0]) / 2, (tc[2][1] + tc[0][1]) / 2}
-
-	child0Face := [3]uint32{face[0], mABIdx, mCAIdx} // corner at v0
-	child1Face := [3]uint32{mABIdx, face[1], mBCIdx} // corner at v1
-	child2Face := [3]uint32{mCAIdx, mBCIdx, face[2]} // corner at v2
-	child3Face := [3]uint32{mABIdx, mBCIdx, mCAIdx}  // central inverted triangle
-
-	// Parent's face index is reused for child0; the other three are appended.
-	// Per-face attribute arrays inherit the parent's values (material,
-	// texture, base color, etc.) so they stay aligned with model.Faces.
-	model.Faces[triIdx] = child0Face
-	child1Idx := appendSubdividedFace(model, int(triIdx), child1Face)
-	child2Idx := appendSubdividedFace(model, int(triIdx), child2Face)
-	child3Idx := appendSubdividedFace(model, int(triIdx), child3Face)
-
-	*visited = append(*visited, true, true, true)
-
-	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
-		triIdx, child0Face, [3][2]float32{tc[0], tcAB, tcCA}, threshold, overlapsRect)
-	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
-		child1Idx, child1Face, [3][2]float32{tcAB, tc[1], tcBC}, threshold, overlapsRect)
-	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
-		child2Idx, child2Face, [3][2]float32{tcCA, tcBC, tc[2]}, threshold, overlapsRect)
-	acceptTriSubdividing(model, acceptedTris, vertUV, visited,
-		child3Idx, child3Face, [3][2]float32{tcAB, tcBC, tcCA}, threshold, overlapsRect)
-}
-
 func edgeLen3D(a, b [3]float32) float32 {
 	dx := a[0] - b[0]
 	dy := a[1] - b[1]
@@ -1040,27 +1093,6 @@ func appendSubdividedFace(model *loader.LoadedModel, parentIdx int, face [3]uint
 		model.FaceMeshIdx = append(model.FaceMeshIdx, model.FaceMeshIdx[parentIdx])
 	}
 	return idx
-}
-
-// tcRunaway returns true when any vertex of the triangle's tc sits more than
-// 2× the sticker's half-extent outside the sticker rect. DEM unfold of a
-// pathologically large mesh triangle produces tc values like that; propagating
-// them through BFS poisons downstream neighbors' unfolds, so we stop here.
-// The 2× pad lets legitimate triangles that barely poke past the sticker
-// boundary continue to propagate.
-func tcRunaway(tc [3][2]float32, fHalfW, fHalfH float32) bool {
-	const padMul = 2
-	limitU := padMul * fHalfW
-	limitV := padMul * fHalfH
-	for k := 0; k < 3; k++ {
-		if tc[k][0] > limitU || tc[k][0] < -limitU {
-			return true
-		}
-		if tc[k][1] > limitV || tc[k][1] < -limitV {
-			return true
-		}
-	}
-	return false
 }
 
 // Vector math helpers.

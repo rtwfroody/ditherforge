@@ -39,6 +39,7 @@
 
   let {
     meshUrl,
+    overlayMeshUrl,
     label,
     viewerId,
     camera: sharedCamera,
@@ -59,6 +60,7 @@
     stageTick = 0,
   }: {
     meshUrl?: string;
+    overlayMeshUrl?: string;
     label: string;
     viewerId: string;
     camera: SharedCamera;
@@ -318,11 +320,19 @@
     }
   }
 
-  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null): THREE.MeshStandardMaterial {
+  // stickerOnly: when true, fragments where the sticker isn't applied
+  // (out of bounds, mask=0, or fully transparent atlas pixel) are
+  // discarded, so the underlying base mesh shows through. Used for the
+  // alpha-wrap overlay layer.
+  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null, stickerOnly: boolean = false): THREE.MeshStandardMaterial {
     // Defaults tuned to match Orca's Phong look: roughness ~0.55 gives a
     // subtle specular lobe (Orca uses shininess=20), metalness=0 keeps colors
     // true-to-hue. Caller opts win on conflict.
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0, ...opts });
+    if (stickerOnly) {
+      mat.transparent = true;
+      mat.alphaTest = 0.001;
+    }
     const hasSticker = !!stickerTex;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBrightness = colorUniforms.uBrightness;
@@ -336,6 +346,7 @@
       // Sticker uniforms.
       shader.uniforms.uStickerAtlas = { value: stickerTex || null };
       shader.uniforms.uHasSticker = { value: hasSticker ? 1.0 : 0.0 };
+      shader.uniforms.uStickerOnly = { value: stickerOnly ? 1.0 : 0.0 };
 
       // Prepend declarations.
       shader.fragmentShader = stickerGLSL + colorAdjustGLSL + warpGLSL + shader.fragmentShader;
@@ -569,18 +580,32 @@
   const stickerGLSL = `
     uniform sampler2D uStickerAtlas;
     uniform float uHasSticker;
+    uniform float uStickerOnly;
   `;
   // Applied after #include <color_fragment>, before color adjustment.
   // Skip compositing when the interpolated UV falls outside this decal's
   // atlas region — matches the voxelizer, which samples transparent for
   // out-of-range UVs instead of stretching edge pixels.
+  //
+  // In sticker-only mode (alpha-wrap overlay), the diffuseColor of
+  // fragments not covered by an opaque sticker is meaningless — they're
+  // black filler that should let the underlying base mesh show through.
+  // We `discard` immediately rather than letting the rest of the
+  // fragment pipeline (color adjust, warp) run on those pixels and then
+  // get clipped by alphaTest.
   const stickerApply = `
     {
+      float stickerAlpha = 0.0;
       if (uHasSticker > 0.5 && vStickerMask > 0.5 &&
           vStickerUV.x >= vStickerBounds.x && vStickerUV.x <= vStickerBounds.y &&
           vStickerUV.y >= vStickerBounds.z && vStickerUV.y <= vStickerBounds.w) {
         vec4 sc = texture2D(uStickerAtlas, vStickerUV);
         diffuseColor.rgb = mix(diffuseColor.rgb, sc.rgb, sc.a);
+        stickerAlpha = sc.a;
+      }
+      if (uStickerOnly > 0.5) {
+        if (stickerAlpha < 0.001) discard;
+        diffuseColor.a = stickerAlpha;
       }
     }
   `;
@@ -679,7 +704,7 @@
     return { meshes };
   }
 
-  async function buildFaceColorScene(td: TypedMeshData): Promise<SceneData> {
+  async function buildFaceColorScene(td: TypedMeshData, stickerOnly: boolean = false): Promise<SceneData> {
     const nFaces = td.faces.length / 3;
     const faceIndices = allFaceIndices(nFaces);
     const positions = unpackPositions(td, faceIndices);
@@ -693,7 +718,7 @@
     applyStickerAttributes(geo, td, faceIndices);
     geo.computeVertexNormals();
 
-    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
+    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly);
     return { meshes: [{ geometry: geo, material: mat }] };
   }
 
@@ -749,6 +774,8 @@
   }
 
   let scene = $state<SceneData | null>(null);
+  let overlayScene = $state<SceneData | null>(null);
+  let overlayGroupRef = $state<THREE.Group | undefined>(undefined);
   let cameraSetup = $state<{ position: [number, number, number]; target: [number, number, number]; near: number; far: number } | null>(null);
   let controlsRef = $state<OrbitControlsImpl | undefined>(undefined);
   // View-space light refs: lights and their shared target are children of the
@@ -840,6 +867,60 @@
     return () => {
       disposeScene(untrack(() => scene));
     };
+  });
+
+  // Build the overlay scene (alpha-wrap sticker carrier). The overlay's
+  // geometry has no per-vertex texture/UV — it's a wrap mesh, so we use
+  // the face-color path. The sticker shader picks up StickerUVs/atlas
+  // from the same mechanism the main mesh uses; only the geometry differs.
+  let overlayBuildId = 0;
+  $effect(() => {
+    const url = overlayMeshUrl;
+    const prev = untrack(() => overlayScene);
+    const myId = ++overlayBuildId;
+    if (url) {
+      fetchBinaryMesh(url).then((td) => {
+        if (myId !== overlayBuildId) return;
+        buildFaceColorScene(td, true).then((s) => {
+          if (myId === overlayBuildId) {
+            overlayScene = s;
+            disposeScene(prev);
+          } else {
+            disposeScene(s);
+          }
+        });
+      }).catch((err) => {
+        console.error(`[${viewerId}] overlay mesh load error:`, err);
+      });
+    } else {
+      overlayScene = null;
+      disposeScene(prev);
+    }
+    return () => {
+      disposeScene(untrack(() => overlayScene));
+    };
+  });
+
+  // Camera-direction bias for the overlay group: nudge it slightly toward
+  // the camera so its surface always wins the depth test against the base
+  // mesh, regardless of view angle. Bias size is scaled to scene extent
+  // so it stays well below user-perceptible drift.
+  $effect(() => {
+    if (!overlayGroupRef) return;
+    const dx = sharedCamera.posX - sharedCamera.targetX;
+    const dy = sharedCamera.posY - sharedCamera.targetY;
+    const dz = sharedCamera.posZ - sharedCamera.targetZ;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-9) return;
+    // Scene-scale-relative bias (~5e-5 of the camera-target distance).
+    // Too small → z-fights with the base mesh; too big → drifts visibly
+    // when zoomed in.
+    const bias = len * 5e-5;
+    overlayGroupRef.position.set(
+      (dx / len) * bias,
+      (dy / len) * bias,
+      (dz / len) * bias,
+    );
   });
 
   // Update color adjustment uniforms when props change.
@@ -949,6 +1030,14 @@
         {#each scene.meshes as mesh}
           <T.Mesh geometry={mesh.geometry} material={mesh.material} />
         {/each}
+
+        {#if overlayScene}
+          <T.Group bind:ref={overlayGroupRef}>
+            {#each overlayScene.meshes as mesh}
+              <T.Mesh geometry={mesh.geometry} material={mesh.material} />
+            {/each}
+          </T.Group>
+        {/if}
 
         <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
         <AxesGizmo />
