@@ -347,24 +347,16 @@ These models work well with DitherForge and are free to download:
 
 ## Known Issues
 
-### Sticker unfold artifacts on closed/curved meshes
+### Unfold-mode stickers on highly curved or closed shapes
 
-The unfold-mode sticker placement uses BFS flood-fill across the mesh
-followed by ARAP relaxation. On closed or highly-curved shapes (e.g. the
-inside of a bowl viewed from outside, or any surface where geodesic
-walks bend back on themselves) BFS can bridge into geodesically-disjoint
-regions, and ARAP then folds those regions on top of the local sticker
-patch. The visible symptoms are the sticker appearing stretched
-horizontally or repeating several times across the model.
+On surfaces that curve sharply or wrap back on themselves (e.g. the
+outside of a bowl, the rim of a cup) an unfold-mode sticker can come out
+stretched horizontally or repeated several times across the model
+instead of appearing once at the placement.
 
-The proper fix is to extract a true geodesic disk around the seed (heat
-method or fast marching for surface distance) and parameterize only that
-disk, decoupling region selection from parameterization. This is a
-planned redesign rather than a parameter tweak.
-
-Workaround: try projection mode if the surface where the sticker lands
-is fairly flat and faces the projector. Projection mode does not use
-BFS unfolding and is unaffected by this issue.
+If you see this, switch the sticker to **projection** mode. Projection
+mode is best when the surface where the sticker lands is fairly flat
+and faces roughly toward you.
 
 ---
 
