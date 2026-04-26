@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"math"
+	"sort"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
@@ -158,32 +159,6 @@ func BuildStickerDecal(
 	if maxAngleDeg > 0 && maxAngleDeg < 180 {
 		cosMaxAngle = float32(math.Cos(maxAngleDeg * math.Pi / 180))
 	}
-
-	// UV-space occupancy bitmap. Tracks which regions of the sticker have
-	// been claimed. The BFS rejects a triangle whose pixel-center footprint
-	// is majority-claimed, preventing the sticker from repeating when
-	// geodesic unfolding folds back on non-developable surfaces.
-	//
-	// Resolution is decoupled from the sticker image: the grid must be fine
-	// enough that adjacent mesh triangles don't share pixel centers, else
-	// they falsely reject each other. The smallest feature that can survive
-	// the output pipeline is one voxel wide, so sizing the occupancy grid
-	// so that each voxel-length span is covered by several pixels gives
-	// adequate headroom. We oversample by 4× per voxel.
-	const occPixelsPerVoxel = 4
-	occW := imgBounds.Dx()
-	occH := imgBounds.Dy()
-	if voxelSize > 0 {
-		wVoxel := int(math.Ceil(scale / voxelSize * occPixelsPerVoxel))
-		hVoxel := int(math.Ceil(scale * aspect / voxelSize * occPixelsPerVoxel))
-		if wVoxel > occW {
-			occW = wVoxel
-		}
-		if hVoxel > occH {
-			occH = hVoxel
-		}
-	}
-	occupancy := make([]bool, occW*occH)
 
 	// triOverlapsTangentBounds checks if the triangle overlaps the sticker
 	// area in tangent-plane coordinates: [-halfW,halfW] x [-halfH,halfH].
@@ -366,10 +341,13 @@ func BuildStickerDecal(
 	// garbage — the decal will still render, just without the relaxation.
 	region.writeBack(vertUV)
 
-	// Rebuild per-triangle UVs from the relaxed vertex UVs and apply the
-	// occupancy rasterizer. After ARAP, the 2D layout matches 3D edge
-	// lengths closely, so genuine fold-backs (non-developable surface
-	// wrapping back on itself) are the main thing the rasterizer catches.
+	// Rebuild per-triangle UVs from the relaxed vertex UVs. We deliberately
+	// keep redundant UV coverage: SampleNearestColor disambiguates by 3D
+	// nearest-triangle, so two triangles whose UVs overlap (e.g. ARAP
+	// shrinking one sibling into another's footprint) is harmless. An
+	// earlier version ran an occupancy rasterizer that rejected such
+	// overlaps as fold-backs, but on real meshes with skinny tessellation
+	// it routinely dropped legitimate coverage and produced visible gaps.
 	for idx, triIdx := range acceptedTris {
 		if idx%1000 == 0 {
 			if ctx.Err() != nil {
@@ -385,11 +363,7 @@ func BuildStickerDecal(
 		if !triOverlapsTangentBounds(tc) {
 			continue
 		}
-		uvs := tangentTrisToUV(tc)
-		if !checkAndPaintTriangle(uvs, occupancy, occW, occH) {
-			continue
-		}
-		decal.TriUVs[triIdx] = uvs
+		decal.TriUVs[triIdx] = tangentTrisToUV(tc)
 	}
 
 	return decal, nil
@@ -446,89 +420,6 @@ func unfoldVertex(posA, posB, posC [3]float32, flatA, flatB, flatCurrent [2]floa
 		flatA[0] + r*(cosA*edgeDir[0]+sign*sinA*edgePerp[0]),
 		flatA[1] + r*(cosA*edgeDir[1]+sign*sinA*edgePerp[1]),
 	}
-}
-
-// checkAndPaintTriangle rasterizes the triangle's UV footprint into the
-// occupancy bitmap. If the majority of covered pixel centers are already
-// claimed by earlier triangles (a geodesic fold-back), the bitmap is left
-// unchanged and false is returned. Otherwise the covered pixels are marked
-// claimed and true is returned.
-//
-// Using the same "pixel center inside triangle" test as the claim step
-// guarantees that adjacent triangles have disjoint footprints — so two
-// sub-pixel neighbors along a shared edge never mutually reject, even when
-// the sticker is scaled far larger than the individual mesh triangles.
-//
-// Sub-pixel triangles (no pixel center lands inside) are always accepted
-// and leave the occupancy bitmap untouched.
-func checkAndPaintTriangle(uvs [3][2]float32, occ []bool, w, h int) bool {
-	fw, fh := float32(w), float32(h)
-	minPx := int(max(0, min(uvs[0][0], min(uvs[1][0], uvs[2][0]))*fw))
-	maxPx := int(min(fw-1, max(uvs[0][0], max(uvs[1][0], uvs[2][0]))*fw))
-	minPy := int(max(0, min(uvs[0][1], min(uvs[1][1], uvs[2][1]))*fh))
-	maxPy := int(min(fh-1, max(uvs[0][1], max(uvs[1][1], uvs[2][1]))*fh))
-
-	var pixels []int
-	claimed := 0
-	for py := minPy; py <= maxPy; py++ {
-		for px := minPx; px <= maxPx; px++ {
-			u := (float32(px) + 0.5) / fw
-			v := (float32(py) + 0.5) / fh
-			if !pointStrictlyInsideTriangle2D(u, v, uvs) {
-				continue
-			}
-			idx := py*w + px
-			pixels = append(pixels, idx)
-			if occ[idx] {
-				claimed++
-			}
-		}
-	}
-	if len(pixels) > 0 && claimed*2 >= len(pixels) {
-		return false
-	}
-	for _, idx := range pixels {
-		occ[idx] = true
-	}
-	return true
-}
-
-// pointStrictlyInsideTriangle2D returns true if (px,py) is strictly inside
-// the 2D triangle defined by uvs, with a small barycentric margin (eps=1e-4,
-// ~1000× float32 relative precision) that excludes points within roundoff
-// distance of any edge. The margin is essential for occupancy tracking:
-// without it, a pixel center that lies near-exactly on a shared edge
-// between two triangles can be reported as "inside" both due to roundoff,
-// causing adjacent triangles to wrongly fight over the pixel. Excluding
-// the margin from both sides leaves the thin band near each edge unclaimed,
-// which is harmless.
-func pointStrictlyInsideTriangle2D(px, py float32, uvs [3][2]float32) bool {
-	x0, y0 := uvs[0][0], uvs[0][1]
-	x1, y1 := uvs[1][0], uvs[1][1]
-	x2, y2 := uvs[2][0], uvs[2][1]
-
-	// Edge functions (signed double-areas of sub-triangles).
-	f0 := (x1-x0)*(py-y0) - (y1-y0)*(px-x0) // edge V0→V1
-	f1 := (x2-x1)*(py-y1) - (y2-y1)*(px-x1) // edge V1→V2
-	f2 := (x0-x2)*(py-y2) - (y0-y2)*(px-x2) // edge V2→V0
-
-	twoArea := f0 + f1 + f2
-	absTwoArea := twoArea
-	if absTwoArea < 0 {
-		absTwoArea = -absTwoArea
-	}
-	if absTwoArea < 1e-20 {
-		return false // degenerate
-	}
-
-	// Barycentric coordinate > eps on all three edges means the point is
-	// strictly inside, away from any edge.
-	const eps = 1e-4
-	threshold := eps * absTwoArea
-	if twoArea > 0 {
-		return f0 > threshold && f1 > threshold && f2 > threshold
-	}
-	return f0 < -threshold && f1 < -threshold && f2 < -threshold
 }
 
 // buildStickerTangentFrame returns (t, b, n): the sticker's tangent, bitangent,
@@ -713,90 +604,181 @@ func BuildStickerDecalProjection(
 		return decal, nil
 	}
 
-	// Occlusion test: for each candidate, check if any OTHER candidate is
-	// closer to the projector at its centroid (t,b). If so, drop it.
+	// Occlusion test: rasterize candidates into a depth buffer at sticker
+	// resolution. For each pixel of the rect, only the frontmost
+	// (largest depth-along-+n) candidate covering that pixel "wins". A
+	// candidate is kept iff it wins at least one pixel.
 	//
-	// Accelerate with a uniform 2D grid over the sticker rectangle: each cell
-	// lists candidates whose tangent-plane AABB overlaps that cell. To test a
-	// candidate's centroid, only candidates in the containing cell need a
-	// point-in-triangle query. This turns an O(N²) sweep into ~O(N·N/cells).
-	//
-	// depthEps scales with sticker size so coplanar surfaces within 0.01%
-	// of the sticker's width are treated as ties rather than occluders.
-	const baryEps = float32(1e-4)
-	depthEps := float32(scale) * 1e-4
-
+	// This replaces a previous centroid-only test that asked "does some
+	// other candidate's tangent triangle cover MY centroid, with greater
+	// depth?". That test failed for two distinct shapes:
+	//   1. Tall thin triangles whose centroid lies outside the sticker
+	//      rect — no other candidate covers a point outside the rect, so
+	//      occlusion was never detected even when the front of the mesh
+	//      fully obscured the candidate inside the rect.
+	//   2. Triangles whose centroid lies inside a tangent-space crack of
+	//      the front mesh tiling — adjacent skinny triangles often produce
+	//      sub-pixel cracks that miss exact-point lookups.
+	// A pixel-grained depth test makes both go away.
 	rectW := 2 * fHalfW
 	rectH := 2 * fHalfH
 	if rectW <= 0 || rectH <= 0 {
 		return decal, nil
 	}
-	gridDim := int(math.Sqrt(float64(len(cands))))
-	if gridDim < 1 {
-		gridDim = 1
+
+	// Resolution: aim for a buffer with at least as many pixels as the
+	// sticker image itself, so the depth test resolves features at sticker
+	// resolution. Cap at 1024 in either dimension so very large stickers
+	// don't blow memory.
+	depthW := imgBounds.Dx()
+	depthH := imgBounds.Dy()
+	if depthW < 256 {
+		depthW = 256
 	}
-	if gridDim > 256 {
-		gridDim = 256
+	if depthH < 256 {
+		depthH = 256
 	}
-	invCellU := float32(gridDim) / rectW
-	invCellV := float32(gridDim) / rectH
-	clampCell := func(v int) int {
-		if v < 0 {
-			return 0
-		}
-		if v >= gridDim {
-			return gridDim - 1
-		}
-		return v
+	if depthW > 1024 {
+		depthW = 1024
 	}
-	cellOf := func(u, v float32) (int, int) {
-		ix := int((u + fHalfW) * invCellU)
-		iy := int((v + fHalfH) * invCellV)
-		return clampCell(ix), clampCell(iy)
+	if depthH > 1024 {
+		depthH = 1024
 	}
-	grid := make([][]int32, gridDim*gridDim)
+	depthBuf := make([]float32, depthW*depthH)
+	ownerBuf := make([]int32, depthW*depthH)
+	const negInf = float32(-1e30)
+	for i := range depthBuf {
+		depthBuf[i] = negInf
+		ownerBuf[i] = -1
+	}
+
+	fW := float32(depthW)
+	fH := float32(depthH)
+	uToPx := fW / rectW
+	vToPy := fH / rectH
+
+	reportProgress(0.60)
 	for i := range cands {
+		if i%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			reportProgress(0.60 + 0.20*float64(i)/float64(len(cands)))
+		}
 		c := &cands[i]
-		ix0, iy0 := cellOf(c.minU, c.minV)
-		ix1, iy1 := cellOf(c.maxU, c.maxV)
-		for iy := iy0; iy <= iy1; iy++ {
-			row := iy * gridDim
-			for ix := ix0; ix <= ix1; ix++ {
-				grid[row+ix] = append(grid[row+ix], int32(i))
+		// Pixel AABB clipped to buffer.
+		px0 := int(math.Floor(float64((c.minU + fHalfW) * uToPx)))
+		py0 := int(math.Floor(float64((c.minV + fHalfH) * vToPy)))
+		px1 := int(math.Ceil(float64((c.maxU + fHalfW) * uToPx)))
+		py1 := int(math.Ceil(float64((c.maxV + fHalfH) * vToPy)))
+		if px0 < 0 {
+			px0 = 0
+		}
+		if py0 < 0 {
+			py0 = 0
+		}
+		if px1 > depthW {
+			px1 = depthW
+		}
+		if py1 > depthH {
+			py1 = depthH
+		}
+		// Rasterize: for each pixel center inside the candidate triangle,
+		// keep the deeper-along-+n value (frontmost wins). The barycentric
+		// margin is intentionally lenient (negative eps): pixel centers
+		// that fall on or near a shared edge between two front triangles
+		// are claimed by BOTH, so the depth test runs on both. Without
+		// this, near-edge pixels would be unclaimed by any front triangle
+		// and a back-of-mesh candidate could win them, producing visible
+		// slivers along front-mesh edges.
+		const baryEps = float32(1e-3)
+		for py := py0; py < py1; py++ {
+			cv := -fHalfH + (float32(py)+0.5)/vToPy
+			for px := px0; px < px1; px++ {
+				cu := -fHalfW + (float32(px)+0.5)/uToPx
+				bary, ok := barycentric2D(cu, cv, c.tcs)
+				if !ok {
+					continue
+				}
+				if bary[0] < -baryEps || bary[1] < -baryEps || bary[2] < -baryEps {
+					continue
+				}
+				d := bary[0]*c.depths[0] + bary[1]*c.depths[1] + bary[2]*c.depths[2]
+				idx := py*depthW + px
+				if d > depthBuf[idx] {
+					depthBuf[idx] = d
+					ownerBuf[idx] = int32(i)
+				}
 			}
 		}
 	}
 
-	reportProgress(0.60)
+	reportProgress(0.80)
+	// Mark winners: any candidate that owns at least one pixel.
+	wins := make([]bool, len(cands))
+	for _, o := range ownerBuf {
+		if o >= 0 {
+			wins[o] = true
+		}
+	}
+
+	// Filter out winners that are far behind the front cluster. Pixels
+	// where the front mesh has a tangent-space gap (e.g. a seam in the
+	// original tessellation) are won by whatever back-of-mesh surface
+	// happens to be front-facing relative to the sticker normal — usually
+	// the inside of the far wall of a hollow shape. These winners form a
+	// distinct depth cluster well below the legitimate front-surface
+	// winners.
+	//
+	// Find the cluster boundary by sorting winner depths and looking for
+	// a gap much larger than the local front-surface variation (5×).
+	// This adapts to mesh-specific depth scales (a deep embossing vs. a
+	// thin shell) without coupling to the user-controlled sticker
+	// `scale`. The default -inf sentinel means "no cut": if there's no
+	// qualifying gap, every winner is kept.
+	depthFloor := float32(-math.MaxFloat32)
+	winnerDepths := make([]float32, 0, len(cands))
+	for i, w := range wins {
+		if w {
+			winnerDepths = append(winnerDepths, cands[i].cdepth)
+		}
+	}
+	if n := len(winnerDepths); n >= 4 {
+		sort.Slice(winnerDepths, func(a, b int) bool { return winnerDepths[a] < winnerDepths[b] })
+		// Front-cluster spread, measured as the 90th-50th percentile of
+		// depth (robust to outliers on either tail).
+		p50 := winnerDepths[n/2]
+		p90 := winnerDepths[(9*n)/10]
+		frontSpread := p90 - p50
+		if frontSpread <= 0 {
+			frontSpread = 1e-3 // pathological flat surface; tiny non-zero floor
+		}
+		// Walk gaps top-down from the median. The first gap exceeding
+		// 5× front-cluster spread marks the front/back boundary; anything
+		// below it is the back cluster (or further-back outliers). Going
+		// top-down means a multi-modal back distribution can't trick us
+		// into cutting deeper than intended — we stop at the first
+		// qualifying gap we encounter walking from the front.
+		for i := n / 2; i >= 1; i-- {
+			gap := winnerDepths[i] - winnerDepths[i-1]
+			if gap > frontSpread*5 {
+				depthFloor = winnerDepths[i] // keep this and everything above
+				break
+			}
+		}
+	}
+
 	for i, c := range cands {
 		if i%1000 == 0 {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			reportProgress(0.60 + 0.40*float64(i)/float64(len(cands)))
+			reportProgress(0.80 + 0.20*float64(i)/float64(len(cands)))
 		}
-		ix, iy := cellOf(c.cx, c.cy)
-		bucket := grid[iy*gridDim+ix]
-		occluded := false
-		for _, j := range bucket {
-			if int(j) == i {
-				continue
-			}
-			other := &cands[j]
-			bary, ok := barycentric2D(c.cx, c.cy, other.tcs)
-			if !ok {
-				continue
-			}
-			if bary[0] < -baryEps || bary[1] < -baryEps || bary[2] < -baryEps {
-				continue
-			}
-			otherDepth := bary[0]*other.depths[0] + bary[1]*other.depths[1] + bary[2]*other.depths[2]
-			if otherDepth > c.cdepth+depthEps {
-				occluded = true
-				break
-			}
+		if !wins[i] {
+			continue
 		}
-		if occluded {
+		if c.cdepth < depthFloor {
 			continue
 		}
 		decal.TriUVs[c.tri] = [3][2]float32{

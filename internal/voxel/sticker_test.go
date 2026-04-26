@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"image/color"
+	"math"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -446,5 +447,154 @@ func TestTcRunaway(t *testing.T) {
 				t.Errorf("tcRunaway(%v) = %v; want %v", c.tc, got, c.want)
 			}
 		})
+	}
+}
+
+// TestBuildStickerDecalProjectionDoesNotLeakToBackWall builds a hollow
+// box (front wall and a parallel back wall, both facing +Z toward the
+// projector) and applies a projection-mode sticker to the front. The
+// back wall is far enough behind that it must not appear in the decal.
+//
+// Regression: an earlier centroid-only occlusion test failed for tall
+// thin candidates whose centroid sat outside the sticker rect, and for
+// candidates whose centroid landed in tangent-space cracks of the front
+// mesh tiling. The pixel-grained depth-buffer test plus the depth-cluster
+// gap filter together guarantee the back wall is fully culled.
+func TestBuildStickerDecalProjectionDoesNotLeakToBackWall(t *testing.T) {
+	model := &loader.LoadedModel{
+		Vertices: [][3]float32{
+			{0, 0, 1}, {2, 0, 1}, {2, 2, 1}, {0, 2, 1},
+			{0, 0, -2}, {2, 0, -2}, {2, 2, -2}, {0, 2, -2},
+		},
+		Faces: [][3]uint32{
+			{0, 1, 2}, {0, 2, 3}, // front wall, normal +Z
+			{4, 5, 6}, {4, 6, 7}, // back wall, normal +Z (also faces projector)
+		},
+		FaceBaseColor: [][4]uint8{
+			{128, 128, 128, 255}, {128, 128, 128, 255},
+			{128, 128, 128, 255}, {128, 128, 128, 255},
+		},
+	}
+	img := makeTestImage(8, 8, color.NRGBA{255, 0, 0, 255})
+
+	center := [3]float64{1, 1, 1}
+	normal := [3]float64{0, 0, 1}
+	up := [3]float64{0, 1, 0}
+	scale := 1.5
+
+	decal, err := BuildStickerDecalProjection(
+		context.Background(), model, img, center, normal, up, scale, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, backTri := range []int32{2, 3} {
+		if _, ok := decal.TriUVs[backTri]; ok {
+			t.Errorf("back wall tri %d leaked into projection decal", backTri)
+		}
+	}
+	frontFound := 0
+	for _, frontTri := range []int32{0, 1} {
+		if _, ok := decal.TriUVs[frontTri]; ok {
+			frontFound++
+		}
+	}
+	if frontFound == 0 {
+		t.Error("expected front wall in decal, got none")
+	}
+}
+
+// TestBuildStickerDecalUnfoldCoversCurvedSurface builds a small curved
+// strip (a fan of triangles forming a shallow cylindrical arc) and
+// applies an unfold-mode sticker. ARAP relaxation legitimately produces
+// small UV overlaps between adjacent triangles on a curved surface, so
+// post-ARAP coverage must remain near-complete.
+//
+// Regression: an earlier occupancy rasterizer rejected any triangle
+// whose UV footprint was already majority-claimed, intending to catch
+// fold-backs. On real meshes with skinny tessellation that threshold
+// rejected ~half of legitimate coverage. The rasterizer was removed; this
+// test guards the high-coverage property.
+func TestBuildStickerDecalUnfoldCoversCurvedSurface(t *testing.T) {
+	const (
+		nCols   = 32
+		R       = float64(5)
+		halfArc = float64(0.6) // radians; ±halfArc from the +Z apex
+		dx      = float32(0.5) // strip extent in X
+	)
+	verts := make([][3]float32, 0, 2*(nCols+1))
+	for i := 0; i <= nCols; i++ {
+		theta := -halfArc + 2*halfArc*float64(i)/float64(nCols)
+		y := float32(R * math.Sin(theta))
+		z := float32(R * math.Cos(theta))
+		verts = append(verts, [3]float32{0, y, z})
+		verts = append(verts, [3]float32{dx, y, z})
+	}
+	faces := make([][3]uint32, 0, 2*nCols)
+	for i := 0; i < nCols; i++ {
+		a := uint32(2 * i)
+		b := uint32(2*i + 1)
+		c := uint32(2*i + 2)
+		d := uint32(2*i + 3)
+		faces = append(faces, [3]uint32{a, b, c}, [3]uint32{b, d, c})
+	}
+	origFaceCount := len(faces)
+	model := &loader.LoadedModel{
+		Vertices:      verts,
+		Faces:         faces,
+		FaceBaseColor: make([][4]uint8, origFaceCount),
+	}
+	for i := range model.FaceBaseColor {
+		model.FaceBaseColor[i] = [4]uint8{128, 128, 128, 255}
+	}
+
+	adj := BuildTriAdjacency(model)
+	img := makeTestImage(8, 8, color.NRGBA{0, 255, 0, 255})
+
+	center := [3]float64{float64(dx) / 2, 0, R}
+	normal := [3]float64{0, 0, 1}
+	up := [3]float64{1, 0, 0} // align tangent U with X (strip axis)
+	scale := 2.5
+
+	si := NewSpatialIndex(model, 0.5)
+	seedTri := FindSeedTriangle(center, model, si)
+	if seedTri < 0 {
+		t.Fatal("no seed triangle found")
+	}
+
+	decal, err := BuildStickerDecal(context.Background(), model, adj, img,
+		seedTri, center, normal, up, scale, 0, 0, 0.4, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Count *original* faces whose 3D centroid Y lies within the rect's
+	// V extent. Subdivision grows the face slice, so iterate only over
+	// the original prefix.
+	wantInRect := 0
+	for fi := 0; fi < origFaceCount; fi++ {
+		f := faces[fi]
+		var cy float32
+		for k := 0; k < 3; k++ {
+			cy += verts[f[k]][1]
+		}
+		cy /= 3
+		if math.Abs(float64(cy)) <= scale/2 {
+			wantInRect++
+		}
+	}
+	if wantInRect == 0 {
+		t.Fatal("test setup error: no triangles in rect")
+	}
+
+	got := 0
+	for tri := range decal.TriUVs {
+		if int(tri) < origFaceCount {
+			got++
+		}
+	}
+	cov := float64(got) / float64(wantInRect)
+	if cov < 0.80 {
+		t.Errorf("unfold coverage too low: %d/%d original-face tris = %.1f%%; expected >= 80%%",
+			got, wantInRect, 100*cov)
 	}
 }
