@@ -115,24 +115,25 @@
       </div>
 
       <div class="space-y-1">
-        <span class="text-xs flex items-center gap-1.5">
-          Mode
-          <HelpTip>
-            Unfold drapes the sticker over the surface (good for curved shapes). Projection stamps it from a single direction (good for flat faces, can stretch on curves).
-          </HelpTip>
-        </span>
+        <span class="text-xs">Mode</span>
         <div class="flex gap-3 text-xs">
-          <label class="flex items-center gap-1">
-            <input type="radio" name={"sticker-mode-" + i} value="unfold"
-              checked={sticker.mode === 'unfold'}
-              onchange={() => { stickers[i] = { ...sticker, mode: 'unfold' }; stickers = stickers; }} />
-            Unfold
-          </label>
           <label class="flex items-center gap-1">
             <input type="radio" name={"sticker-mode-" + i} value="projection"
               checked={sticker.mode === 'projection'}
               onchange={() => { stickers[i] = { ...sticker, mode: 'projection' }; stickers = stickers; }} />
             Projection
+            <HelpTip>
+              Stamps the sticker from a single direction, like a slide projector. Works well on most shapes, including complex or non-developable geometry. Can stretch on surfaces that curve away from the projection direction.
+            </HelpTip>
+          </label>
+          <label class="flex items-center gap-1">
+            <input type="radio" name={"sticker-mode-" + i} value="unfold"
+              checked={sticker.mode === 'unfold'}
+              onchange={() => { stickers[i] = { ...sticker, mode: 'unfold' }; stickers = stickers; }} />
+            Unfold
+            <HelpTip>
+              Drapes the sticker over the surface, wrapping around curves. Best on developable patches like cylinders or gentle curves. If it looks wrong on a complex mesh, try enabling Alpha-wrap — it gives unfold a cleaner surface to work from.
+            </HelpTip>
           </label>
         </div>
       </div>
