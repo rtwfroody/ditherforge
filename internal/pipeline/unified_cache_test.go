@@ -154,6 +154,63 @@ func TestCacheAToggleBToggleAHitsMemory(t *testing.T) {
 	}
 }
 
+// TestParseStageKeyDependsOnInputOnly: StageParse's key changes when
+// Input/ObjectIndex/ReloadSeq change but is invariant under everything
+// else (Scale, Size, alpha-wrap, base color, etc.).
+func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
+	c := NewStageCache()
+	pathA := makeFakeInput(t)
+	base := Options{Input: pathA, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	// Scale changes should NOT change StageParse's key.
+	scaled := base
+	scaled.Scale = 2
+	if c.stageKey(StageParse, base) != c.stageKey(StageParse, scaled) {
+		t.Error("StageParse key changed when Scale changed; parse cache should survive")
+	}
+
+	// AlphaWrap changes should NOT change StageParse's key.
+	wrapped := base
+	wrapped.AlphaWrap = true
+	if c.stageKey(StageParse, base) != c.stageKey(StageParse, wrapped) {
+		t.Error("StageParse key changed when AlphaWrap changed; parse cache should survive")
+	}
+
+	// ObjectIndex change SHOULD change StageParse's key (different mesh).
+	otherIdx := base
+	otherIdx.ObjectIndex = 1
+	if c.stageKey(StageParse, base) == c.stageKey(StageParse, otherIdx) {
+		t.Error("StageParse key did not change when ObjectIndex changed")
+	}
+
+	// ReloadSeq bump SHOULD change StageParse's key (force re-parse).
+	reloaded := base
+	reloaded.ReloadSeq = 1
+	if c.stageKey(StageParse, base) == c.stageKey(StageParse, reloaded) {
+		t.Error("StageParse key did not change when ReloadSeq bumped")
+	}
+}
+
+// TestLoadStageKeyInvalidatesOnAlphaWrap: StageLoad must re-run when
+// alpha-wrap parameters change (the wrap result is part of loadOutput).
+func TestLoadStageKeyInvalidatesOnAlphaWrap(t *testing.T) {
+	c := NewStageCache()
+	path := makeFakeInput(t)
+	base := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	wrapped := base
+	wrapped.AlphaWrap = true
+	if c.stageKey(StageLoad, base) == c.stageKey(StageLoad, wrapped) {
+		t.Fatal("StageLoad key did not change when AlphaWrap toggled")
+	}
+
+	wrappedTighter := wrapped
+	wrappedTighter.AlphaWrapAlpha = 0.6
+	if c.stageKey(StageLoad, wrapped) == c.stageKey(StageLoad, wrappedTighter) {
+		t.Fatal("StageLoad key did not change when AlphaWrapAlpha changed")
+	}
+}
+
 // TestStageKeyEmptyOnHashFailure: when the input file doesn't exist (so we
 // can't hash it), stageKey returns "" and no caching happens.
 func TestStageKeyEmptyOnHashFailure(t *testing.T) {

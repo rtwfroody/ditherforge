@@ -13,6 +13,7 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -20,7 +21,17 @@ import (
 type StageID int
 
 const (
-	StageLoad StageID = iota
+	// StageParse parses the input file into a pristine *LoadedModel in
+	// file units, with no transformations applied. Output is small and
+	// only depends on (Input, ObjectIndex, ReloadSeq). Replaced what used
+	// to be a separate "raw cache" living outside the stages array.
+	StageParse StageID = iota
+	// StageLoad transforms the parsed model into a usable loadOutput:
+	// clones, scales, normalizes Z, optionally alpha-wraps, builds the
+	// preview MeshData. Alpha-wrap (the slow part) is folded into this
+	// stage's body, not a separate stage — so the on-disk cache for
+	// StageLoad subsumes what used to be a separate alpha-wrap cache.
+	StageLoad
 	StageDecimate
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
@@ -37,9 +48,9 @@ const (
 // "stage" argument to diskcache.Cache.{Get,Set}.
 func stageSubdir(s StageID) string {
 	switch s {
+	case StageParse:
+		return "parse"
 	case StageLoad:
-		// load's disk artifact is the parsed-from-file model (raw); the
-		// in-memory loadOutput is rebuilt from raw on every cache restore.
 		return "load"
 	case StageDecimate:
 		return "decimate"
@@ -108,12 +119,6 @@ func (m *stageMap) put(key string, output any) {
 type StageCache struct {
 	stages [numStages]*stageMap
 
-	// raw is the disk-backed pristine parsed model (file units, no scale /
-	// normalize / base-color override). loadOutput in stages[StageLoad] is
-	// derived from raw plus opts; raw itself is small enough to keep cached
-	// in memory across runs and is what makes file-parse cheap on restart.
-	raw *cachedRaw
-
 	// disk persists the gob-encoded outputs of expensive stages across app
 	// restarts. nil = persistence disabled.
 	disk *diskcache.Cache
@@ -135,11 +140,6 @@ type StageCache struct {
 	invContents      string
 }
 
-type cachedRaw struct {
-	key   string
-	model *loader.LoadedModel
-}
-
 // NewStageCache returns an empty stage cache.
 func NewStageCache() *StageCache {
 	c := &StageCache{}
@@ -153,6 +153,39 @@ func NewStageCache() *StageCache {
 // nil keeps persistence disabled.
 func (c *StageCache) SetDisk(d *diskcache.Cache) {
 	c.disk = d
+}
+
+// runStageCached is the canonical wrapper every pipeline stage uses. It:
+//
+//   - returns immediately on a cache hit, emitting a single "completed"
+//     stage marker so the UI shows the stage as done;
+//   - on a miss, runs body and lets body emit its own progress markers
+//     (some stages are spinners, some have determinate progress bars from
+//     inner functions like DecimateMesh / VoxelizeTwoGrids).
+//
+// body is responsible for storing its result via cache.set… before
+// returning. This keeps the helper a pure cross-cut concern (cache check
+// + UI marker) without coupling it to each stage's typed output.
+//
+// Pattern:
+//
+//	return runStageCached(cache, StageDecimate, opts, tracker, func() error {
+//	    ...
+//	    cache.setDecimate(opts, &decimateOutput{...})
+//	    return nil
+//	})
+func runStageCached(
+	cache *StageCache,
+	stage StageID,
+	opts Options,
+	tracker progress.Tracker,
+	body func() error,
+) error {
+	if cache.get(stage, opts) != nil {
+		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
+		return nil
+	}
+	return body()
 }
 
 // Disk returns the attached disk cache, or nil if persistence is disabled.
@@ -234,39 +267,6 @@ func (c *StageCache) stageKey(stage StageID, opts Options) string {
 	return diskcache.Key(parts...)
 }
 
-// rawKey is the disk key for the parsed-from-file model. Only depends on the
-// file content, the path, the object index, and the reload counter — not on
-// scale/size/alpha-wrap/base-color, because the raw model is the input to
-// those steps, not their output.
-func (c *StageCache) rawKey(opts Options) string {
-	fh := c.inputContentHash(opts.Input)
-	if fh == "" {
-		return ""
-	}
-	return diskcache.Key(Version, "raw", fh,
-		fmt.Sprint(opts.ObjectIndex),
-		fmt.Sprint(opts.ReloadSeq),
-	)
-}
-
-// alphaWrapKey is the disk key for the resolved alpha-wrap output. Uses the
-// *resolved* alpha/offset (after auto-defaults are applied — caller passes
-// them) so two different NozzleDiameters that resolve to the same alpha
-// share a cache entry.
-func (c *StageCache) alphaWrapKey(opts Options, alpha, offset float32) string {
-	fh := c.inputContentHash(opts.Input)
-	if fh == "" {
-		return ""
-	}
-	return diskcache.Key(
-		Version, "alphawrap", fh,
-		fmt.Sprint(opts.ObjectIndex),
-		fmt.Sprint(opts.ReloadSeq),
-		fmt.Sprintf("%g", opts.Scale),
-		sizeKeyPart(opts.Size),
-		fmt.Sprintf("%g/%g", alpha, offset),
-	)
-}
 
 // sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
 // distinct from any concrete value.
@@ -421,13 +421,23 @@ type mergeOutput struct {
 // stageKey, which concatenates stageFnv values from StageLoad through the
 // requested stage.
 
+// parseSettings is what affects the parsed-from-file *LoadedModel.
+// File-content invariants live elsewhere (the stageKey cascade adds the
+// sha256 of the file's bytes, so identical bytes hit the same cache).
+type parseSettings struct {
+	Input       string
+	ReloadSeq   int64
+	ObjectIndex int
+}
+
+// loadSettings is what affects the post-parse loadOutput: scale,
+// normalize, alpha-wrap. The cumulative cascade key for StageLoad
+// includes parseSettings via stageFnv(StageParse), so changing Input or
+// ReloadSeq also invalidates StageLoad.
 type loadSettings struct {
-	Input           string
 	Scale           float32
 	HasSize         bool
 	Size            float32
-	ReloadSeq       int64
-	ObjectIndex     int
 	AlphaWrap       bool
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
@@ -521,12 +531,15 @@ func writeInt(h hash.Hash64, i int) {
 
 func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	switch stage {
+	case StageParse:
+		return parseSettings{
+			Input:       opts.Input,
+			ReloadSeq:   opts.ReloadSeq,
+			ObjectIndex: opts.ObjectIndex,
+		}
 	case StageLoad:
 		s := loadSettings{
-			Input:           opts.Input,
 			Scale:           opts.Scale,
-			ReloadSeq:       opts.ReloadSeq,
-			ObjectIndex:     opts.ObjectIndex,
 			AlphaWrap:       opts.AlphaWrap,
 			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
 			AlphaWrapOffset: opts.AlphaWrapOffset,
@@ -576,13 +589,14 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 	h := fnv.New64a()
 	s := c.settingsForStage(stage, opts)
 	switch v := s.(type) {
-	case loadSettings:
+	case parseSettings:
 		writeString(h, v.Input)
+		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
+		writeInt(h, v.ObjectIndex)
+	case loadSettings:
 		writeFloat32(h, v.Scale)
 		writeBool(h, v.HasSize)
 		writeFloat32(h, v.Size)
-		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
-		writeInt(h, v.ObjectIndex)
 		writeBool(h, v.AlphaWrap)
 		writeFloat32(h, v.AlphaWrapAlpha)
 		writeFloat32(h, v.AlphaWrapOffset)
@@ -660,6 +674,10 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 // "any") matters because gob.Decode needs the concrete type behind any.
 func allocOutput(stage StageID) any {
 	switch stage {
+	case StageParse:
+		return &loader.LoadedModel{}
+	case StageLoad:
+		return &loadOutput{}
 	case StageDecimate:
 		return &decimateOutput{}
 	case StageSticker:
@@ -684,10 +702,8 @@ func allocOutput(stage StageID) any {
 
 // get returns the cached output for the given stage and opts, or nil on
 // miss. Tries memory first; on miss, tries disk and warms memory on a hit.
-//
-// StageLoad has no disk fallback at this generic level — its disk artifact
-// is the raw model, looked up via getRaw and rebuilt into a loadOutput by
-// runLoad. Calls to get(StageLoad, ...) only return a memory hit.
+// Every stage is treated identically — there are no stages with special
+// caching rules.
 func (c *StageCache) get(stage StageID, opts Options) any {
 	key := c.stageKey(stage, opts)
 	if key == "" {
@@ -696,7 +712,7 @@ func (c *StageCache) get(stage StageID, opts Options) any {
 	if v := c.stages[stage].get(key); v != nil {
 		return v
 	}
-	if c.disk == nil || stage == StageLoad {
+	if c.disk == nil {
 		return nil
 	}
 	out := allocOutput(stage)
@@ -710,8 +726,8 @@ func (c *StageCache) get(stage StageID, opts Options) any {
 	return out
 }
 
-// set stores output for the given stage and opts in memory and (for stages
-// other than StageLoad) async-writes it to disk.
+// set stores output for the given stage and opts in memory and async-writes
+// it to disk.
 //
 // Concurrency contract: after calling set, callers must treat output as
 // read-only. The disk-write goroutine reads it concurrently with downstream
@@ -722,13 +738,25 @@ func (c *StageCache) set(stage StageID, opts Options, output any) {
 		return
 	}
 	c.stages[stage].put(key, output)
-	if c.disk == nil || stage == StageLoad {
+	if c.disk == nil {
 		return
 	}
 	go c.disk.Set(stageSubdir(stage), key, output)
 }
 
 // Typed wrappers — return the concrete output type for each stage.
+
+func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
+	v := c.get(StageParse, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*loader.LoadedModel)
+}
+
+func (c *StageCache) setParse(opts Options, m *loader.LoadedModel) {
+	c.set(StageParse, opts, m)
+}
 
 func (c *StageCache) getLoad(opts Options) *loadOutput {
 	v := c.get(StageLoad, opts)
@@ -850,39 +878,3 @@ func (c *StageCache) setMerge(opts Options, mo *mergeOutput) {
 	c.set(StageMerge, opts, mo)
 }
 
-// getRaw returns the cached pristine model. Tries the in-memory cachedRaw
-// slot first, then falls back to disk and warms memory on a hit. Returns
-// nil on miss.
-func (c *StageCache) getRaw(opts Options) *loader.LoadedModel {
-	k := c.rawKey(opts)
-	if k == "" {
-		return nil
-	}
-	if c.raw != nil && c.raw.key == k {
-		return c.raw.model
-	}
-	if c.disk == nil {
-		return nil
-	}
-	var m loader.LoadedModel
-	if !c.disk.Get("raw", k, &m) {
-		return nil
-	}
-	c.raw = &cachedRaw{key: k, model: &m}
-	return &m
-}
-
-// setRaw stores the pristine model in the memory raw slot and async-writes
-// to disk. The model is read-only after this point (callers always
-// CloneForEdit before mutating), so concurrent gob encoding is safe.
-func (c *StageCache) setRaw(opts Options, m *loader.LoadedModel) {
-	k := c.rawKey(opts)
-	if k == "" {
-		return
-	}
-	c.raw = &cachedRaw{key: k, model: m}
-	if c.disk == nil {
-		return
-	}
-	go c.disk.Set("raw", k, m)
-}
