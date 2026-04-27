@@ -9,6 +9,7 @@ import "testing"
 // must invalidate the sticker stage; otherwise voxelize samples colors from
 // a stale so.Model.FaceBaseColor.
 func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
+	c := NewStageCache()
 	base := Options{
 		Input:     "model.glb",
 		BaseColor: "#FF0000",
@@ -19,7 +20,7 @@ func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 	changed := base
 	changed.BaseColor = "#00FF00"
 
-	if stageKey(StageSticker, base) == stageKey(StageSticker, changed) {
+	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, changed) {
 		t.Fatal("StageSticker key did not change when BaseColor changed; " +
 			"runSticker's so.Model.FaceBaseColor would be stale on a cached run")
 	}
@@ -30,14 +31,15 @@ func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 // survive base-color changes because applyBaseColor patches the cached
 // ColorModel/SampleModel in place.
 func TestLoadAndDecimateStageKeysIndependentOfBaseColor(t *testing.T) {
+	c := NewStageCache()
 	base := Options{Input: "model.glb", BaseColor: "#FF0000"}
 	changed := base
 	changed.BaseColor = "#00FF00"
 
-	if stageKey(StageLoad, base) != stageKey(StageLoad, changed) {
+	if c.stageFnv(StageLoad, base) != c.stageFnv(StageLoad, changed) {
 		t.Error("StageLoad key changed on BaseColor change; load cache should survive")
 	}
-	if stageKey(StageDecimate, base) != stageKey(StageDecimate, changed) {
+	if c.stageFnv(StageDecimate, base) != c.stageFnv(StageDecimate, changed) {
 		t.Error("StageDecimate key changed on BaseColor change; decimate cache should survive")
 	}
 }
@@ -45,11 +47,12 @@ func TestLoadAndDecimateStageKeysIndependentOfBaseColor(t *testing.T) {
 // TestVoxelizeStageKeyDependsOnBaseColor is a sanity check that the existing
 // voxelize invalidation rule still holds.
 func TestVoxelizeStageKeyDependsOnBaseColor(t *testing.T) {
+	c := NewStageCache()
 	base := Options{Input: "model.glb", BaseColor: "#FF0000"}
 	changed := base
 	changed.BaseColor = "#00FF00"
 
-	if stageKey(StageVoxelize, base) == stageKey(StageVoxelize, changed) {
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, changed) {
 		t.Fatal("StageVoxelize key did not change when BaseColor changed")
 	}
 }

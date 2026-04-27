@@ -215,7 +215,7 @@ func (a *App) Export3MF() (string, error) {
 		return "", nil
 	}
 
-	_, err = pipeline.ExportFile(a.cache, path, export3mf.Options{
+	_, err = pipeline.ExportFile(a.cache, a.lastOpts, path, export3mf.Options{
 		PrinterID:      a.lastOpts.Printer,
 		NozzleDiameter: a.lastOpts.NozzleDiameter,
 		LayerHeight:    a.lastOpts.LayerHeight,

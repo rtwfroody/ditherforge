@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
@@ -19,9 +20,9 @@ import (
 type StageID int
 
 const (
-	StageLoad    StageID = iota
+	StageLoad StageID = iota
 	StageDecimate
-	StageSticker         // builds decals from mesh, before voxelization
+	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
 	StageColorAdjust
 	StageColorWarp
@@ -32,41 +33,120 @@ const (
 	numStages
 )
 
-// StageCache holds per-stage cached outputs so that only invalidated stages
-// re-run when settings change.
+// stageSubdir returns the on-disk subdirectory for a stage. Used as the
+// "stage" argument to diskcache.Cache.{Get,Set}.
+func stageSubdir(s StageID) string {
+	switch s {
+	case StageLoad:
+		// load's disk artifact is the parsed-from-file model (raw); the
+		// in-memory loadOutput is rebuilt from raw on every cache restore.
+		return "load"
+	case StageDecimate:
+		return "decimate"
+	case StageSticker:
+		return "sticker"
+	case StageVoxelize:
+		return "voxelize"
+	case StageColorAdjust:
+		return "coloradjust"
+	case StageColorWarp:
+		return "colorwarp"
+	case StagePalette:
+		return "palette"
+	case StageDither:
+		return "dither"
+	case StageClip:
+		return "clip"
+	case StageMerge:
+		return "merge"
+	}
+	return "unknown"
+}
+
+// stageMemoryCap is the per-stage in-memory entry cap. Two slots is enough
+// for the canonical "toggle between A and B" workflow (e.g. LayerHeight
+// 0.2 ↔ 0.12). Cycling through three or more settings still hits disk on
+// the second pass, which is fast for these payloads. Eviction is FIFO by
+// insertion order.
+const stageMemoryCap = 2
+
+// stageMap is a per-stage in-memory cache holding up to cap entries keyed by
+// the unified cache key. Eviction is insertion-order FIFO — we don't promote
+// on read because the goal is "keep the last N computed", not "keep the last
+// N read".
+type stageMap struct {
+	cap     int
+	entries map[string]any
+	order   []string // insertion order; index 0 is oldest
+}
+
+func newStageMap(cap int) *stageMap {
+	return &stageMap{cap: cap, entries: make(map[string]any, cap)}
+}
+
+func (m *stageMap) get(key string) any {
+	return m.entries[key]
+}
+
+func (m *stageMap) put(key string, output any) {
+	if _, ok := m.entries[key]; ok {
+		m.entries[key] = output
+		return
+	}
+	if len(m.entries) >= m.cap {
+		oldest := m.order[0]
+		m.order = m.order[1:]
+		delete(m.entries, oldest)
+	}
+	m.entries[key] = output
+	m.order = append(m.order, key)
+}
+
+// StageCache holds per-stage cached outputs. Each stage has a multi-slot
+// in-memory cache keyed by a unified string key; the same key looks up the
+// stage's gob-encoded representation in the disk cache.
 type StageCache struct {
-	stages [numStages]*cachedStage
-	// raw caches the pristine parsed model (file units, no scale/normalize/
-	// base-color override). It survives Scale/Size/BaseColor changes so the
-	// file parse isn't repeated when only a scale-dependent knob moves.
+	stages [numStages]*stageMap
+
+	// raw is the disk-backed pristine parsed model (file units, no scale /
+	// normalize / base-color override). loadOutput in stages[StageLoad] is
+	// derived from raw plus opts; raw itself is small enough to keep cached
+	// in memory across runs and is what makes file-parse cheap on restart.
 	raw *cachedRaw
 
-	// disk persists the expensive-to-recompute outputs (raw parse, decimate,
-	// alpha-wrap) across app restarts. nil = persistence disabled.
+	// disk persists the gob-encoded outputs of expensive stages across app
+	// restarts. nil = persistence disabled.
 	disk *diskcache.Cache
 
-	// inputHash caches sha256 of the current input file's contents so that we
-	// don't re-hash on every disk-cache lookup within a session. Tracked by
-	// (path, mtime, size); a change to any invalidates and re-hashes.
+	// inputHash caches sha256 of the current input file's contents so we
+	// don't re-hash on every key derivation within a session. Tracked by
+	// (path, mtime, size); a change to any forces a re-hash.
 	inputHashPath  string
 	inputHashMtime time.Time
 	inputHashSize  int64
 	inputHash      string
-}
 
-type cachedStage struct {
-	key    uint64
-	output any
+	// invContents caches the inventory file's contents (used in
+	// paletteSettings) so stageFnv doesn't re-read the file on every
+	// cache lookup. Tracked by (path, mtime, size) like inputHash.
+	invContentsPath  string
+	invContentsMtime time.Time
+	invContentsSize  int64
+	invContents      string
 }
 
 type cachedRaw struct {
-	key   uint64
+	key   string
 	model *loader.LoadedModel
 }
 
 // NewStageCache returns an empty stage cache.
 func NewStageCache() *StageCache {
-	return &StageCache{}
+	c := &StageCache{}
+	for i := range c.stages {
+		c.stages[i] = newStageMap(stageMemoryCap)
+	}
+	return c
 }
 
 // SetDisk attaches a disk cache. Call this once after NewStageCache; passing
@@ -80,9 +160,35 @@ func (c *StageCache) Disk() *diskcache.Cache {
 	return c.disk
 }
 
+// inventoryContents returns the inventory file's contents, memoized within
+// the session by (path, mtime, size). Returns "" if the file can't be read.
+// Used by stageFnv for paletteSettings, which is called many times per run.
+func (c *StageCache) inventoryContents(path string) string {
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if c.invContentsPath == path &&
+		c.invContentsMtime.Equal(info.ModTime()) && c.invContentsSize == info.Size() {
+		return c.invContents
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	c.invContents = string(data)
+	c.invContentsPath = path
+	c.invContentsMtime = info.ModTime()
+	c.invContentsSize = info.Size()
+	return c.invContents
+}
+
 // inputContentHash returns a sha256 of opts.Input's contents, memoized within
 // the session by (path, mtime, size). Returns "" on stat or read failure;
-// callers should treat that as "no disk caching for this run".
+// callers treat that as "no disk caching for this run".
 func (c *StageCache) inputContentHash(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -103,18 +209,36 @@ func (c *StageCache) inputContentHash(path string) string {
 	return h
 }
 
-// sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
-// distinct from any concrete value.
-func sizeKeyPart(s *float32) string {
-	if s == nil {
-		return "nil"
+// stageKey returns the unified cache key for a stage. It's a hex sha256 of
+// the version, the input file's content hash, and the FNV hashes of every
+// stage's individual settings up through (and including) `stage`. Two key
+// properties:
+//
+//   - Cascade: changing an upstream stage's settings changes every
+//     downstream stage's key. No explicit invalidation needed.
+//   - Determinism: identical (file content, settings) on a different machine
+//     or app restart yields the same key — disk hits work across sessions.
+//
+// Returns "" if the file can't be hashed; callers must treat that as "no
+// caching for this run" and recompute every stage.
+func (c *StageCache) stageKey(stage StageID, opts Options) string {
+	fh := c.inputContentHash(opts.Input)
+	if fh == "" {
+		return ""
 	}
-	return fmt.Sprintf("%g", *s)
+	parts := make([]string, 0, 3+int(stage)+1)
+	parts = append(parts, Version, fh)
+	for s := StageID(0); s <= stage; s++ {
+		parts = append(parts, fmt.Sprintf("%016x", c.stageFnv(s, opts)))
+	}
+	return diskcache.Key(parts...)
 }
 
-// rawDiskKey computes the disk-cache key for a parsed-from-file LoadedModel.
-// Returns "" if the file hash cannot be computed; the caller must skip disk.
-func (c *StageCache) rawDiskKey(opts Options) string {
+// rawKey is the disk key for the parsed-from-file model. Only depends on the
+// file content, the path, the object index, and the reload counter — not on
+// scale/size/alpha-wrap/base-color, because the raw model is the input to
+// those steps, not their output.
+func (c *StageCache) rawKey(opts Options) string {
 	fh := c.inputContentHash(opts.Input)
 	if fh == "" {
 		return ""
@@ -125,30 +249,11 @@ func (c *StageCache) rawDiskKey(opts Options) string {
 	)
 }
 
-// decimateDiskKey hashes everything that can affect the decimate output: the
-// input file, all settings that feed into lo.Model (scale/size/alpha-wrap),
-// and decimate-specific settings. ReloadSeq is included to mirror the
-// in-memory key — callers bump it to force a re-parse of an unchanged path.
-func (c *StageCache) decimateDiskKey(opts Options) string {
-	fh := c.inputContentHash(opts.Input)
-	if fh == "" {
-		return ""
-	}
-	return diskcache.Key(
-		Version, "decimate", fh,
-		fmt.Sprint(opts.ObjectIndex),
-		fmt.Sprint(opts.ReloadSeq),
-		fmt.Sprintf("%g", opts.Scale),
-		sizeKeyPart(opts.Size),
-		fmt.Sprintf("%v/%g/%g", opts.AlphaWrap, opts.AlphaWrapAlpha, opts.AlphaWrapOffset),
-		fmt.Sprintf("%g/%g/%v", opts.NozzleDiameter, opts.LayerHeight, opts.NoSimplify),
-	)
-}
-
-// alphaWrapDiskKey hashes everything that can affect the alpha-wrap output:
-// the input file, the scaled-mesh settings, and the alpha/offset arguments
-// (the *resolved* values, after auto-defaults are applied — caller passes them).
-func (c *StageCache) alphaWrapDiskKey(opts Options, alpha, offset float32) string {
+// alphaWrapKey is the disk key for the resolved alpha-wrap output. Uses the
+// *resolved* alpha/offset (after auto-defaults are applied — caller passes
+// them) so two different NozzleDiameters that resolve to the same alpha
+// share a cache entry.
+func (c *StageCache) alphaWrapKey(opts Options, alpha, offset float32) string {
 	fh := c.inputContentHash(opts.Input)
 	if fh == "" {
 		return ""
@@ -161,6 +266,15 @@ func (c *StageCache) alphaWrapDiskKey(opts Options, alpha, offset float32) strin
 		sizeKeyPart(opts.Size),
 		fmt.Sprintf("%g/%g", alpha, offset),
 	)
+}
+
+// sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
+// distinct from any concrete value.
+func sizeKeyPart(s *float32) string {
+	if s == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%g", *s)
 }
 
 // Per-stage output types.
@@ -203,35 +317,60 @@ type voxelizeOutput struct {
 	// changes on StageVoxelize, so dither re-runs (same cells, different
 	// dither mode) can reuse the table instead of rebuilding it. Valid for
 	// the lifetime of this voxelizeOutput; never mutate Cells in place.
-	neighbors [][]voxel.Neighbor
+	// Unexported so gob skips it on the disk round-trip; rebuilt on demand
+	// by getNeighbors().
+	neighbors    [][]voxel.Neighbor
+	neighborOnce sync.Once
 }
 
-// neighbors returns the two-grid neighbor table, building it on first call.
-// Pipeline stages are driven by a single worker (see app.pipelineWorker),
-// so a plain nil-check suffices — no mutex needed.
+// getNeighbors returns the two-grid neighbor table, building it on first
+// call. sync.Once makes the lazy build safe even if a future change
+// introduces concurrent readers — without it, a downstream reader and the
+// disk-encode goroutine kicked off by setVoxelize would race on the
+// neighbors field. (gob skips unexported fields so the encode goroutine
+// doesn't touch this directly, but the invariant is easier to keep when
+// the synchronization is explicit.)
 func (vo *voxelizeOutput) getNeighbors() [][]voxel.Neighbor {
-	if vo.neighbors == nil {
+	vo.neighborOnce.Do(func() {
 		vo.neighbors = voxel.BuildTwoGridNeighbors(vo.Cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
-	}
+	})
 	return vo.neighbors
 }
 
 type stickerOutput struct {
 	Decals []*voxel.StickerDecal
-	Adj    *voxel.TriAdjacency // cached for potential reuse
 	// Model is the sticker substrate (scratch clone of either ColorModel or
 	// the alpha-wrapped Model, depending on opts.AlphaWrap). The BFS may
 	// have subdivided pathologically-large triangles in place. Decal TriUVs
 	// index into THIS model's Faces, so downstream sampling and preview
 	// rendering must use Model. nil when no stickers were built.
 	Model *loader.LoadedModel
-	// SI is a spatial index built over Model, cached so runVoxelize can
-	// reuse it without rebuilding (the wrap mesh can be ~100k faces).
-	SI *voxel.SpatialIndex
 	// FromAlphaWrap is true when Model is a clone of the wrap mesh rather
 	// than ColorModel. Voxelize uses this to decide whether to do a single
 	// nearest-tri lookup (Model == sample model) or two separate lookups.
 	FromAlphaWrap bool
+
+	// si is the spatial index over Model. Seeded inside runSticker on a
+	// fresh build; nil after a disk-cache decode (the field is unexported,
+	// gob skips it). Rebuilt by ensureSI() on first access. sync.Once
+	// makes the lazy build safe against the disk-encode goroutine
+	// triggered by setSticker — gob doesn't touch unexported fields, but
+	// keeping the synchronization explicit lets the cache contract
+	// "outputs are immutable after set" survive future concurrency.
+	si     *voxel.SpatialIndex
+	siOnce sync.Once
+}
+
+// ensureSI returns so.si, building it on first call. Safe to call from
+// multiple goroutines; in practice the single pipeline worker is the only
+// caller (runVoxelize on the alpha-wrap branch).
+func (so *stickerOutput) ensureSI() *voxel.SpatialIndex {
+	so.siOnce.Do(func() {
+		if so.si == nil && so.Model != nil {
+			so.si = voxel.NewSpatialIndex(so.Model, 2)
+		}
+	})
+	return so.si
 }
 
 type colorAdjustOutput struct {
@@ -277,8 +416,10 @@ type mergeOutput struct {
 // --- Per-stage settings structs for cache key computation ---
 //
 // Each struct contains exactly the Options fields that affect that stage.
-// The stageKey function hashes the struct using binary.Write, so the key
-// is type-safe and free of format-string ambiguities.
+// stageFnv hashes the struct using binary.Write, so the key is type-safe and
+// free of format-string ambiguities. The cumulative cascade is built by
+// stageKey, which concatenates stageFnv values from StageLoad through the
+// requested stage.
 
 type loadSettings struct {
 	Input           string
@@ -311,14 +452,8 @@ type stickerSettings struct {
 	BaseColor string
 	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
 	// original mesh), so decals built for one substrate are invalid when
-	// the toggle changes.
-	//
-	// AlphaWrapAlpha and AlphaWrapOffset are intentionally NOT included
-	// here. Both are part of loadSettings, so changing them invalidates
-	// StageLoad and the cascade re-runs every later stage including this
-	// one. Adding them here would be redundant. If a future refactor
-	// switches to fine-grained invalidation that doesn't cascade, this
-	// struct must grow those fields too.
+	// the toggle changes. AlphaWrapAlpha and AlphaWrapOffset live in
+	// loadSettings; the cumulative stage key cascade picks them up.
 	AlphaWrap bool
 }
 
@@ -340,9 +475,9 @@ type decimateSettings struct {
 
 type paletteSettings struct {
 	NumColors         int
-	LockedColors      string   // joined for hashing
+	LockedColors      string // joined for hashing
 	InventoryFile     string
-	InventoryContents string   // file contents for hashing; empty if no file
+	InventoryContents string // file contents for hashing; empty if no file
 	InventoryColors   [][3]uint8
 	InventoryLabels   []string
 	ColorSnap         float64
@@ -359,9 +494,7 @@ type mergeSettings struct {
 	NoMerge bool
 }
 
-// hashSettings computes an FNV-1a hash for a stage's settings.
 func writeString(h hash.Hash64, s string) {
-	// Length-prefix to avoid ambiguity between e.g. "ab"+"c" and "a"+"bc".
 	binary.Write(h, binary.LittleEndian, uint32(len(s)))
 	h.Write([]byte(s))
 }
@@ -386,7 +519,7 @@ func writeInt(h hash.Hash64, i int) {
 	binary.Write(h, binary.LittleEndian, int64(i))
 }
 
-func settingsForStage(stage StageID, opts Options) any {
+func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	switch stage {
 	case StageLoad:
 		s := loadSettings{
@@ -418,17 +551,11 @@ func settingsForStage(stage StageID, opts Options) any {
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
-		var contents string
-		if opts.InventoryFile != "" {
-			if data, err := os.ReadFile(opts.InventoryFile); err == nil {
-				contents = string(data)
-			}
-		}
 		return paletteSettings{
 			NumColors:         opts.NumColors,
 			LockedColors:      strings.Join(opts.LockedColors, ","),
 			InventoryFile:     opts.InventoryFile,
-			InventoryContents: contents,
+			InventoryContents: c.inventoryContents(opts.InventoryFile),
 			InventoryColors:   opts.InventoryColors,
 			InventoryLabels:   opts.InventoryLabels,
 			ColorSnap:         opts.ColorSnap,
@@ -443,10 +570,11 @@ func settingsForStage(stage StageID, opts Options) any {
 	return nil
 }
 
-// stageKey computes an FNV-1a hash of the settings that affect a given stage.
-func stageKey(stage StageID, opts Options) uint64 {
+// stageFnv hashes a single stage's settings to a uint64. Used as the
+// per-stage component of the cumulative stageKey.
+func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 	h := fnv.New64a()
-	s := settingsForStage(stage, opts)
+	s := c.settingsForStage(stage, opts)
 	switch v := s.(type) {
 	case loadSettings:
 		writeString(h, v.Input)
@@ -527,146 +655,234 @@ func stageKey(stage StageID, opts Options) uint64 {
 	return h.Sum64()
 }
 
-// Invalidate computes new keys for each stage and returns the earliest stage
-// whose key changed (meaning it and everything after must re-run). If all
-// keys match, returns numStages (nothing to re-run).
-func (c *StageCache) Invalidate(opts Options) StageID {
-	for s := StageID(0); s < numStages; s++ {
-		newKey := stageKey(s, opts)
-		if c.stages[s] == nil || c.stages[s].key != newKey {
-			// Clear this stage and everything after.
-			for j := s; j < numStages; j++ {
-				c.stages[j] = nil
-			}
-			return s
-		}
+// allocOutput returns a fresh, zero-valued pointer of the right type for the
+// given stage, suitable for gob-decoding into. Returning a typed pointer (not
+// "any") matters because gob.Decode needs the concrete type behind any.
+func allocOutput(stage StageID) any {
+	switch stage {
+	case StageDecimate:
+		return &decimateOutput{}
+	case StageSticker:
+		return &stickerOutput{}
+	case StageVoxelize:
+		return &voxelizeOutput{}
+	case StageColorAdjust:
+		return &colorAdjustOutput{}
+	case StageColorWarp:
+		return &colorWarpOutput{}
+	case StagePalette:
+		return &paletteOutput{}
+	case StageDither:
+		return &ditherOutput{}
+	case StageClip:
+		return &clipOutput{}
+	case StageMerge:
+		return &mergeOutput{}
 	}
-	return numStages
+	return nil
 }
 
-// Typed getters.
-
-func (c *StageCache) getLoad() *loadOutput {
-	if c.stages[StageLoad] == nil {
+// get returns the cached output for the given stage and opts, or nil on
+// miss. Tries memory first; on miss, tries disk and warms memory on a hit.
+//
+// StageLoad has no disk fallback at this generic level — its disk artifact
+// is the raw model, looked up via getRaw and rebuilt into a loadOutput by
+// runLoad. Calls to get(StageLoad, ...) only return a memory hit.
+func (c *StageCache) get(stage StageID, opts Options) any {
+	key := c.stageKey(stage, opts)
+	if key == "" {
 		return nil
 	}
-	return c.stages[StageLoad].output.(*loadOutput)
-}
-
-func (c *StageCache) getVoxelize() *voxelizeOutput {
-	if c.stages[StageVoxelize] == nil {
+	if v := c.stages[stage].get(key); v != nil {
+		return v
+	}
+	if c.disk == nil || stage == StageLoad {
 		return nil
 	}
-	return c.stages[StageVoxelize].output.(*voxelizeOutput)
-}
-
-func (c *StageCache) getSticker() *stickerOutput {
-	if c.stages[StageSticker] == nil {
+	out := allocOutput(stage)
+	if out == nil {
 		return nil
 	}
-	return c.stages[StageSticker].output.(*stickerOutput)
-}
-
-func (c *StageCache) getColorAdjust() *colorAdjustOutput {
-	if c.stages[StageColorAdjust] == nil {
+	if !c.disk.Get(stageSubdir(stage), key, out) {
 		return nil
 	}
-	return c.stages[StageColorAdjust].output.(*colorAdjustOutput)
+	c.stages[stage].put(key, out)
+	return out
 }
 
-func (c *StageCache) getColorWarp() *colorWarpOutput {
-	if c.stages[StageColorWarp] == nil {
+// set stores output for the given stage and opts in memory and (for stages
+// other than StageLoad) async-writes it to disk.
+//
+// Concurrency contract: after calling set, callers must treat output as
+// read-only. The disk-write goroutine reads it concurrently with downstream
+// stages; concurrent reads of immutable data are race-free.
+func (c *StageCache) set(stage StageID, opts Options, output any) {
+	key := c.stageKey(stage, opts)
+	if key == "" {
+		return
+	}
+	c.stages[stage].put(key, output)
+	if c.disk == nil || stage == StageLoad {
+		return
+	}
+	go c.disk.Set(stageSubdir(stage), key, output)
+}
+
+// Typed wrappers — return the concrete output type for each stage.
+
+func (c *StageCache) getLoad(opts Options) *loadOutput {
+	v := c.get(StageLoad, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StageColorWarp].output.(*colorWarpOutput)
+	return v.(*loadOutput)
 }
 
-func (c *StageCache) getDecimate() *decimateOutput {
-	if c.stages[StageDecimate] == nil {
+func (c *StageCache) setLoad(opts Options, lo *loadOutput) {
+	c.set(StageLoad, opts, lo)
+}
+
+func (c *StageCache) getDecimate(opts Options) *decimateOutput {
+	v := c.get(StageDecimate, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StageDecimate].output.(*decimateOutput)
+	return v.(*decimateOutput)
 }
 
-func (c *StageCache) getPalette() *paletteOutput {
-	if c.stages[StagePalette] == nil {
+func (c *StageCache) setDecimate(opts Options, do *decimateOutput) {
+	c.set(StageDecimate, opts, do)
+}
+
+func (c *StageCache) getSticker(opts Options) *stickerOutput {
+	v := c.get(StageSticker, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StagePalette].output.(*paletteOutput)
+	return v.(*stickerOutput)
 }
 
-func (c *StageCache) getDither() *ditherOutput {
-	if c.stages[StageDither] == nil {
+func (c *StageCache) setSticker(opts Options, so *stickerOutput) {
+	c.set(StageSticker, opts, so)
+}
+
+func (c *StageCache) getVoxelize(opts Options) *voxelizeOutput {
+	v := c.get(StageVoxelize, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StageDither].output.(*ditherOutput)
+	return v.(*voxelizeOutput)
 }
 
-func (c *StageCache) getClip() *clipOutput {
-	if c.stages[StageClip] == nil {
+func (c *StageCache) setVoxelize(opts Options, vo *voxelizeOutput) {
+	c.set(StageVoxelize, opts, vo)
+}
+
+func (c *StageCache) getColorAdjust(opts Options) *colorAdjustOutput {
+	v := c.get(StageColorAdjust, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StageClip].output.(*clipOutput)
+	return v.(*colorAdjustOutput)
 }
 
-func (c *StageCache) getMerge() *mergeOutput {
-	if c.stages[StageMerge] == nil {
+func (c *StageCache) setColorAdjust(opts Options, cao *colorAdjustOutput) {
+	c.set(StageColorAdjust, opts, cao)
+}
+
+func (c *StageCache) getColorWarp(opts Options) *colorWarpOutput {
+	v := c.get(StageColorWarp, opts)
+	if v == nil {
 		return nil
 	}
-	return c.stages[StageMerge].output.(*mergeOutput)
+	return v.(*colorWarpOutput)
 }
 
-// Typed setter.
-
-func (c *StageCache) setStage(stage StageID, key uint64, output any) {
-	c.stages[stage] = &cachedStage{key: key, output: output}
+func (c *StageCache) setColorWarp(opts Options, cwo *colorWarpOutput) {
+	c.set(StageColorWarp, opts, cwo)
 }
 
-// rawLoadKey hashes only the inputs that affect the raw file parse.
-// Invariant: any Options field consumed by loadModel (preview.go) must appear
-// here, or the raw cache will return a stale model after that field changes.
-func rawLoadKey(opts Options) uint64 {
-	h := fnv.New64a()
-	writeString(h, opts.Input)
-	binary.Write(h, binary.LittleEndian, opts.ReloadSeq)
-	writeInt(h, opts.ObjectIndex)
-	return h.Sum64()
+func (c *StageCache) getPalette(opts Options) *paletteOutput {
+	v := c.get(StagePalette, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*paletteOutput)
 }
 
-// getRaw returns the cached pristine model. Tries memory first, then falls
-// back to the disk cache (and warms the in-memory cache on a disk hit).
-// Returns nil on miss.
+func (c *StageCache) setPalette(opts Options, po *paletteOutput) {
+	c.set(StagePalette, opts, po)
+}
+
+func (c *StageCache) getDither(opts Options) *ditherOutput {
+	v := c.get(StageDither, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*ditherOutput)
+}
+
+func (c *StageCache) setDither(opts Options, do *ditherOutput) {
+	c.set(StageDither, opts, do)
+}
+
+func (c *StageCache) getClip(opts Options) *clipOutput {
+	v := c.get(StageClip, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*clipOutput)
+}
+
+func (c *StageCache) setClip(opts Options, co *clipOutput) {
+	c.set(StageClip, opts, co)
+}
+
+func (c *StageCache) getMerge(opts Options) *mergeOutput {
+	v := c.get(StageMerge, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*mergeOutput)
+}
+
+func (c *StageCache) setMerge(opts Options, mo *mergeOutput) {
+	c.set(StageMerge, opts, mo)
+}
+
+// getRaw returns the cached pristine model. Tries the in-memory cachedRaw
+// slot first, then falls back to disk and warms memory on a hit. Returns
+// nil on miss.
 func (c *StageCache) getRaw(opts Options) *loader.LoadedModel {
-	k := rawLoadKey(opts)
+	k := c.rawKey(opts)
+	if k == "" {
+		return nil
+	}
 	if c.raw != nil && c.raw.key == k {
 		return c.raw.model
 	}
 	if c.disk == nil {
 		return nil
 	}
-	dk := c.rawDiskKey(opts)
-	if dk == "" {
-		return nil
-	}
 	var m loader.LoadedModel
-	if !c.disk.Get("raw", dk, &m) {
+	if !c.disk.Get("raw", k, &m) {
 		return nil
 	}
 	c.raw = &cachedRaw{key: k, model: &m}
 	return &m
 }
 
+// setRaw stores the pristine model in the memory raw slot and async-writes
+// to disk. The model is read-only after this point (callers always
+// CloneForEdit before mutating), so concurrent gob encoding is safe.
 func (c *StageCache) setRaw(opts Options, m *loader.LoadedModel) {
-	c.raw = &cachedRaw{key: rawLoadKey(opts), model: m}
+	k := c.rawKey(opts)
+	if k == "" {
+		return
+	}
+	c.raw = &cachedRaw{key: k, model: m}
 	if c.disk == nil {
 		return
 	}
-	dk := c.rawDiskKey(opts)
-	if dk == "" {
-		return
-	}
-	// Async write: the model is read-only after this point (callers always
-	// CloneForEdit before mutating), so it's safe to gob-encode in parallel
-	// while the pipeline continues.
-	go c.disk.Set("raw", dk, m)
+	go c.disk.Set("raw", k, m)
 }

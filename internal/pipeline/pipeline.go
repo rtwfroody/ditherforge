@@ -181,17 +181,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		}
 	}
 
-	startFrom := cache.Invalidate(opts)
 	start := time.Now()
-
-	// Emit instant start+done for cached (skipped) stages so the UI shows
-	// them as completed.
-	for s := StageID(0); s < startFrom && s < numStages; s++ {
-		if name, ok := stageNames[s]; ok {
-			tracker.StageStart(name, false, 0)
-			tracker.StageDone(name)
-		}
-	}
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -199,13 +189,12 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Stage 0: Load
 	// runLoad emits its own "Loading" stage (and "Alpha-wrap" sub-stage when
-	// enabled), so don't double-emit here.
-	if startFrom <= StageLoad {
-		if err := runLoad(ctx, cache, opts, tracker); err != nil {
-			return nil, err
-		}
+	// enabled), so don't double-emit here. runLoad checks the unified cache
+	// internally and short-circuits on a hit.
+	if err := runLoad(ctx, cache, opts, tracker); err != nil {
+		return nil, err
 	}
-	lo := cache.getLoad()
+	lo := cache.getLoad(opts)
 
 	// Apply base color override on top of the (possibly cached) load output.
 	// Cheap and idempotent: runs every invocation so load/decimate/sticker
@@ -226,26 +215,25 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 
 	// Stage 1: Decimate (only depends on geometry + grid params, not stickers)
 	// DecimateMesh emits its own "Decimating" stage events (with a progress
-	// bar), so don't double-emit here.
-	if startFrom <= StageDecimate {
-		if err := runDecimate(ctx, cache, opts, lo, tracker); err != nil {
-			return nil, err
-		}
+	// bar), so don't double-emit here. runDecimate checks the cache and
+	// short-circuits on a hit.
+	if err := runDecimate(ctx, cache, opts, lo, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	// Stage 2: Sticker (builds decals from mesh, before voxelization)
-	if startFrom <= StageSticker {
-		if err := runSticker(ctx, cache, opts, lo, tracker, onWarning); err != nil {
-			return nil, err
-		}
+	// Stage 2: Sticker (builds decals from mesh, before voxelization).
+	// runSticker checks the cache internally; on hit it just emits a stage
+	// marker for the UI.
+	if err := runSticker(ctx, cache, opts, lo, tracker, onWarning); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	so := cache.getSticker()
+	so := cache.getSticker(opts)
 
 	// Send input mesh (with sticker overlay) to the preview after stickers
 	// are built. Two cases:
@@ -294,95 +282,75 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Stage 3: Voxelize (uses decals from sticker stage)
 	// VoxelizeTwoGrids emits its own "Voxelizing" and "Coloring cells" stages
 	// so the two phases appear as distinct steps in the UI instead of
-	// overlapping.
-	if startFrom <= StageVoxelize {
-		if err := runVoxelize(ctx, cache, opts, lo, so, tracker); err != nil {
-			return nil, err
-		}
+	// overlapping. runVoxelize checks the cache internally.
+	if err := runVoxelize(ctx, cache, opts, lo, so, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	vo := cache.getVoxelize()
+	vo := cache.getVoxelize(opts)
 
 	// Stage 4: Color adjustment
-	if startFrom <= StageColorAdjust {
-		tracker.StageStart(stageNames[StageColorAdjust], false, 0)
-		if err := runColorAdjust(ctx, cache, opts, vo); err != nil {
-			return nil, err
-		}
-		tracker.StageDone(stageNames[StageColorAdjust])
+	if err := runColorAdjust(ctx, cache, opts, vo, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	cao := cache.getColorAdjust()
+	cao := cache.getColorAdjust(opts)
 
-	// Stage 4: Color warp (RBF-based color space warping)
-	if startFrom <= StageColorWarp {
-		tracker.StageStart(stageNames[StageColorWarp], false, 0)
-		if err := runColorWarp(ctx, cache, opts, cao); err != nil {
-			return nil, err
-		}
-		tracker.StageDone(stageNames[StageColorWarp])
+	// Stage 5: Color warp (RBF-based color space warping)
+	if err := runColorWarp(ctx, cache, opts, cao, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	cwo := cache.getColorWarp()
+	cwo := cache.getColorWarp(opts)
 
-	// Stage 5: Palette + snap colors
-	if startFrom <= StagePalette {
-		tracker.StageStart(stageNames[StagePalette], false, 0)
-		if err := runPalette(ctx, cache, opts, cwo, tracker); err != nil {
-			return nil, err
-		}
-		tracker.StageDone(stageNames[StagePalette])
+	// Stage 6: Palette + snap colors
+	if err := runPalette(ctx, cache, opts, cwo, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	po := cache.getPalette()
+	po := cache.getPalette(opts)
 
 	if onPalette != nil {
 		onPalette(po.Palette, po.PaletteLabels)
 	}
 
-	// Stage 6: Dither + flood fill
+	// Stage 7: Dither + flood fill
 	// runDither emits its own "Dithering" and "Flood fill" stages so the two
 	// phases each get their own progress bar.
-	if startFrom <= StageDither {
-		if err := runDither(ctx, cache, opts, po, vo, tracker); err != nil {
-			return nil, err
-		}
+	if err := runDither(ctx, cache, opts, po, vo, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	do := cache.getDither()
+	do := cache.getDither(opts)
 
-	// Stage 7: Clip
+	// Stage 8: Clip
 	// ClipMeshByPatchesTwoGrid emits its own "Clipping" stage with a
 	// progress bar fed by worker counters.
-	if startFrom <= StageClip {
-		if err := runClip(ctx, cache, opts, do, cache.getDecimate(), vo, tracker); err != nil {
-			return nil, err
-		}
+	if err := runClip(ctx, cache, opts, do, cache.getDecimate(opts), vo, tracker); err != nil {
+		return nil, err
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	// Stage 8: Merge
+	// Stage 9: Merge
 	// MergeCoplanarTriangles emits its own "Merging" stage. The NoMerge
 	// path emits an instant start+done from runMerge.
-	if startFrom <= StageMerge {
-		if err := runMerge(ctx, cache, opts, tracker); err != nil {
-			return nil, err
-		}
+	if err := runMerge(ctx, cache, opts, tracker); err != nil {
+		return nil, err
 	}
 
-	mo := cache.getMerge()
+	mo := cache.getMerge(opts)
 
 	// Build output preview mesh from merge result + palette.
 	// Scale vertices to match the preview's coordinate space so both
@@ -430,7 +398,7 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 		}, nil, nil
 	}
 
-	faceCount, err := ExportFile(cache, opts.Output, export3mf.Options{
+	faceCount, err := ExportFile(cache, opts, opts.Output, export3mf.Options{
 		PrinterID:      opts.Printer,
 		NozzleDiameter: opts.NozzleDiameter,
 		LayerHeight:    opts.LayerHeight,
@@ -450,12 +418,14 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 	return prepResult, result, nil
 }
 
-// ExportFile writes a 3MF file using cached pipeline results.
+// ExportFile writes a 3MF file using cached pipeline results. The opts must
+// be the same Options object used in the most recent successful RunCached
+// call so the cache lookups hit.
 // Returns the number of faces in the output.
-func ExportFile(cache *StageCache, outputPath string, exportOpts export3mf.Options) (int, error) {
-	lo := cache.getLoad()
-	po := cache.getPalette()
-	mo := cache.getMerge()
+func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts export3mf.Options) (int, error) {
+	lo := cache.getLoad(opts)
+	po := cache.getPalette(opts)
+	mo := cache.getMerge(opts)
 	if lo == nil || po == nil || mo == nil {
 		return 0, fmt.Errorf("pipeline has not been run yet")
 	}
@@ -496,6 +466,16 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 // --- Per-stage helpers ---
 
 func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) error {
+	// In-memory cache hit: emit a no-op stage marker for the UI and return.
+	// The disk fallback for StageLoad lives at the raw-model level (see
+	// cache.getRaw); a memory miss with a disk-cached raw still requires
+	// re-running the rest of this function (clone, scale, alpha-wrap) to
+	// rebuild the loadOutput.
+	if cache.getLoad(opts) != nil {
+		progress.BeginStage(tracker, "Loading", false, 0).Done()
+		return nil
+	}
+
 	loading := progress.BeginStage(tracker, "Loading", false, 0)
 	defer loading.Done()
 	inputExt := strings.ToLower(filepath.Ext(opts.Input))
@@ -575,7 +555,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progr
 			offset = alpha / 30
 		}
 		var wrapped *loader.LoadedModel
-		dk := cache.alphaWrapDiskKey(opts, alpha, offset)
+		dk := cache.alphaWrapKey(opts, alpha, offset)
 		if cache.disk != nil && dk != "" {
 			var dm loader.LoadedModel
 			if cache.disk.Get("alphawrap", dk, &dm) {
@@ -624,7 +604,7 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progr
 		}
 	}
 
-	cache.setStage(StageLoad, stageKey(StageLoad, opts), &loadOutput{
+	cache.setLoad(opts, &loadOutput{
 		Model:        geomModel,
 		ColorModel:   model,
 		SampleModel:  sampleModel,
@@ -663,6 +643,17 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // so the preview reflects the new colors. Idempotent — a no-op when
 // lo.appliedBaseColor already matches opts.BaseColor.
 //
+// This intentionally violates the cache's "outputs are immutable after set"
+// contract for loadOutput: ColorModel.FaceBaseColor and SampleModel.FaceBaseColor
+// are mutated in place every run. Safe today because (a) the pipeline runs
+// single-threaded under app.pipelineWorker, so no other reader is active when
+// this runs; (b) BaseColor is excluded from loadSettings, so multiple cached
+// loadOutput entries don't exist for the same load key with different colors;
+// and (c) this runs before any disk-encode goroutine kicked off by setLoad
+// (which is in-memory only — there's no goroutine for StageLoad).
+// If concurrency is ever introduced into the pipeline worker, factor this
+// into a per-run shallow clone of lo.ColorModel/SampleModel.
+//
 // Invariant: whenever lo is present, raw is too. runLoad always calls
 // setRaw before populating the load stage, and nothing clears raw in isolation.
 func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
@@ -690,6 +681,9 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 }
 
 func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, so *stickerOutput, tracker progress.Tracker) error {
+	if cache.getVoxelize(opts) != nil {
+		return nil
+	}
 	layer0Size := opts.NozzleDiameter * squarevoxel.Layer0CellScale
 	upperSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	layerH := opts.LayerHeight
@@ -711,7 +705,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	if so != nil && so.Model != nil {
 		if so.FromAlphaWrap {
 			stickerModel = so.Model
-			stickerSI = so.SI
+			stickerSI = so.ensureSI()
 		} else {
 			sampleModel = so.Model
 		}
@@ -724,7 +718,7 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	if err != nil {
 		return fmt.Errorf("voxelize: %w", err)
 	}
-	cache.setStage(StageVoxelize, stageKey(StageVoxelize, opts), &voxelizeOutput{
+	cache.setVoxelize(opts, &voxelizeOutput{
 		Cells:         result.Cells,
 		CellAssignMap: result.CellAssignMap,
 		MinV:          result.MinV,
@@ -736,8 +730,19 @@ func runVoxelize(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 }
 
 func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker, onWarning func(string)) error {
+	if cache.getSticker(opts) != nil {
+		// Cache hit: emit a UI marker so the stage shows as done.
+		// Consistent with the other runX cache-hit paths.
+		tracker.StageStart(stageNames[StageSticker], false, 0)
+		tracker.StageDone(stageNames[StageSticker])
+		return nil
+	}
 	if len(opts.Stickers) == 0 {
-		cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{})
+		// No work to do, but still emit a marker so the stage list looks
+		// uniform from run to run.
+		tracker.StageStart(stageNames[StageSticker], false, 0)
+		tracker.StageDone(stageNames[StageSticker])
+		cache.setSticker(opts, &stickerOutput{})
 		return nil
 	}
 
@@ -846,17 +851,30 @@ func runSticker(ctx context.Context, cache *StageCache, opts Options, lo *loadOu
 		stage.Progress(base + stickerUnits)
 	}
 
-	cache.setStage(StageSticker, stageKey(StageSticker, opts), &stickerOutput{
+	so := &stickerOutput{
 		Decals:        decals,
-		Adj:           adj,
 		Model:         model,
-		SI:            si,
 		FromAlphaWrap: opts.AlphaWrap,
-	})
+	}
+	// si is unexported (and non-gob); seed it from the BFS pass we just
+	// ran so downstream stages on this run skip the rebuild. On a disk
+	// cache hit, ensureSI rebuilds it. Built before the cache.set call so
+	// the cached struct is fully populated, satisfying the "read-only
+	// after set" invariant the disk-encode goroutine relies on.
+	so.si = si
+	cache.setSticker(opts, so)
 	return nil
 }
 
-func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput) error {
+func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *voxelizeOutput, tracker progress.Tracker) error {
+	if cache.getColorAdjust(opts) != nil {
+		tracker.StageStart(stageNames[StageColorAdjust], false, 0)
+		tracker.StageDone(stageNames[StageColorAdjust])
+		return nil
+	}
+	tracker.StageStart(stageNames[StageColorAdjust], false, 0)
+	defer tracker.StageDone(stageNames[StageColorAdjust])
+
 	adj := voxel.ColorAdjustment{
 		Brightness: opts.Brightness,
 		Contrast:   opts.Contrast,
@@ -872,18 +890,24 @@ func runColorAdjust(ctx context.Context, cache *StageCache, opts Options, vo *vo
 			opts.Brightness, opts.Contrast, opts.Saturation, time.Since(tAdj).Seconds())
 	}
 
-	cache.setStage(StageColorAdjust, stageKey(StageColorAdjust, opts), &colorAdjustOutput{
-		Cells: cells,
-	})
+	cache.setColorAdjust(opts, &colorAdjustOutput{Cells: cells})
 	return nil
 }
 
-func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *colorAdjustOutput) error {
+func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *colorAdjustOutput, tracker progress.Tracker) error {
+	if cache.getColorWarp(opts) != nil {
+		tracker.StageStart(stageNames[StageColorWarp], false, 0)
+		tracker.StageDone(stageNames[StageColorWarp])
+		return nil
+	}
+	tracker.StageStart(stageNames[StageColorWarp], false, 0)
+	defer tracker.StageDone(stageNames[StageColorWarp])
+
 	if len(opts.WarpPins) == 0 {
 		// Pass through — copy cells to avoid aliasing cached output.
 		out := make([]voxel.ActiveCell, len(cao.Cells))
 		copy(out, cao.Cells)
-		cache.setStage(StageColorWarp, stageKey(StageColorWarp, opts), &colorWarpOutput{Cells: out})
+		cache.setColorWarp(opts, &colorWarpOutput{Cells: out})
 		return nil
 	}
 
@@ -907,22 +931,16 @@ func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *col
 	}
 	fmt.Printf("  Warped colors (%d pins) in %.1fs\n", len(pins), time.Since(tWarp).Seconds())
 
-	cache.setStage(StageColorWarp, stageKey(StageColorWarp, opts), &colorWarpOutput{Cells: cells})
+	cache.setColorWarp(opts, &colorWarpOutput{Cells: cells})
 	return nil
 }
 
 func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
-	dk := cache.decimateDiskKey(opts)
-	if cache.disk != nil && dk != "" {
-		var dm loader.LoadedModel
-		if cache.disk.Get("decimate", dk, &dm) {
-			fmt.Printf("Decimating: cached (%d vertices, %d faces)\n",
-				len(dm.Vertices), len(dm.Faces))
-			cache.setStage(StageDecimate, stageKey(StageDecimate, opts), &decimateOutput{
-				DecimModel: &dm,
-			})
-			return nil
-		}
+	if cache.getDecimate(opts) != nil {
+		// Cached: emit a UI marker so users see "Decimating ✓".
+		tracker.StageStart(stageNames[StageDecimate], false, 0)
+		tracker.StageDone(stageNames[StageDecimate])
+		return nil
 	}
 
 	fmt.Println("Decimating...")
@@ -933,15 +951,7 @@ func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 		return fmt.Errorf("decimate: %w", err)
 	}
 
-	cache.setStage(StageDecimate, stageKey(StageDecimate, opts), &decimateOutput{
-		DecimModel: decimModel,
-	})
-	if cache.disk != nil && dk != "" {
-		// Async write: decimModel is consumed read-only by runClip and
-		// the export path; nothing mutates it after this point, so the
-		// gob encoder is safe to run concurrently with those readers.
-		go cache.disk.Set("decimate", dk, decimModel)
-	}
+	cache.setDecimate(opts, &decimateOutput{DecimModel: decimModel})
 	return nil
 }
 
@@ -1006,7 +1016,7 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 		}
 	}
 
-	cache.setStage(StagePalette, stageKey(StagePalette, opts), &paletteOutput{
+	cache.setPalette(opts, &paletteOutput{
 		Palette:       pal,
 		PaletteLabels: palLabels,
 		Cells:         cells,
@@ -1015,6 +1025,15 @@ func runPalette(ctx context.Context, cache *StageCache, opts Options, cwo *color
 }
 
 func runDither(ctx context.Context, cache *StageCache, opts Options, po *paletteOutput, vo *voxelizeOutput, tracker progress.Tracker) error {
+	if cache.getDither(opts) != nil {
+		// Cache hit: emit UI markers for the two sub-stages so they appear
+		// done. (Stages are visualized as "Dithering" then "Flood fill".)
+		tracker.StageStart("Dithering", false, 0)
+		tracker.StageDone("Dithering")
+		tracker.StageStart("Flood fill", false, 0)
+		tracker.StageDone("Flood fill")
+		return nil
+	}
 	ditherMode := opts.Dither
 	cells := po.Cells
 	pal := po.Palette
@@ -1075,7 +1094,7 @@ func runDither(ctx context.Context, cache *StageCache, opts Options, po *palette
 		patchAssignment[pid] = assignments[i]
 	}
 
-	cache.setStage(StageDither, stageKey(StageDither, opts), &ditherOutput{
+	cache.setDither(opts, &ditherOutput{
 		Assignments:     assignments,
 		PatchMap:        patchMap,
 		NumPatches:      numPatches,
@@ -1125,6 +1144,12 @@ func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignment
 }
 
 func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput, tracker progress.Tracker) error {
+	if cache.getClip(opts) != nil {
+		// Cached: emit a UI marker so the Clipping step appears done.
+		tracker.StageStart("Clipping", false, 0)
+		tracker.StageDone("Clipping")
+		return nil
+	}
 	tClip := time.Now()
 	cfg := voxel.TwoGridConfig{
 		MinV:       vo.MinV,
@@ -1141,7 +1166,7 @@ func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOut
 	fmt.Printf("  Clipped mesh: %d faces in %.1fs\n", len(shellFaces), time.Since(tClip).Seconds())
 	fmt.Printf("  After clip: %s\n", voxel.CheckWatertight(shellFaces))
 
-	cache.setStage(StageClip, stageKey(StageClip, opts), &clipOutput{
+	cache.setClip(opts, &clipOutput{
 		ShellVerts:       shellVerts,
 		ShellFaces:       shellFaces,
 		ShellAssignments: shellAssignments,
@@ -1150,7 +1175,12 @@ func runClip(ctx context.Context, cache *StageCache, opts Options, do *ditherOut
 }
 
 func runMerge(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) error {
-	co := cache.getClip()
+	if cache.getMerge(opts) != nil {
+		tracker.StageStart("Merging", false, 0)
+		tracker.StageDone("Merging")
+		return nil
+	}
+	co := cache.getClip(opts)
 	shellVerts := co.ShellVerts
 	shellFaces := co.ShellFaces
 	shellAssignments := co.ShellAssignments
@@ -1171,7 +1201,7 @@ func runMerge(ctx context.Context, cache *StageCache, opts Options, tracker prog
 	}
 	fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
 
-	cache.setStage(StageMerge, stageKey(StageMerge, opts), &mergeOutput{
+	cache.setMerge(opts, &mergeOutput{
 		ShellVerts:       shellVerts,
 		ShellFaces:       shellFaces,
 		ShellAssignments: shellAssignments,
