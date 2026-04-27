@@ -43,6 +43,7 @@ type App struct {
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
 	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
 	collections   *collection.Manager    // filament collection manager
+	sweepInFlight atomic.Bool             // true while a disk-cache sweep goroutine is running
 }
 
 // pipelineRequest is sent from ProcessPipeline to the worker goroutine.
@@ -102,25 +103,32 @@ const (
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.pipelineWorker()
-	go a.sweepDiskCache()
 }
 
-// sweepDiskCache runs the age + LRU eviction in the background so it doesn't
-// delay startup. Best-effort: any error is logged and ignored.
-func (a *App) sweepDiskCache() {
-	c := a.cache.Disk()
-	if c == nil {
+// kickDiskCacheSweep starts a background sweep goroutine if one isn't
+// already running. Called at the end of every pipeline run so the cache
+// can't grow between sweeps. The sweep itself is best-effort: any error
+// is logged and ignored. Safe to call from any goroutine.
+func (a *App) kickDiskCacheSweep() {
+	if !a.sweepInFlight.CompareAndSwap(false, true) {
 		return
 	}
-	stats, err := c.Sweep(diskCacheMaxAge, diskCacheMaxBytes)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "disk cache sweep: %v\n", err)
-		return
-	}
-	if stats.AgeEvicted > 0 || stats.SizeEvicted > 0 {
-		fmt.Fprintf(os.Stderr, "disk cache sweep: removed %d aged + %d LRU entries (%.1f MB)\n",
-			stats.AgeEvicted, stats.SizeEvicted, float64(stats.BytesFreed)/(1<<20))
-	}
+	go func() {
+		defer a.sweepInFlight.Store(false)
+		c := a.cache.Disk()
+		if c == nil {
+			return
+		}
+		stats, err := c.Sweep(diskCacheMaxAge, diskCacheMaxBytes)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "disk cache sweep: %v\n", err)
+			return
+		}
+		if stats.AgeEvicted > 0 || stats.SizeEvicted > 0 {
+			fmt.Fprintf(os.Stderr, "disk cache sweep: removed %d aged + %d LRU entries (%.1f MB)\n",
+				stats.AgeEvicted, stats.SizeEvicted, float64(stats.BytesFreed)/(1<<20))
+		}
+	}()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -422,6 +430,9 @@ func (a *App) processOne(req pipelineRequest) {
 			Duration: result.Duration.Seconds(),
 		})
 	}
+	// Pipeline completed successfully; the disk cache may have grown.
+	// kickDiskCacheSweep is a no-op if a previous sweep is still running.
+	a.kickDiskCacheSweep()
 }
 
 // LogMessage prints a message from the frontend to stdout.
