@@ -1,8 +1,8 @@
-// Package diskcache provides a small content-addressed cache stored as gob
-// files under a single directory. It is used to persist the parse, decimate,
-// and alpha-wrap outputs across app restarts. Eviction is mtime-driven: a
-// startup sweep removes entries past a maximum age and then evicts the oldest
-// entries until the total size fits within a budget.
+// Package diskcache provides a small content-addressed cache stored as
+// zstd-compressed gob files under a single directory. It is used to persist
+// per-stage pipeline outputs across app restarts. Eviction is mtime-driven:
+// a startup sweep removes entries past a maximum age and then evicts the
+// oldest entries until the total size fits within a budget.
 package diskcache
 
 import (
@@ -15,12 +15,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
+
 // Cache is rooted at a single directory. Each "stage" gets its own
-// subdirectory and entries are gob files named "<key>.gob".
+// subdirectory and entries are zstd-compressed gob files named
+// "<key>.gob.zst".
 type Cache struct {
 	Dir string
 	// OnError, if non-nil, is called whenever Set or Get encounters an
@@ -83,13 +86,13 @@ func HashFile(path string) (string, error) {
 }
 
 func (c *Cache) pathFor(stage, key string) string {
-	return filepath.Join(c.Dir, stage, key+".gob")
+	return filepath.Join(c.Dir, stage, key+".gob.zst")
 }
 
-// Get reads and gob-decodes the entry into out (a pointer). Returns false on
-// miss; on a decode error the file is removed silently and false is returned.
-// On success, the file's mtime is bumped so the LRU sweep treats it as a
-// recent access.
+// Get reads, zstd-decompresses, and gob-decodes the entry into out (a
+// pointer). Returns false on miss; on any decode error the file is removed
+// silently and false is returned. On success, the file's mtime is bumped so
+// the LRU sweep treats it as a recent access.
 func (c *Cache) Get(stage, key string, out any) bool {
 	p := c.pathFor(stage, key)
 	f, err := os.Open(p)
@@ -99,35 +102,59 @@ func (c *Cache) Get(stage, key string, out any) bool {
 		}
 		return false
 	}
-	if err := gob.NewDecoder(f).Decode(out); err != nil {
+	zr, err := zstd.NewReader(f)
+	if err != nil {
 		f.Close()
 		os.Remove(p)
 		c.reportError(stage, "decode", key, err)
 		return false
 	}
+	if err := gob.NewDecoder(zr).Decode(out); err != nil {
+		zr.Close()
+		f.Close()
+		os.Remove(p)
+		c.reportError(stage, "decode", key, err)
+		return false
+	}
+	zr.Close()
 	f.Close()
 	now := time.Now()
 	_ = os.Chtimes(p, now, now)
 	return true
 }
 
-// Set encodes val and writes it atomically (temp file + rename). All errors
-// are silently swallowed: the cache is best-effort and a failed write must
-// not break the pipeline. Errors are reported via OnError if set.
+// Set gob-encodes val, zstd-compresses, and writes the result atomically
+// (temp file + rename). All errors are silently swallowed: the cache is
+// best-effort and a failed write must not break the pipeline. Errors are
+// reported via OnError if set.
 func (c *Cache) Set(stage, key string, val any) {
 	dir := filepath.Join(c.Dir, stage)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.reportError(stage, "mkdir", key, err)
 		return
 	}
-	final := filepath.Join(dir, key+".gob")
+	final := filepath.Join(dir, key+".gob.zst")
 	tmp, err := os.CreateTemp(dir, ".tmp-"+key+"-*")
 	if err != nil {
 		c.reportError(stage, "tempfile", key, err)
 		return
 	}
 	tmpName := tmp.Name()
-	if err := gob.NewEncoder(tmp).Encode(val); err != nil {
+	zw, err := zstd.NewWriter(tmp, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		c.reportError(stage, "encode", key, err)
+		return
+	}
+	if err := gob.NewEncoder(zw).Encode(val); err != nil {
+		zw.Close()
+		tmp.Close()
+		os.Remove(tmpName)
+		c.reportError(stage, "encode", key, err)
+		return
+	}
+	if err := zw.Close(); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		c.reportError(stage, "encode", key, err)
@@ -153,9 +180,14 @@ type SweepStats struct {
 
 // Sweep walks the cache directory and removes entries:
 //
-//  1. Stale temp files from interrupted writes.
-//  2. Entries with mtime older than maxAge.
-//  3. Oldest-by-mtime entries until total size <= maxBytes.
+//  1. Files with mtime older than maxAge.
+//  2. Oldest-by-mtime files until total size <= maxBytes.
+//
+// Every file under c.Dir is a candidate — there's no name- or
+// extension-specific filtering. The cache directory is dedicated to this
+// cache, so anything in it is owned by us and safe to evict. This also
+// means stale temp files from interrupted writes, and any leftovers from
+// older cache file-name schemes, get cleaned up by the same rules.
 //
 // Errors on individual entries are ignored so a single unreadable file
 // doesn't abort the sweep.
@@ -177,14 +209,6 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		}
 		info, err := d.Info()
 		if err != nil {
-			return nil
-		}
-		base := filepath.Base(path)
-		// Stray temp files from a crashed/interrupted Set call.
-		if strings.HasPrefix(base, ".tmp-") {
-			if rmErr := os.Remove(path); rmErr == nil {
-				stats.BytesFreed += info.Size()
-			}
 			return nil
 		}
 		if info.ModTime().Before(cutoff) {

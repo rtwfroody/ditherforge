@@ -41,8 +41,8 @@ func TestLoadedModelGobRoundTripNoTextures(t *testing.T) {
 	}
 }
 
-// TestLoadedModelGobRoundTripWithTextures: textures survive PNG round-trip
-// inside the gob payload.
+// TestLoadedModelGobRoundTripWithTextures: textures survive raw NRGBA
+// round-trip inside the gob payload.
 func TestLoadedModelGobRoundTripWithTextures(t *testing.T) {
 	tex := image.NewNRGBA(image.Rect(0, 0, 4, 4))
 	tex.Set(0, 0, color.NRGBA{R: 200, G: 100, B: 50, A: 255})

@@ -3,6 +3,7 @@ package diskcache
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,8 +49,8 @@ func TestCorruptFileIsRemoved(t *testing.T) {
 	c, _ := Open(dir)
 	stageDir := filepath.Join(dir, "test")
 	os.MkdirAll(stageDir, 0o755)
-	corrupt := filepath.Join(stageDir, "key.gob")
-	if err := os.WriteFile(corrupt, []byte("not gob"), 0o644); err != nil {
+	corrupt := filepath.Join(stageDir, "key.gob.zst")
+	if err := os.WriteFile(corrupt, []byte("not zstd"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var p payload
@@ -157,20 +158,34 @@ func TestSweepLRU(t *testing.T) {
 	}
 }
 
-// TestSweepRemovesStaleTempFiles: leftover .tmp- files from interrupted
-// writes should be cleaned up by Sweep.
-func TestSweepRemovesStaleTempFiles(t *testing.T) {
+// TestSweepEvictsArbitraryFiles: anything in the cache directory is
+// fair game — Sweep applies its rules uniformly without filtering by
+// extension or name. Aged-out files (including stale .tmp- leftovers
+// and entries from older cache file-name schemes) get removed once
+// they cross the age cutoff.
+func TestSweepEvictsArbitraryFiles(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := Open(dir)
 	stageDir := filepath.Join(dir, "test")
 	os.MkdirAll(stageDir, 0o755)
-	tmp := filepath.Join(stageDir, ".tmp-foo-12345")
-	os.WriteFile(tmp, []byte("partial"), 0o644)
-	if _, err := c.Sweep(7*24*time.Hour, 1<<40); err != nil {
+	stale := filepath.Join(stageDir, ".tmp-foo-12345") // crashed-Set leftover
+	old := filepath.Join(stageDir, "key.gob")          // pre-zstd format
+	os.WriteFile(stale, []byte("partial"), 0o644)
+	os.WriteFile(old, []byte("legacy"), 0o644)
+	pastCutoff := time.Now().Add(-30 * 24 * time.Hour)
+	os.Chtimes(stale, pastCutoff, pastCutoff)
+	os.Chtimes(old, pastCutoff, pastCutoff)
+	stats, err := c.Sweep(7*24*time.Hour, 1<<40)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
-		t.Error("stale temp file was not removed by Sweep")
+	if stats.AgeEvicted != 2 {
+		t.Errorf("AgeEvicted = %d, want 2", stats.AgeEvicted)
+	}
+	for _, p := range []string{stale, old} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("file %s was not removed by Sweep", filepath.Base(p))
+		}
 	}
 }
 
@@ -212,7 +227,7 @@ func TestHashFile(t *testing.T) {
 	}
 }
 
-// TestAtomicWrite: a Set should never leave a partial .gob file at the
+// TestAtomicWrite: a Set should never leave a partial file at the
 // final path even if the process is interrupted mid-write. We can't
 // simulate a true crash, but we can verify no .tmp- files leak after a
 // successful Set.
@@ -223,8 +238,8 @@ func TestAtomicWriteNoLeftovers(t *testing.T) {
 	stageDir := filepath.Join(dir, "test")
 	entries, _ := os.ReadDir(stageDir)
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".gob" {
-			t.Errorf("non-.gob file left in cache dir: %s", e.Name())
+		if !strings.HasSuffix(e.Name(), ".gob.zst") {
+			t.Errorf("non-cache file left in cache dir: %s", e.Name())
 		}
 	}
 }

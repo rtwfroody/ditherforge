@@ -6,6 +6,7 @@ require (
 	github.com/alexflint/go-arg v1.5.1
 	github.com/hschendel/stl v1.0.4
 	github.com/james-bowman/sparse v0.0.0-20260216202247-495ee4f84d35
+	github.com/klauspost/compress v1.18.5
 	github.com/lucasb-eyer/go-colorful v1.2.0
 	github.com/qmuntal/draco-go v0.4.0
 	github.com/qmuntal/gltf v0.27.0

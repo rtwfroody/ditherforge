@@ -3,20 +3,20 @@ package loader
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"image"
-	"image/png"
+
+	"github.com/rtwfroody/ditherforge/internal/imageraw"
 )
 
-// modelOnDisk is the on-disk gob representation of LoadedModel. It mirrors
-// LoadedModel's fields except Textures, which is replaced by PNG-encoded
-// byte slices because gob can't serialize image.Image directly.
+// modelOnDisk is the on-disk gob representation of LoadedModel. Textures
+// are stored as raw NRGBA bytes; the diskcache zstd layer handles
+// compression.
 type modelOnDisk struct {
 	Vertices       [][3]float32
 	Faces          [][3]uint32
 	UVs            [][2]float32
 	VertexColors   [][4]uint8
-	TexturesPNG    [][]byte
+	Textures       []imageraw.Tex
 	FaceTextureIdx []int32
 	FaceAlpha      []float32
 	FaceBaseColor  [][4]uint8
@@ -25,7 +25,7 @@ type modelOnDisk struct {
 	NumMeshes      int
 }
 
-// GobEncode lets gob serialize a LoadedModel. Textures are PNG-encoded.
+// GobEncode lets gob serialize a LoadedModel.
 func (m *LoadedModel) GobEncode() ([]byte, error) {
 	od := modelOnDisk{
 		Vertices:       m.Vertices,
@@ -40,16 +40,9 @@ func (m *LoadedModel) GobEncode() ([]byte, error) {
 		NumMeshes:      m.NumMeshes,
 	}
 	if len(m.Textures) > 0 {
-		od.TexturesPNG = make([][]byte, len(m.Textures))
+		od.Textures = make([]imageraw.Tex, len(m.Textures))
 		for i, t := range m.Textures {
-			if t == nil {
-				continue
-			}
-			var buf bytes.Buffer
-			if err := png.Encode(&buf, t); err != nil {
-				return nil, fmt.Errorf("encode texture %d: %w", i, err)
-			}
-			od.TexturesPNG[i] = buf.Bytes()
+			od.Textures[i] = imageraw.FromImage(t)
 		}
 	}
 	var out bytes.Buffer
@@ -59,8 +52,8 @@ func (m *LoadedModel) GobEncode() ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// GobDecode lets gob deserialize a LoadedModel. PNG textures are decoded back
-// into image.Image (concrete type as returned by png.Decode).
+// GobDecode lets gob deserialize a LoadedModel. Textures come back as
+// concrete *image.NRGBA values.
 func (m *LoadedModel) GobDecode(data []byte) error {
 	var od modelOnDisk
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&od); err != nil {
@@ -76,17 +69,10 @@ func (m *LoadedModel) GobDecode(data []byte) error {
 	m.NoTextureMask = od.NoTextureMask
 	m.FaceMeshIdx = od.FaceMeshIdx
 	m.NumMeshes = od.NumMeshes
-	if len(od.TexturesPNG) > 0 {
-		m.Textures = make([]image.Image, len(od.TexturesPNG))
-		for i, b := range od.TexturesPNG {
-			if len(b) == 0 {
-				continue
-			}
-			img, err := png.Decode(bytes.NewReader(b))
-			if err != nil {
-				return fmt.Errorf("decode texture %d: %w", i, err)
-			}
-			m.Textures[i] = img
+	if len(od.Textures) > 0 {
+		m.Textures = make([]image.Image, len(od.Textures))
+		for i, t := range od.Textures {
+			m.Textures[i] = imageraw.ToImage(t)
 		}
 	}
 	return nil
