@@ -2,12 +2,15 @@ package pipeline
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash"
 	"hash/fnv"
 	"math"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -37,6 +40,18 @@ type StageCache struct {
 	// base-color override). It survives Scale/Size/BaseColor changes so the
 	// file parse isn't repeated when only a scale-dependent knob moves.
 	raw *cachedRaw
+
+	// disk persists the expensive-to-recompute outputs (raw parse, decimate,
+	// alpha-wrap) across app restarts. nil = persistence disabled.
+	disk *diskcache.Cache
+
+	// inputHash caches sha256 of the current input file's contents so that we
+	// don't re-hash on every disk-cache lookup within a session. Tracked by
+	// (path, mtime, size); a change to any invalidates and re-hashes.
+	inputHashPath  string
+	inputHashMtime time.Time
+	inputHashSize  int64
+	inputHash      string
 }
 
 type cachedStage struct {
@@ -52,6 +67,100 @@ type cachedRaw struct {
 // NewStageCache returns an empty stage cache.
 func NewStageCache() *StageCache {
 	return &StageCache{}
+}
+
+// SetDisk attaches a disk cache. Call this once after NewStageCache; passing
+// nil keeps persistence disabled.
+func (c *StageCache) SetDisk(d *diskcache.Cache) {
+	c.disk = d
+}
+
+// Disk returns the attached disk cache, or nil if persistence is disabled.
+func (c *StageCache) Disk() *diskcache.Cache {
+	return c.disk
+}
+
+// inputContentHash returns a sha256 of opts.Input's contents, memoized within
+// the session by (path, mtime, size). Returns "" on stat or read failure;
+// callers should treat that as "no disk caching for this run".
+func (c *StageCache) inputContentHash(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if c.inputHash != "" && c.inputHashPath == path &&
+		c.inputHashMtime.Equal(info.ModTime()) && c.inputHashSize == info.Size() {
+		return c.inputHash
+	}
+	h, err := diskcache.HashFile(path)
+	if err != nil {
+		return ""
+	}
+	c.inputHash = h
+	c.inputHashPath = path
+	c.inputHashMtime = info.ModTime()
+	c.inputHashSize = info.Size()
+	return h
+}
+
+// sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
+// distinct from any concrete value.
+func sizeKeyPart(s *float32) string {
+	if s == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%g", *s)
+}
+
+// rawDiskKey computes the disk-cache key for a parsed-from-file LoadedModel.
+// Returns "" if the file hash cannot be computed; the caller must skip disk.
+func (c *StageCache) rawDiskKey(opts Options) string {
+	fh := c.inputContentHash(opts.Input)
+	if fh == "" {
+		return ""
+	}
+	return diskcache.Key(Version, "raw", fh,
+		fmt.Sprint(opts.ObjectIndex),
+		fmt.Sprint(opts.ReloadSeq),
+	)
+}
+
+// decimateDiskKey hashes everything that can affect the decimate output: the
+// input file, all settings that feed into lo.Model (scale/size/alpha-wrap),
+// and decimate-specific settings. ReloadSeq is included to mirror the
+// in-memory key — callers bump it to force a re-parse of an unchanged path.
+func (c *StageCache) decimateDiskKey(opts Options) string {
+	fh := c.inputContentHash(opts.Input)
+	if fh == "" {
+		return ""
+	}
+	return diskcache.Key(
+		Version, "decimate", fh,
+		fmt.Sprint(opts.ObjectIndex),
+		fmt.Sprint(opts.ReloadSeq),
+		fmt.Sprintf("%g", opts.Scale),
+		sizeKeyPart(opts.Size),
+		fmt.Sprintf("%v/%g/%g", opts.AlphaWrap, opts.AlphaWrapAlpha, opts.AlphaWrapOffset),
+		fmt.Sprintf("%g/%g/%v", opts.NozzleDiameter, opts.LayerHeight, opts.NoSimplify),
+	)
+}
+
+// alphaWrapDiskKey hashes everything that can affect the alpha-wrap output:
+// the input file, the scaled-mesh settings, and the alpha/offset arguments
+// (the *resolved* values, after auto-defaults are applied — caller passes them).
+func (c *StageCache) alphaWrapDiskKey(opts Options, alpha, offset float32) string {
+	fh := c.inputContentHash(opts.Input)
+	if fh == "" {
+		return ""
+	}
+	return diskcache.Key(
+		Version, "alphawrap", fh,
+		fmt.Sprint(opts.ObjectIndex),
+		fmt.Sprint(opts.ReloadSeq),
+		fmt.Sprintf("%g", opts.Scale),
+		sizeKeyPart(opts.Size),
+		fmt.Sprintf("%g/%g", alpha, offset),
+	)
 }
 
 // Per-stage output types.
@@ -524,15 +633,40 @@ func rawLoadKey(opts Options) uint64 {
 	return h.Sum64()
 }
 
-// getRaw returns the cached pristine model, or nil if the key has changed.
+// getRaw returns the cached pristine model. Tries memory first, then falls
+// back to the disk cache (and warms the in-memory cache on a disk hit).
+// Returns nil on miss.
 func (c *StageCache) getRaw(opts Options) *loader.LoadedModel {
 	k := rawLoadKey(opts)
-	if c.raw == nil || c.raw.key != k {
+	if c.raw != nil && c.raw.key == k {
+		return c.raw.model
+	}
+	if c.disk == nil {
 		return nil
 	}
-	return c.raw.model
+	dk := c.rawDiskKey(opts)
+	if dk == "" {
+		return nil
+	}
+	var m loader.LoadedModel
+	if !c.disk.Get("raw", dk, &m) {
+		return nil
+	}
+	c.raw = &cachedRaw{key: k, model: &m}
+	return &m
 }
 
 func (c *StageCache) setRaw(opts Options, m *loader.LoadedModel) {
 	c.raw = &cachedRaw{key: rawLoadKey(opts), model: m}
+	if c.disk == nil {
+		return
+	}
+	dk := c.rawDiskKey(opts)
+	if dk == "" {
+		return
+	}
+	// Async write: the model is read-only after this point (callers always
+	// CloneForEdit before mutating), so it's safe to gob-encode in parallel
+	// while the pipeline continues.
+	go c.disk.Set("raw", dk, m)
 }

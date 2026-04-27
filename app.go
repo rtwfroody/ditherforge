@@ -19,6 +19,7 @@ import (
 	"golang.org/x/image/draw"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
+	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
@@ -74,17 +75,52 @@ func NewApp() *App {
 		// Fatal: collections are required for the GUI to function.
 		panic(fmt.Sprintf("failed to initialize collection manager: %v", err))
 	}
+	cache := pipeline.NewStageCache()
+	if dir, err := diskcache.DefaultDir(); err == nil {
+		if d, err := diskcache.Open(dir); err == nil {
+			d.OnError = func(stage, op, key string, err error) {
+				fmt.Fprintf(os.Stderr, "disk cache %s %s [%s]: %v\n", stage, op, key, err)
+			}
+			cache.SetDisk(d)
+		} else {
+			fmt.Fprintf(os.Stderr, "disk cache disabled: %v\n", err)
+		}
+	}
 	return &App{
-		cache:       pipeline.NewStageCache(),
+		cache:       cache,
 		meshes:      newMeshHandler(),
 		reqCh:       make(chan pipelineRequest, 1),
 		collections: cm,
 	}
 }
 
+const (
+	diskCacheMaxAge   = 7 * 24 * time.Hour
+	diskCacheMaxBytes = 1 << 30 // 1 GiB
+)
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.pipelineWorker()
+	go a.sweepDiskCache()
+}
+
+// sweepDiskCache runs the age + LRU eviction in the background so it doesn't
+// delay startup. Best-effort: any error is logged and ignored.
+func (a *App) sweepDiskCache() {
+	c := a.cache.Disk()
+	if c == nil {
+		return
+	}
+	stats, err := c.Sweep(diskCacheMaxAge, diskCacheMaxBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "disk cache sweep: %v\n", err)
+		return
+	}
+	if stats.AgeEvicted > 0 || stats.SizeEvicted > 0 {
+		fmt.Fprintf(os.Stderr, "disk cache sweep: removed %d aged + %d LRU entries (%.1f MB)\n",
+			stats.AgeEvicted, stats.SizeEvicted, float64(stats.BytesFreed)/(1<<20))
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {

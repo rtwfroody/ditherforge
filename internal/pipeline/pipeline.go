@@ -574,14 +574,36 @@ func runLoad(ctx context.Context, cache *StageCache, opts Options, tracker progr
 		if offset <= 0 {
 			offset = alpha / 30
 		}
-		fmt.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm...", alpha, offset)
-		tWrap := time.Now()
-		wrapped, err := alphawrap.Wrap(model, alpha, offset)
-		if err != nil {
-			return fmt.Errorf("alpha-wrap: %w", err)
+		var wrapped *loader.LoadedModel
+		dk := cache.alphaWrapDiskKey(opts, alpha, offset)
+		if cache.disk != nil && dk != "" {
+			var dm loader.LoadedModel
+			if cache.disk.Get("alphawrap", dk, &dm) {
+				fmt.Printf("  Alpha-wrap: cached (%d vertices, %d faces)\n",
+					len(dm.Vertices), len(dm.Faces))
+				wrapped = &dm
+			}
 		}
-		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
-			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
+		if wrapped == nil {
+			fmt.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm...", alpha, offset)
+			tWrap := time.Now()
+			w, err := alphawrap.Wrap(model, alpha, offset)
+			if err != nil {
+				return fmt.Errorf("alpha-wrap: %w", err)
+			}
+			fmt.Printf(" %d vertices, %d faces in %.1fs\n",
+				len(w.Vertices), len(w.Faces), time.Since(tWrap).Seconds())
+			wrapped = w
+			if cache.disk != nil && dk != "" {
+				// Async write: wrapped becomes lo.Model below, and downstream
+				// stages (decimate, voxelize, clip) only read from it. The
+				// gob encoder reading concurrently with those readers is
+				// race-free as long as nothing mutates wrapped after this
+				// point — confirmed by audit of squarevoxel.DecimateMesh and
+				// the voxel/clip readers, all of which are read-only.
+				go cache.disk.Set("alphawrap", dk, wrapped)
+			}
+		}
 		geomModel = wrapped
 		wrap.Done()
 	}
@@ -890,6 +912,19 @@ func runColorWarp(ctx context.Context, cache *StageCache, opts Options, cao *col
 }
 
 func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadOutput, tracker progress.Tracker) error {
+	dk := cache.decimateDiskKey(opts)
+	if cache.disk != nil && dk != "" {
+		var dm loader.LoadedModel
+		if cache.disk.Get("decimate", dk, &dm) {
+			fmt.Printf("Decimating: cached (%d vertices, %d faces)\n",
+				len(dm.Vertices), len(dm.Faces))
+			cache.setStage(StageDecimate, stageKey(StageDecimate, opts), &decimateOutput{
+				DecimModel: &dm,
+			})
+			return nil
+		}
+	}
+
 	fmt.Println("Decimating...")
 	cellSize := opts.NozzleDiameter * squarevoxel.UpperCellScale
 	targetCells := squarevoxel.CountSurfaceCells(ctx, lo.Model, opts.NozzleDiameter, opts.LayerHeight)
@@ -901,6 +936,12 @@ func runDecimate(ctx context.Context, cache *StageCache, opts Options, lo *loadO
 	cache.setStage(StageDecimate, stageKey(StageDecimate, opts), &decimateOutput{
 		DecimModel: decimModel,
 	})
+	if cache.disk != nil && dk != "" {
+		// Async write: decimModel is consumed read-only by runClip and
+		// the export path; nothing mutates it after this point, so the
+		// gob encoder is safe to run concurrently with those readers.
+		go cache.disk.Set("decimate", dk, decimModel)
+	}
 	return nil
 }
 
