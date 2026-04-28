@@ -191,7 +191,11 @@ func runStageCached(
 	tracker progress.Tracker,
 	body func() error,
 ) error {
-	if cache.get(stage, opts) != nil {
+	getStart := time.Now()
+	v, src := cache.getWithSource(stage, opts)
+	if v != nil {
+		fmt.Printf("%s: cache hit (%s, %s)\n", stageNames[stage],
+			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond))
 		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
 		return nil
 	}
@@ -204,6 +208,17 @@ func runStageCached(
 	}
 	cache.recordCost(stage, opts, time.Since(start))
 	return nil
+}
+
+// hitSourceLabel returns a short label for console messages.
+func hitSourceLabel(s hitSource) string {
+	switch s {
+	case hitMemory:
+		return "memory"
+	case hitDisk:
+		return "disk"
+	}
+	return "miss"
 }
 
 // recordCost writes the sidecar metadata file capturing how long the
@@ -744,30 +759,49 @@ func allocOutput(stage StageID) any {
 	return nil
 }
 
+// hitSource indicates where a cache hit came from. Used to drive the
+// console message in runStageCached so the user can see whether disk
+// caching is paying off (disk hits) or just same-session repetition
+// (memory hits).
+type hitSource int
+
+const (
+	hitMiss hitSource = iota
+	hitMemory
+	hitDisk
+)
+
 // get returns the cached output for the given stage and opts, or nil on
 // miss. Tries memory first; on miss, tries disk and warms memory on a hit.
 // Every stage is treated identically — there are no stages with special
 // caching rules.
 func (c *StageCache) get(stage StageID, opts Options) any {
+	v, _ := c.getWithSource(stage, opts)
+	return v
+}
+
+// getWithSource is get plus an indicator of where the hit came from.
+// Used by runStageCached for the console "cache hit" message.
+func (c *StageCache) getWithSource(stage StageID, opts Options) (any, hitSource) {
 	key := c.stageKey(stage, opts)
 	if key == "" {
-		return nil
+		return nil, hitMiss
 	}
 	if v := c.stages[stage].get(key); v != nil {
-		return v
+		return v, hitMemory
 	}
 	if c.disk == nil {
-		return nil
+		return nil, hitMiss
 	}
 	out := allocOutput(stage)
 	if out == nil {
-		return nil
+		return nil, hitMiss
 	}
 	if !c.disk.Get(stageSubdir(stage), key, out) {
-		return nil
+		return nil, hitMiss
 	}
 	c.stages[stage].put(key, out)
-	return out
+	return out, hitDisk
 }
 
 // set stores output for the given stage and opts in memory and async-writes
