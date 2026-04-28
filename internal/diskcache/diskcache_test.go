@@ -243,3 +243,186 @@ func TestAtomicWriteNoLeftovers(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordCostRoundTrip: writing then reading a meta file gives back
+// the same cost.
+func TestRecordCostRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	c.Set("test", "k", payload{Name: "x"})
+	c.RecordCost("test", "k", 1234*time.Millisecond)
+	metaPath := filepath.Join(dir, "test", "k.meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"costMs":1234`) {
+		t.Errorf("unexpected meta content: %s", data)
+	}
+}
+
+// TestSweepCostAwareEviction: among entries within the age cutoff, the
+// one with the lowest cost-per-byte is evicted first when the budget
+// forces an eviction.
+func TestSweepCostAwareEviction(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	mkData := func(seed int) []int {
+		d := make([]int, 4000)
+		for i := range d {
+			d[i] = seed*100000 + i
+		}
+		return d
+	}
+	c.Set("test", "cheap", payload{Name: "cheap", Data: mkData(1)})
+	c.Set("test", "midwa", payload{Name: "midway", Data: mkData(2)})
+	c.Set("test", "spend", payload{Name: "expensive", Data: mkData(3)})
+
+	// Roughly equal sizes (same payload shape). Costs differ by 1000x:
+	// the cheap one took 1 ms, the middle took 100 ms, the expensive
+	// one took 10000 ms.
+	c.RecordCost("test", "cheap", 1*time.Millisecond)
+	c.RecordCost("test", "midwa", 100*time.Millisecond)
+	c.RecordCost("test", "spend", 10000*time.Millisecond)
+
+	// Make 'cheap' the freshest by mtime so LRU alone would *keep* it
+	// over 'spend'. Cost-awareness must override.
+	now := time.Now()
+	os.Chtimes(c.pathFor("test", "spend"), now.Add(-3*time.Hour), now.Add(-3*time.Hour))
+	os.Chtimes(c.pathFor("test", "midwa"), now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	os.Chtimes(c.pathFor("test", "cheap"), now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+	// And touch the meta files to match so the entry's "newest mtime"
+	// matches the data file's.
+	os.Chtimes(filepath.Join(dir, "test", "spend.meta.json"), now.Add(-3*time.Hour), now.Add(-3*time.Hour))
+	os.Chtimes(filepath.Join(dir, "test", "midwa.meta.json"), now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	os.Chtimes(filepath.Join(dir, "test", "cheap.meta.json"), now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+
+	// Budget fits ~1.5 entries (data + meta together).
+	infoCheap, _ := os.Stat(c.pathFor("test", "cheap"))
+	infoCheapMeta, _ := os.Stat(filepath.Join(dir, "test", "cheap.meta.json"))
+	entrySize := infoCheap.Size() + infoCheapMeta.Size()
+	cap := entrySize * 3 / 2
+	stats, err := c.Sweep(7*24*time.Hour, cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SizeEvicted == 0 {
+		t.Fatal("expected at least one SizeEvicted")
+	}
+	// 'cheap' has the lowest cost/size, must be the first evicted.
+	if _, err := os.Stat(c.pathFor("test", "cheap")); !os.IsNotExist(err) {
+		t.Error("cheap (low-cost) entry was not the first evicted")
+	}
+	if _, err := os.Stat(c.pathFor("test", "spend")); err != nil {
+		t.Error("expensive (high-cost) entry was incorrectly evicted")
+	}
+	// The data file's meta sidecar should follow it out.
+	if _, err := os.Stat(filepath.Join(dir, "test", "cheap.meta.json")); !os.IsNotExist(err) {
+		t.Error("evicted entry's meta sidecar was left behind")
+	}
+}
+
+// TestSweepKeepsFreshOrphanMeta: a meta file with no data sibling can
+// transiently exist when the meta-write goroutine wins the race against
+// the data-write goroutine. Sweep must NOT delete it eagerly, because
+// the data is about to land and we'd lose the cost record. It ages out
+// at maxAge like everything else.
+func TestSweepKeepsFreshOrphanMeta(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	stageDir := filepath.Join(dir, "test")
+	os.MkdirAll(stageDir, 0o755)
+	orphan := filepath.Join(stageDir, "ghost.meta.json")
+	if err := os.WriteFile(orphan, []byte(`{"costMs":100}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Sweep(7*24*time.Hour, 1<<40); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Error("fresh orphan meta was incorrectly removed")
+	}
+
+	// Now age it past the cutoff — should be removed.
+	stale := time.Now().Add(-30 * 24 * time.Hour)
+	os.Chtimes(orphan, stale, stale)
+	if _, err := c.Sweep(7*24*time.Hour, 1<<40); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Error("aged-out orphan meta was not removed")
+	}
+}
+
+// TestSweepRecencyDominatesEvictionAtEqualCost: two entries with
+// identical recorded cost and size differ only in age. The older one
+// should evict first, since the recency factor decays its score.
+func TestSweepRecencyDominatesEvictionAtEqualCost(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	mkData := func(seed int) []int {
+		d := make([]int, 4000)
+		for i := range d {
+			d[i] = seed*100000 + i
+		}
+		return d
+	}
+	c.Set("test", "fresh", payload{Name: "fresh", Data: mkData(1)})
+	c.Set("test", "stale", payload{Name: "stale", Data: mkData(2)})
+	c.RecordCost("test", "fresh", 500*time.Millisecond)
+	c.RecordCost("test", "stale", 500*time.Millisecond)
+	now := time.Now()
+	// Make 'stale' a day old so recency factor halves it; 'fresh'
+	// stays roughly current.
+	freshT := now.Add(-1 * time.Minute)
+	staleT := now.Add(-24 * time.Hour)
+	os.Chtimes(c.pathFor("test", "fresh"), freshT, freshT)
+	os.Chtimes(filepath.Join(dir, "test", "fresh.meta.json"), freshT, freshT)
+	os.Chtimes(c.pathFor("test", "stale"), staleT, staleT)
+	os.Chtimes(filepath.Join(dir, "test", "stale.meta.json"), staleT, staleT)
+
+	infoFresh, _ := os.Stat(c.pathFor("test", "fresh"))
+	infoFreshMeta, _ := os.Stat(filepath.Join(dir, "test", "fresh.meta.json"))
+	entrySize := infoFresh.Size() + infoFreshMeta.Size()
+	cap := entrySize * 3 / 2 // room for ~1 entry
+	if _, err := c.Sweep(7*24*time.Hour, cap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.pathFor("test", "stale")); !os.IsNotExist(err) {
+		t.Error("stale entry was not the first evicted (recency factor must lower its score)")
+	}
+	if _, err := os.Stat(c.pathFor("test", "fresh")); err != nil {
+		t.Error("fresh entry was incorrectly evicted")
+	}
+}
+
+// TestSweepFallbackToLRUWhenNoCosts: when no entries have recorded
+// costs (legacy / pre-cost-tracking entries), eviction falls back to
+// oldest-mtime-first, matching the previous LRU behavior.
+func TestSweepFallbackToLRUWhenNoCosts(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	mkData := func(seed int) []int {
+		d := make([]int, 4000)
+		for i := range d {
+			d[i] = seed*100000 + i
+		}
+		return d
+	}
+	c.Set("test", "a", payload{Name: "a", Data: mkData(1)})
+	c.Set("test", "b", payload{Name: "b", Data: mkData(2)})
+	c.Set("test", "c", payload{Name: "c", Data: mkData(3)})
+	// No RecordCost calls — all entries have zero cost.
+	now := time.Now()
+	os.Chtimes(c.pathFor("test", "a"), now.Add(-3*time.Hour), now.Add(-3*time.Hour))
+	os.Chtimes(c.pathFor("test", "b"), now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	os.Chtimes(c.pathFor("test", "c"), now.Add(-1*time.Hour), now.Add(-1*time.Hour))
+	infoA, _ := os.Stat(c.pathFor("test", "a"))
+	cap := infoA.Size() + infoA.Size()/2
+	if _, err := c.Sweep(7*24*time.Hour, cap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.pathFor("test", "a")); !os.IsNotExist(err) {
+		t.Error("LRU-fallback: oldest entry 'a' should have been evicted")
+	}
+}

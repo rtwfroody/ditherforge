@@ -159,13 +159,16 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 //
 //   - returns immediately on a cache hit, emitting a single "completed"
 //     stage marker so the UI shows the stage as done;
-//   - on a miss, runs body and lets body emit its own progress markers
+//   - on a miss, times the body, lets body emit its own progress markers
 //     (some stages are spinners, some have determinate progress bars from
-//     inner functions like DecimateMesh / VoxelizeTwoGrids).
+//     inner functions like DecimateMesh / VoxelizeTwoGrids), and on
+//     success records the wall-clock duration as a sidecar metadata file
+//     so Sweep can make cost-aware eviction decisions.
 //
 // body is responsible for storing its result via cache.set… before
 // returning. This keeps the helper a pure cross-cut concern (cache check
-// + UI marker) without coupling it to each stage's typed output.
+// + UI marker + cost recording) without coupling it to each stage's
+// typed output.
 //
 // Pattern:
 //
@@ -185,7 +188,29 @@ func runStageCached(
 		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
 		return nil
 	}
-	return body()
+	start := time.Now()
+	if err := body(); err != nil {
+		// Errored runs don't record cost. The body may not have
+		// written the data file (or wrote a partial), so a meta
+		// pointing at it would be misleading.
+		return err
+	}
+	cache.recordCost(stage, opts, time.Since(start))
+	return nil
+}
+
+// recordCost writes the sidecar metadata file capturing how long the
+// stage took to run. Async like Set: failures go to OnError, never
+// returned. No-op when disk persistence is disabled.
+func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration) {
+	if c.disk == nil {
+		return
+	}
+	key := c.stageKey(stage, opts)
+	if key == "" {
+		return
+	}
+	go c.disk.RecordCost(stageSubdir(stage), key, cost)
 }
 
 // Disk returns the attached disk cache, or nil if persistence is disabled.
