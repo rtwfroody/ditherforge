@@ -11,6 +11,7 @@
   import { Slider } from '$lib/components/ui/slider';
   import * as Tooltip from '$lib/components/ui/tooltip';
   import HelpTip from '$lib/components/HelpTip.svelte';
+  import SettingsSection from '$lib/components/SettingsSection.svelte';
   import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
@@ -1061,336 +1062,346 @@
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-6">
-        <!-- Printer -->
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <span>Printer</span>
-          <div class="flex-1 h-px bg-border"></div>
-        </div>
-        <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
-          <div class="col-span-2 flex items-center gap-1.5">
-            <span class="text-sm font-medium">Printer</span>
+        <SettingsSection title="Printer">
+          {#snippet tip()}
             <HelpTip>
-              Target printer for the exported 3MF. Nozzle and layer height
-              options adapt to what the selected printer supports.
+              Target hardware. Sets the smallest detail the output can reproduce.
             </HelpTip>
-          </div>
-          <select
-            class="col-span-2 h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-            bind:value={printerId}
-            onchange={() => reconcilePrinterSelection()}
-          >
-            {#each printers as p (p.id)}
-              <option value={p.id}>{p.displayName}</option>
-            {/each}
-            {#if printers.length === 0}
-              <option value={printerId}>{printerId}</option>
-            {/if}
-          </select>
-
-          <div class="flex items-center gap-1.5">
-            <span class="text-sm font-medium">Nozzle (mm)</span>
-            <HelpTip>
-              Nozzle diameter variant for the selected printer. Also sets the
-              finest horizontal detail the output can represent.
-            </HelpTip>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <span class="text-sm font-medium">Layer height (mm)</span>
-            <HelpTip>
-              Vertical resolution of the print. Must match the layer height
-              used when slicing.
-            </HelpTip>
-          </div>
-          <select
-            class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-            bind:value={nozzleDiameter}
-            onchange={() => reconcilePrinterSelection()}
-          >
-            {#if currentPrinter}
-              {#each currentPrinter.nozzles as n (n.diameter)}
-                <option value={n.diameter}>{n.diameter}</option>
-              {/each}
-            {:else}
-              <option value={nozzleDiameter}>{nozzleDiameter}</option>
-            {/if}
-          </select>
-          <select
-            class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-            bind:value={layerHeight}
-          >
-            {#if currentNozzle}
-              {#each currentNozzle.layerHeights as lh (lh)}
-                <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}</option>
-              {/each}
-            {:else}
-              <option value={layerHeight}>{layerHeight}</option>
-            {/if}
-          </select>
-        </div>
-
-        <!-- Model -->
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <span>Model</span>
-          <div class="flex-1 h-px bg-border"></div>
-        </div>
-        <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
-          <div class="flex items-center gap-3">
-            <label class="flex items-center gap-1.5 text-sm font-medium">
-              <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
-              Size (mm)
-            </label>
-            <label class="flex items-center gap-1.5 text-sm font-medium">
-              <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
-              Scale
-            </label>
-            <HelpTip>
-              Size sets the longest dimension of the output in millimeters. Scale multiplies the model's native size.
-            </HelpTip>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <span class="text-sm font-medium">Base color</span>
-            <HelpTip>
-              Color used for faces that aren't covered by the model's texture. Pick one to override the model's default.
-            </HelpTip>
-          </div>
-          {#if sizeMode === 'size'}
-            <Input id="size" bind:value={sizeValue} type="number" step={1} />
-          {:else}
-            <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
-          {/if}
-          {#if baseColor}
-            <div class="flex items-center gap-2">
-              <button
-                class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
-                style="background: {baseColor.hex}; color: {contrastColor(baseColor.hex)};"
-                title={colorTooltip(baseColor)}
-                onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}
-              >
-                {baseColor.label || baseColor.hex}
-              </button>
-              <Button variant="ghost" size="sm" onclick={() => { baseColor = null; baseColorPickerOpen = false; }}>Clear</Button>
-            </div>
-          {:else}
-            <Button variant="outline" class="w-full" size="sm" onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}>
-              Default
-            </Button>
-          {/if}
-          {#if baseColorPickerOpen}
-            <div class="col-span-2">
-              <CollectionPicker
-                onselect={(hex, label, collection) => { baseColor = { hex, label, collection }; baseColorPickerOpen = false; }}
-                onclose={() => { baseColorPickerOpen = false; }}
-              />
-            </div>
-          {/if}
-        </div>
-
-        <!-- Alpha-wrap -->
-        <div class="space-y-2">
-          <label class="flex items-center gap-2 text-sm font-medium">
-            <Checkbox bind:checked={alphaWrap} />
-            Alpha-wrap (clean geometry for 3D printing)
-            <HelpTip>
-              Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
-            </HelpTip>
-          </label>
-          {#if alphaWrap}
-            <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
-              <label class="flex flex-col gap-1">
-                <span class="text-muted-foreground flex items-center gap-1.5">
-                  Alpha (mm)
-                  <HelpTip>
-                    Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
-                  </HelpTip>
-                </span>
-                <input type="number" step="0.1" min="0"
-                       placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
-                       class="h-9 rounded border bg-background text-foreground px-2"
-                       bind:value={alphaWrapAlpha} />
-              </label>
-              <label class="flex flex-col gap-1">
-                <span class="text-muted-foreground flex items-center gap-1.5">
-                  Offset (mm)
-                  <HelpTip>
-                    How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
-                  </HelpTip>
-                </span>
-                <input type="number" step="0.01" min="0"
-                       placeholder="auto (alpha / 30)"
-                       class="h-9 rounded border bg-background text-foreground px-2"
-                       bind:value={alphaWrapOffset} />
-              </label>
-            </div>
-          {/if}
-        </div>
-
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <span>Stickers</span>
-          <div class="flex-1 h-px bg-border"></div>
-        </div>
-
-        <StickerPanel
-          bind:stickers={stickers}
-          bind:placingIndex={placingStickerIndex}
-          onAdd={addSticker}
-          onRemove={removeSticker}
-        />
-
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <span>Color</span>
-          <div class="flex-1 h-px bg-border"></div>
-        </div>
-
-        <div class="space-y-3">
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Brightness</Label>
-                <HelpTip>
-                  Shift the input texture lighter or darker before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} onValueCommit={(v: number) => committedBrightness = v} />
-          </div>
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Contrast</Label>
-                <HelpTip>
-                  Stretch or compress the tonal range of the input texture before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} onValueCommit={(v: number) => committedContrast = v} />
-          </div>
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5">
-                <Label>Saturation</Label>
-                <HelpTip>
-                  Make colors more vivid or closer to gray before dithering.
-                </HelpTip>
-              </div>
-              <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
-            </div>
-            <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} onValueCommit={(v: number) => committedSaturation = v} />
-          </div>
-        </div>
-
-        <ColorPinEditor
-          bind:pins={warpPins}
-          loadCollectionColors={GetCollectionColors}
-          bind:pickingIndex={pickingPinIndex}
-          onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
-        />
-
-        <!-- Color snap -->
-        <div class="space-y-1">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5">
-              <Label>Color snap (delta E)</Label>
+          {/snippet}
+          <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
+            <div class="col-span-2 flex items-center gap-1.5">
+              <span class="text-sm font-medium">Printer</span>
               <HelpTip>
-                CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                Target printer for the exported 3MF. Nozzle and layer height
+                options adapt to what the selected printer supports.
               </HelpTip>
             </div>
-            <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-          </div>
-          <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
-        </div>
-
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-          <span>Filament</span>
-          <HelpTip>
-            Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
-          </HelpTip>
-          <div class="flex-1 h-px bg-border"></div>
-        </div>
-
-        <!-- Filament settings -->
-        <div class="space-y-4">
-          <!-- Color palette grid -->
-          <div class="space-y-2">
-            <div class="grid grid-cols-4 gap-2">
-              {#each colorSlots as slot, i}
-                {@const resolved = resolvedBySlot[i]}
-                <div class="group relative">
-                  <button
-                    type="button"
-                    class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                    title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
-                    onclick={() => openPicker(i)}
-                  >
-                    {#if slot || resolved}
-                      {@const info = (slot ?? resolved)!}
-                      <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
-                      <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
-                    {:else}
-                      <div class="w-full h-5 bg-muted"></div>
-                      <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
-                    {/if}
-                  </button>
-                  <!-- Lock toggle -->
-                  {#if slot || resolved}
-                    <button
-                      class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
-                      title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
-                      onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
-                    >
-                      {#if slot}
-                        <LockIcon size={10} class="text-white" />
-                      {:else}
-                        <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
-                      {/if}
-                    </button>
-                  {/if}
-                  {#if colorSlots.length > 1}
-                    <button
-                      class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                      onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
-                    >&times;</button>
-                  {/if}
-                </div>
+            <select
+              class="col-span-2 h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+              bind:value={printerId}
+              onchange={() => reconcilePrinterSelection()}
+            >
+              {#each printers as p (p.id)}
+                <option value={p.id}>{p.displayName}</option>
               {/each}
-              {#if colorSlots.length < 16}
-                <button
-                  class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
-                  onclick={addColorSlot}
-                >+</button>
+              {#if printers.length === 0}
+                <option value={printerId}>{printerId}</option>
+              {/if}
+            </select>
+
+            <div class="flex items-center gap-1.5">
+              <span class="text-sm font-medium">Nozzle (mm)</span>
+              <HelpTip>
+                Nozzle diameter variant for the selected printer. Also sets the
+                finest horizontal detail the output can represent.
+              </HelpTip>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-sm font-medium">Layer height (mm)</span>
+              <HelpTip>
+                Vertical resolution of the print. Must match the layer height
+                used when slicing.
+              </HelpTip>
+            </div>
+            <select
+              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+              bind:value={nozzleDiameter}
+              onchange={() => reconcilePrinterSelection()}
+            >
+              {#if currentPrinter}
+                {#each currentPrinter.nozzles as n (n.diameter)}
+                  <option value={n.diameter}>{n.diameter}</option>
+                {/each}
+              {:else}
+                <option value={nozzleDiameter}>{nozzleDiameter}</option>
+              {/if}
+            </select>
+            <select
+              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+              bind:value={layerHeight}
+            >
+              {#if currentNozzle}
+                {#each currentNozzle.layerHeights as lh (lh)}
+                  <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}</option>
+                {/each}
+              {:else}
+                <option value={layerHeight}>{layerHeight}</option>
+              {/if}
+            </select>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="Model">
+          {#snippet tip()}
+            <HelpTip>
+              Size the model, set a fallback color, and optionally alpha-wrap to clean up bad geometry.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-6">
+            <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
+              <div class="flex items-center gap-3">
+                <label class="flex items-center gap-1.5 text-sm font-medium">
+                  <input type="radio" name="sizemode" value="size" checked={sizeMode === 'size'} onchange={() => { sizeMode = 'size'; }} />
+                  Size (mm)
+                </label>
+                <label class="flex items-center gap-1.5 text-sm font-medium">
+                  <input type="radio" name="sizemode" value="scale" checked={sizeMode === 'scale'} onchange={() => { sizeMode = 'scale'; }} />
+                  Scale
+                </label>
+                <HelpTip>
+                  Size sets the longest dimension of the output in millimeters. Scale multiplies the model's native size.
+                </HelpTip>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-medium">Base color</span>
+                <HelpTip>
+                  Color used for faces that aren't covered by the model's texture. Pick one to override the model's default.
+                </HelpTip>
+              </div>
+              {#if sizeMode === 'size'}
+                <Input id="size" bind:value={sizeValue} type="number" step={1} />
+              {:else}
+                <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
+              {/if}
+              {#if baseColor}
+                <div class="flex items-center gap-2">
+                  <button
+                    class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
+                    style="background: {baseColor.hex}; color: {contrastColor(baseColor.hex)};"
+                    title={colorTooltip(baseColor)}
+                    onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}
+                  >
+                    {baseColor.label || baseColor.hex}
+                  </button>
+                  <Button variant="ghost" size="sm" onclick={() => { baseColor = null; baseColorPickerOpen = false; }}>Clear</Button>
+                </div>
+              {:else}
+                <Button variant="outline" class="w-full" size="sm" onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}>
+                  Default
+                </Button>
+              {/if}
+              {#if baseColorPickerOpen}
+                <div class="col-span-2">
+                  <CollectionPicker
+                    onselect={(hex, label, collection) => { baseColor = { hex, label, collection }; baseColorPickerOpen = false; }}
+                    onclose={() => { baseColorPickerOpen = false; }}
+                  />
+                </div>
               {/if}
             </div>
-            {#if pickerIndex !== null}
-              <CollectionPicker
-                onselect={pickColor}
-                onclose={closePicker}
-              />
-            {/if}
-          </div>
 
-          <!-- Remaining color source -->
-          <div class="space-y-2">
-            <div class="flex items-center gap-1.5">
-              <Label>Unlocked colors from</Label>
-              <HelpTip>
-                Filament collection the auto-picker draws from for unlocked palette slots. Manage collections from the Filaments menu.
-              </HelpTip>
+            <!-- Alpha-wrap -->
+            <div class="space-y-2">
+              <label class="flex items-center gap-2 text-sm font-medium">
+                <Checkbox bind:checked={alphaWrap} />
+                Alpha-wrap (clean geometry for 3D printing)
+                <HelpTip>
+                  Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
+                </HelpTip>
+              </label>
+              {#if alphaWrap}
+                <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Alpha (mm)
+                      <HelpTip>
+                        Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
+                      </HelpTip>
+                    </span>
+                    <input type="number" step="0.1" min="0"
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                           class="h-9 rounded border bg-background text-foreground px-2"
+                           bind:value={alphaWrapAlpha} />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Offset (mm)
+                      <HelpTip>
+                        How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
+                      </HelpTip>
+                    </span>
+                    <input type="number" step="0.01" min="0"
+                           placeholder="auto (alpha / 30)"
+                           class="h-9 rounded border bg-background text-foreground px-2"
+                           bind:value={alphaWrapOffset} />
+                  </label>
+                </div>
+              {/if}
             </div>
-            <CollectionSelect
-              bind:selected={inventoryCollection}
-              onchange={loadInventoryCollectionColors}
-            />
           </div>
-        </div>
+        </SettingsSection>
 
-        <!-- Advanced (collapsed) -->
-        <details class="group">
-          <summary class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground cursor-pointer select-none">
-            <span>Advanced</span>
-            <div class="flex-1 h-px bg-border"></div>
-          </summary>
-          <div class="mt-3 space-y-4">
+        <SettingsSection title="Stickers" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Stamp logos, labels, or artwork onto the model surface.
+            </HelpTip>
+          {/snippet}
+          <StickerPanel
+            bind:stickers={stickers}
+            bind:placingIndex={placingStickerIndex}
+            onAdd={addSticker}
+            onRemove={removeSticker}
+          />
+        </SettingsSection>
+
+        <SettingsSection title="Color">
+          {#snippet tip()}
+            <HelpTip>
+              Adjust the input texture and tune color mapping before dithering.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-6">
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Brightness</Label>
+                    <HelpTip>
+                      Shift the input texture lighter or darker before dithering.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
+                </div>
+                <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} onValueCommit={(v: number) => committedBrightness = v} />
+              </div>
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Contrast</Label>
+                    <HelpTip>
+                      Stretch or compress the tonal range of the input texture before dithering.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
+                </div>
+                <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} onValueCommit={(v: number) => committedContrast = v} />
+              </div>
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Saturation</Label>
+                    <HelpTip>
+                      Make colors more vivid or closer to gray before dithering.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
+                </div>
+                <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} onValueCommit={(v: number) => committedSaturation = v} />
+              </div>
+            </div>
+
+            <ColorPinEditor
+              bind:pins={warpPins}
+              loadCollectionColors={GetCollectionColors}
+              bind:pickingIndex={pickingPinIndex}
+              onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
+            />
+
+            <!-- Color snap -->
+            <div class="space-y-1">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-1.5">
+                  <Label>Color snap (delta E)</Label>
+                  <HelpTip>
+                    CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                  </HelpTip>
+                </div>
+                <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+              </div>
+              <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="Filament">
+          {#snippet tip()}
+            <HelpTip>
+              Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-4">
+            <!-- Color palette grid -->
+            <div class="space-y-2">
+              <div class="grid grid-cols-4 gap-2">
+                {#each colorSlots as slot, i}
+                  {@const resolved = resolvedBySlot[i]}
+                  <div class="group relative">
+                    <button
+                      type="button"
+                      class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
+                      title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
+                      onclick={() => openPicker(i)}
+                    >
+                      {#if slot || resolved}
+                        {@const info = (slot ?? resolved)!}
+                        <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
+                        <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
+                      {:else}
+                        <div class="w-full h-5 bg-muted"></div>
+                        <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
+                      {/if}
+                    </button>
+                    <!-- Lock toggle -->
+                    {#if slot || resolved}
+                      <button
+                        class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
+                        title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
+                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
+                      >
+                        {#if slot}
+                          <LockIcon size={10} class="text-white" />
+                        {:else}
+                          <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
+                        {/if}
+                      </button>
+                    {/if}
+                    {#if colorSlots.length > 1}
+                      <button
+                        class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
+                      >&times;</button>
+                    {/if}
+                  </div>
+                {/each}
+                {#if colorSlots.length < 16}
+                  <button
+                    class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
+                    onclick={addColorSlot}
+                  >+</button>
+                {/if}
+              </div>
+              {#if pickerIndex !== null}
+                <CollectionPicker
+                  onselect={pickColor}
+                  onclose={closePicker}
+                />
+              {/if}
+            </div>
+
+            <!-- Remaining color source -->
+            <div class="space-y-2">
+              <div class="flex items-center gap-1.5">
+                <Label>Unlocked colors from</Label>
+                <HelpTip>
+                  Filament collection the auto-picker draws from for unlocked palette slots. Manage collections from the Filaments menu.
+                </HelpTip>
+              </div>
+              <CollectionSelect
+                bind:selected={inventoryCollection}
+                onchange={loadInventoryCollectionColors}
+              />
+            </div>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="Advanced" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Dither algorithm and diagnostic toggles. Most users can ignore these.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-4">
             <div class="space-y-2">
               <div class="flex items-center gap-1.5">
                 <Label for="dither">Dither mode</Label>
@@ -1433,7 +1444,7 @@
               </label>
             </div>
           </div>
-        </details>
+        </SettingsSection>
       </Card.Content>
     </Card.Root>
 
