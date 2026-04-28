@@ -189,6 +189,29 @@ func TestSweepEvictsArbitraryFiles(t *testing.T) {
 	}
 }
 
+// TestSweepKeepsInFlightTempFiles: an active Set goroutine has a temp
+// file in the cache directory while it's mid-write. Sweep must not
+// delete it — if it does, the writer's os.Rename fails ("no such file
+// or directory") and the cache write is silently lost. Recent .tmp-*
+// files (within the age cutoff) are off-limits.
+func TestSweepKeepsInFlightTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	stageDir := filepath.Join(dir, "test")
+	os.MkdirAll(stageDir, 0o755)
+	// Simulate an in-flight write by creating a fresh .tmp-* file
+	// that's "huge" — Sweep would otherwise be tempted to evict it
+	// to fit a tight byte budget.
+	tmp := filepath.Join(stageDir, ".tmp-key-789")
+	os.WriteFile(tmp, make([]byte, 100_000), 0o644)
+	if _, err := c.Sweep(7*24*time.Hour, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Error("in-flight temp file was incorrectly removed by sweep")
+	}
+}
+
 // TestKeyStable: same parts produce the same key; different ordering or
 // content produces a different key.
 func TestKeyStable(t *testing.T) {

@@ -38,10 +38,14 @@ type loadOutputOnDisk struct {
 	InputMesh      *MeshData
 	PreviewScale   float32
 	ExtentMM       float32
-	// appliedBaseColor is intentionally not persisted: applyBaseColor
-	// re-applies idempotently from the cached parse output on every
-	// run, regardless of what colors were applied at the time the
-	// loadOutput was originally built.
+	// appliedBaseColor is intentionally not persisted: cache.setLoad
+	// is called inside runLoad (before applyBaseColor runs), so the
+	// disk version's "applied" state is always pristine. On disk hit
+	// applyBaseColor sees appliedBaseColor=="" and skips the reset-
+	// from-parse path (since lo.ColorModel is already pristine);
+	// only an in-session BaseColor change after lo's been mutated
+	// triggers a reset, and that path is satisfied by the in-memory
+	// parse cache.
 }
 
 func (lo *loadOutput) GobEncode() ([]byte, error) {

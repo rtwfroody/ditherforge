@@ -305,6 +305,20 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		}
 		base := filepath.Base(path)
 		dir := filepath.Dir(path)
+		// In-flight write temp files: an active Set goroutine is
+		// renaming this file into place. Sweep must not touch it
+		// or the rename fails ("no such file or directory") and the
+		// cache write is silently lost. Past the age cutoff they're
+		// crash leftovers and safe to delete.
+		if strings.HasPrefix(base, ".tmp-") {
+			if info.ModTime().Before(cutoff) {
+				if rmErr := os.Remove(path); rmErr == nil {
+					stats.AgeEvicted++
+					stats.BytesFreed += info.Size()
+				}
+			}
+			return nil
+		}
 		var groupID string
 		var isMeta bool
 		switch {
