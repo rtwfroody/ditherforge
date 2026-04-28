@@ -123,6 +123,13 @@ type StageCache struct {
 	// restarts. nil = persistence disabled.
 	disk *diskcache.Cache
 
+	// diskWrites tracks async disk-write goroutines so the app can wait
+	// for them at shutdown. Without this, the OS kills mid-flight writes
+	// (which take seconds for big payloads like a 400 MB load entry),
+	// leaving the cache incomplete and the next session re-doing work
+	// that should have hit the cache.
+	diskWrites sync.WaitGroup
+
 	// inputHash caches sha256 of the current input file's contents so we
 	// don't re-hash on every key derivation within a session. Tracked by
 	// (path, mtime, size); a change to any forces a re-hash.
@@ -200,8 +207,9 @@ func runStageCached(
 }
 
 // recordCost writes the sidecar metadata file capturing how long the
-// stage took to run. Async like Set: failures go to OnError, never
-// returned. No-op when disk persistence is disabled.
+// stage took to run. Async like Set, tracked by the same WaitGroup so
+// shutdown can wait for it. Failures go to OnError, never returned.
+// No-op when disk persistence is disabled.
 func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration) {
 	if c.disk == nil {
 		return
@@ -210,7 +218,18 @@ func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration)
 	if key == "" {
 		return
 	}
-	go c.disk.RecordCost(stageSubdir(stage), key, cost)
+	c.diskWrites.Add(1)
+	go func() {
+		defer c.diskWrites.Done()
+		c.disk.RecordCost(stageSubdir(stage), key, cost)
+	}()
+}
+
+// WaitForDiskWrites blocks until all in-flight async disk writes have
+// completed. Call from shutdown so a 400 MB compressed load entry
+// doesn't get its goroutine killed mid-flight by process exit.
+func (c *StageCache) WaitForDiskWrites() {
+	c.diskWrites.Wait()
 }
 
 // Disk returns the attached disk cache, or nil if persistence is disabled.
@@ -766,7 +785,11 @@ func (c *StageCache) set(stage StageID, opts Options, output any) {
 	if c.disk == nil {
 		return
 	}
-	go c.disk.Set(stageSubdir(stage), key, output)
+	c.diskWrites.Add(1)
+	go func() {
+		defer c.diskWrites.Done()
+		c.disk.Set(stageSubdir(stage), key, output)
+	}()
 }
 
 // Typed wrappers — return the concrete output type for each stage.

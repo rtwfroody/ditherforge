@@ -133,6 +133,24 @@ func (a *App) kickDiskCacheSweep() {
 
 func (a *App) shutdown(ctx context.Context) {
 	close(a.reqCh)
+	// Wait for in-flight disk-cache writes to complete. Big payloads
+	// (load entries can be hundreds of MB after zstd) take seconds to
+	// encode and write; without this wait, the OS kills the writer
+	// goroutines at process exit and the next session re-does the
+	// expensive work it should have hit in the cache.
+	//
+	// Bounded by a generous timeout so a stuck FS doesn't trap the
+	// user in the shutdown path.
+	done := make(chan struct{})
+	go func() {
+		a.cache.WaitForDiskWrites()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		fmt.Fprintf(os.Stderr, "shutdown: gave up waiting for disk cache writes after 30s\n")
+	}
 }
 
 // Quit terminates the application. Bound so the frontend's File > Exit
