@@ -212,5 +212,5 @@ Active `.tmp-*` files from in-flight write goroutines are skipped within the age
 
 ## Lifecycle
 
-- `runStageCached` (`stepcache.go`) is the canonical wrapper every stage uses. On hit it emits a UI marker and a console log line (`"Loading: cache hit (disk, 312ms)"`). On miss it times the body via `time.Since` and async-writes the meta sidecar via `RecordCost`.
+- `runStage` (`run.go`) is the generic helper every per-run stage method uses. It memoizes the body's output into `pipelineRun` and threads the value through `runStageCached` (`stepcache.go`), which on a hit emits a UI marker and a console log line (`"Loading: cache hit (disk, 312ms)"`) and on a miss times the body and async-writes the meta sidecar via `RecordCost`.
 - All disk writes are tracked in a `sync.WaitGroup` on `StageCache`. `App.shutdown` calls `WaitForDiskWrites` (with a 30-second timeout) so big payloads aren't killed mid-rename when the user closes the window.

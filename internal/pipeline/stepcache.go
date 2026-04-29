@@ -176,17 +176,14 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 //     success calls stampCost to back-fill the disk meta sidecar with
 //     the wall-clock generation time.
 //
-// body must store its result via cache.set… before returning. The
-// typed setter encodes the value and queues the blob write; this
-// helper handles the cost/description metadata after the fact.
+// body is responsible only for producing and persisting the stage's
+// result. In normal use, callers reach this helper via runStage (in
+// run.go), which wraps body to memoize the live pointer into
+// pipelineRun and queue the async cache.set. After body returns
+// successfully, runStageCached calls stampCost to back-fill the
+// disk-side meta sidecar with description and wall-clock duration.
 //
-// Pattern:
-//
-//	return runStageCached(cache, StageDecimate, opts, tracker, func() error {
-//	    ...
-//	    cache.setDecimate(opts, &decimateOutput{...})
-//	    return nil
-//	})
+// Direct callers are rare; prefer runStage.
 func runStageCached(
 	cache *StageCache,
 	stage StageID,
@@ -787,31 +784,37 @@ func (c *StageCache) getWithSource(stage StageID, opts Options) (any, hitSource)
 	return out, hitDisk
 }
 
-// set encodes output once and writes the resulting blob to disk.
-// Description and cost are filled in by stampCost, which
-// runStageCached calls after the body returns and the wall-clock
-// duration is known.
+// set spawns a goroutine that encodes output and writes the resulting
+// blob to disk. Description and cost are filled in by stampCost,
+// which runStageCached calls after the body returns and the
+// wall-clock duration is known.
 //
-// Lifetime: after set returns, the caller's local pointer is the only
-// live decoded copy. The cache holds bytes on disk; subsequent gets
-// decode fresh structs. No mutable state is shared across stages or
-// with disk-write goroutines.
+// Encoding happens off the calling goroutine deliberately: encoding a
+// multi-hundred-MB stage output allocates aggressively, and doing
+// that synchronously on the pipeline worker thread piled on memory
+// pressure right before CGO calls into native libraries (alpha-wrap,
+// renderer). That timing reliably tripped a SIGSEGV in a C++ runtime
+// signal handler that wasn't SA_ONSTACK-clean. Async encoding spreads
+// the allocation pressure over time and keeps the calling goroutine
+// thin.
+//
+// Lifetime: after set returns, the caller's local pointer is the
+// only live decoded copy. The encoder goroutine reads it
+// concurrently with downstream stages; concurrent reads of immutable
+// data are race-free, but the caller must not mutate.
 func (c *StageCache) set(stage StageID, opts Options, output any) {
 	key := c.stageKey(stage, opts)
 	if key == "" || c.disk == nil {
-		return
-	}
-	blob, err := cacheblob.Encode(output)
-	if err != nil {
-		// Encoding failures shouldn't break the pipeline. The
-		// caller still has its live pointer; cross-run hits just
-		// won't happen for this entry.
 		return
 	}
 	subdir := stageSubdir(stage)
 	c.diskWrites.Add(1)
 	go func() {
 		defer c.diskWrites.Done()
+		blob, err := cacheblob.Encode(output)
+		if err != nil {
+			return
+		}
 		c.disk.SetBlob(subdir, key, blob)
 	}()
 }
@@ -840,7 +843,10 @@ func (c *StageCache) stampCost(stage StageID, opts Options, cost time.Duration) 
 	}()
 }
 
-// Typed wrappers — return the concrete output type for each stage.
+// Typed getters — return the concrete output type for each stage.
+// Used by callers outside the pipeline-run flow (e.g. pipeline.go's
+// post-run consumers, applyBaseColor). The per-stage Run methods use
+// runStage's generic c.get instead.
 
 func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
 	v := c.get(StageParse, opts)
@@ -848,10 +854,6 @@ func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
 		return nil
 	}
 	return v.(*loader.LoadedModel)
-}
-
-func (c *StageCache) setParse(opts Options, m *loader.LoadedModel) {
-	c.set(StageParse, opts, m)
 }
 
 func (c *StageCache) getLoad(opts Options) *loadOutput {
@@ -862,70 +864,6 @@ func (c *StageCache) getLoad(opts Options) *loadOutput {
 	return v.(*loadOutput)
 }
 
-func (c *StageCache) setLoad(opts Options, lo *loadOutput) {
-	c.set(StageLoad, opts, lo)
-}
-
-func (c *StageCache) getDecimate(opts Options) *decimateOutput {
-	v := c.get(StageDecimate, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*decimateOutput)
-}
-
-func (c *StageCache) setDecimate(opts Options, do *decimateOutput) {
-	c.set(StageDecimate, opts, do)
-}
-
-func (c *StageCache) getSticker(opts Options) *stickerOutput {
-	v := c.get(StageSticker, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*stickerOutput)
-}
-
-func (c *StageCache) setSticker(opts Options, so *stickerOutput) {
-	c.set(StageSticker, opts, so)
-}
-
-func (c *StageCache) getVoxelize(opts Options) *voxelizeOutput {
-	v := c.get(StageVoxelize, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*voxelizeOutput)
-}
-
-func (c *StageCache) setVoxelize(opts Options, vo *voxelizeOutput) {
-	c.set(StageVoxelize, opts, vo)
-}
-
-func (c *StageCache) getColorAdjust(opts Options) *colorAdjustOutput {
-	v := c.get(StageColorAdjust, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*colorAdjustOutput)
-}
-
-func (c *StageCache) setColorAdjust(opts Options, cao *colorAdjustOutput) {
-	c.set(StageColorAdjust, opts, cao)
-}
-
-func (c *StageCache) getColorWarp(opts Options) *colorWarpOutput {
-	v := c.get(StageColorWarp, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*colorWarpOutput)
-}
-
-func (c *StageCache) setColorWarp(opts Options, cwo *colorWarpOutput) {
-	c.set(StageColorWarp, opts, cwo)
-}
-
 func (c *StageCache) getPalette(opts Options) *paletteOutput {
 	v := c.get(StagePalette, opts)
 	if v == nil {
@@ -934,43 +872,11 @@ func (c *StageCache) getPalette(opts Options) *paletteOutput {
 	return v.(*paletteOutput)
 }
 
-func (c *StageCache) setPalette(opts Options, po *paletteOutput) {
-	c.set(StagePalette, opts, po)
-}
-
-func (c *StageCache) getDither(opts Options) *ditherOutput {
-	v := c.get(StageDither, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*ditherOutput)
-}
-
-func (c *StageCache) setDither(opts Options, do *ditherOutput) {
-	c.set(StageDither, opts, do)
-}
-
-func (c *StageCache) getClip(opts Options) *clipOutput {
-	v := c.get(StageClip, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*clipOutput)
-}
-
-func (c *StageCache) setClip(opts Options, co *clipOutput) {
-	c.set(StageClip, opts, co)
-}
-
 func (c *StageCache) getMerge(opts Options) *mergeOutput {
 	v := c.get(StageMerge, opts)
 	if v == nil {
 		return nil
 	}
 	return v.(*mergeOutput)
-}
-
-func (c *StageCache) setMerge(opts Options, mo *mergeOutput) {
-	c.set(StageMerge, opts, mo)
 }
 

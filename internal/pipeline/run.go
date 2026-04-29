@@ -62,41 +62,84 @@ func (r *pipelineRun) checkCancel() error {
 	return nil
 }
 
+// runStage is the shared scaffold for every per-run stage method. The
+// per-method boilerplate (memoization slot, body invocation, cache
+// set, cache-hit fallback) is identical across stages and varies only
+// in the output type, the slot pointer, the StageID, and the body —
+// which this helper takes as parameters.
+//
+// Behavior:
+//
+//  1. If the slot already holds a value (this Run already produced or
+//     decoded it), return immediately.
+//  2. Run the cache-aware wrapper. On a cache hit the body is skipped
+//     and the slot stays nil; on a miss, the body produces the value,
+//     stores it in the slot, and async-writes the encoded blob to the
+//     disk cache.
+//  3. If the slot is still nil after the wrapper, the cache-hit path
+//     ran — decode from the cache to populate the slot.
+//
+// The slot-then-cache-set ordering is load-bearing: a downstream call
+// to the typed getter (e.g. cache.getX) cannot return a value the
+// disk-write goroutine hasn't yet flushed. Memoizing into the slot
+// before kicking the async write ensures the same Run's downstream
+// consumers see the live pointer immediately.
+func runStage[T any](
+	r *pipelineRun,
+	stage StageID,
+	slot **T,
+	body func() (*T, error),
+) (*T, error) {
+	if *slot != nil {
+		return *slot, nil
+	}
+	err := runStageCached(r.cache, stage, r.opts, r.tracker, func() error {
+		out, err := body()
+		if err != nil {
+			return err
+		}
+		// Order is load-bearing: write the slot before kicking
+		// the async cache.set. Within-run consumers read the
+		// slot via pipelineRun memoization and would race the
+		// disk-write goroutine if we set the cache first.
+		*slot = out
+		r.cache.set(stage, r.opts, out)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if *slot == nil {
+		if v := r.cache.get(stage, r.opts); v != nil {
+			*slot = v.(*T)
+		}
+	}
+	return *slot, nil
+}
+
 // ----- Stage methods -----
 
 func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
-	if r.parse != nil {
-		return r.parse, nil
-	}
-	err := runStageCached(r.cache, StageParse, r.opts, r.tracker, func() error {
+	return runStage(r, StageParse, &r.parse, func() (*loader.LoadedModel, error) {
 		stage := progress.BeginStage(r.tracker, stageNames[StageParse], false, 0)
 		defer stage.Done()
 		fmt.Printf("Parsing %s...", r.opts.Input)
 		t := time.Now()
 		loaded, err := loadModel(r.opts.Input, r.opts.ObjectIndex)
 		if err != nil {
-			return fmt.Errorf("parsing %s: %w", filepath.Ext(r.opts.Input), err)
+			return nil, fmt.Errorf("parsing %s: %w", filepath.Ext(r.opts.Input), err)
 		}
 		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
 			len(loaded.Vertices), len(loaded.Faces), time.Since(t).Seconds())
-		r.cache.setParse(r.opts, loaded)
-		return nil
+		return loaded, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.parse = r.cache.getParse(r.opts)
-	return r.parse, nil
 }
 
 func (r *pipelineRun) Load() (*loadOutput, error) {
-	if r.load != nil {
-		return r.load, nil
-	}
-	err := runStageCached(r.cache, StageLoad, r.opts, r.tracker, func() error {
+	lo, err := runStage(r, StageLoad, &r.load, func() (*loadOutput, error) {
 		raw, err := r.Parse()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		label := stageNames[StageLoad]
 		if r.opts.AlphaWrap {
@@ -126,7 +169,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		fmt.Printf("  Extent: %.1f x %.1f x %.1f mm\n", ex[0], ex[1], ex[2])
 
 		if err := r.checkCancel(); err != nil {
-			return err
+			return nil, err
 		}
 		nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
@@ -144,7 +187,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			tWrap := time.Now()
 			wrapped, werr := alphawrap.Wrap(model, alpha, offset)
 			if werr != nil {
-				return fmt.Errorf("alpha-wrap: %w", werr)
+				return nil, fmt.Errorf("alpha-wrap: %w", werr)
 			}
 			fmt.Printf(" %d vertices, %d faces in %.1fs\n",
 				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
@@ -162,76 +205,56 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			}
 		}
 
-		r.cache.setLoad(r.opts, &loadOutput{
+		return &loadOutput{
 			Model:        geomModel,
 			ColorModel:   model,
 			SampleModel:  sampleModel,
 			InputMesh:    buildInputMeshData(model),
 			PreviewScale: unitScale / totalScale,
 			ExtentMM:     nativeExtentMM,
-		})
-		return nil
+		}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	r.load = r.cache.getLoad(r.opts)
 	// Apply base-color override on top of the (possibly cached)
 	// load output. Cheap and idempotent. On a fresh disk hit
 	// (lo.appliedBaseColor=="") this skips the parse cache lookup.
-	applyBaseColor(r.cache, r.load, r.opts)
-	return r.load, nil
+	applyBaseColor(r.cache, lo, r.opts)
+	return lo, nil
 }
 
 func (r *pipelineRun) Decimate() (*decimateOutput, error) {
-	if r.decimate != nil {
-		return r.decimate, nil
-	}
-	err := runStageCached(r.cache, StageDecimate, r.opts, r.tracker, func() error {
+	return runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Println("Decimating...")
 		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
 		targetCells := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
 		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, targetCells, cellSize, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
-			return fmt.Errorf("decimate: %w", derr)
+			return nil, fmt.Errorf("decimate: %w", derr)
 		}
-		r.cache.setDecimate(r.opts, &decimateOutput{DecimModel: decimModel})
-		return nil
+		return &decimateOutput{DecimModel: decimModel}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.decimate = r.cache.getDecimate(r.opts)
-	return r.decimate, nil
 }
 
 func (r *pipelineRun) Sticker() (*stickerOutput, error) {
-	if r.sticker != nil {
-		return r.sticker, nil
-	}
-	err := runStageCached(r.cache, StageSticker, r.opts, r.tracker, func() error {
+	return runStage(r, StageSticker, &r.sticker, func() (*stickerOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		return r.computeSticker(lo)
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.sticker = r.cache.getSticker(r.opts)
-	return r.sticker, nil
 }
 
-func (r *pipelineRun) computeSticker(lo *loadOutput) error {
+func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 	if len(r.opts.Stickers) == 0 {
 		progress.BeginStage(r.tracker, stageNames[StageSticker], false, 0).Done()
-		r.cache.setSticker(r.opts, &stickerOutput{})
-		return nil
+		return &stickerOutput{}, nil
 	}
 	var sourceModel *loader.LoadedModel
 	if r.opts.AlphaWrap {
@@ -265,12 +288,12 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) error {
 
 		f, err := os.Open(s.ImagePath)
 		if err != nil {
-			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
+			return nil, fmt.Errorf("sticker %s: %w", s.ImagePath, err)
 		}
 		img, _, err := image.Decode(f)
 		f.Close()
 		if err != nil {
-			return fmt.Errorf("sticker %s: %w", s.ImagePath, err)
+			return nil, fmt.Errorf("sticker %s: %w", s.ImagePath, err)
 		}
 
 		bounds := img.Bounds()
@@ -293,13 +316,13 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) error {
 				seedTri, s.Center, s.Normal, s.Up, s.Scale, s.Rotation, s.MaxAngle,
 				onProgress)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		case "projection":
 			decal, err = voxel.BuildStickerDecalProjection(r.ctx, model, img,
 				s.Center, s.Normal, s.Up, s.Scale, s.Rotation, onProgress)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if len(decal.TriUVs) == 0 {
 				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
@@ -307,7 +330,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) error {
 				continue
 			}
 		default:
-			return fmt.Errorf("sticker %s: unknown mode %q", s.ImagePath, s.Mode)
+			return nil, fmt.Errorf("sticker %s: unknown mode %q", s.ImagePath, s.Mode)
 		}
 		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
 		if decal.LSCMResidual > 1e-5 && r.onWarning != nil {
@@ -325,22 +348,18 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) error {
 		FromAlphaWrap: r.opts.AlphaWrap,
 	}
 	so.si = si
-	r.cache.setSticker(r.opts, so)
-	return nil
+	return so, nil
 }
 
 func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
-	if r.voxelize != nil {
-		return r.voxelize, nil
-	}
-	err := runStageCached(r.cache, StageVoxelize, r.opts, r.tracker, func() error {
+	return runStage(r, StageVoxelize, &r.voxelize, func() (*voxelizeOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		so, err := r.Sticker()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		layer0Size := r.opts.NozzleDiameter * squarevoxel.Layer0CellScale
 		upperSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
@@ -363,33 +382,24 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals)
 		if verr != nil {
-			return fmt.Errorf("voxelize: %w", verr)
+			return nil, fmt.Errorf("voxelize: %w", verr)
 		}
-		r.cache.setVoxelize(r.opts, &voxelizeOutput{
+		return &voxelizeOutput{
 			Cells:         result.Cells,
 			CellAssignMap: result.CellAssignMap,
 			MinV:          result.MinV,
 			Layer0Size:    layer0Size,
 			UpperSize:     upperSize,
 			LayerH:        layerH,
-		})
-		return nil
+		}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.voxelize = r.cache.getVoxelize(r.opts)
-	return r.voxelize, nil
 }
 
 func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
-	if r.colorAdjust != nil {
-		return r.colorAdjust, nil
-	}
-	err := runStageCached(r.cache, StageColorAdjust, r.opts, r.tracker, func() error {
+	return runStage(r, StageColorAdjust, &r.colorAdjust, func() (*colorAdjustOutput, error) {
 		vo, err := r.Voxelize()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
 		defer stage.Done()
@@ -401,109 +411,90 @@ func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
 		tAdj := time.Now()
 		cells, cerr := voxel.AdjustCellColors(r.ctx, vo.Cells, adj)
 		if cerr != nil {
-			return cerr
+			return nil, cerr
 		}
 		if !adj.IsIdentity() {
 			fmt.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs\n",
 				r.opts.Brightness, r.opts.Contrast, r.opts.Saturation, time.Since(tAdj).Seconds())
 		}
-		r.cache.setColorAdjust(r.opts, &colorAdjustOutput{Cells: cells})
-		return nil
+		return &colorAdjustOutput{Cells: cells}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.colorAdjust = r.cache.getColorAdjust(r.opts)
-	return r.colorAdjust, nil
 }
 
 func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
-	if r.colorWarp != nil {
-		return r.colorWarp, nil
-	}
-	err := runStageCached(r.cache, StageColorWarp, r.opts, r.tracker, func() error {
+	return runStage(r, StageColorWarp, &r.colorWarp, func() (*colorWarpOutput, error) {
 		cao, err := r.ColorAdjust()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
 		defer stage.Done()
 		if len(r.opts.WarpPins) == 0 {
-			out := make([]voxel.ActiveCell, len(cao.Cells))
-			copy(out, cao.Cells)
-			r.cache.setColorWarp(r.opts, &colorWarpOutput{Cells: out})
-			return nil
+			cells := make([]voxel.ActiveCell, len(cao.Cells))
+			copy(cells, cao.Cells)
+			return &colorWarpOutput{Cells: cells}, nil
 		}
 		pins := make([]voxel.ColorWarpPin, len(r.opts.WarpPins))
 		for i, p := range r.opts.WarpPins {
 			src, perr := palette.ParsePalette([]string{p.SourceHex})
 			if perr != nil {
-				return fmt.Errorf("warp pin %d source: %w", i, perr)
+				return nil, fmt.Errorf("warp pin %d source: %w", i, perr)
 			}
 			tgt, perr := palette.ParsePalette([]string{p.TargetHex})
 			if perr != nil {
-				return fmt.Errorf("warp pin %d target: %w", i, perr)
+				return nil, fmt.Errorf("warp pin %d target: %w", i, perr)
 			}
 			pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0], Sigma: p.Sigma}
 		}
 		tWarp := time.Now()
 		cells, werr := voxel.WarpCellColors(r.ctx, cao.Cells, pins)
 		if werr != nil {
-			return werr
+			return nil, werr
 		}
 		fmt.Printf("  Warped colors (%d pins) in %.1fs\n", len(pins), time.Since(tWarp).Seconds())
-		r.cache.setColorWarp(r.opts, &colorWarpOutput{Cells: cells})
-		return nil
+		return &colorWarpOutput{Cells: cells}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.colorWarp = r.cache.getColorWarp(r.opts)
-	return r.colorWarp, nil
 }
 
 func (r *pipelineRun) Palette() (*paletteOutput, error) {
-	if r.palette != nil {
-		return r.palette, nil
-	}
-	err := runStageCached(r.cache, StagePalette, r.opts, r.tracker, func() error {
+	return runStage(r, StagePalette, &r.palette, func() (*paletteOutput, error) {
 		cwo, err := r.ColorWarp()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		stage := progress.BeginStage(r.tracker, stageNames[StagePalette], false, 0)
 		defer stage.Done()
 
 		pcfg, perr := buildPaletteConfig(r.opts)
 		if perr != nil {
-			return perr
+			return nil, perr
 		}
 		if pcfg.NumColors > export3mf.MaxFilaments {
-			return fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
+			return nil, fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
 		}
 		cells := make([]voxel.ActiveCell, len(cwo.Cells))
 		copy(cells, cwo.Cells)
 		ditherMode := r.opts.Dither
 		pal, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
 		if perr != nil {
-			return perr
+			return nil, perr
 		}
 		if palDisplay != "" {
 			fmt.Printf("%s\n", palDisplay)
 		}
 		if len(pal) == 0 {
-			return fmt.Errorf("no palette colors")
+			return nil, fmt.Errorf("no palette colors")
 		}
 		if r.opts.ColorSnap > 0 {
 			if serr := voxel.SnapColors(r.ctx, cells, pal, r.opts.ColorSnap); serr != nil {
-				return serr
+				return nil, serr
 			}
 			fmt.Printf("  Snapped cell colors toward palette by delta E %.1f\n", r.opts.ColorSnap)
 		}
 		if len(pcfg.Locked) == 0 && len(pal) > 1 {
 			assigns, aerr := voxel.AssignColors(r.ctx, cells, pal)
 			if aerr != nil {
-				return aerr
+				return nil, aerr
 			}
 			counts := make([]int, len(pal))
 			for _, a := range assigns {
@@ -520,32 +511,23 @@ func (r *pipelineRun) Palette() (*paletteOutput, error) {
 				palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
 			}
 		}
-		r.cache.setPalette(r.opts, &paletteOutput{
+		return &paletteOutput{
 			Palette:       pal,
 			PaletteLabels: palLabels,
 			Cells:         cells,
-		})
-		return nil
+		}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.palette = r.cache.getPalette(r.opts)
-	return r.palette, nil
 }
 
 func (r *pipelineRun) Dither() (*ditherOutput, error) {
-	if r.dither != nil {
-		return r.dither, nil
-	}
-	err := runStageCached(r.cache, StageDither, r.opts, r.tracker, func() error {
+	return runStage(r, StageDither, &r.dither, func() (*ditherOutput, error) {
 		po, err := r.Palette()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		vo, err := r.Voxelize()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, 2*len(po.Cells))
 		defer stage.Done()
@@ -563,7 +545,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		}
 		if derr != nil {
-			return derr
+			return nil, derr
 		}
 		fmt.Printf("  Dithered (%s) %d cells in %.1fs\n", ditherMode, len(cells), time.Since(tDither).Seconds())
 		counts := make([]int, len(pal))
@@ -583,7 +565,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		tFlood := time.Now()
 		patchMap, numPatches, ferr := floodFillTwoGrids(r.ctx, cells, assignments, r.tracker)
 		if ferr != nil {
-			return ferr
+			return nil, ferr
 		}
 		fmt.Printf("  Flood fill: %d patches in %.1fs\n", numPatches, time.Since(tFlood).Seconds())
 		patchAssignment := make([]int32, numPatches)
@@ -592,37 +574,28 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			pid := patchMap[k]
 			patchAssignment[pid] = assignments[i]
 		}
-		r.cache.setDither(r.opts, &ditherOutput{
+		return &ditherOutput{
 			Assignments:     assignments,
 			PatchMap:        patchMap,
 			NumPatches:      numPatches,
 			PatchAssignment: patchAssignment,
-		})
-		return nil
+		}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.dither = r.cache.getDither(r.opts)
-	return r.dither, nil
 }
 
 func (r *pipelineRun) Clip() (*clipOutput, error) {
-	if r.clip != nil {
-		return r.clip, nil
-	}
-	err := runStageCached(r.cache, StageClip, r.opts, r.tracker, func() error {
+	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
 		do, err := r.Dither()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		deco, err := r.Decimate()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		vo, err := r.Voxelize()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		tClip := time.Now()
 		cfg := voxel.TwoGridConfig{
@@ -635,32 +608,23 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		shellVerts, shellFaces, shellAssignments, cerr := voxel.ClipMeshByPatchesTwoGrid(
 			r.ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg, r.tracker)
 		if cerr != nil {
-			return fmt.Errorf("clip: %w", cerr)
+			return nil, fmt.Errorf("clip: %w", cerr)
 		}
 		fmt.Printf("  Clipped mesh: %d faces in %.1fs\n", len(shellFaces), time.Since(tClip).Seconds())
 		fmt.Printf("  After clip: %s\n", voxel.CheckWatertight(shellFaces))
-		r.cache.setClip(r.opts, &clipOutput{
+		return &clipOutput{
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,
 			ShellAssignments: shellAssignments,
-		})
-		return nil
+		}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.clip = r.cache.getClip(r.opts)
-	return r.clip, nil
 }
 
 func (r *pipelineRun) Merge() (*mergeOutput, error) {
-	if r.merge != nil {
-		return r.merge, nil
-	}
-	err := runStageCached(r.cache, StageMerge, r.opts, r.tracker, func() error {
+	return runStage(r, StageMerge, &r.merge, func() (*mergeOutput, error) {
 		co, err := r.Clip()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		shellVerts := co.ShellVerts
 		shellFaces := co.ShellFaces
@@ -671,24 +635,18 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 			var merr error
 			shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
 			if merr != nil {
-				return fmt.Errorf("merge: %w", merr)
+				return nil, fmt.Errorf("merge: %w", merr)
 			}
 			fmt.Printf("  Merged shell: %d -> %d faces in %.1fs\n", before, len(shellFaces), time.Since(tMerge).Seconds())
 		} else {
 			progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
 		}
 		fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
-		r.cache.setMerge(r.opts, &mergeOutput{
+		return &mergeOutput{
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,
 			ShellAssignments: shellAssignments,
-		})
-		return nil
+		}, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	r.merge = r.cache.getMerge(r.opts)
-	return r.merge, nil
 }
 
