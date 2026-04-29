@@ -11,20 +11,18 @@ package diskcache
 
 import (
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
+	"github.com/rtwfroody/ditherforge/internal/cacheblob"
+	"github.com/rtwfroody/ditherforge/internal/cachepolicy"
 )
 
 // dataExt and metaExt are the file extensions for cache data files and
@@ -128,45 +126,27 @@ func (c *Cache) pathFor(stage, key string) string {
 	return filepath.Join(c.Dir, stage, key+dataExt)
 }
 
-// Get reads, zstd-decompresses, and gob-decodes the entry into out (a
-// pointer). Returns false on miss; on any decode error the file is removed
-// silently and false is returned. On success, the file's mtime is bumped so
-// the LRU sweep treats it as a recent access.
-func (c *Cache) Get(stage, key string, out any) bool {
+// GetBlob reads the raw cacheblob bytes for (stage, key). Returns nil
+// on miss. On success the file's mtime is bumped so the sweep treats
+// this as a recent access. Decode errors are not detected here — the
+// caller decides whether to decode the blob.
+func (c *Cache) GetBlob(stage, key string) []byte {
 	p := c.pathFor(stage, key)
-	f, err := os.Open(p)
+	data, err := os.ReadFile(p)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			c.reportError(stage, "open", key, err)
 		}
-		return false
+		return nil
 	}
-	zr, err := zstd.NewReader(f)
-	if err != nil {
-		f.Close()
-		os.Remove(p)
-		c.reportError(stage, "decode", key, err)
-		return false
-	}
-	if err := gob.NewDecoder(zr).Decode(out); err != nil {
-		zr.Close()
-		f.Close()
-		os.Remove(p)
-		c.reportError(stage, "decode", key, err)
-		return false
-	}
-	zr.Close()
-	f.Close()
 	now := time.Now()
 	_ = os.Chtimes(p, now, now)
-	return true
+	return data
 }
 
-// Set gob-encodes val, zstd-compresses, and writes the result atomically
-// (temp file + rename). All errors are silently swallowed: the cache is
-// best-effort and a failed write must not break the pipeline. Errors are
-// reported via OnError if set.
-func (c *Cache) Set(stage, key string, val any) {
+// SetBlob writes a pre-encoded cacheblob to disk atomically (temp file
+// + rename). Errors are silently swallowed and routed through OnError.
+func (c *Cache) SetBlob(stage, key string, blob []byte) {
 	dir := filepath.Join(c.Dir, stage)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.reportError(stage, "mkdir", key, err)
@@ -179,24 +159,10 @@ func (c *Cache) Set(stage, key string, val any) {
 		return
 	}
 	tmpName := tmp.Name()
-	zw, err := zstd.NewWriter(tmp, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
+	if _, err := tmp.Write(blob); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		c.reportError(stage, "encode", key, err)
-		return
-	}
-	if err := gob.NewEncoder(zw).Encode(val); err != nil {
-		zw.Close()
-		tmp.Close()
-		os.Remove(tmpName)
-		c.reportError(stage, "encode", key, err)
-		return
-	}
-	if err := zw.Close(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		c.reportError(stage, "encode", key, err)
+		c.reportError(stage, "write", key, err)
 		return
 	}
 	if err := tmp.Close(); err != nil {
@@ -208,6 +174,48 @@ func (c *Cache) Set(stage, key string, val any) {
 		os.Remove(tmpName)
 		c.reportError(stage, "rename", key, err)
 	}
+}
+
+// Remove deletes the data file (and meta sidecar, if any) for
+// (stage, key). Errors are routed through OnError. Used by callers
+// that decoded the blob themselves and discovered it was corrupt;
+// removing the bad file means the next access misses cleanly and
+// recomputes instead of silently failing forever.
+func (c *Cache) Remove(stage, key string) {
+	if err := os.Remove(c.pathFor(stage, key)); err != nil && !os.IsNotExist(err) {
+		c.reportError(stage, "remove", key, err)
+	}
+	metaPath := filepath.Join(c.Dir, stage, key+metaExt)
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		c.reportError(stage, "remove", key, err)
+	}
+}
+
+// Get reads, zstd-decompresses, and gob-decodes the entry into out (a
+// pointer). Returns false on miss; on any decode error the file is
+// removed silently and false is returned.
+func (c *Cache) Get(stage, key string, out any) bool {
+	blob := c.GetBlob(stage, key)
+	if blob == nil {
+		return false
+	}
+	if err := cacheblob.Decode(blob, out); err != nil {
+		os.Remove(c.pathFor(stage, key))
+		c.reportError(stage, "decode", key, err)
+		return false
+	}
+	return true
+}
+
+// Set encodes val with cacheblob and writes the result atomically.
+// Errors are silently swallowed and routed through OnError.
+func (c *Cache) Set(stage, key string, val any) {
+	blob, err := cacheblob.Encode(val)
+	if err != nil {
+		c.reportError(stage, "encode", key, err)
+		return
+	}
+	c.SetBlob(stage, key, blob)
 }
 
 // RecordCost writes a sidecar JSON file recording how long the data file
@@ -269,47 +277,15 @@ type cacheEntry struct {
 	description string
 }
 
-// recencyHalfLife is how fast an entry's "value" decays as time since
-// last access grows. With a 7-day halflife, a freshly-touched entry
-// counts at full weight, a 7-day-old entry at 50%. Tied to time-since-
-// access (mtime), which Get bumps on every cache hit. The maxAge
-// cutoff (typically 7 days) handles deeper decay.
-const recencyHalfLife = 7 * 24 * time.Hour
-
-// scoreSizeFloor is the minimum size used in the eviction score's sqrt
-// denominator. Entries smaller than this are treated as if they were
-// this size, so small fresh entries can't crowd out large expensive
-// ones via the size penalty when their absolute cost is much lower.
-const scoreSizeFloor = 64 * 1024
-
-// recencyFactor returns the multiplier in (0, 1] that age contributes to
-// an entry's eviction score. age <= 0 (clock skew) yields 1.0.
-func recencyFactor(age time.Duration) float64 {
-	if age <= 0 {
-		return 1.0
-	}
-	return math.Pow(0.5, age.Seconds()/recencyHalfLife.Seconds())
-}
-
 // Sweep walks the cache directory and removes entries by two rules:
 //
 //  1. Age: any entry whose newest file is older than maxAge is deleted.
 //  2. Value-aware size eviction: among the remaining entries, those
-//     with the lowest score are deleted first until total size fits
-//     within maxBytes. The score combines three factors:
-//
-//         score = (costMs / sqrt(sizeBytes)) * 2^(-age/halflife)
-//
-//     Higher cost = more valuable (linear — generation time is the
-//     thing we're really trying to amortize). Larger size = less
-//     valuable per byte, but only as sqrt(size) so a 1000× larger
-//     entry that took 1000× longer still wins over a tiny cheap one.
-//     Older = less valuable (decays exponentially with a 7-day
-//     halflife, matching the typical maxAge so recency softens the
-//     score across the whole live window rather than collapsing it
-//     in a day). Ties fall back to oldest-mtime-first, which
-//     preserves LRU semantics for legacy entries with no recorded
-//     cost.
+//     with the lowest cachepolicy.Score are deleted first until total
+//     size fits within maxBytes. The score balances generation cost
+//     (more valuable), size (less valuable per byte, sqrt-shaped so
+//     huge expensive entries still beat tiny cheap ones), and recency
+//     (decays exponentially over cachepolicy.HalfLife).
 //
 // Errors on individual files are ignored so a single unreadable file
 // doesn't abort the sweep.
@@ -421,51 +397,26 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		survivors = append(survivors, e)
 	}
 
-	// Phase 2: cost-aware size eviction.
-	var total int64
-	for _, e := range survivors {
-		total += e.totalSize
+	// Phase 2: cost-aware size eviction. Delegate ranking to
+	// cachepolicy; the returned indices line up with survivors.
+	policyEntries := make([]cachepolicy.Entry, len(survivors))
+	for i, e := range survivors {
+		policyEntries[i] = cachepolicy.Entry{
+			Stage:       e.stage,
+			Description: e.description,
+			SizeBytes:   e.totalSize,
+			CostMs:      e.costMs,
+			Mtime:       e.newestMtime,
+		}
 	}
-	if total <= maxBytes {
-		return stats, nil
-	}
-	now := time.Now()
-	score := func(e *cacheEntry) float64 {
-		if e.totalSize <= 0 {
-			return 0
-		}
-		// Floor the size before sqrt so entries below ~64 KiB
-		// cluster together and absolute cost decides among them.
-		// Without this, a tiny-but-fresh entry can outscore a huge
-		// expensive one of similar density, because the size
-		// penalty compounds even at trivial sizes.
-		size := float64(e.totalSize)
-		if size < float64(scoreSizeFloor) {
-			size = float64(scoreSizeFloor)
-		}
-		base := float64(e.costMs) / math.Sqrt(size)
-		return base * recencyFactor(now.Sub(e.newestMtime))
-	}
-	sort.Slice(survivors, func(i, j int) bool {
-		si, sj := score(survivors[i]), score(survivors[j])
-		if si != sj {
-			return si < sj
-		}
-		// Tie-break: older first. Only matters when scores are
-		// exactly equal (typically zero-cost legacy entries).
-		return survivors[i].newestMtime.Before(survivors[j].newestMtime)
-	})
-	for _, e := range survivors {
-		if total <= maxBytes {
-			break
-		}
+	for _, idx := range cachepolicy.FitToBudget(policyEntries, maxBytes, time.Now()) {
+		e := survivors[idx]
 		c.reportEvict(e.stage, e.description, "size", e.totalSize, e.costMs)
 		for _, p := range e.paths {
 			os.Remove(p)
 		}
 		stats.SizeEvicted++
 		stats.BytesFreed += e.totalSize
-		total -= e.totalSize
 	}
 	return stats, nil
 }

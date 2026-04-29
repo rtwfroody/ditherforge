@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/cacheblob"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/progress"
@@ -117,53 +118,16 @@ func stageDescription(stage StageID, opts Options) string {
 	return base
 }
 
-// stageMemoryCap is the per-stage in-memory entry cap. Two slots is enough
-// for the canonical "toggle between A and B" workflow (e.g. LayerHeight
-// 0.2 ↔ 0.12). Cycling through three or more settings still hits disk on
-// the second pass, which is fast for these payloads. Eviction is FIFO by
-// insertion order.
-const stageMemoryCap = 2
-
-// stageMap is a per-stage in-memory cache holding up to cap entries keyed by
-// the unified cache key. Eviction is insertion-order FIFO — we don't promote
-// on read because the goal is "keep the last N computed", not "keep the last
-// N read".
-type stageMap struct {
-	cap     int
-	entries map[string]any
-	order   []string // insertion order; index 0 is oldest
-}
-
-func newStageMap(cap int) *stageMap {
-	return &stageMap{cap: cap, entries: make(map[string]any, cap)}
-}
-
-func (m *stageMap) get(key string) any {
-	return m.entries[key]
-}
-
-func (m *stageMap) put(key string, output any) {
-	if _, ok := m.entries[key]; ok {
-		m.entries[key] = output
-		return
-	}
-	if len(m.entries) >= m.cap {
-		oldest := m.order[0]
-		m.order = m.order[1:]
-		delete(m.entries, oldest)
-	}
-	m.entries[key] = output
-	m.order = append(m.order, key)
-}
-
-// StageCache holds per-stage cached outputs. Each stage has a multi-slot
-// in-memory cache keyed by a unified string key; the same key looks up the
-// stage's gob-encoded representation in the disk cache.
+// StageCache holds per-stage cached outputs as compressed cacheblob
+// bytes on disk. There is no separate in-memory tier of compressed
+// blobs: the OS page cache keeps recent reads resident and decode
+// (zstd + gob) dominates hit latency anyway, so a process-local copy
+// of the same compressed bytes earns very little. Within a single
+// pipeline invocation, pipelineRun (run.go) memoizes the live decoded
+// struct so a stage is decoded at most once per run.
 type StageCache struct {
-	stages [numStages]*stageMap
-
-	// disk persists the gob-encoded outputs of expensive stages across app
-	// restarts. nil = persistence disabled.
+	// disk persists cacheblobs across app restarts. nil = caching
+	// disabled (everything recomputes; tests use this).
 	disk *diskcache.Cache
 
 	// diskWrites tracks async disk-write goroutines so the app can wait
@@ -190,13 +154,10 @@ type StageCache struct {
 	invContents      string
 }
 
-// NewStageCache returns an empty stage cache.
+// NewStageCache returns an empty stage cache with no disk persistence.
+// Use SetDisk to attach a disk tier.
 func NewStageCache() *StageCache {
-	c := &StageCache{}
-	for i := range c.stages {
-		c.stages[i] = newStageMap(stageMemoryCap)
-	}
-	return c
+	return &StageCache{}
 }
 
 // SetDisk attaches a disk cache. Call this once after NewStageCache; passing
@@ -212,13 +173,12 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 //   - on a miss, times the body, lets body emit its own progress markers
 //     (some stages are spinners, some have determinate progress bars from
 //     inner functions like DecimateMesh / VoxelizeTwoGrids), and on
-//     success records the wall-clock duration as a sidecar metadata file
-//     so Sweep can make cost-aware eviction decisions.
+//     success calls stampCost to back-fill the disk meta sidecar with
+//     the wall-clock generation time.
 //
-// body is responsible for storing its result via cache.set… before
-// returning. This keeps the helper a pure cross-cut concern (cache check
-// + UI marker + cost recording) without coupling it to each stage's
-// typed output.
+// body must store its result via cache.set… before returning. The
+// typed setter encodes the value and queues the blob write; this
+// helper handles the cost/description metadata after the fact.
 //
 // Pattern:
 //
@@ -245,42 +205,23 @@ func runStageCached(
 	start := time.Now()
 	if err := body(); err != nil {
 		// Errored runs don't record cost. The body may not have
-		// written the data file (or wrote a partial), so a meta
+		// written its result (or wrote a partial), so a meta
 		// pointing at it would be misleading.
 		return err
 	}
-	cache.recordCost(stage, opts, stageDescription(stage, opts), time.Since(start))
+	// Body wrote the blob via the typed setter. Stamp the disk
+	// meta sidecar with description and wall-clock cost so the
+	// next sweep can rank this entry correctly.
+	cache.stampCost(stage, opts, time.Since(start))
 	return nil
 }
 
 // hitSourceLabel returns a short label for console messages.
 func hitSourceLabel(s hitSource) string {
-	switch s {
-	case hitMemory:
-		return "memory"
-	case hitDisk:
+	if s == hitDisk {
 		return "disk"
 	}
 	return "miss"
-}
-
-// recordCost writes the sidecar metadata file capturing how long the
-// stage took to run. Async like Set, tracked by the same WaitGroup so
-// shutdown can wait for it. Failures go to OnError, never returned.
-// No-op when disk persistence is disabled.
-func (c *StageCache) recordCost(stage StageID, opts Options, description string, cost time.Duration) {
-	if c.disk == nil {
-		return
-	}
-	key := c.stageKey(stage, opts)
-	if key == "" {
-		return
-	}
-	c.diskWrites.Add(1)
-	go func() {
-		defer c.diskWrites.Done()
-		c.disk.RecordCost(stageSubdir(stage), key, description, cost)
-	}()
 }
 
 // WaitForDiskWrites blocks until all in-flight async disk writes have
@@ -802,70 +743,100 @@ func allocOutput(stage StageID) any {
 	return nil
 }
 
-// hitSource indicates where a cache hit came from. Used to drive the
-// console message in runStageCached so the user can see whether disk
-// caching is paying off (disk hits) or just same-session repetition
-// (memory hits).
+// hitSource indicates where a cache hit came from. Currently only the
+// disk tier produces hits (in-process compressed-byte caching was
+// removed because the OS page cache + pipelineRun memoization already
+// cover what it would have provided).
 type hitSource int
 
 const (
 	hitMiss hitSource = iota
-	hitMemory
 	hitDisk
 )
 
 // get returns the cached output for the given stage and opts, or nil on
-// miss. Tries memory first; on miss, tries disk and warms memory on a hit.
-// Every stage is treated identically — there are no stages with special
-// caching rules.
+// miss. Every stage is treated identically — there are no stages with
+// special caching rules.
 func (c *StageCache) get(stage StageID, opts Options) any {
 	v, _ := c.getWithSource(stage, opts)
 	return v
 }
 
 // getWithSource is get plus an indicator of where the hit came from.
-// Used by runStageCached for the console "cache hit" message.
+// On a hit, decodes the blob into a freshly allocated output struct.
+// A blob that fails to decode (corrupted file, format change) is
+// deleted so the next access misses cleanly and recomputes.
 func (c *StageCache) getWithSource(stage StageID, opts Options) (any, hitSource) {
 	key := c.stageKey(stage, opts)
-	if key == "" {
+	if key == "" || c.disk == nil {
 		return nil, hitMiss
 	}
-	if v := c.stages[stage].get(key); v != nil {
-		return v, hitMemory
-	}
-	if c.disk == nil {
+	subdir := stageSubdir(stage)
+	blob := c.disk.GetBlob(subdir, key)
+	if blob == nil {
 		return nil, hitMiss
 	}
 	out := allocOutput(stage)
 	if out == nil {
 		return nil, hitMiss
 	}
-	if !c.disk.Get(stageSubdir(stage), key, out) {
+	if err := cacheblob.Decode(blob, out); err != nil {
+		c.disk.Remove(subdir, key)
 		return nil, hitMiss
 	}
-	c.stages[stage].put(key, out)
 	return out, hitDisk
 }
 
-// set stores output for the given stage and opts in memory and async-writes
-// it to disk.
+// set encodes output once and writes the resulting blob to disk.
+// Description and cost are filled in by stampCost, which
+// runStageCached calls after the body returns and the wall-clock
+// duration is known.
 //
-// Concurrency contract: after calling set, callers must treat output as
-// read-only. The disk-write goroutine reads it concurrently with downstream
-// stages; concurrent reads of immutable data are race-free.
+// Lifetime: after set returns, the caller's local pointer is the only
+// live decoded copy. The cache holds bytes on disk; subsequent gets
+// decode fresh structs. No mutable state is shared across stages or
+// with disk-write goroutines.
 func (c *StageCache) set(stage StageID, opts Options, output any) {
 	key := c.stageKey(stage, opts)
-	if key == "" {
+	if key == "" || c.disk == nil {
 		return
 	}
-	c.stages[stage].put(key, output)
-	if c.disk == nil {
+	blob, err := cacheblob.Encode(output)
+	if err != nil {
+		// Encoding failures shouldn't break the pipeline. The
+		// caller still has its live pointer; cross-run hits just
+		// won't happen for this entry.
 		return
 	}
+	subdir := stageSubdir(stage)
 	c.diskWrites.Add(1)
 	go func() {
 		defer c.diskWrites.Done()
-		c.disk.Set(stageSubdir(stage), key, output)
+		c.disk.SetBlob(subdir, key, blob)
+	}()
+}
+
+// stampCost back-fills the disk-side meta sidecar with description and
+// wall-clock cost for the entry the most recent typed setter wrote.
+// Async; tracked by diskWrites so shutdown waits for it.
+//
+// Best-effort under same-key contention: if two pipeline runs produce
+// the same key in quick succession, their stampCost goroutines may
+// land out of order, leaving the meta with the wrong cost. The blob
+// is still correct (last writer wins on the data file too) and an
+// off-by-one cost only mildly skews future eviction scoring; not
+// worth a per-key serializer.
+func (c *StageCache) stampCost(stage StageID, opts Options, cost time.Duration) {
+	key := c.stageKey(stage, opts)
+	if key == "" || c.disk == nil {
+		return
+	}
+	subdir := stageSubdir(stage)
+	description := stageDescription(stage, opts)
+	c.diskWrites.Add(1)
+	go func() {
+		defer c.diskWrites.Done()
+		c.disk.RecordCost(subdir, key, description, cost)
 	}()
 }
 

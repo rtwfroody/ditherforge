@@ -105,7 +105,7 @@ func NewApp() *App {
 
 const (
 	diskCacheMaxAge   = 7 * 24 * time.Hour
-	diskCacheMaxBytes = 1 << 30 // 1 GiB
+	diskCacheMaxBytes = 1 << 31 // 2 GiB
 )
 
 // humanSize formats a byte count using KB / MB / GB units (1024-based).
