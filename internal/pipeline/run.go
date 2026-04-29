@@ -94,7 +94,11 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		return r.load, nil
 	}
 	err := runStageCached(r.cache, StageLoad, r.opts, r.tracker, func() error {
-		stage := progress.BeginStage(r.tracker, stageNames[StageLoad], false, 0)
+		label := stageNames[StageLoad]
+		if r.opts.AlphaWrap {
+			label += " (including alpha-wrap)"
+		}
+		stage := progress.BeginStage(r.tracker, label, false, 0)
 		defer stage.Done()
 
 		raw, err := r.Parse()
