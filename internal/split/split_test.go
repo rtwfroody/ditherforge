@@ -177,7 +177,7 @@ func surfaceArea(m *loader.LoadedModel) float64 {
 
 func TestCut_UnitCubeAtMidplane(t *testing.T) {
 	cube := makeUnitCube()
-	res, err := Cut(cube, AxisPlane(2, 0.5))
+	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestCut_SphereAtEquator(t *testing.T) {
 	// Cut slightly off the equator: subdividing the icosahedron lands
 	// many vertices exactly on z=0, and Cut requires no on-plane
 	// vertices.
-	res, err := Cut(sphere, AxisPlane(2, 0.01))
+	res, err := Cut(sphere, AxisPlane(2, 0.01), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestCut_TangentPlaneFails(t *testing.T) {
 	cube := makeUnitCube()
 	// z=1 hits the top face exactly: vertices on that face have side==0,
 	// rest have side<0. No cut polygon, no cap.
-	_, err := Cut(cube, AxisPlane(2, 1))
+	_, err := Cut(cube, AxisPlane(2, 1), ConnectorSettings{})
 	if err == nil {
 		t.Fatal("Cut: expected error for tangent plane, got nil")
 	}
@@ -230,7 +230,7 @@ func TestCut_TangentPlaneFails(t *testing.T) {
 
 func TestCut_MissingMeshFails(t *testing.T) {
 	cube := makeUnitCube()
-	_, err := Cut(cube, AxisPlane(2, 10))
+	_, err := Cut(cube, AxisPlane(2, 10), ConnectorSettings{})
 	if err == nil {
 		t.Fatal("Cut: expected error for plane that misses the mesh")
 	}
@@ -238,7 +238,7 @@ func TestCut_MissingMeshFails(t *testing.T) {
 
 func TestCut_NonUnitNormalFails(t *testing.T) {
 	cube := makeUnitCube()
-	_, err := Cut(cube, Plane{Normal: [3]float64{2, 0, 0}, D: 0.5})
+	_, err := Cut(cube, Plane{Normal: [3]float64{2, 0, 0}, D: 0.5}, ConnectorSettings{})
 	if err == nil {
 		t.Fatal("Cut: expected error for non-unit normal")
 	}
@@ -252,7 +252,7 @@ func TestCut_PreservesUVsAcrossSplit(t *testing.T) {
 	for i, p := range cube.Vertices {
 		cube.UVs[i] = [2]float32{p[0], p[1]}
 	}
-	res, err := Cut(cube, AxisPlane(2, 0.5))
+	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
@@ -327,7 +327,7 @@ func makeHollowCube() *loader.LoadedModel {
 func TestCut_OnPlaneVertexFails(t *testing.T) {
 	cube := makeUnitCube()
 	// z=0 hits all four bottom-face vertices.
-	_, err := Cut(cube, AxisPlane(2, 0))
+	_, err := Cut(cube, AxisPlane(2, 0), ConnectorSettings{})
 	if err == nil {
 		t.Fatal("expected error when cut plane passes through model vertices")
 	}
@@ -338,7 +338,7 @@ func TestCut_OnPlaneVertexFails(t *testing.T) {
 // would silently break the watertight contract for downstream stages.
 func TestCut_CapFacesLieOnPlane(t *testing.T) {
 	cube := makeUnitCube()
-	res, err := Cut(cube, AxisPlane(2, 0.5))
+	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestCut_PreservesVertexColors(t *testing.T) {
 			cube.VertexColors[i] = [4]uint8{0, 0, 255, 255}
 		}
 	}
-	res, err := Cut(cube, AxisPlane(2, 0.5))
+	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestCut_MultiComponentRejected(t *testing.T) {
 		Vertices: append(cube1.Vertices, cube2v...),
 		Faces:    append(cube1.Faces, cube2f...),
 	}
-	_, err := Cut(pair, AxisPlane(2, 0.5))
+	_, err := Cut(pair, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err == nil {
 		t.Fatal("expected error for non-nested multi-component cut")
 	}
@@ -445,7 +445,7 @@ func TestCut_PolygonWithHoles(t *testing.T) {
 	hollow := makeHollowCube()
 	// Cut at z=0.1 (off-axis to avoid degenerate alignment with face
 	// boundaries of the inner cube).
-	res, err := Cut(hollow, AxisPlane(2, 0.1))
+	res, err := Cut(hollow, AxisPlane(2, 0.1), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}

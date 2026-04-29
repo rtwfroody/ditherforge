@@ -538,6 +538,32 @@ reconstitute the original cube.
   the largest connected component per side is kept and the rest is
   reported as a warning.
 
+## Phase 2 follow-ups (not yet addressed)
+
+Phase 2 ships connector placement (polylabel) plus peg/pocket/dowel
+geometry, but with one significant limitation:
+
+- **Multi-connector triangulation.** The auto-count heuristic and the
+  user-supplied `Count` are temporarily clamped to 1 inside
+  `placeConnectors`. When two connectors land at near-equal
+  Y-coordinates (which polylabel-with-exclusion frequently produces on
+  symmetric caps), the second hole's bridge crosses through the first
+  hole's bridge spike, and `earClip` fails to find an ear. The fix is
+  one of:
+  1. Port a more robust earcut (Mapbox's earcut.js handles bridge
+     spikes correctly via the visibility/angle scan over reflex
+     vertices including bridged spike endpoints).
+  2. Perturb connector placements so they don't share Y-values; emit a
+     warning when perturbation pushes the connector off-center.
+  3. Process all hole bridges into a single combined merged polygon in
+     one pass (Mapbox's approach), rather than incremental per-hole
+     bridges.
+
+  Until this lands, the auto heuristic always emits 1 connector. The
+  inscribed-circle radius `R` and the resulting auto-count (1/2/3
+  pre-cap) are computed and would be the correct count under (1)–(3),
+  so removing the cap is mostly a matter of fixing the earcut path.
+
 ## Phase 1 follow-ups (not yet addressed)
 
 These came out of the phase-1 code review but were intentionally

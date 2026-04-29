@@ -22,6 +22,33 @@ type Plane struct {
 	D      float64
 }
 
+// ConnectorStyle selects what alignment features Cut bakes into the cut
+// faces.
+type ConnectorStyle int
+
+const (
+	// NoConnectors leaves both caps as flat planar surfaces.
+	NoConnectors ConnectorStyle = iota
+	// Pegs places a solid cylindrical peg on half 0's cap and a matching
+	// cylindrical pocket on half 1's cap. Female radius = peg radius +
+	// clearance.
+	Pegs
+	// Dowels punches matching cylindrical holes in both caps. Both holes
+	// are oversized by clearance. The user prints separate dowels (or
+	// uses hardware-store steel pins).
+	Dowels
+)
+
+// ConnectorSettings controls connector placement and dimensions. The
+// zero value (Style=NoConnectors) leaves caps flat.
+type ConnectorSettings struct {
+	Style       ConnectorStyle
+	Count       int     // 0 = auto (heuristic on inscribed-circle radius); 1..3 explicit
+	DiamMM      float64 // peg/dowel diameter in mm
+	DepthMM     float64 // peg/pocket depth (per side for Dowels)
+	ClearanceMM float64 // per-side radial clearance applied to female features
+}
+
 // AxisPlane builds a Plane perpendicular to one of the principal axes
 // (axis: 0=X, 1=Y, 2=Z) at the given offset along that axis. Normal points
 // in +axis direction. Invalid axis values fall back to Z; callers that
@@ -56,6 +83,9 @@ type CutResult struct {
 
 // Cut splits a watertight model by a plane and caps each half with a
 // triangulated planar surface, producing two closed-watertight halves.
+// Optional alignment connectors (pegs or dowel holes) can be baked into
+// the cut faces via the connectors parameter; pass ConnectorSettings{}
+// for plain caps.
 //
 // The input model must be watertight (every edge has exactly two
 // incident faces). If it is not, the output halves will not be watertight
@@ -65,10 +95,12 @@ type CutResult struct {
 // Returns an error when:
 //   - the cut plane misses the mesh entirely (no intersected triangles),
 //   - the recovered cut polygon has degenerate or non-closed loops,
-//   - cap triangulation fails (e.g. self-intersecting boundary).
+//   - cap triangulation fails (e.g. self-intersecting boundary),
+//   - the cut produces multiple disconnected components per side,
+//   - any model vertex lies exactly on the cut plane.
 //
 // On error, neither half is returned — splitting must succeed atomically.
-func Cut(model *loader.LoadedModel, plane Plane) (*CutResult, error) {
+func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (*CutResult, error) {
 	if model == nil || len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("split.Cut: empty model")
 	}
@@ -126,7 +158,15 @@ func Cut(model *loader.LoadedModel, plane Plane) (*CutResult, error) {
 		return nil, fmt.Errorf("split.Cut: cut plane does not intersect the mesh")
 	}
 
-	// 4. Cap each half by triangulating its loops. Each half's cap normal
+	// 4. Place connectors and add their cap-circle "hole" loops to
+	//    each half. Done before triangulation so the cap polygons
+	//    naturally exclude the connector regions.
+	placements := bld.placeConnectors(loops, plane, connectors)
+	if len(placements) > 0 {
+		bld.addConnectorHoles(&loops, plane, placements)
+	}
+
+	// 5. Cap each half by triangulating its loops. Each half's cap normal
 	//    points away from the interior of that half: half 0 (negative
 	//    side) has cap normal +plane.Normal; half 1 has -plane.Normal.
 	capArea, err := bld.triangulateCaps(loops, plane)
@@ -135,6 +175,14 @@ func Cut(model *loader.LoadedModel, plane Plane) (*CutResult, error) {
 	}
 	if capArea < eps*eps {
 		return nil, fmt.Errorf("split.Cut: cap area below %g (cut plane is tangent to the surface; choose a different offset)", eps*eps)
+	}
+
+	// 6. Generate cylindrical body geometry for each placed connector
+	//    (peg cylinder on male side, pocket walls + floor on the other
+	//    half). Each body closes the corresponding cap hole, so the
+	//    halves remain watertight.
+	if len(placements) > 0 {
+		bld.addConnectorBodies(plane, placements, connectors)
 	}
 
 	res := &CutResult{
