@@ -18,19 +18,22 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
-// SplitInfo carries per-half geometry plus inverse transforms used by
-// VoxelizeTwoGrids when the model has been split into two halves and
-// laid out side-by-side on the bed. The geometry meshes (Halves) are
-// in bed coordinates; InverseTransform[i] maps a bed-coord position
-// back into original-mesh coordinates, where colorModel,
-// stickerModel, and the sticker spatial index live unmoved.
+// SplitInfo carries per-half geometry plus the forward transforms
+// that produced the laid-out halves. VoxelizeTwoGrids calls
+// Xform[i].ApplyInverse on each cell centroid to map bed coords
+// back into original-mesh coords, where colorModel, stickerModel,
+// and the sticker spatial index live unmoved.
+//
+// Xform is the FORWARD transform (orig → bed), not the inverse.
+// The "inverse" lives in voxelize's call to ApplyInverse, not in
+// the field. This matches splitOutput.Xform in docs/SPLIT.md.
 //
 // When SplitInfo is nil, VoxelizeTwoGrids voxelizes the single
 // `model` argument with no transform (bit-identical to the
 // pre-split path).
 type SplitInfo struct {
-	Halves           [2]*loader.LoadedModel
-	InverseTransform [2]split.Transform
+	Halves [2]*loader.LoadedModel
+	Xform  [2]split.Transform
 }
 
 // Cell size multipliers relative to nozzle diameter.
@@ -246,6 +249,11 @@ type TwoGridResult struct {
 // mesh than the color sampler — typically the alpha-wrap mesh while
 // colorModel is the original textured mesh. Pass nil for both to use
 // colorModel for sticker lookups (which also covers the no-sticker case).
+//
+// When splitInfo is non-nil, the `model` parameter is ignored; geometry
+// comes from splitInfo.Halves and each cell records its halfIdx. The
+// `colorModel` parameter is required (no fallback) because the geometry
+// meshes are in bed coords while colorModel must be in original coords.
 func VoxelizeTwoGrids(
 	ctx context.Context,
 	model, colorModel *loader.LoadedModel,
@@ -278,7 +286,7 @@ func VoxelizeTwoGrids(
 			}
 			entries = append(entries, geomEntry{
 				mesh:     m,
-				invXform: splitInfo.InverseTransform[h],
+				invXform: splitInfo.Xform[h],
 				halfIdx:  uint8(h),
 			})
 		}
@@ -296,27 +304,21 @@ func VoxelizeTwoGrids(
 	}
 
 	for _, e := range entries {
-		fmt.Printf("  Input mesh (half %d): %s\n", e.halfIdx, voxel.CheckWatertight(e.mesh.Faces))
+		if len(entries) > 1 {
+			fmt.Printf("  Input mesh (half %d): %s\n", e.halfIdx, voxel.CheckWatertight(e.mesh.Faces))
+		} else {
+			fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(e.mesh.Faces))
+		}
 	}
 
 	// Bbox is the union over all geometry meshes (in bed coords for
 	// the split path).
-	var minV, maxV [3]float32
-	first := true
-	for _, e := range entries {
+	minV, maxV := voxel.ComputeBounds(entries[0].mesh.Vertices)
+	for _, e := range entries[1:] {
 		mn, mx := voxel.ComputeBounds(e.mesh.Vertices)
-		if first {
-			minV, maxV = mn, mx
-			first = false
-		} else {
-			for i := 0; i < 3; i++ {
-				if mn[i] < minV[i] {
-					minV[i] = mn[i]
-				}
-				if mx[i] > maxV[i] {
-					maxV[i] = mx[i]
-				}
-			}
+		for i := 0; i < 3; i++ {
+			minV[i] = min(minV[i], mn[i])
+			maxV[i] = max(maxV[i], mx[i])
 		}
 	}
 	maxCellSize := max(layer0Size, upperSize)
