@@ -704,13 +704,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Phase-7 wiring not yet shipped: when Split is enabled,
-		// deco.Halves is populated and DecimModel is nil. Clip
-		// needs to call ClipMeshByPatchesTwoGrid per half with the
-		// dither patches filtered by halfIdx. Until that lands we
-		// surface a clear error rather than crash on a nil mesh.
-		if deco.DecimModel == nil {
-			return nil, fmt.Errorf("clip: split-aware Clip not yet implemented (phase 7, see docs/SPLIT.md); set Options.Split.Enabled=false to use the unsplit path")
+		spo, err := r.Split()
+		if err != nil {
+			return nil, err
 		}
 		tClip := time.Now()
 		cfg := voxel.TwoGridConfig{
@@ -720,6 +716,16 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			LayerH:     vo.LayerH,
 			SeamZ:      vo.MinV[2] + 0.5*vo.LayerH,
 		}
+
+		if spo.Enabled {
+			out, err := r.clipSplit(do, deco, vo, cfg)
+			if err != nil {
+				return nil, err
+			}
+			fmt.Printf("  Clipped (split): %d faces in %.1fs\n", len(out.ShellFaces), time.Since(tClip).Seconds())
+			return out, nil
+		}
+
 		shellVerts, shellFaces, shellAssignments, cerr := voxel.ClipMeshByPatchesTwoGrid(
 			r.ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg, r.tracker)
 		if cerr != nil {
@@ -735,6 +741,56 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 	})
 }
 
+// clipSplit runs ClipMeshByPatchesTwoGrid once per half, with each
+// half's PatchMap subset, and concatenates the per-half outputs into
+// a single clipOutput with ShellHalfIdx tagging each face.
+//
+// Patches are connected components of cells with the same color
+// assignment. Cells in different halves are spatially separated by
+// the bed-layout gap and never share neighbors, so flood-fill never
+// joins them: every patch belongs to exactly one half. We rely on
+// that to filter PatchMap by cell.HalfIdx without losing
+// connectivity.
+func (r *pipelineRun) clipSplit(do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput, cfg voxel.TwoGridConfig) (*clipOutput, error) {
+	var halfPatchMaps [2]map[voxel.CellKey]int
+	for h := 0; h < 2; h++ {
+		halfPatchMaps[h] = make(map[voxel.CellKey]int)
+	}
+	for ck, patchIdx := range do.PatchMap {
+		cellIdx, ok := vo.CellAssignMap[ck]
+		if !ok {
+			continue
+		}
+		h := vo.Cells[cellIdx].HalfIdx
+		halfPatchMaps[h][ck] = patchIdx
+	}
+
+	var combinedVerts [][3]float32
+	var combinedFaces [][3]uint32
+	var combinedAssign []int32
+	var combinedHalfIdx []byte
+	for h := 0; h < 2; h++ {
+		verts, faces, assigns, err := voxel.ClipMeshByPatchesTwoGrid(
+			r.ctx, deco.Halves[h], halfPatchMaps[h], do.PatchAssignment, cfg, r.tracker)
+		if err != nil {
+			return nil, fmt.Errorf("clip half %d: %w", h, err)
+		}
+		offset := uint32(len(combinedVerts))
+		combinedVerts = append(combinedVerts, verts...)
+		for _, f := range faces {
+			combinedFaces = append(combinedFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
+			combinedHalfIdx = append(combinedHalfIdx, byte(h))
+		}
+		combinedAssign = append(combinedAssign, assigns...)
+	}
+	return &clipOutput{
+		ShellVerts:       combinedVerts,
+		ShellFaces:       combinedFaces,
+		ShellAssignments: combinedAssign,
+		ShellHalfIdx:     combinedHalfIdx,
+	}, nil
+}
+
 func (r *pipelineRun) Merge() (*mergeOutput, error) {
 	return runStage(r, StageMerge, &r.merge, func() (*mergeOutput, error) {
 		co, err := r.Clip()
@@ -744,11 +800,26 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 		shellVerts := co.ShellVerts
 		shellFaces := co.ShellFaces
 		shellAssignments := co.ShellAssignments
+		shellHalfIdx := co.ShellHalfIdx
 		if !r.opts.NoMerge {
 			tMerge := time.Now()
 			before := len(shellFaces)
 			var merr error
-			shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
+			if shellHalfIdx != nil {
+				// Per-half merge: halves don't share vertices (clipSplit
+				// offsets each half's vertex indices), so
+				// MergeCoplanarTriangles run on the full mesh would not
+				// merge across halves anyway, but the per-face HalfIdx
+				// parallel array needs to track the merged face count.
+				// Simplest: extract per-half slices, merge each, then
+				// concatenate. Faces in clipSplit's output are already
+				// grouped by half (h=0 then h=1), so the slice ranges
+				// are contiguous.
+				shellFaces, shellAssignments, shellHalfIdx, merr =
+					mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, r.tracker)
+			} else {
+				shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
+			}
 			if merr != nil {
 				return nil, fmt.Errorf("merge: %w", merr)
 			}
@@ -761,7 +832,56 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,
 			ShellAssignments: shellAssignments,
+			ShellHalfIdx:     shellHalfIdx,
 		}, nil
 	})
+}
+
+// mergeSplitFaces runs MergeCoplanarTriangles independently on each
+// half's contiguous face slice (clipSplit groups faces by half), then
+// concatenates results and rebuilds the per-face HalfIdx array.
+// Vertices are shared across halves by index space (clipSplit emits a
+// unified vertex table with offsets), but faces never reference
+// across halves, so per-half merge is correct.
+func mergeSplitFaces(
+	ctx context.Context,
+	verts [][3]float32,
+	faces [][3]uint32,
+	assignments []int32,
+	halfIdx []byte,
+	tracker progress.Tracker,
+) ([][3]uint32, []int32, []byte, error) {
+	// Find the boundary between half 0 and half 1.
+	boundary := len(faces)
+	for i, h := range halfIdx {
+		if h == 1 {
+			boundary = i
+			break
+		}
+	}
+	h0Faces := faces[:boundary]
+	h1Faces := faces[boundary:]
+	h0Assign := assignments[:boundary]
+	h1Assign := assignments[boundary:]
+
+	mergedH0Faces, mergedH0Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h0Faces, h0Assign, tracker)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("merge half 0: %w", err)
+	}
+	mergedH1Faces, mergedH1Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h1Faces, h1Assign, tracker)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("merge half 1: %w", err)
+	}
+
+	combinedFaces := append(mergedH0Faces, mergedH1Faces...)
+	combinedAssign := append(mergedH0Assign, mergedH1Assign...)
+	combinedHalfIdx := make([]byte, 0, len(combinedFaces))
+	for range mergedH0Faces {
+		combinedHalfIdx = append(combinedHalfIdx, 0)
+	}
+	for range mergedH1Faces {
+		combinedHalfIdx = append(combinedHalfIdx, 1)
+	}
+	return combinedFaces, combinedAssign, combinedHalfIdx, nil
 }
 

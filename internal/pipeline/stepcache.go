@@ -490,6 +490,12 @@ type clipOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	// ShellHalfIdx is parallel to ShellFaces; non-nil only when Split
+	// is enabled, in which case each face is tagged with the half it
+	// came from. Downstream Merge keeps it parallel through the
+	// per-half merge pass; Export uses it (eventually) to emit one
+	// 3MF <object> entry per half.
+	ShellHalfIdx []byte
 }
 
 // mergeOutput has the same structure as clipOutput. When NoMerge is true,
@@ -499,6 +505,7 @@ type mergeOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	ShellHalfIdx     []byte // parallel to ShellFaces; nil when Split disabled
 }
 
 // --- Per-stage settings structs for cache key computation ---

@@ -538,6 +538,24 @@ reconstitute the original cube.
   the largest connected component per side is kept and the rest is
   reported as a warning.
 
+## Phase 7 follow-up: 3MF two-object emission
+
+Phase 7 ships split-aware Clip + Merge: the pipeline runs end-to-end
+with `Options.Split.Enabled=true`, producing a single laid-out mesh
+with `mergeOutput.ShellHalfIdx` parallel to `ShellFaces` tagging
+each face with its half. `buildOutputModel` lifts that into
+`LoadedModel.FaceMeshIdx` + `NumMeshes=2`.
+
+The 3MF export still emits a single `<object>` entry. To emit two
+objects (one per half), `internal/export3mf/export3mf.go:215` (and
+the bambu.go variant at line 249) needs to iterate per
+FaceMeshIdx group and emit one `<object>` per group, with a build
+item per object. The `Xform` per half is exactly what 3MF's
+`<item transform>` attribute wants. Marked as the v1 finishing
+piece — without it the user prints both halves as a single 3MF
+object, which slicers handle but lose the ability to apply
+per-object settings to each half.
+
 ## Phase 5 measurements (informational)
 
 The phase-5 cap-planarity validation (`TestDecimate_HalfPreservesCapPlanarity`)

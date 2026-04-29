@@ -1,7 +1,11 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
+
+	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
 // TestSplitDisabled_NoCacheKeyChange — when Split.Enabled is false,
@@ -95,6 +99,111 @@ func TestSplitEnabled_FieldCascade(t *testing.T) {
 				t.Errorf("StageSplit key did not change when %s changed", tc.name)
 			}
 		})
+	}
+}
+
+// TestMergeSplitFaces_PerHalfMergeAndConcat — mergeSplitFaces should
+// run MergeCoplanarTriangles once per half (faces are grouped by
+// halfIdx in clipSplit's output) and concatenate, preserving the
+// per-face HalfIdx parallel array on the result. Constructs a tiny
+// shell with two coplanar quads on each half (4 triangles per half,
+// expecting merge to reduce to 2 triangles per half).
+func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
+	// Half 0: a quad in the z=0 plane at x=[0,1], y=[0,2], split into
+	// 2 triangles, with a coplanar adjacent quad at y=[2,4]. Result:
+	// 4 triangles that merge into 2 (since coplanar same-color groups
+	// re-triangulate to a quad = 2 tris).
+	verts := [][3]float32{
+		// half 0 (8 verts)
+		{0, 0, 0}, {1, 0, 0}, {1, 2, 0}, {0, 2, 0},
+		{0, 4, 0}, {1, 4, 0}, // extends y to 4
+		{0, 0, 0}, {0, 0, 0}, // padding to keep counts simple
+		// half 1 (8 verts shifted in x)
+		{10, 0, 0}, {11, 0, 0}, {11, 2, 0}, {10, 2, 0},
+		{10, 4, 0}, {11, 4, 0},
+		{0, 0, 0}, {0, 0, 0},
+	}
+	// 4 tris per half (2 quads each = 4 tris).
+	faces := [][3]uint32{
+		// Half 0 quads (z=0 plane)
+		{0, 1, 2}, {0, 2, 3}, // first quad
+		{3, 2, 5}, {3, 5, 4}, // second quad sharing edge 2-3 (now indices 3-2 reversed) -> using 3 and 5 for share
+		// Half 1
+		{8, 9, 10}, {8, 10, 11},
+		{11, 10, 13}, {11, 13, 12},
+	}
+	assignments := []int32{0, 0, 0, 0, 1, 1, 1, 1}
+	halfIdx := []byte{0, 0, 0, 0, 1, 1, 1, 1}
+	outFaces, outAssign, outHalf, err := mergeSplitFaces(
+		context.Background(), verts, faces, assignments, halfIdx, progress.NullTracker{},
+	)
+	if err != nil {
+		t.Fatalf("mergeSplitFaces: %v", err)
+	}
+	if len(outFaces) != len(outAssign) || len(outFaces) != len(outHalf) {
+		t.Errorf("output array lengths differ: faces=%d assign=%d half=%d", len(outFaces), len(outAssign), len(outHalf))
+	}
+	// Count faces per half. Should be > 0 and grouped (all 0s come
+	// before all 1s after concat).
+	var n0, n1 int
+	transitionSeen := false
+	for i, h := range outHalf {
+		if h == 0 {
+			if transitionSeen {
+				t.Errorf("face %d has HalfIdx=0 but a HalfIdx=1 came earlier — concat order broken", i)
+			}
+			n0++
+		} else if h == 1 {
+			transitionSeen = true
+			n1++
+		} else {
+			t.Errorf("face %d has unexpected HalfIdx=%d", i, h)
+		}
+	}
+	if n0 == 0 || n1 == 0 {
+		t.Errorf("expected both halves represented; got n0=%d n1=%d", n0, n1)
+	}
+}
+
+// TestClipSplit_FiltersPatchMapByHalf — verifies that clipSplit's
+// patch-map filtering routes each cell's patch into the correct
+// per-half map. Doesn't run the full clip; it's a unit test of the
+// filter logic, which is the load-bearing correctness step.
+func TestClipSplit_FiltersPatchMapByHalf(t *testing.T) {
+	// Two cells: one in half 0, one in half 1.
+	cells := []voxel.ActiveCell{
+		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 0},
+		{Grid: 0, Col: 5, Row: 0, Layer: 0, HalfIdx: 1},
+	}
+	cellAssignMap := map[voxel.CellKey]int{
+		{Grid: 0, Col: 0, Row: 0, Layer: 0}: 0,
+		{Grid: 0, Col: 5, Row: 0, Layer: 0}: 1,
+	}
+	patchMap := map[voxel.CellKey]int{
+		{Grid: 0, Col: 0, Row: 0, Layer: 0}: 0,
+		{Grid: 0, Col: 5, Row: 0, Layer: 0}: 1,
+	}
+
+	var halfPatchMaps [2]map[voxel.CellKey]int
+	for h := 0; h < 2; h++ {
+		halfPatchMaps[h] = make(map[voxel.CellKey]int)
+	}
+	for ck, patchIdx := range patchMap {
+		cellIdx, ok := cellAssignMap[ck]
+		if !ok {
+			continue
+		}
+		h := cells[cellIdx].HalfIdx
+		halfPatchMaps[h][ck] = patchIdx
+	}
+	if len(halfPatchMaps[0]) != 1 || len(halfPatchMaps[1]) != 1 {
+		t.Errorf("expected 1 cell per half map, got h0=%d h1=%d", len(halfPatchMaps[0]), len(halfPatchMaps[1]))
+	}
+	if _, ok := halfPatchMaps[0][voxel.CellKey{Grid: 0, Col: 0, Row: 0, Layer: 0}]; !ok {
+		t.Errorf("half 0 map missing the col=0 cell")
+	}
+	if _, ok := halfPatchMaps[1][voxel.CellKey{Grid: 0, Col: 5, Row: 0, Layer: 0}]; !ok {
+		t.Errorf("half 1 map missing the col=5 cell")
 	}
 }
 

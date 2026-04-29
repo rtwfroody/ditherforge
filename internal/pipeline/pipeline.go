@@ -381,6 +381,14 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 
 // buildOutputModel constructs a LoadedModel from merge output, suitable for
 // export or preview mesh building.
+//
+// When the merge output carries a per-face HalfIdx (Split was
+// enabled), the result's FaceMeshIdx is populated from it and
+// NumMeshes is set to 2. Downstream consumers that understand
+// multi-mesh inputs (e.g. a future export3mf change for two-object
+// emission) can use those fields; consumers that don't (preview
+// mesh building, single-object export) treat the result as one mesh
+// and ignore the per-face tag.
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
@@ -391,13 +399,22 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 		textures = []image.Image{placeholder}
 	}
 
-	return &loader.LoadedModel{
+	out := &loader.LoadedModel{
 		Vertices:       mo.ShellVerts,
 		Faces:          mo.ShellFaces,
 		UVs:            make([][2]float32, len(mo.ShellVerts)),
 		Textures:       textures,
 		FaceTextureIdx: make([]int32, len(mo.ShellFaces)),
 	}
+	if mo.ShellHalfIdx != nil {
+		faceMeshIdx := make([]int32, len(mo.ShellHalfIdx))
+		for i, h := range mo.ShellHalfIdx {
+			faceMeshIdx[i] = int32(h)
+		}
+		out.FaceMeshIdx = faceMeshIdx
+		out.NumMeshes = 2
+	}
+	return out
 }
 
 // applyBaseColorOverride sets the base color for all untextured faces to the
