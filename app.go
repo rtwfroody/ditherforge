@@ -82,6 +82,14 @@ func NewApp() *App {
 			d.OnError = func(stage, op, key string, err error) {
 				fmt.Fprintf(os.Stderr, "disk cache %s %s [%s]: %v\n", stage, op, key, err)
 			}
+			d.OnEvict = func(stage, description, reason string, sizeBytes, costMs int64) {
+				what := description
+				if what == "" {
+					what = stage
+				}
+				fmt.Fprintf(os.Stderr, "disk cache evict (%s): %s — %s, %.1fs to generate\n",
+					reason, what, humanSize(sizeBytes), float64(costMs)/1000)
+			}
 			cache.SetDisk(d)
 		} else {
 			fmt.Fprintf(os.Stderr, "disk cache disabled: %v\n", err)
@@ -99,6 +107,21 @@ const (
 	diskCacheMaxAge   = 7 * 24 * time.Hour
 	diskCacheMaxBytes = 1 << 30 // 1 GiB
 )
+
+// humanSize formats a byte count using KB / MB / GB units (1024-based).
+func humanSize(n int64) string {
+	const k = 1024.0
+	f := float64(n)
+	switch {
+	case f >= k*k*k:
+		return fmt.Sprintf("%.1f GB", f/(k*k*k))
+	case f >= k*k:
+		return fmt.Sprintf("%.1f MB", f/(k*k))
+	case f >= k:
+		return fmt.Sprintf("%.1f KB", f/k)
+	}
+	return fmt.Sprintf("%d B", n)
+}
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx

@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,48 @@ func stageSubdir(s StageID) string {
 		return "merge"
 	}
 	return "unknown"
+}
+
+// stageDescription returns a short human-readable summary of what an
+// entry for (stage, opts) contains. Stored in the disk-cache meta
+// sidecar and printed during sweeps so the operator can see what's
+// being evicted ("Load: foo.glb (alpha-wrap)" beats an opaque hash).
+func stageDescription(stage StageID, opts Options) string {
+	base := filepath.Base(opts.Input)
+	switch stage {
+	case StageParse:
+		return fmt.Sprintf("Parse: %s", base)
+	case StageLoad:
+		s := fmt.Sprintf("Load: %s", base)
+		if opts.AlphaWrap {
+			s += " (alpha-wrap)"
+		}
+		return s
+	case StageDecimate:
+		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
+	case StageSticker:
+		return fmt.Sprintf("Stickers: %s (%d)", base, len(opts.Stickers))
+	case StageVoxelize:
+		return fmt.Sprintf("Voxelize: %s @ %.2f/%.2fmm", base, opts.NozzleDiameter, opts.LayerHeight)
+	case StageColorAdjust:
+		return fmt.Sprintf("Color adjust: %s (B%+.0f C%+.0f S%+.0f)",
+			base, opts.Brightness, opts.Contrast, opts.Saturation)
+	case StageColorWarp:
+		return fmt.Sprintf("Color warp: %s (%d pins)", base, len(opts.WarpPins))
+	case StagePalette:
+		return fmt.Sprintf("Palette: %s (%d colors)", base, opts.NumColors)
+	case StageDither:
+		mode := opts.Dither
+		if mode == "" {
+			mode = "default"
+		}
+		return fmt.Sprintf("Dither: %s (%s)", base, mode)
+	case StageClip:
+		return fmt.Sprintf("Clip: %s", base)
+	case StageMerge:
+		return fmt.Sprintf("Merge: %s", base)
+	}
+	return base
 }
 
 // stageMemoryCap is the per-stage in-memory entry cap. Two slots is enough
@@ -206,7 +249,7 @@ func runStageCached(
 		// pointing at it would be misleading.
 		return err
 	}
-	cache.recordCost(stage, opts, time.Since(start))
+	cache.recordCost(stage, opts, stageDescription(stage, opts), time.Since(start))
 	return nil
 }
 
@@ -225,7 +268,7 @@ func hitSourceLabel(s hitSource) string {
 // stage took to run. Async like Set, tracked by the same WaitGroup so
 // shutdown can wait for it. Failures go to OnError, never returned.
 // No-op when disk persistence is disabled.
-func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration) {
+func (c *StageCache) recordCost(stage StageID, opts Options, description string, cost time.Duration) {
 	if c.disk == nil {
 		return
 	}
@@ -236,7 +279,7 @@ func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration)
 	c.diskWrites.Add(1)
 	go func() {
 		defer c.diskWrites.Done()
-		c.disk.RecordCost(stageSubdir(stage), key, cost)
+		c.disk.RecordCost(stageSubdir(stage), key, description, cost)
 	}()
 }
 

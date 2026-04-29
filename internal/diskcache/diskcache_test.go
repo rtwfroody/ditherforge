@@ -273,7 +273,7 @@ func TestRecordCostRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := Open(dir)
 	c.Set("test", "k", payload{Name: "x"})
-	c.RecordCost("test", "k", 1234*time.Millisecond)
+	c.RecordCost("test", "k", "round-trip", 1234*time.Millisecond)
 	metaPath := filepath.Join(dir, "test", "k.meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -304,9 +304,9 @@ func TestSweepCostAwareEviction(t *testing.T) {
 	// Roughly equal sizes (same payload shape). Costs differ by 1000x:
 	// the cheap one took 1 ms, the middle took 100 ms, the expensive
 	// one took 10000 ms.
-	c.RecordCost("test", "cheap", 1*time.Millisecond)
-	c.RecordCost("test", "midwa", 100*time.Millisecond)
-	c.RecordCost("test", "spend", 10000*time.Millisecond)
+	c.RecordCost("test", "cheap", "cheap entry", 1*time.Millisecond)
+	c.RecordCost("test", "midwa", "midway entry", 100*time.Millisecond)
+	c.RecordCost("test", "spend", "expensive entry", 10000*time.Millisecond)
 
 	// Make 'cheap' the freshest by mtime so LRU alone would *keep* it
 	// over 'spend'. Cost-awareness must override.
@@ -392,8 +392,8 @@ func TestSweepRecencyDominatesEvictionAtEqualCost(t *testing.T) {
 	}
 	c.Set("test", "fresh", payload{Name: "fresh", Data: mkData(1)})
 	c.Set("test", "stale", payload{Name: "stale", Data: mkData(2)})
-	c.RecordCost("test", "fresh", 500*time.Millisecond)
-	c.RecordCost("test", "stale", 500*time.Millisecond)
+	c.RecordCost("test", "fresh", "fresh", 500*time.Millisecond)
+	c.RecordCost("test", "stale", "stale", 500*time.Millisecond)
 	now := time.Now()
 	// Make 'stale' a day old so recency factor halves it; 'fresh'
 	// stays roughly current.
@@ -416,6 +416,110 @@ func TestSweepRecencyDominatesEvictionAtEqualCost(t *testing.T) {
 	}
 	if _, err := os.Stat(c.pathFor("test", "fresh")); err != nil {
 		t.Error("fresh entry was incorrectly evicted")
+	}
+}
+
+// TestSweepLargeExpensiveBeatsSmallCheap: the user's stated rule —
+// 1KB that took 1s should NOT be kept over 1000KB that took 1000s.
+// With cost-per-byte alone the two would tie. The score formula's
+// sub-linear size penalty (sqrt) breaks the tie in favor of the
+// entry whose absolute cost is higher.
+func TestSweepLargeExpensiveBeatsSmallCheap(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	// Non-compressible data so on-disk size scales with logical size:
+	// hash chains produce essentially random bytes that zstd can't shrink.
+	mkRandomish := func(n int) []int {
+		d := make([]int, n)
+		x := uint64(n)*2654435761 + 0x9E3779B97F4A7C15
+		for i := range d {
+			x ^= x << 13
+			x ^= x >> 7
+			x ^= x << 17
+			d[i] = int(x)
+		}
+		return d
+	}
+	// Small entry: small payload, modest cost.
+	c.Set("test", "small", payload{Name: "small", Data: mkRandomish(64)})
+	// Large entry: ~1000× larger payload, ~1000× more cost.
+	c.Set("test", "large", payload{Name: "large", Data: mkRandomish(64000)})
+	c.RecordCost("test", "small", "small/cheap", 1*time.Second)
+	c.RecordCost("test", "large", "large/expensive", 1000*time.Second)
+
+	// Both entries equally fresh, so recency doesn't pick the winner.
+	now := time.Now().Add(-1 * time.Minute)
+	for _, k := range []string{"small", "large"} {
+		os.Chtimes(c.pathFor("test", k), now, now)
+		os.Chtimes(filepath.Join(dir, "test", k+".meta.json"), now, now)
+	}
+
+	// Budget that fits the large entry (with its meta) but not also
+	// the small one. Setting cap = large total + 1 forces sweep to
+	// drop a single entry — the small one if scoring is correct.
+	largeTotal := func() int64 {
+		di, _ := os.Stat(c.pathFor("test", "large"))
+		mi, _ := os.Stat(filepath.Join(dir, "test", "large.meta.json"))
+		return di.Size() + mi.Size()
+	}()
+	cap := largeTotal + 1
+
+	if _, err := c.Sweep(7*24*time.Hour, cap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.pathFor("test", "small")); !os.IsNotExist(err) {
+		t.Error("small/cheap entry should have been evicted: a 1000× cheaper entry must lose to a 1000× more expensive one even when it's smaller")
+	}
+	if _, err := os.Stat(c.pathFor("test", "large")); err != nil {
+		t.Error("large/expensive entry should have survived")
+	}
+}
+
+// TestSweepHugeExpensiveBeatsTinyCheap: a fresh 5KB / 0.5s Parse
+// entry must NOT outrank a fresh 500KB / 60s Load entry. Without the
+// size floor, the sqrt denominator's penalty against the large entry
+// would invert the ranking even though the Load is 120× more
+// expensive in absolute terms.
+func TestSweepHugeExpensiveBeatsTinyCheap(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	mkRandomish := func(n int) []int {
+		d := make([]int, n)
+		x := uint64(n)*2654435761 + 0x9E3779B97F4A7C15
+		for i := range d {
+			x ^= x << 13
+			x ^= x >> 7
+			x ^= x << 17
+			d[i] = int(x)
+		}
+		return d
+	}
+	c.Set("test", "tiny", payload{Name: "tiny", Data: mkRandomish(64)})
+	c.Set("test", "huge", payload{Name: "huge", Data: mkRandomish(64000)})
+	c.RecordCost("test", "tiny", "tiny/cheap", 500*time.Millisecond)
+	c.RecordCost("test", "huge", "huge/expensive", 60*time.Second)
+
+	now := time.Now().Add(-1 * time.Minute)
+	for _, k := range []string{"tiny", "huge"} {
+		os.Chtimes(c.pathFor("test", k), now, now)
+		os.Chtimes(filepath.Join(dir, "test", k+".meta.json"), now, now)
+	}
+
+	hugeTotal := func() int64 {
+		di, _ := os.Stat(c.pathFor("test", "huge"))
+		mi, _ := os.Stat(filepath.Join(dir, "test", "huge.meta.json"))
+		return di.Size() + mi.Size()
+	}()
+	cap := hugeTotal + 1
+
+	if _, err := c.Sweep(7*24*time.Hour, cap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.pathFor("test", "tiny")); !os.IsNotExist(err) {
+		t.Error("tiny/cheap should have been evicted: a 120× cheaper entry must lose to a 120× more expensive one even though it's smaller")
+	}
+	if _, err := os.Stat(c.pathFor("test", "huge")); err != nil {
+		t.Error("huge/expensive should have survived")
 	}
 }
 

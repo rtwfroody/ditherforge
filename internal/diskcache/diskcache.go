@@ -39,10 +39,13 @@ const (
 // EntryMetadata is the JSON shape of a sidecar .meta.json file.
 type EntryMetadata struct {
 	// CostMs is how long the data file took to generate, in
-	// milliseconds. Used by Sweep to make cost-aware eviction
-	// decisions: entries with high cost-per-byte are kept, low-cost
-	// or huge entries evict first.
+	// milliseconds. Used by Sweep to score entries for eviction:
+	// expensive-to-regenerate entries are kept longer.
 	CostMs int64 `json:"costMs"`
+	// Description is a short human-readable summary of what the
+	// entry contains (e.g. "Load: foo.glb (alpha-wrap)"). Printed
+	// during sweep so the operator can see what's being evicted.
+	Description string `json:"description,omitempty"`
 }
 
 
@@ -60,11 +63,22 @@ type Cache struct {
 	// construction; reassignment after the cache is in use is racy because
 	// Set may invoke it from a goroutine.
 	OnError func(stage, op, key string, err error)
+	// OnEvict, if non-nil, is called for each entry Sweep removes,
+	// before the files are deleted. reason is "age" (past maxAge) or
+	// "size" (cost-aware eviction to fit the budget). Description is
+	// the meta-recorded human-readable summary, or "" if absent.
+	OnEvict func(stage, description, reason string, sizeBytes, costMs int64)
 }
 
 func (c *Cache) reportError(stage, op, key string, err error) {
 	if c.OnError != nil {
 		c.OnError(stage, op, key, err)
+	}
+}
+
+func (c *Cache) reportEvict(stage, description, reason string, sizeBytes, costMs int64) {
+	if c.OnEvict != nil {
+		c.OnEvict(stage, description, reason, sizeBytes, costMs)
 	}
 }
 
@@ -197,11 +211,12 @@ func (c *Cache) Set(stage, key string, val any) {
 }
 
 // RecordCost writes a sidecar JSON file recording how long the data file
-// at (stage, key) took to generate. Sweep uses this to make cost-aware
-// eviction decisions: entries with high cost-per-byte are kept, low-cost
-// or huge entries evict first. Best-effort like Set; errors go through
+// at (stage, key) took to generate, and a short human-readable description
+// of what the entry contains. Sweep uses cost to score entries for
+// eviction; description is shown in the sweep printout so the operator
+// can see what's being removed. Best-effort like Set; errors go through
 // OnError but never fail the caller.
-func (c *Cache) RecordCost(stage, key string, cost time.Duration) {
+func (c *Cache) RecordCost(stage, key, description string, cost time.Duration) {
 	dir := filepath.Join(c.Dir, stage)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		c.reportError(stage, "mkdir", key, err)
@@ -214,7 +229,7 @@ func (c *Cache) RecordCost(stage, key string, cost time.Duration) {
 		return
 	}
 	tmpName := tmp.Name()
-	md := EntryMetadata{CostMs: cost.Milliseconds()}
+	md := EntryMetadata{CostMs: cost.Milliseconds(), Description: description}
 	if err := json.NewEncoder(tmp).Encode(md); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
@@ -246,18 +261,26 @@ type SweepStats struct {
 // (stale .tmp- leftovers, files from older formats) are also tracked as
 // single-file entries with no cost.
 type cacheEntry struct {
+	stage       string
 	paths       []string
 	totalSize   int64
 	newestMtime time.Time
 	costMs      int64
+	description string
 }
 
 // recencyHalfLife is how fast an entry's "value" decays as time since
-// last access grows. With one day, a freshly-touched entry counts at
-// full weight, a day-old entry at 50%, a week-old entry at ~0.8%
-// (which the maxAge cutoff handles separately). Tied to time-since-
-// access (mtime), which Get bumps on every cache hit.
-const recencyHalfLife = 24 * time.Hour
+// last access grows. With a 7-day halflife, a freshly-touched entry
+// counts at full weight, a 7-day-old entry at 50%. Tied to time-since-
+// access (mtime), which Get bumps on every cache hit. The maxAge
+// cutoff (typically 7 days) handles deeper decay.
+const recencyHalfLife = 7 * 24 * time.Hour
+
+// scoreSizeFloor is the minimum size used in the eviction score's sqrt
+// denominator. Entries smaller than this are treated as if they were
+// this size, so small fresh entries can't crowd out large expensive
+// ones via the size penalty when their absolute cost is much lower.
+const scoreSizeFloor = 64 * 1024
 
 // recencyFactor returns the multiplier in (0, 1] that age contributes to
 // an entry's eviction score. age <= 0 (clock skew) yields 1.0.
@@ -275,13 +298,18 @@ func recencyFactor(age time.Duration) float64 {
 //     with the lowest score are deleted first until total size fits
 //     within maxBytes. The score combines three factors:
 //
-//         score = (costMs / sizeBytes) * 2^(-age/halflife)
+//         score = (costMs / sqrt(sizeBytes)) * 2^(-age/halflife)
 //
-//     Higher cost = more valuable (proportional). Larger size = less
-//     valuable per byte (proportional). Older = less valuable (decays
-//     exponentially with halflife = 24h). Ties fall back to oldest-
-//     mtime-first, which preserves LRU semantics for legacy entries
-//     with no recorded cost.
+//     Higher cost = more valuable (linear — generation time is the
+//     thing we're really trying to amortize). Larger size = less
+//     valuable per byte, but only as sqrt(size) so a 1000× larger
+//     entry that took 1000× longer still wins over a tiny cheap one.
+//     Older = less valuable (decays exponentially with a 7-day
+//     halflife, matching the typical maxAge so recency softens the
+//     score across the whole live window rather than collapsing it
+//     in a day). Ties fall back to oldest-mtime-first, which
+//     preserves LRU semantics for legacy entries with no recorded
+//     cost.
 //
 // Errors on individual files are ignored so a single unreadable file
 // doesn't abort the sweep.
@@ -335,7 +363,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		}
 		e, ok := entries[groupID]
 		if !ok {
-			e = &cacheEntry{}
+			e = &cacheEntry{stage: filepath.Base(dir)}
 			entries[groupID] = e
 		}
 		e.paths = append(e.paths, path)
@@ -358,6 +386,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 					c.reportError(stage, "decode", key, err)
 				} else {
 					e.costMs = md.CostMs
+					e.description = md.Description
 				}
 			}
 		}
@@ -381,6 +410,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 	survivors := make([]*cacheEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.newestMtime.Before(cutoff) {
+			c.reportEvict(e.stage, e.description, "age", e.totalSize, e.costMs)
 			for _, p := range e.paths {
 				os.Remove(p)
 			}
@@ -404,7 +434,16 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		if e.totalSize <= 0 {
 			return 0
 		}
-		base := float64(e.costMs) / float64(e.totalSize)
+		// Floor the size before sqrt so entries below ~64 KiB
+		// cluster together and absolute cost decides among them.
+		// Without this, a tiny-but-fresh entry can outscore a huge
+		// expensive one of similar density, because the size
+		// penalty compounds even at trivial sizes.
+		size := float64(e.totalSize)
+		if size < float64(scoreSizeFloor) {
+			size = float64(scoreSizeFloor)
+		}
+		base := float64(e.costMs) / math.Sqrt(size)
 		return base * recencyFactor(now.Sub(e.newestMtime))
 	}
 	sort.Slice(survivors, func(i, j int) bool {
@@ -420,6 +459,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		if total <= maxBytes {
 			break
 		}
+		c.reportEvict(e.stage, e.description, "size", e.totalSize, e.costMs)
 		for _, p := range e.paths {
 			os.Remove(p)
 		}
