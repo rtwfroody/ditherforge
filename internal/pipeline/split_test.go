@@ -116,4 +116,13 @@ func TestStageSplitDescription(t *testing.T) {
 	if got != want {
 		t.Errorf("enabled description = %q, want %q", got, want)
 	}
+	// Auto-count (ConnectorCount=0) renders as "×auto" so a zero
+	// in the log isn't mistaken for "no connectors."
+	auto := on
+	auto.Split.ConnectorCount = 0
+	got = stageDescription(StageSplit, auto)
+	want = "Split: foo.glb (Z@5.0mm, pegs ×auto)"
+	if got != want {
+		t.Errorf("auto-count description = %q, want %q", got, want)
+	}
 }

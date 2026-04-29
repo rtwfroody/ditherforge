@@ -105,8 +105,12 @@ func stageDescription(stage StageID, opts Options) string {
 			return fmt.Sprintf("Split: %s (off)", base)
 		}
 		axisName := []string{"X", "Y", "Z"}[opts.Split.Axis]
-		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s ×%d)",
-			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, opts.Split.ConnectorCount)
+		countStr := fmt.Sprintf("×%d", opts.Split.ConnectorCount)
+		if opts.Split.ConnectorCount == 0 {
+			countStr = "×auto"
+		}
+		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
+			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
 	case StageDecimate:
 		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
 	case StageSticker:
@@ -455,6 +459,12 @@ type decimateOutput struct {
 //
 // When Options.Split.Enabled is false, splitOutput.Enabled is false
 // and downstream stages take their non-split path.
+//
+// CONSUMERS MUST GATE ON `Enabled`, NEVER ON `Halves[i] == nil`.
+// loader.LoadedModel.GobEncode handles nil receivers by encoding
+// an empty model, which decodes as a non-nil zero LoadedModel. So
+// after a disk-cache round-trip, Halves[0]/Halves[1] are non-nil
+// even when Enabled is false. Only the Enabled bit is reliable.
 type splitOutput struct {
 	Enabled   bool
 	Halves    [2]*loader.LoadedModel

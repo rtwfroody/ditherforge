@@ -232,14 +232,24 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Disabled-passthrough: when Split is off, return a marker
-		// output that downstream stages treat as "no split."
-		if !r.opts.Split.Enabled {
-			progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0).Done()
-			return &splitOutput{Enabled: false}, nil
-		}
 		stage := progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0)
 		defer stage.Done()
+
+		// Disabled-passthrough: emit the stage event so the UI shows
+		// "Splitting" ticking by, then return a marker output that
+		// downstream stages treat as "no split."
+		if !r.opts.Split.Enabled {
+			return &splitOutput{Enabled: false}, nil
+		}
+
+		// Split requires a watertight input; the design doc says the
+		// frontend forces AlphaWrap=true when Split is enabled.
+		// Surface the precondition violation here so the user sees a
+		// clear error rather than a downstream "non-manifold cut
+		// polygon" message from split.Cut.
+		if !r.opts.AlphaWrap {
+			return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
+		}
 
 		fmt.Println("Splitting...")
 		tSplit := time.Now()
@@ -303,11 +313,12 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 
 		if so.Enabled {
 			fmt.Println("Decimating (split)...")
-			totalFaces := len(so.Halves[0].Faces) + len(so.Halves[1].Faces)
-			// Approximate per-half target by scaling
-			// CountSurfaceCells's whole-model count by face fraction.
+			// Use CountSurfaceCells on the unsplit lo.Model as the
+			// total target. Layout is rotation+translation, so the
+			// volume / surface area is preserved across halves;
+			// proportional per-half splitting lives inside
+			// DecimateHalves.
 			combinedTarget := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
-			_ = totalFaces // proportional split lives inside DecimateHalves
 			halves, derr := squarevoxel.DecimateHalves(r.ctx, so.Halves, combinedTarget, cellSize, r.opts.NoSimplify, r.tracker)
 			if derr != nil {
 				return nil, fmt.Errorf("decimate (split): %w", derr)
@@ -699,7 +710,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		// dither patches filtered by halfIdx. Until that lands we
 		// surface a clear error rather than crash on a nil mesh.
 		if deco.DecimModel == nil {
-			return nil, fmt.Errorf("clip: split-aware Clip not yet implemented (phase 7); set Options.Split.Enabled=false to use the unsplit path")
+			return nil, fmt.Errorf("clip: split-aware Clip not yet implemented (phase 7, see docs/SPLIT.md); set Options.Split.Enabled=false to use the unsplit path")
 		}
 		tClip := time.Now()
 		cfg := voxel.TwoGridConfig{
