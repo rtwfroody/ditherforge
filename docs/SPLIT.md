@@ -538,6 +538,24 @@ reconstitute the original cube.
   the largest connected component per side is kept and the rest is
   reported as a warning.
 
+## Phase 5 measurements (informational)
+
+The phase-5 cap-planarity validation (`TestDecimate_HalfPreservesCapPlanarity`)
+found that QEM's planar-affinity bias preserves the cap plane
+*loosely*, not *exactly*. On an icosphere cut at z=0.1 and decimated
+to 50% face count, surviving cap-perimeter vertices drift up to
+~3% of `cellSize` off the plane (~1.5 μm at cellSize=50 μm). This
+is well below FDM printer resolution and is acceptable for v1.
+
+A regression that disabled the planar-affinity bias entirely would
+produce drift on the order of `cellSize` itself (a 30× increase),
+which the test threshold (`0.1 × cellSize`) would catch.
+
+If real-world prints reveal cap mismatch issues at the half
+boundary, the design doc's deferred fix is to add an optional
+`pinnedVertices` parameter to `voxel.Decimate` and pass the
+cap-perimeter vertex set when decimating Split halves.
+
 ## Phase 3 follow-ups (not yet addressed)
 
 - **Peg orientation when cap is on bed.** `Layout` rotates each half

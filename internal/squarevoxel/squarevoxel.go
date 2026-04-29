@@ -588,25 +588,14 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 // quadric error and is disfavored by the heap. (Verified by
 // TestDecimate_HalfPreservesCapPlanarity.)
 func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
-	totalFaces := 0
-	for _, h := range halves {
-		if h != nil {
-			totalFaces += len(h.Faces)
-		}
-	}
+	// split.Cut's contract guarantees both halves are non-nil; we rely
+	// on that here rather than guarding for nil.
+	totalFaces := len(halves[0].Faces) + len(halves[1].Faces)
 	var out [2]*loader.LoadedModel
 	for i, h := range halves {
-		if h == nil {
-			continue
-		}
-		// Proportional split, with a floor of 1 to avoid divide-by-zero
-		// or degenerate "decimate to 0 faces" requests.
-		var perHalfTarget int
-		if totalFaces == 0 {
-			perHalfTarget = 0
-		} else {
-			perHalfTarget = totalTargetCells * len(h.Faces) / totalFaces
-		}
+		// Proportional split with a floor of 1 (avoid degenerate
+		// "decimate to 0 faces" requests).
+		perHalfTarget := totalTargetCells * len(h.Faces) / totalFaces
 		if perHalfTarget < 1 {
 			perHalfTarget = 1
 		}
