@@ -380,7 +380,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		fmt.Println("Voxelizing...")
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
-			layer0Size, upperSize, layerH, r.tracker, so.Decals)
+			layer0Size, upperSize, layerH, r.tracker, so.Decals, nil)
 		if verr != nil {
 			return nil, fmt.Errorf("voxelize: %w", verr)
 		}
