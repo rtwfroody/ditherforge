@@ -421,6 +421,24 @@ func (b *cutBuilder) appendFace(h int, srcFace int, f [3]uint32) {
 	}
 }
 
+// appendNewVertex adds a fresh vertex (with no source-mesh parent) to
+// halves[h] and writes conforming zero entries into every per-vertex
+// parallel array. Used by connector-hole and connector-body code in
+// connectors.go for vertices that aren't midpoints or copies of the
+// source mesh.
+func (b *cutBuilder) appendNewVertex(h int, pos [3]float32) uint32 {
+	half := b.halves[h]
+	idx := uint32(len(half.Vertices))
+	half.Vertices = append(half.Vertices, pos)
+	if half.UVs != nil {
+		half.UVs = append(half.UVs, [2]float32{})
+	}
+	if half.VertexColors != nil {
+		half.VertexColors = append(half.VertexColors, [4]uint8{})
+	}
+	return idx
+}
+
 // lerpU8 linearly interpolates between a and b at parameter t∈[0,1].
 func lerpU8(a, b uint8, t float64) uint8 {
 	x := float64(a) + t*(float64(b)-float64(a))

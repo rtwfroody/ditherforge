@@ -15,6 +15,11 @@ import (
 // the cost of more iterations. A value of bbox_diagonal / 100 is fine
 // for connector placement.
 //
+// Returned distance ≤ 0 means no interior point was found (degenerate
+// or self-intersecting polygon). Callers should treat this as "no
+// inscribed circle" — connectorPlacement uses the dist >= 2×D check to
+// achieve this.
+//
 // Algorithm: Mapbox polylabel — priority-queue subdivision of the
 // bbox into cells, ordered by upper-bound on max distance achievable
 // in the cell. See https://github.com/mapbox/polylabel.
@@ -40,7 +45,12 @@ func poleOfInaccessibility(outer []pt2, holes [][]pt2, precision float64) (pt2, 
 	}
 	width := maxX - minX
 	height := maxY - minY
+	// Use min for the initial cell size when both dims are positive;
+	// fall back to max for sliver polygons (one dim collapsed).
 	cellSize := math.Min(width, height)
+	if cellSize == 0 {
+		cellSize = math.Max(width, height)
+	}
 	if cellSize == 0 {
 		return pt2{X: minX, Y: minY}, 0
 	}
@@ -74,6 +84,13 @@ func poleOfInaccessibility(outer []pt2, holes [][]pt2, precision float64) (pt2, 
 		heap.Push(pq, newPolylabelCell(c.x+half, c.y+half, half, outer, holes))
 	}
 
+	// best.dist <= 0 means no interior point was sampled; the polygon
+	// is degenerate or wholly outside its bbox-sample grid. Surface
+	// this as a non-positive distance so callers can reject without
+	// returning a misleading "valid" position.
+	if best.dist <= 0 {
+		return pt2{X: best.x, Y: best.y}, 0
+	}
 	return pt2{X: best.x, Y: best.y}, best.dist
 }
 

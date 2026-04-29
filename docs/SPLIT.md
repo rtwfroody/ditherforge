@@ -541,28 +541,37 @@ reconstitute the original cube.
 ## Phase 2 follow-ups (not yet addressed)
 
 Phase 2 ships connector placement (polylabel) plus peg/pocket/dowel
-geometry, but with one significant limitation:
+geometry, but with `earClip` boundary-case fragility blocking two
+related capabilities:
 
 - **Multi-connector triangulation.** The auto-count heuristic and the
   user-supplied `Count` are temporarily clamped to 1 inside
   `placeConnectors`. When two connectors land at near-equal
   Y-coordinates (which polylabel-with-exclusion frequently produces on
   symmetric caps), the second hole's bridge crosses through the first
-  hole's bridge spike, and `earClip` fails to find an ear. The fix is
-  one of:
-  1. Port a more robust earcut (Mapbox's earcut.js handles bridge
-     spikes correctly via the visibility/angle scan over reflex
-     vertices including bridged spike endpoints).
-  2. Perturb connector placements so they don't share Y-values; emit a
-     warning when perturbation pushes the connector off-center.
-  3. Process all hole bridges into a single combined merged polygon in
-     one pass (Mapbox's approach), rather than incremental per-hole
-     bridges.
+  hole's bridge spike, and `earClip` fails to find an ear.
 
-  Until this lands, the auto heuristic always emits 1 connector. The
-  inscribed-circle radius `R` and the resulting auto-count (1/2/3
-  pre-cap) are computed and would be the correct count under (1)–(3),
-  so removing the cap is mostly a matter of fixing the earcut path.
+- **Tilted-plane connectors.** The same `earClip` degeneracy hits
+  hexagonal caps from non-axis-aligned cuts (e.g. `(1, 1, 1)/√3`
+  normal through the cube centre), even with a single connector. The
+  irregular hexagon has edge orientations that trigger the boundary
+  case. `TestCut_TiltedPlanePeg` is skipped pending the fix.
+
+The fix is one of:
+1. Port a more robust earcut (Mapbox's earcut.js handles bridge
+   spikes correctly via the visibility/angle scan over reflex
+   vertices including bridged spike endpoints, and is robust against
+   non-axis-aligned input).
+2. Perturb connector placements so they don't share Y-values; emit a
+   warning when perturbation pushes the connector off-center. (Helps
+   the multi-connector case but not the tilted hexagon case.)
+3. Process all hole bridges into a single combined merged polygon in
+   one pass (Mapbox's approach), rather than incremental per-hole
+   bridges.
+
+Until this lands, the auto heuristic always emits 1 connector and
+only axis-aligned cuts are supported for connectors. Plain-cap
+(NoConnectors) cuts work on any plane.
 
 ## Phase 1 follow-ups (not yet addressed)
 

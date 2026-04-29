@@ -99,15 +99,6 @@ func (b *cutBuilder) placeConnectors(loops [2][][]uint32, plane Plane, settings 
 	}
 
 	// Auto-count heuristic on the inscribed-circle radius.
-	//
-	// PHASE 2 LIMITATION: multi-connector triangulation hits a
-	// bridge-spike edge case in earClip when two connectors land at
-	// nearly equal y-values, which the polylabel-with-exclusion
-	// strategy frequently produces. Rather than ship broken multi-
-	// connector geometry, we cap auto-count at 1 and clamp explicit
-	// Count to 1 too; multi-connector support is a phase 2.5
-	// follow-up that needs a more robust earClip port (see
-	// docs/SPLIT.md "Phase 2 follow-ups").
 	count := settings.Count
 	if count == 0 {
 		switch {
@@ -122,8 +113,15 @@ func (b *cutBuilder) placeConnectors(loops [2][][]uint32, plane Plane, settings 
 	if count > 3 {
 		count = 3
 	}
-	if count > 1 {
-		count = 1
+
+	// PHASE 2 LIMITATION: multi-connector triangulation hits a
+	// bridge-spike edge case in earClip when two connectors land at
+	// nearly equal y-values, which the polylabel-with-exclusion
+	// strategy frequently produces. Until a more robust earClip path
+	// lands (see docs/SPLIT.md "Phase 2 follow-ups"), clamp to 1.
+	const phase2MaxConnectors = 1
+	if count > phase2MaxConnectors {
+		count = phase2MaxConnectors
 	}
 
 	// Place iteratively. Each placed connector adds an exclusion
@@ -218,7 +216,7 @@ func (b *cutBuilder) addConnectorHoles(loops *[2][][]uint32, plane Plane, placem
 					float32(placements[pi].Pos3D[1] + dx*u[1] + dy*v[1]),
 					float32(placements[pi].Pos3D[2] + dx*u[2] + dy*v[2]),
 				}
-				verts[i] = b.appendCapVertex(h, pos)
+				verts[i] = b.appendNewVertex(h, pos)
 			}
 			placements[pi].LoopVerts[h] = verts
 			(*loops)[h] = append((*loops)[h], verts)
@@ -238,6 +236,12 @@ func (b *cutBuilder) addConnectorHoles(loops *[2][][]uint32, plane Plane, placem
 // for pegs, +cap outward for pockets).
 func (b *cutBuilder) addConnectorBodies(plane Plane, placements []connectorPlacement, settings ConnectorSettings) {
 	for h := 0; h < 2; h++ {
+		// capNormal must match the convention used by triangulateCaps
+		// (cap.go) and addConnectorHoles for this half: half 0's cap
+		// outward normal is +plane.Normal, half 1's is -plane.Normal.
+		// All three sites use planeBasis(capNormal), so a centralised
+		// basis source for all three would be safe, but until then
+		// these three call sites must stay in lockstep.
 		var capNormal [3]float64
 		if h == 0 {
 			capNormal = plane.Normal
@@ -282,7 +286,7 @@ func (b *cutBuilder) addConnectorBodies(plane Plane, placements []connectorPlace
 			}
 			for i, vi := range bottom {
 				p := b.halves[h].Vertices[vi]
-				top[i] = b.appendCapVertex(h, [3]float32{
+				top[i] = b.appendNewVertex(h, [3]float32{
 					p[0] + float32(off[0]),
 					p[1] + float32(off[1]),
 					p[2] + float32(off[2]),
@@ -322,19 +326,3 @@ func (b *cutBuilder) addConnectorBodies(plane Plane, placements []connectorPlace
 	}
 }
 
-// appendCapVertex adds a new vertex at the given position to halves[h]
-// with conforming zero entries in every parallel array. Used for both
-// connector-circle vertices and connector-body (top/bottom-ring)
-// vertices.
-func (b *cutBuilder) appendCapVertex(h int, pos [3]float32) uint32 {
-	half := b.halves[h]
-	idx := uint32(len(half.Vertices))
-	half.Vertices = append(half.Vertices, pos)
-	if half.UVs != nil {
-		half.UVs = append(half.UVs, [2]float32{})
-	}
-	if half.VertexColors != nil {
-		half.VertexColors = append(half.VertexColors, [4]uint8{})
-	}
-	return idx
-}
