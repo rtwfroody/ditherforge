@@ -25,8 +25,18 @@ type modelOnDisk struct {
 	NumMeshes      int
 }
 
-// GobEncode lets gob serialize a LoadedModel.
+// GobEncode lets gob serialize a LoadedModel. nil receivers encode
+// as an empty model so a nil *LoadedModel inside an array (e.g. an
+// uninitialised splitOutput.Halves slot in the disabled-passthrough
+// path) round-trips without panicking.
 func (m *LoadedModel) GobEncode() ([]byte, error) {
+	if m == nil {
+		var out bytes.Buffer
+		if err := gob.NewEncoder(&out).Encode(modelOnDisk{}); err != nil {
+			return nil, err
+		}
+		return out.Bytes(), nil
+	}
 	od := modelOnDisk{
 		Vertices:       m.Vertices,
 		Faces:          m.Faces,

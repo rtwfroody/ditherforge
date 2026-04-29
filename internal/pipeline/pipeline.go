@@ -57,6 +57,24 @@ type Options struct {
 	AlphaWrap       bool    // enable CGAL Alpha_wrap_3 post-load mesh cleanup
 	AlphaWrapAlpha  float32 // mm; 0 = auto (5 × NozzleDiameter)
 	AlphaWrapOffset float32 // mm; 0 = auto (alpha / 30)
+	Split           SplitSettings `json:"Split,omitempty"`
+}
+
+// SplitSettings controls the optional Split stage that cuts a model
+// into two halves with peg/pocket connectors and lays them out
+// side-by-side on the bed. The zero value disables the stage; the
+// pipeline runs bit-identically to the pre-Split path. See
+// docs/SPLIT.md for the architecture.
+type SplitSettings struct {
+	Enabled         bool
+	Axis            int     // 0=X, 1=Y, 2=Z
+	Offset          float64 // model-space, along Axis
+	ConnectorStyle  string  // "none", "pegs", "dowels"
+	ConnectorCount  int     // 0 = auto, 1..3 explicit
+	ConnectorDiamMM  float64
+	ConnectorDepthMM float64
+	ClearanceMM      float64
+	GapMM            float64
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
@@ -100,6 +118,7 @@ type Callbacks struct {
 var stageNames = map[StageID]string{
 	StageParse:       "Parsing",
 	StageLoad:        "Loading",
+	StageSplit:       "Splitting",
 	StageVoxelize:    "Voxelizing",
 	StageSticker:     "Applying stickers",
 	StageDecimate:    "Decimating",

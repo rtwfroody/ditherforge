@@ -16,6 +16,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -34,6 +35,12 @@ const (
 	// stage's body, not a separate stage — so the on-disk cache for
 	// StageLoad subsumes what used to be a separate alpha-wrap cache.
 	StageLoad
+	// StageSplit cuts the watertight loaded mesh in two and lays the
+	// halves out side-by-side on the bed (see docs/SPLIT.md). The
+	// Decimate, Voxelize, and downstream stages consume the split
+	// output when Options.Split.Enabled is true. When disabled, the
+	// stage is a passthrough.
+	StageSplit
 	StageDecimate
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
@@ -54,6 +61,8 @@ func stageSubdir(s StageID) string {
 		return "parse"
 	case StageLoad:
 		return "load"
+	case StageSplit:
+		return "split"
 	case StageDecimate:
 		return "decimate"
 	case StageSticker:
@@ -91,6 +100,13 @@ func stageDescription(stage StageID, opts Options) string {
 			s += " (alpha-wrap)"
 		}
 		return s
+	case StageSplit:
+		if !opts.Split.Enabled {
+			return fmt.Sprintf("Split: %s (off)", base)
+		}
+		axisName := []string{"X", "Y", "Z"}[opts.Split.Axis]
+		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s ×%d)",
+			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, opts.Split.ConnectorCount)
 	case StageDecimate:
 		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
 	case StageSticker:
@@ -422,7 +438,29 @@ type colorWarpOutput struct {
 }
 
 type decimateOutput struct {
+	// DecimModel is populated for the unsplit path. nil when split is
+	// enabled.
 	DecimModel *loader.LoadedModel
+	// Halves is populated for the split path: per-half decimated
+	// laid-out meshes. Both indices nil when split is disabled.
+	Halves [2]*loader.LoadedModel
+}
+
+// splitOutput is the result of cutting a watertight model in two and
+// laying the halves out side-by-side on the bed. Halves are in bed
+// coordinates (post-Layout); Xform[i] is the forward transform from
+// original-mesh coords to bed coords for half i (Voxelize calls
+// ApplyInverse to map cell centroids back to original coords for
+// color sampling).
+//
+// When Options.Split.Enabled is false, splitOutput.Enabled is false
+// and downstream stages take their non-split path.
+type splitOutput struct {
+	Enabled   bool
+	Halves    [2]*loader.LoadedModel
+	Xform     [2]split.Transform
+	CutNormal [3]float64 // outward normal from half 0 toward half 1
+	CutPlaneD float64
 }
 
 type paletteOutput struct {
@@ -523,6 +561,23 @@ type decimateSettings struct {
 	LayerHeight    float32
 }
 
+// splitSettings is what affects StageSplit's output. When Enabled is
+// false, only the Enabled bit is hashed so a disabled-Split run
+// produces the same downstream cache keys it would have produced
+// before the Split feature shipped. Toggling other fields while
+// Enabled=false does not invalidate the cache.
+type splitSettings struct {
+	Enabled         bool
+	Axis            int
+	Offset          float64
+	ConnectorStyle  string
+	ConnectorCount  int
+	ConnectorDiamMM  float64
+	ConnectorDepthMM float64
+	ClearanceMM      float64
+	GapMM            float64
+}
+
 type paletteSettings struct {
 	NumColors         int
 	LockedColors      string // joined for hashing
@@ -601,6 +656,23 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
 		return colorWarpSettings{WarpPins: opts.WarpPins}
+	case StageSplit:
+		// When disabled, only the Enabled bit affects the key; this
+		// preserves cache-hit equivalence with the pre-Split path.
+		if !opts.Split.Enabled {
+			return splitSettings{Enabled: false}
+		}
+		return splitSettings{
+			Enabled:          true,
+			Axis:             opts.Split.Axis,
+			Offset:           opts.Split.Offset,
+			ConnectorStyle:   opts.Split.ConnectorStyle,
+			ConnectorCount:   opts.Split.ConnectorCount,
+			ConnectorDiamMM:  opts.Split.ConnectorDiamMM,
+			ConnectorDepthMM: opts.Split.ConnectorDepthMM,
+			ClearanceMM:      opts.Split.ClearanceMM,
+			GapMM:            opts.Split.GapMM,
+		}
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
@@ -679,6 +751,18 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 			writeString(h, p.TargetHex)
 			writeFloat64(h, p.Sigma)
 		}
+	case splitSettings:
+		writeBool(h, v.Enabled)
+		if v.Enabled {
+			writeInt(h, v.Axis)
+			writeFloat64(h, v.Offset)
+			writeString(h, v.ConnectorStyle)
+			writeInt(h, v.ConnectorCount)
+			writeFloat64(h, v.ConnectorDiamMM)
+			writeFloat64(h, v.ConnectorDepthMM)
+			writeFloat64(h, v.ClearanceMM)
+			writeFloat64(h, v.GapMM)
+		}
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 		writeFloat32(h, v.NozzleDiameter)
@@ -718,6 +802,8 @@ func allocOutput(stage StageID) any {
 		return &loader.LoadedModel{}
 	case StageLoad:
 		return &loadOutput{}
+	case StageSplit:
+		return &splitOutput{}
 	case StageDecimate:
 		return &decimateOutput{}
 	case StageSticker:

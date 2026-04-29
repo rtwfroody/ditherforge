@@ -15,6 +15,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -44,6 +45,7 @@ type pipelineRun struct {
 	// consumers within the same Run skip the cache lookup.
 	parse       *loader.LoadedModel
 	load        *loadOutput
+	split       *splitOutput
 	decimate    *decimateOutput
 	sticker     *stickerOutput
 	voxelize    *voxelizeOutput
@@ -224,14 +226,96 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 	return lo, nil
 }
 
+func (r *pipelineRun) Split() (*splitOutput, error) {
+	return runStage(r, StageSplit, &r.split, func() (*splitOutput, error) {
+		lo, err := r.Load()
+		if err != nil {
+			return nil, err
+		}
+		// Disabled-passthrough: when Split is off, return a marker
+		// output that downstream stages treat as "no split."
+		if !r.opts.Split.Enabled {
+			progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0).Done()
+			return &splitOutput{Enabled: false}, nil
+		}
+		stage := progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0)
+		defer stage.Done()
+
+		fmt.Println("Splitting...")
+		tSplit := time.Now()
+
+		// Translate Options.Split into split.Cut + split.Layout calls.
+		plane := split.AxisPlane(r.opts.Split.Axis, r.opts.Split.Offset)
+		conn := split.ConnectorSettings{
+			Style:       parseConnectorStyle(r.opts.Split.ConnectorStyle),
+			Count:       r.opts.Split.ConnectorCount,
+			DiamMM:      r.opts.Split.ConnectorDiamMM,
+			DepthMM:     r.opts.Split.ConnectorDepthMM,
+			ClearanceMM: r.opts.Split.ClearanceMM,
+		}
+		// Cut runs on lo.Model. The frontend forces AlphaWrap=true
+		// when Split is enabled (see docs/SPLIT.md "Watertight
+		// requirement"), so lo.Model is watertight under correct
+		// frontend wiring. If a caller bypasses that guard,
+		// split.Cut surfaces a clear error.
+		res, err := split.Cut(lo.Model, plane, conn)
+		if err != nil {
+			return nil, fmt.Errorf("split.Cut: %w", err)
+		}
+		xforms := split.Layout(res, r.opts.Split.GapMM)
+
+		fmt.Printf("  Split: cut and laid out two halves in %.1fs\n", time.Since(tSplit).Seconds())
+		return &splitOutput{
+			Enabled:   true,
+			Halves:    res.Halves,
+			Xform:     xforms,
+			CutNormal: plane.Normal,
+			CutPlaneD: plane.D,
+		}, nil
+	})
+}
+
+// parseConnectorStyle converts the Options string into the typed
+// split.ConnectorStyle. Unknown values fall back to NoConnectors;
+// we trust the frontend to send valid strings.
+func parseConnectorStyle(s string) split.ConnectorStyle {
+	switch s {
+	case "pegs":
+		return split.Pegs
+	case "dowels":
+		return split.Dowels
+	default:
+		return split.NoConnectors
+	}
+}
+
 func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 	return runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
 			return nil, err
 		}
-		fmt.Println("Decimating...")
+		so, err := r.Split()
+		if err != nil {
+			return nil, err
+		}
 		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+
+		if so.Enabled {
+			fmt.Println("Decimating (split)...")
+			totalFaces := len(so.Halves[0].Faces) + len(so.Halves[1].Faces)
+			// Approximate per-half target by scaling
+			// CountSurfaceCells's whole-model count by face fraction.
+			combinedTarget := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
+			_ = totalFaces // proportional split lives inside DecimateHalves
+			halves, derr := squarevoxel.DecimateHalves(r.ctx, so.Halves, combinedTarget, cellSize, r.opts.NoSimplify, r.tracker)
+			if derr != nil {
+				return nil, fmt.Errorf("decimate (split): %w", derr)
+			}
+			return &decimateOutput{Halves: halves}, nil
+		}
+
+		fmt.Println("Decimating...")
 		targetCells := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
 		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, targetCells, cellSize, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
@@ -361,6 +445,10 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if err != nil {
 			return nil, err
 		}
+		spo, err := r.Split()
+		if err != nil {
+			return nil, err
+		}
 		layer0Size := r.opts.NozzleDiameter * squarevoxel.Layer0CellScale
 		upperSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
 		layerH := r.opts.LayerHeight
@@ -377,10 +465,18 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
+		var splitInfo *squarevoxel.SplitInfo
+		if spo.Enabled {
+			splitInfo = &squarevoxel.SplitInfo{
+				Halves: spo.Halves,
+				Xform:  spo.Xform,
+			}
+		}
+
 		fmt.Println("Voxelizing...")
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
-			layer0Size, upperSize, layerH, r.tracker, so.Decals, nil)
+			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo)
 		if verr != nil {
 			return nil, fmt.Errorf("voxelize: %w", verr)
 		}
@@ -596,6 +692,14 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		vo, err := r.Voxelize()
 		if err != nil {
 			return nil, err
+		}
+		// Phase-7 wiring not yet shipped: when Split is enabled,
+		// deco.Halves is populated and DecimModel is nil. Clip
+		// needs to call ClipMeshByPatchesTwoGrid per half with the
+		// dither patches filtered by halfIdx. Until that lands we
+		// surface a clear error rather than crash on a nil mesh.
+		if deco.DecimModel == nil {
+			return nil, fmt.Errorf("clip: split-aware Clip not yet implemented (phase 7); set Options.Split.Enabled=false to use the unsplit path")
 		}
 		tClip := time.Now()
 		cfg := voxel.TwoGridConfig{
