@@ -575,3 +575,46 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 	tracker.StageDone("Decimating")
 	return model, nil
 }
+
+// DecimateHalves runs DecimateMesh once per Split half, splitting the
+// total target cell count between halves proportional to each half's
+// face count. Used by the StageSplit-aware pipeline path; the
+// unsplit path keeps using DecimateMesh directly.
+//
+// Each half is closed-watertight in its own right (post-Layout), so
+// the underlying voxel.Decimate runs unmodified. Cap planarity is
+// preserved by QEM's planar-affinity bias: collapsing a
+// cap-perimeter vertex moves it off the cap plane, which is high
+// quadric error and is disfavored by the heap. (Verified by
+// TestDecimate_HalfPreservesCapPlanarity.)
+func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
+	totalFaces := 0
+	for _, h := range halves {
+		if h != nil {
+			totalFaces += len(h.Faces)
+		}
+	}
+	var out [2]*loader.LoadedModel
+	for i, h := range halves {
+		if h == nil {
+			continue
+		}
+		// Proportional split, with a floor of 1 to avoid divide-by-zero
+		// or degenerate "decimate to 0 faces" requests.
+		var perHalfTarget int
+		if totalFaces == 0 {
+			perHalfTarget = 0
+		} else {
+			perHalfTarget = totalTargetCells * len(h.Faces) / totalFaces
+		}
+		if perHalfTarget < 1 {
+			perHalfTarget = 1
+		}
+		decimated, err := DecimateMesh(ctx, h, perHalfTarget, cellSize, noSimplify, tracker)
+		if err != nil {
+			return out, fmt.Errorf("decimate half %d: %w", i, err)
+		}
+		out[i] = decimated
+	}
+	return out, nil
+}
