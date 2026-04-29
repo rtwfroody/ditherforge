@@ -94,6 +94,10 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		return r.load, nil
 	}
 	err := runStageCached(r.cache, StageLoad, r.opts, r.tracker, func() error {
+		raw, err := r.Parse()
+		if err != nil {
+			return err
+		}
 		label := stageNames[StageLoad]
 		if r.opts.AlphaWrap {
 			label += " (including alpha-wrap)"
@@ -101,10 +105,6 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		stage := progress.BeginStage(r.tracker, label, false, 0)
 		defer stage.Done()
 
-		raw, err := r.Parse()
-		if err != nil {
-			return err
-		}
 		inputExt := strings.ToLower(filepath.Ext(r.opts.Input))
 		unitScale := unitScaleForExt(inputExt)
 		scale := unitScale * r.opts.Scale
@@ -387,12 +387,12 @@ func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
 		return r.colorAdjust, nil
 	}
 	err := runStageCached(r.cache, StageColorAdjust, r.opts, r.tracker, func() error {
-		stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
-		defer stage.Done()
 		vo, err := r.Voxelize()
 		if err != nil {
 			return err
 		}
+		stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
+		defer stage.Done()
 		adj := voxel.ColorAdjustment{
 			Brightness: r.opts.Brightness,
 			Contrast:   r.opts.Contrast,
@@ -422,12 +422,12 @@ func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
 		return r.colorWarp, nil
 	}
 	err := runStageCached(r.cache, StageColorWarp, r.opts, r.tracker, func() error {
-		stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
-		defer stage.Done()
 		cao, err := r.ColorAdjust()
 		if err != nil {
 			return err
 		}
+		stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
+		defer stage.Done()
 		if len(r.opts.WarpPins) == 0 {
 			out := make([]voxel.ActiveCell, len(cao.Cells))
 			copy(out, cao.Cells)
@@ -467,13 +467,13 @@ func (r *pipelineRun) Palette() (*paletteOutput, error) {
 		return r.palette, nil
 	}
 	err := runStageCached(r.cache, StagePalette, r.opts, r.tracker, func() error {
-		stage := progress.BeginStage(r.tracker, stageNames[StagePalette], false, 0)
-		defer stage.Done()
-
 		cwo, err := r.ColorWarp()
 		if err != nil {
 			return err
 		}
+		stage := progress.BeginStage(r.tracker, stageNames[StagePalette], false, 0)
+		defer stage.Done()
+
 		pcfg, perr := buildPaletteConfig(r.opts)
 		if perr != nil {
 			return perr
