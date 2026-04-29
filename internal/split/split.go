@@ -76,9 +76,14 @@ func (p Plane) signedDistance(v [3]float32) float64 {
 // Halves[i].Faces of the triangles that make up that half's cap (the
 // planar fan that closed off the cut surface). Phase-2 connector code
 // uses CapFaces to find the cap polygon to place pegs/pockets on.
+//
+// Plane is the cut plane that produced this result, stored so phase-3
+// Layout can find the cap normal without the caller needing to keep
+// track of the plane separately.
 type CutResult struct {
 	Halves   [2]*loader.LoadedModel
 	CapFaces [2][]uint32
+	Plane    Plane
 }
 
 // Cut splits a watertight model by a plane and caps each half with a
@@ -188,6 +193,7 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 	res := &CutResult{
 		Halves:   bld.halves,
 		CapFaces: bld.capFaces,
+		Plane:    plane,
 	}
 	return res, nil
 }

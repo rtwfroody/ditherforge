@@ -538,6 +538,22 @@ reconstitute the original cube.
   the largest connected component per side is kept and the rest is
   reported as a warning.
 
+## Phase 3 follow-ups (not yet addressed)
+
+- **Peg orientation when cap is on bed.** `Layout` rotates each half
+  so its outward cap normal points to −Z (cap face down on the bed).
+  This works cleanly for NoConnectors and Dowels: the cap rests on
+  the bed and the half's body extends upward. For Pegs, the male
+  peg extends past the cap in `+cap_normal` direction (original
+  coords), which becomes `−Z` in bed coords, so the peg tip rests on
+  the bed and the cap is elevated by the peg depth. The half is
+  still printable, but the user must flip-and-glue (or use a
+  different print orientation) to assemble. Two future-work paths:
+  (a) cap-up layout for the male side specifically; (b) leave it as
+  a documented quirk and make the result preview obvious in the
+  frontend. (a) is the cleaner UX but adds layout-side branching on
+  connector style.
+
 ## Phase 2 follow-ups (not yet addressed)
 
 Phase 2 ships connector placement (polylabel) plus peg/pocket/dowel

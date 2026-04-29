@@ -55,10 +55,21 @@ func (t Transform) ApplyInverse(p [3]float32) [3]float32 {
 // rewritten in place to bed coordinates. Returns the per-half
 // Transform that took original-mesh coords to those bed coords.
 //
-// Half 0's outward cap normal is +plane.Normal; half 1's is
-// −plane.Normal. Half 0 ends up to the −X side, half 1 to the +X
-// side.
-func Layout(result *CutResult, plane Plane, gapMM float64) [2]Transform {
+// Half 0's outward cap normal is +result.Plane.Normal; half 1's is
+// −result.Plane.Normal. Half 0 ends up to the −X side, half 1 to the
+// +X side.
+//
+// Note: `min.z = 0` puts the cap on the bed for halves whose lowest
+// extent in the cap-normal direction is the cap itself. This holds
+// for NoConnectors and Dowels (the dowel pocket extends INTO the
+// half's solid, away from the cap). For Pegs, the male peg extends
+// OUT of the half's solid past the cap, so after layout the peg
+// tip rests on the bed and the cap is elevated by the peg depth.
+// The user-facing implication is that the male peg requires either
+// a flip-and-glue assembly step or print-orientation tweak — see
+// docs/SPLIT.md "Phase 3 follow-ups" for the discussion.
+func Layout(result *CutResult, gapMM float64) [2]Transform {
+	plane := result.Plane
 	var xforms [2]Transform
 
 	// Step 1: cap-to-bed rotation per half.
@@ -150,7 +161,9 @@ func rotationToNegZ(a [3]float64) [9]float64 {
 		return [9]float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
 	}
 	if dot < -aligned {
-		// a is +Z; rotate 180° around X.
+		// a is +Z; rotate 180° around X. Any axis perpendicular to Z
+		// would work; X chosen arbitrarily and consistently for
+		// reproducibility.
 		return [9]float64{1, 0, 0, 0, -1, 0, 0, 0, -1}
 	}
 	// Rodrigues' formula: axis = a × target (normalised), angle =
