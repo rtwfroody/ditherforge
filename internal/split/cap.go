@@ -117,14 +117,15 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 		//
 		// If a region's strict triangulation fails (genuinely
 		// self-intersecting polygon, e.g. from bridge interference),
-		// fall back to a fan from outer[0]. The fan is geometrically
-		// flawed for non-convex outers (some triangles wind CW and
-		// extend past the cut polygon) but it always CLOSES the
-		// cap: every outer-loop edge is incident to exactly one cap
-		// triangle, so the boundary stays watertight. Holes inside
-		// the failing region are dropped because we can't reproduce
-		// them without bridging — the cap will be slightly "fatter"
-		// than the actual cut shape over those regions.
+		// fall back to a fan from outer[0] PLUS a fan per hole
+		// (preserving each hole's CW winding). Every cut-polygon
+		// edge — outer or hole — appears in exactly one cap triangle,
+		// so the half stays manifold at every boundary. The fan is
+		// geometrically flawed for non-convex outers (overlapping
+		// triangles), and each hole's fan triangles have CW winding
+		// (inverted relative to the cap normal) — slicers interpret
+		// those inverted patches as voids, so cavities that should be
+		// hollow stay hollow rather than getting capped solid.
 		regionsFanned := 0
 		for outerI, holeIdxs := range holesByOuter {
 			holes := make([][]pt2, 0, len(holeIdxs))
@@ -135,9 +136,12 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 			}
 			tris, err := triangulate(loop2d[outerI], loopIdx[outerI], holes, holeIxs)
 			if err != nil {
-				plog.Printf("  Split: half %d: cap region (%d verts, %d hole(s)) triangulation failed; using fan fallback (boundary stays closed; cap may have inverted/overlapping triangles): %v",
+				plog.Printf("  Split: half %d: cap region (%d verts, %d hole(s)) triangulation failed; using fan fallback (boundary stays manifold; geometry approximate, holes preserved as inverted patches): %v",
 					h, len(loop2d[outerI]), len(holes), err)
 				tris = fanTriangulate(loopIdx[outerI])
+				for _, hi := range holeIdxs {
+					tris = append(tris, fanTriangulate(loopIdx[hi])...)
+				}
 				regionsFanned++
 			}
 			startFace := uint32(len(half.Faces))
