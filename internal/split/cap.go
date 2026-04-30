@@ -3,6 +3,8 @@ package split
 import (
 	"fmt"
 	"math"
+
+	"github.com/rtwfroody/ditherforge/internal/plog"
 )
 
 // triangulateCaps closes off both halves' open cut-faces with planar
@@ -112,7 +114,21 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 		// Triangulate each (outer, holes) group independently. Cap
 		// area accumulates the signed sum (outer area − hole areas)
 		// across every group.
+		//
+		// If a single region fails to triangulate (typically a
+		// genuinely self-intersecting polygon from bridge
+		// interference or a non-manifold cut sequence), we log a
+		// warning and skip that region rather than abort the entire
+		// cut. The user gets a half that's non-watertight at the
+		// skipped region but otherwise valid — enough to see whether
+		// the cut location is worth pursuing. If every region fails
+		// and the cap ends up empty, that does abort, since a half
+		// with no cap at all is unusable.
+		regionsTried := 0
+		regionsCapped := 0
+		var lastErr error
 		for outerI, holeIdxs := range holesByOuter {
+			regionsTried++
 			holes := make([][]pt2, 0, len(holeIdxs))
 			holeIxs := make([][]uint32, 0, len(holeIdxs))
 			for _, hi := range holeIdxs {
@@ -121,8 +137,12 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 			}
 			tris, err := triangulate(loop2d[outerI], loopIdx[outerI], holes, holeIxs)
 			if err != nil {
-				return 0, fmt.Errorf("triangulateCaps: half %d: %w", h, err)
+				lastErr = err
+				plog.Printf("  Split: half %d: skipping cap region (outer %d verts, %d hole(s)) — %v",
+					h, len(loop2d[outerI]), len(holes), err)
+				continue
 			}
+			regionsCapped++
 			startFace := uint32(len(half.Faces))
 			for _, t := range tris {
 				b.appendFace(h, -1, t)
@@ -134,6 +154,13 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 			for _, hi := range holeIdxs {
 				total += areas[hi] // already negative
 			}
+		}
+		if regionsCapped == 0 && regionsTried > 0 {
+			return 0, fmt.Errorf("triangulateCaps: half %d: all %d cap regions failed to triangulate; last error: %w", h, regionsTried, lastErr)
+		}
+		if regionsCapped < regionsTried {
+			plog.Printf("  Split: half %d: capped %d/%d regions (skipped regions leave the half non-watertight at those spots)",
+				h, regionsCapped, regionsTried)
 		}
 	}
 	return total, nil
