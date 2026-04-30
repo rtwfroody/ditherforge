@@ -123,66 +123,57 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 	// ill-conditioned when both endpoints are within a few ULPs of
 	// zero — risking a midpoint that snaps onto an existing vertex,
 	// the very degeneracy this check exists to prevent. So eps must
-	// be at least 3-4 ULPs. We pick 4e-7·bbDiag (~3.4 ULPs) and let
-	// the auto-perturb loop below absorb the resulting hit rate on
-	// dense alpha-wrapped meshes.
+	// be at least 3-4 ULPs. We pick 4e-7·bbDiag (~3.4 ULPs).
 	eps := 4e-7 * bbDiag
 	if eps < 1e-9 {
 		eps = 1e-9
 	}
 
 	// 1. Classify each vertex into -1 / 0 / +1 by signed distance.
+	//    Vertices that land within ±eps of the plane (|d| <= eps) are
+	//    snapped slightly off-plane along plane.Normal so every vertex
+	//    has an unambiguous side. The cap-polygon walker assumes each
+	//    cut-graph node has degree exactly 2; an on-plane vertex can
+	//    appear in the cut polygon multiple times (a fan of triangles
+	//    around it can straddle the plane in 4+ places), creating a
+	//    figure-eight or self-touching loop the walker can't recover.
 	//
-	//    On-plane vertices (|d| <= eps) create a non-manifold cut
-	//    polygon the loop walker can't recover. Even with the tightened
-	//    eps above, a dense alpha-wrapped mesh leaves a meaningful
-	//    fraction of random offsets hitting at least one vertex.
-	//
-	//    Auto-perturb: when on-plane vertices are detected, shift the
-	//    plane by a small offset along its normal and re-classify.
-	//    The shift starts at 4·eps and doubles each retry, so we
-	//    escape vertex clusters quickly. Total shift after 8 retries
-	//    is bounded at (4·eps)·(2^8 − 1) ≈ 1000·eps ≈ 60 μm on a
-	//    150 mm model — well below user-perceptible drift. If we
-	//    still can't find a clean offset after maxAttempts, surface
-	//    the original error so the user can pick a different offset.
-	const maxAttempts = 8
+	//    Snapping happens on a shallow clone of the model so the
+	//    caller's mesh is unmodified. The displacement (2·eps,
+	//    sub-micron on typical models) is far below user-perceptible
+	//    drift and only touches the offending vertices.
 	side := make([]int8, len(model.Vertices))
-	classify := func() int {
-		count := 0
-		for i, v := range model.Vertices {
-			d := plane.signedDistance(v)
-			switch {
-			case d < -eps:
-				side[i] = -1
-			case d > eps:
-				side[i] = +1
-			default:
-				side[i] = 0
-				count++
-			}
+	var onPlaneIdx []int
+	for i, v := range model.Vertices {
+		d := plane.signedDistance(v)
+		switch {
+		case d < -eps:
+			side[i] = -1
+		case d > eps:
+			side[i] = +1
+		default:
+			side[i] = 0
+			onPlaneIdx = append(onPlaneIdx, i)
 		}
-		return count
 	}
-	totalShift := 0.0
-	shiftStep := 4 * eps
-	attempt := 0
-	for {
-		onPlaneCount := classify()
-		if onPlaneCount == 0 {
-			break
+	if len(onPlaneIdx) > 0 {
+		snapped := make([][3]float32, len(model.Vertices))
+		copy(snapped, model.Vertices)
+		shift := float32(2 * eps)
+		nx := float32(plane.Normal[0])
+		ny := float32(plane.Normal[1])
+		nz := float32(plane.Normal[2])
+		for _, i := range onPlaneIdx {
+			snapped[i][0] += shift * nx
+			snapped[i][1] += shift * ny
+			snapped[i][2] += shift * nz
+			side[i] = +1
 		}
-		if attempt >= maxAttempts {
-			return nil, fmt.Errorf("split.Cut: cut plane passes through %d vertex/vertices of the model after %d perturbation attempts (cumulative shift %.3g mm); offset the cut by hand to avoid the dense vertex region",
-				onPlaneCount, attempt, totalShift)
-		}
-		plane.D += shiftStep
-		totalShift += shiftStep
-		shiftStep *= 2
-		attempt++
-	}
-	if totalShift > 0 {
-		plog.Printf("  Split: shifted cut plane by %.3g mm to clear on-plane vertices", totalShift)
+		clone := *model
+		clone.Vertices = snapped
+		model = &clone
+		plog.Printf("  Split: snapped %d on-plane vertex(es) by %.3g mm along plane normal",
+			len(onPlaneIdx), 2*eps)
 	}
 
 	// 2. Build the per-half mesh by splitting crossing triangles. cutEdges

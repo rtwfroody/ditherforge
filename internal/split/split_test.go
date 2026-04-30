@@ -218,13 +218,24 @@ func TestCut_SphereAtEquator(t *testing.T) {
 	}
 }
 
-func TestCut_TangentPlaneFails(t *testing.T) {
+// TestCut_TangentPlaneSnapsThrough verifies that a plane lying exactly
+// on a boundary face (z=1, the cube's top face) doesn't fail outright
+// — the snap mechanism nudges the touching vertices off the plane and
+// the cut proceeds, producing a near-degenerate sliver as one half.
+// This is a behavior change from the pre-snap algorithm, which
+// rejected tangent cuts as "cap area below threshold". Distinguishing
+// "really tangent" from "barely cuts" at sub-micron precision isn't
+// useful in practice: downstream stages can handle thin halves, and
+// hard-rejecting tangent cuts surfaces a confusing error to the user
+// when they pick the bbox extreme as their offset.
+func TestCut_TangentPlaneSnapsThrough(t *testing.T) {
 	cube := makeUnitCube()
-	// z=1 hits the top face exactly: vertices on that face have side==0,
-	// rest have side<0. No cut polygon, no cap.
-	_, err := Cut(cube, AxisPlane(2, 1), ConnectorSettings{})
-	if err == nil {
-		t.Fatal("Cut: expected error for tangent plane, got nil")
+	res, err := Cut(cube, AxisPlane(2, 1), ConnectorSettings{})
+	if err != nil {
+		t.Fatalf("expected tangent-plane snap to succeed, got error: %v", err)
+	}
+	if res == nil || res.Halves[0] == nil || res.Halves[1] == nil {
+		t.Fatal("expected both halves to be populated after tangent-snap")
 	}
 }
 
@@ -321,24 +332,62 @@ func makeHollowCube() *loader.LoadedModel {
 	}
 }
 
-// TestCut_OnPlaneVertexAutoPerturbs verifies that a cut passing exactly
-// through model vertices is silently rescued by the auto-perturb loop:
-// the plane shifts by a sub-micron amount until no vertex lies on it,
-// and the cut succeeds. The original behavior (hard reject) was too
-// brittle on dense alpha-wrapped meshes where the random hit rate is
-// near 100%.
-func TestCut_OnPlaneVertexAutoPerturbs(t *testing.T) {
-	cube := makeUnitCube()
-	// z=0 hits all four bottom-face vertices. Auto-perturb should
-	// shift to ~z=4e-9 (or larger if the first shift still hits) and
-	// produce a valid cut.
-	res, err := Cut(cube, AxisPlane(2, 0), ConnectorSettings{})
+// makeStackedCubes returns a 1×1×2 watertight mesh formed by stacking
+// two unit cubes along Z. The four "middle" vertices share z=0
+// exactly — cutting at z=0 exercises the on-plane snap path with
+// genuinely-interior vertices (geometry on both sides of the cut).
+func makeStackedCubes() *loader.LoadedModel {
+	v := [][3]float32{
+		{0, 0, -1}, {1, 0, -1}, {1, 1, -1}, {0, 1, -1}, // 0..3 bottom
+		{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, //     4..7 middle (on z=0)
+		{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, //     8..11 top
+	}
+	f := [][3]uint32{
+		// bottom face
+		{0, 2, 1}, {0, 3, 2},
+		// bottom-cube side walls (linking 0..3 to 4..7)
+		{0, 1, 5}, {0, 5, 4},
+		{1, 2, 6}, {1, 6, 5},
+		{2, 3, 7}, {2, 7, 6},
+		{3, 0, 4}, {3, 4, 7},
+		// top-cube side walls (linking 4..7 to 8..11)
+		{4, 5, 9}, {4, 9, 8},
+		{5, 6, 10}, {5, 10, 9},
+		{6, 7, 11}, {6, 11, 10},
+		{7, 4, 8}, {7, 8, 11},
+		// top face
+		{8, 9, 10}, {8, 10, 11},
+	}
+	return &loader.LoadedModel{Vertices: v, Faces: f}
+}
+
+// TestCut_OnPlaneVertexSnapsOff verifies that interior vertices lying
+// exactly on the cut plane are silently snapped off it (along the
+// plane normal, by sub-micron amount) so the cut succeeds. Uses a
+// stacked-cubes mesh whose middle quad has all four vertices at z=0;
+// without snap, the cap-polygon walker would see a degree-4 junction
+// at each of those vertices and break.
+func TestCut_OnPlaneVertexSnapsOff(t *testing.T) {
+	mesh := makeStackedCubes()
+	originalVerts := append([][3]float32(nil), mesh.Vertices...)
+	res, err := Cut(mesh, AxisPlane(2, 0), ConnectorSettings{})
 	if err != nil {
-		t.Fatalf("expected auto-perturb to recover, got error: %v", err)
+		t.Fatalf("expected snap-off to recover, got error: %v", err)
 	}
 	if res == nil || res.Halves[0] == nil || res.Halves[1] == nil {
-		t.Fatal("expected both halves to be populated after auto-perturb")
+		t.Fatal("expected both halves to be populated after snap-off")
 	}
+	// Caller's mesh must be unmodified (snap is supposed to happen on
+	// a shallow clone).
+	for i, v := range mesh.Vertices {
+		if v != originalVerts[i] {
+			t.Errorf("Cut mutated input vertex %d: got %v, want %v", i, v, originalVerts[i])
+		}
+	}
+	// Both halves should be well-formed and have material on their side
+	// of the plane.
+	assertWatertight(t, res.Halves[0], "half 0")
+	assertWatertight(t, res.Halves[1], "half 1")
 }
 
 // TestCut_CapFacesLieOnPlane checks that every cap-face vertex lies
