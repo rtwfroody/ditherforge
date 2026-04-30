@@ -64,3 +64,44 @@ func TestFitToBudgetNoOpWhenWithinBudget(t *testing.T) {
 		t.Errorf("expected no eviction, got %v", got)
 	}
 }
+
+// TestFitToBudgetFreshBeatsStaleHigherCost reproduces the user's
+// real-world scenario: a just-completed Clip output (25.4s, 68 MB)
+// vs an hours-old Clip output (6.2s, 23 MB) used to evict the fresh
+// one because the recency-factor difference was negligible on a
+// 7-day half-life. With the 1-hour half-life the fresh entry's
+// recency factor stays at 1.0 while the stale one drops to 0.5,
+// so cost*recency favors the fresh entry even though its raw cost
+// per sqrt-byte is lower than the older one's.
+func TestFitToBudgetFreshBeatsStaleHigherCost(t *testing.T) {
+	now := time.Now()
+	staleMtime := now.Add(-3 * HalfLife) // recency factor ~0.125
+	entries := []Entry{
+		{Key: "fresh-clip", SizeBytes: 68 << 20, CostMs: 25400, Mtime: now},
+		{Key: "stale-merge", SizeBytes: 22 << 20, CostMs: 12300, Mtime: staleMtime},
+	}
+	// Cumulative size > 80 MiB; budget = 70 MiB forces one eviction.
+	got := FitToBudget(entries, 70<<20, now)
+	if len(got) != 1 {
+		t.Fatalf("expected one eviction, got %v", got)
+	}
+	if entries[got[0]].Key != "stale-merge" {
+		t.Errorf("expected stale-merge to evict, got %s", entries[got[0]].Key)
+	}
+}
+
+// TestRecencyFloorKeepsAgedEntriesRanked verifies that very old
+// entries don't all collapse to score 0. A high-cost ancient entry
+// must still outrank a cheap ancient one of the same size.
+func TestRecencyFloorKeepsAgedEntriesRanked(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour) // many half-lives — clamped to floor
+	entries := []Entry{
+		{Key: "old-cheap", SizeBytes: 1000, CostMs: 100, Mtime: old},
+		{Key: "old-expensive", SizeBytes: 1000, CostMs: 60000, Mtime: old},
+	}
+	got := FitToBudget(entries, 1500, now)
+	if len(got) != 1 || entries[got[0]].Key != "old-cheap" {
+		t.Errorf("expected old-cheap to evict first, got %v", got)
+	}
+}

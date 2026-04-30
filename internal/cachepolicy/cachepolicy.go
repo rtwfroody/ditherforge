@@ -9,11 +9,23 @@ import (
 	"time"
 )
 
-// HalfLife is the recency decay halflife. With a 7-day halflife a
-// freshly-touched entry counts at full weight and a 7-day-old entry at
-// 50%. Tied to time-since-access (mtime), which the tiers should bump
-// on every cache hit.
-const HalfLife = 7 * 24 * time.Hour
+// HalfLife is the recency decay halflife. A 1-hour halflife is sharp
+// enough that just-generated entries dominate over even moderately
+// stale ones (factor 1.0 vs 0.5 at one hour), preventing the
+// "expensive result evicted seconds after it was written" failure
+// mode where the prior 7-day halflife couldn't tell a few-seconds-old
+// entry from a few-hours-old one. Tied to time-since-access (mtime),
+// which the tiers bump on every cache hit.
+const HalfLife = 1 * time.Hour
+
+// RecencyFloor caps how far the recency factor can decay. Without it,
+// a 1-hour halflife pushes day-old entries to 2^-24 ≈ 6e-8, making
+// every old entry score essentially zero regardless of generation
+// cost. The floor preserves a meaningful score among older entries so
+// expensive ones (e.g. a 60s alpha-wrap from yesterday) still beat
+// cheap ones (e.g. a 0.5s parse) when both fall outside the
+// fresh-tier window.
+const RecencyFloor = 0.05
 
 // SizeFloor is the minimum size used in the score's sqrt denominator.
 // Entries smaller than this cluster together, so absolute cost decides
@@ -34,13 +46,20 @@ type Entry struct {
 	Mtime       time.Time
 }
 
-// RecencyFactor returns the multiplier in (0, 1] that age contributes
-// to an entry's score. age <= 0 (clock skew) yields 1.0.
+// RecencyFactor returns the multiplier in [RecencyFloor, 1] that age
+// contributes to an entry's score. age <= 0 (clock skew) yields 1.0.
+// The decay is exp(-age / HalfLife) clamped at RecencyFloor so old
+// entries keep a non-zero contribution that lets cost differentiate
+// among them.
 func RecencyFactor(age time.Duration) float64 {
 	if age <= 0 {
 		return 1.0
 	}
-	return math.Pow(0.5, age.Seconds()/HalfLife.Seconds())
+	f := math.Pow(0.5, age.Seconds()/HalfLife.Seconds())
+	if f < RecencyFloor {
+		return RecencyFloor
+	}
+	return f
 }
 
 // Score is the value an entry contributes to the cache. Higher is more
