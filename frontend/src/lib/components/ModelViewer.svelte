@@ -912,16 +912,25 @@
   //
   // cutPlaneRev increments on every (re)build so the Invalidator can
   // trigger a Threlte render via a cheap monotonic key instead of
-  // stringifying the prop on every parent render.
+  // stringifying the prop on every parent render. Update it via
+  // untrack() because `cutPlaneRev = cutPlaneRev + 1` would otherwise
+  // self-track inside this $effect — Svelte 5 sees the read on the
+  // RHS and tracks it as a dep, the write retriggers the effect, and
+  // the effect trips `effect_update_depth_exceeded`. The thrown error
+  // aborts mount partway, which manifests as the File menu not wiring
+  // up and `ListPrinters()` never resolving.
   let cutPlaneGeo = $state<THREE.BufferGeometry | null>(null);
   let cutPlaneMat = $state<THREE.MeshBasicMaterial | null>(null);
   let cutPlaneRev = $state(0);
+  function bumpCutPlaneRev() {
+    cutPlaneRev = untrack(() => cutPlaneRev) + 1;
+  }
   $effect(() => {
     const cp = cutPlane;
     if (!cp) {
       cutPlaneGeo = null;
       cutPlaneMat = null;
-      cutPlaneRev++;
+      bumpCutPlaneRev();
       return;
     }
     // Pad slightly so the plane visibly extends past the model.
@@ -954,7 +963,7 @@
     });
     cutPlaneGeo = geo;
     cutPlaneMat = mat;
-    cutPlaneRev++;
+    bumpCutPlaneRev();
     return () => {
       geo.dispose();
       mat.dispose();
