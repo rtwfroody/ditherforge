@@ -5,10 +5,21 @@ import (
 	"math"
 	"testing"
 
+	"github.com/rtwfroody/ditherforge/internal/cgalclip"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
 )
+
+// skipIfNoCGAL skips a test that needs split.Cut when the binary
+// wasn't built with the cgal tag. split delegates the geometry to
+// CGAL via internal/cgalclip; without CGAL there's no usable cut.
+func skipIfNoCGAL(t *testing.T) {
+	t.Helper()
+	if !cgalclip.HasCGAL {
+		t.Skip("split.Cut requires the cgal build tag")
+	}
+}
 
 // makeIcosphere returns a unit-radius icosphere centred at the
 // origin with `subdiv` subdivision passes. subdiv=2 → 320 triangles,
@@ -90,6 +101,7 @@ func makeIcosphere(subdiv int) *loader.LoadedModel {
 // disabled QEM's planar bias would produce drift on the order of
 // cellSize itself (10x more), so this threshold catches that.
 func TestDecimate_HalfPreservesCapPlanarity(t *testing.T) {
+	skipIfNoCGAL(t)
 	const cutZ = 0.1
 	const cellSize = 0.05
 	sphere := makeIcosphere(2)
@@ -138,6 +150,7 @@ func TestDecimate_HalfPreservesCapPlanarity(t *testing.T) {
 // total target between halves proportionally to face count and
 // returns a decimated mesh per half.
 func TestDecimateHalves_ProportionalTargets(t *testing.T) {
+	skipIfNoCGAL(t)
 	sphere := makeIcosphere(2)
 	res, err := split.Cut(sphere, split.AxisPlane(2, 0.1), split.ConnectorSettings{})
 	if err != nil {
@@ -163,6 +176,7 @@ func TestDecimateHalves_ProportionalTargets(t *testing.T) {
 // TestDecimateHalves_NoSimplifyPassthrough — when noSimplify=true the
 // helper returns each half unmodified (identity equality).
 func TestDecimateHalves_NoSimplifyPassthrough(t *testing.T) {
+	skipIfNoCGAL(t)
 	sphere := makeIcosphere(1)
 	res, err := split.Cut(sphere, split.AxisPlane(2, 0.1), split.ConnectorSettings{})
 	if err != nil {
