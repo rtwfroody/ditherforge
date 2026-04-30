@@ -58,23 +58,24 @@
     Split into two parts
     <HelpTip>
       Cut the model in two pieces so each half fits the build volume,
-      or so you can paint each half before assembly. Alignment pegs
-      help the halves register when glued. Forces alpha-wrap on
-      because the cut needs a watertight input.
+      or so supports that would otherwise be hard to remove become
+      easy to access. Alignment pegs help the halves register when
+      glued. Forces alpha-wrap on because the cut needs a watertight
+      input.
     </HelpTip>
   </label>
 
   {#if enabled}
     <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
       <label class="flex flex-col gap-1">
-        <span class="text-muted-foreground">Cut axis</span>
+        <span class="text-muted-foreground">Cut plane</span>
         <select
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={axis}
         >
-          <option value={0}>X</option>
-          <option value={1}>Y</option>
-          <option value={2}>Z</option>
+          <option value={0}>YZ</option>
+          <option value={1}>XZ</option>
+          <option value={2}>XY</option>
         </select>
       </label>
 

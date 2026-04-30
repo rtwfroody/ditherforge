@@ -59,6 +59,11 @@ func ComputeSplitPreview(cache *StageCache, opts Options, s SplitSettings) (*Spl
 // `Offset` along the chosen `Axis`; the centering only translates
 // the quad within the plane (U·Normal = V·Normal = 0), not the
 // plane equation Normal·p = Offset.
+//
+// Mirrored client-side in frontend/src/App.svelte's
+// `cutPlanePreview` $derived to avoid an RPC per slider tick. Keep
+// the two implementations in sync — especially the (U, V) basis
+// table and the centering math.
 func computeSplitPreviewFromVertices(verts [][3]float32, s SplitSettings) (*SplitPreviewResult, error) {
 	if len(verts) == 0 {
 		return nil, fmt.Errorf("split preview: model has no vertices")

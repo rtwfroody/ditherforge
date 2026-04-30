@@ -25,6 +25,7 @@
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
+  import type { CutPlanePreview } from '$lib/types';
   import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
@@ -161,25 +162,82 @@
   let splitClearanceMM = $state(0.15);
   let splitGapMM = $state(5);
   // The loaded model's bbox in original-mesh coords (mm, post-scale,
-  // post-normalizeZ). Populated from the input-mesh event.
-  let modelBBoxMin = $state<[number, number, number]>([0, 0, 0]);
-  let modelBBoxMax = $state<[number, number, number]>([100, 100, 100]);
+  // post-normalizeZ). Populated from the input-mesh event; null until
+  // the first event arrives so the Split UI can distinguish "no model
+  // loaded yet" from "model with bbox at the origin."
+  let modelBBoxMin = $state<[number, number, number] | null>(null);
+  let modelBBoxMax = $state<[number, number, number] | null>(null);
   // Min/max for the Split offset slider — derived from the bbox along
   // the chosen axis. Updates automatically when the user toggles axes
-  // or loads a new model.
-  const splitOffsetMin = $derived(modelBBoxMin[splitAxis] ?? 0);
-  const splitOffsetMax = $derived(modelBBoxMax[splitAxis] ?? 100);
+  // or loads a new model. Falls back to a 0..100 placeholder while
+  // bbox is unknown (the slider is rarely visible in that state since
+  // Split.Enabled requires AlphaWrap, which requires a loaded model).
+  const splitOffsetMin = $derived(modelBBoxMin?.[splitAxis] ?? 0);
+  const splitOffsetMax = $derived(modelBBoxMax?.[splitAxis] ?? 100);
 
   // When the user changes the cut axis, recentre the offset on the
   // new axis's bbox midpoint. Without this, an offset that was sane
   // for axis Z would commonly fall outside the X or Y range.
   $effect(() => {
     const axis = splitAxis;
+    if (!modelBBoxMin || !modelBBoxMax) return;
     const lo = modelBBoxMin[axis];
     const hi = modelBBoxMax[axis];
     if (splitOffset < lo || splitOffset > hi) {
       splitOffset = (lo + hi) / 2;
     }
+  });
+
+  // Cut-plane preview overlay for the input viewer. Mirrors the
+  // backend's pipeline.computeSplitPreviewFromVertices in
+  // internal/pipeline/splitpreview.go — keep the two in sync. The
+  // (U, V) basis is right-handed with U × V = Normal, and the quad
+  // is centred on the model's bbox so it sits symmetrically over the
+  // mesh. Computed client-side from the bbox so it tracks the slider
+  // without RPC churn.
+  //
+  // Assumes (U, V) are axis-aligned (one of {±X, ±Y, ±Z}). That lets
+  // us compute min/max of the projected silhouette from the two
+  // bbox-corner endpoints alone instead of every vertex — equivalent
+  // because the projection of a bbox onto an axis-aligned vector is
+  // determined entirely by its corners. If splitpreview.go ever
+  // generalizes to arbitrary plane normals, this mirror must too.
+  const cutPlanePreview = $derived.by((): CutPlanePreview | null => {
+    if (!splitEnabled || !modelBBoxMin || !modelBBoxMax) return null;
+    const axis = splitAxis;
+    const normal: [number, number, number] = [0, 0, 0];
+    normal[axis] = 1;
+    let u: [number, number, number];
+    let v: [number, number, number];
+    switch (axis) {
+      case 0: u = [0, 1, 0]; v = [0, 0, 1]; break;
+      case 1: u = [0, 0, 1]; v = [1, 0, 0]; break;
+      default: u = [1, 0, 0]; v = [0, 1, 0]; break;
+    }
+    const proj = (p: [number, number, number], a: [number, number, number]) =>
+      p[0] * a[0] + p[1] * a[1] + p[2] * a[2];
+    const minU = Math.min(proj(modelBBoxMin, u), proj(modelBBoxMax, u));
+    const maxU = Math.max(proj(modelBBoxMin, u), proj(modelBBoxMax, u));
+    const minV = Math.min(proj(modelBBoxMin, v), proj(modelBBoxMax, v));
+    const maxV = Math.max(proj(modelBBoxMin, v), proj(modelBBoxMax, v));
+    const originU = (minU + maxU) / 2;
+    const originV = (minV + maxV) / 2;
+    const origin: [number, number, number] = [0, 0, 0];
+    origin[axis] = splitOffset;
+    for (let i = 0; i < 3; i++) origin[i] += originU * u[i] + originV * v[i];
+    // The bbox is in original-mesh mm but the input viewer renders the
+    // mesh at previewScale (vertices multiplied by previewScale in
+    // scalePreviewMesh). Scale origin and half-extents to match the
+    // rendered frame; (u, v, normal) directions are scale-invariant.
+    const ps = calibratedPreviewScale ?? 1;
+    return {
+      origin: [origin[0] * ps, origin[1] * ps, origin[2] * ps],
+      normal,
+      u,
+      v,
+      halfExtentU: ((maxU - minU) / 2) * ps,
+      halfExtentV: ((maxV - minV) / 2) * ps,
+    };
   });
 
   // Cascade: turning AlphaWrap off while Split is on auto-disables
@@ -360,13 +418,15 @@
     // Update the model bbox for the Split offset slider. The bbox
     // is in original-mesh coords (mm, post-scale, post-normalizeZ).
     if (event.bboxMin && event.bboxMax) {
-      modelBBoxMin = event.bboxMin;
-      modelBBoxMax = event.bboxMax;
+      const newMin = event.bboxMin;
+      const newMax = event.bboxMax;
+      modelBBoxMin = newMin;
+      modelBBoxMax = newMax;
       // If Split was enabled with the previous model's bbox in mind
       // (offset clamped to a range that's now invalid), recentre the
       // offset on the new model's bbox along the chosen axis.
-      const lo = modelBBoxMin[splitAxis];
-      const hi = modelBBoxMax[splitAxis];
+      const lo = newMin[splitAxis];
+      const hi = newMax[splitAxis];
       if (splitOffset < lo || splitOffset > hi) {
         splitOffset = (lo + hi) / 2;
       }
@@ -683,6 +743,10 @@
     inputMeshUrl = undefined;
     inputOverlayMeshUrl = undefined;
     outputMeshUrl = undefined;
+    // Bbox is per-model; clear so the Split UI doesn't briefly show
+    // the prior model's range while the new mesh is loading.
+    modelBBoxMin = null;
+    modelBBoxMax = null;
     inputFile = path;
     // Stickers are tied to the previous model's geometry; clear them.
     // Warp pins reference colors sampled from the previous model; clear too.
@@ -1328,8 +1392,8 @@
             <HelpTip>
               Cut the model into two halves that print side by side
               and assemble back together with peg/pocket alignment.
-              Useful for build-volume limits or for painting halves
-              separately before assembly.
+              Useful for build-volume limits, or to expose supports
+              that would otherwise be hard to remove.
             </HelpTip>
           {/snippet}
           <SplitControls
@@ -1579,7 +1643,7 @@
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} />
+      <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} cutPlane={cutPlanePreview} />
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />

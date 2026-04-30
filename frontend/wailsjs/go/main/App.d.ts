@@ -34,8 +34,6 @@ export function OpenStickerImage():Promise<string>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
-export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
-
 export function Quit():Promise<void>;
 
 export function ReadStickerThumbnail(arg1:string):Promise<string>;
@@ -49,5 +47,7 @@ export function SaveCollectionColors(arg1:string,arg2:Array<main.ColorEntry>):Pr
 export function SaveSettings(arg1:string,arg2:main.Settings):Promise<void>;
 
 export function SaveSettingsDialog(arg1:main.Settings):Promise<string>;
+
+export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
 
 export function Version():Promise<string>;

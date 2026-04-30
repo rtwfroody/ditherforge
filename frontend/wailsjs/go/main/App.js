@@ -62,10 +62,6 @@ export function ProcessPipeline(arg1) {
   return window['go']['main']['App']['ProcessPipeline'](arg1);
 }
 
-export function SplitPreview(arg1) {
-  return window['go']['main']['App']['SplitPreview'](arg1);
-}
-
 export function Quit() {
   return window['go']['main']['App']['Quit']();
 }
@@ -92,6 +88,10 @@ export function SaveSettings(arg1, arg2) {
 
 export function SaveSettingsDialog(arg1) {
   return window['go']['main']['App']['SaveSettingsDialog'](arg1);
+}
+
+export function SplitPreview(arg1) {
+  return window['go']['main']['App']['SplitPreview'](arg1);
 }
 
 export function Version() {
