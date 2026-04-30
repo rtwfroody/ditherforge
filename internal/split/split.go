@@ -114,32 +114,74 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 	}
 
 	bbDiag := bboxDiag(model.Vertices)
-	eps := 1e-6 * bbDiag
+	// eps is the half-width of the "on-plane" zone. It must be large
+	// enough to absorb numerical instability in `signedDistance`
+	// (dot(n,v)-D suffers catastrophic cancellation near zero, with
+	// residual error ~ULP(bbDiag) ≈ 1.2e-7·bbDiag) AND the
+	// downstream midpoint computation t = -d0/(d1-d0), which becomes
+	// ill-conditioned when both endpoints are within a few ULPs of
+	// zero — risking a midpoint that snaps onto an existing vertex,
+	// the very degeneracy this check exists to prevent. So eps must
+	// be at least 3-4 ULPs. We pick 4e-7·bbDiag (~3.4 ULPs) and let
+	// the auto-perturb loop below absorb the resulting hit rate on
+	// dense alpha-wrapped meshes.
+	eps := 4e-7 * bbDiag
 	if eps < 1e-9 {
 		eps = 1e-9
 	}
 
-	// 1. Classify each vertex: -1 negative side, 0 on plane, +1 positive.
-	//    On-plane vertices and faces are rejected up front: they create
-	//    non-manifold cut polygons that the loop walker can't recover.
-	//    Per the design doc's failure policy this is preferable to
-	//    silently producing bad output.
+	// 1. Classify each vertex into -1 / 0 / +1 by signed distance.
+	//
+	//    On-plane vertices (|d| <= eps) create a non-manifold cut
+	//    polygon the loop walker can't recover. Even with the tightened
+	//    eps above, a dense alpha-wrapped mesh leaves a meaningful
+	//    fraction of random offsets hitting at least one vertex.
+	//
+	//    Auto-perturb: when on-plane vertices are detected, shift the
+	//    plane by a small offset along its normal and re-classify.
+	//    The shift starts at 4·eps and doubles each retry, so we
+	//    escape vertex clusters quickly. Total shift after 8 retries
+	//    is bounded at (4·eps)·(2^8 − 1) ≈ 1000·eps ≈ 60 μm on a
+	//    150 mm model — well below user-perceptible drift. If we
+	//    still can't find a clean offset after maxAttempts, surface
+	//    the original error so the user can pick a different offset.
+	const maxAttempts = 8
 	side := make([]int8, len(model.Vertices))
-	onPlaneCount := 0
-	for i, v := range model.Vertices {
-		d := plane.signedDistance(v)
-		switch {
-		case d < -eps:
-			side[i] = -1
-		case d > eps:
-			side[i] = +1
-		default:
-			side[i] = 0
-			onPlaneCount++
+	classify := func() int {
+		count := 0
+		for i, v := range model.Vertices {
+			d := plane.signedDistance(v)
+			switch {
+			case d < -eps:
+				side[i] = -1
+			case d > eps:
+				side[i] = +1
+			default:
+				side[i] = 0
+				count++
+			}
 		}
+		return count
 	}
-	if onPlaneCount > 0 {
-		return nil, fmt.Errorf("split.Cut: cut plane passes through %d vertex/vertices of the model; offset the cut slightly to avoid degenerate cut polygons", onPlaneCount)
+	totalShift := 0.0
+	shiftStep := 4 * eps
+	attempt := 0
+	for {
+		onPlaneCount := classify()
+		if onPlaneCount == 0 {
+			break
+		}
+		if attempt >= maxAttempts {
+			return nil, fmt.Errorf("split.Cut: cut plane passes through %d vertex/vertices of the model after %d perturbation attempts (cumulative shift %.3g mm); offset the cut by hand to avoid the dense vertex region",
+				onPlaneCount, attempt, totalShift)
+		}
+		plane.D += shiftStep
+		totalShift += shiftStep
+		shiftStep *= 2
+		attempt++
+	}
+	if totalShift > 0 {
+		fmt.Printf("  Split: shifted cut plane by %.3g mm to clear on-plane vertices\n", totalShift)
 	}
 
 	// 2. Build the per-half mesh by splitting crossing triangles. cutEdges

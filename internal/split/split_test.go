@@ -321,15 +321,23 @@ func makeHollowCube() *loader.LoadedModel {
 	}
 }
 
-// TestCut_OnPlaneVertexFails verifies that a cut passing exactly
-// through a vertex of the model is rejected. The user-facing remedy
-// (offset the cut slightly) lives in the error message.
-func TestCut_OnPlaneVertexFails(t *testing.T) {
+// TestCut_OnPlaneVertexAutoPerturbs verifies that a cut passing exactly
+// through model vertices is silently rescued by the auto-perturb loop:
+// the plane shifts by a sub-micron amount until no vertex lies on it,
+// and the cut succeeds. The original behavior (hard reject) was too
+// brittle on dense alpha-wrapped meshes where the random hit rate is
+// near 100%.
+func TestCut_OnPlaneVertexAutoPerturbs(t *testing.T) {
 	cube := makeUnitCube()
-	// z=0 hits all four bottom-face vertices.
-	_, err := Cut(cube, AxisPlane(2, 0), ConnectorSettings{})
-	if err == nil {
-		t.Fatal("expected error when cut plane passes through model vertices")
+	// z=0 hits all four bottom-face vertices. Auto-perturb should
+	// shift to ~z=4e-9 (or larger if the first shift still hits) and
+	// produce a valid cut.
+	res, err := Cut(cube, AxisPlane(2, 0), ConnectorSettings{})
+	if err != nil {
+		t.Fatalf("expected auto-perturb to recover, got error: %v", err)
+	}
+	if res == nil || res.Halves[0] == nil || res.Halves[1] == nil {
+		t.Fatal("expected both halves to be populated after auto-perturb")
 	}
 }
 
