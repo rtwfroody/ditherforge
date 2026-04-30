@@ -62,6 +62,10 @@ export function ProcessPipeline(arg1) {
   return window['go']['main']['App']['ProcessPipeline'](arg1);
 }
 
+export function SplitPreview(arg1) {
+  return window['go']['main']['App']['SplitPreview'](arg1);
+}
+
 export function Quit() {
   return window['go']['main']['App']['Quit']();
 }

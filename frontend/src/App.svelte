@@ -12,6 +12,7 @@
   import * as Tooltip from '$lib/components/ui/tooltip';
   import HelpTip from '$lib/components/HelpTip.svelte';
   import SettingsSection from '$lib/components/SettingsSection.svelte';
+  import SplitControls from '$lib/components/SplitControls.svelte';
   import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
@@ -147,6 +148,33 @@
   let alphaWrap = $state(false);
   let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
+  // Split (cut model into two halves with peg/pocket connectors).
+  // See docs/SPLIT.md. Defaults match the design doc's "what most
+  // users want" baseline.
+  let splitEnabled = $state(false);
+  let splitAxis = $state(2); // 0=X, 1=Y, 2=Z
+  let splitOffset = $state(0);
+  let splitConnectorStyle = $state('pegs');
+  let splitConnectorCount = $state(0); // 0 = auto
+  let splitConnectorDiamMM = $state(5);
+  let splitConnectorDepthMM = $state(6);
+  let splitClearanceMM = $state(0.15);
+  let splitGapMM = $state(5);
+  // Min/max for the offset slider, computed from the loaded model's
+  // bbox along the chosen axis. Updated when the model is loaded or
+  // the axis changes.
+  let splitOffsetMin = $state(0);
+  let splitOffsetMax = $state(100);
+
+  // Cascade: turning AlphaWrap off while Split is on auto-disables
+  // Split (the cut needs a watertight input). The reverse cascade
+  // (turning Split on auto-enables AlphaWrap) lives in
+  // SplitControls.svelte's onAlphaWrapForced callback.
+  $effect(() => {
+    if (!alphaWrap && splitEnabled) {
+      splitEnabled = false;
+    }
+  });
   let stickers = $state<StickerUI[]>([]);
   let placingStickerIndex = $state(-1);
   const placingSticker = $derived(placingStickerIndex >= 0 ? stickers[placingStickerIndex] ?? null : null);
@@ -439,7 +467,12 @@
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
           dither, committedColorSnap, noMerge, noSimplify, stats,
-          alphaWrap, alphaWrapAlpha, alphaWrapOffset, reloadSeq];
+          alphaWrap, alphaWrapAlpha, alphaWrapOffset,
+          splitEnabled, splitAxis, splitOffset,
+          splitConnectorStyle, splitConnectorCount,
+          splitConnectorDiamMM, splitConnectorDepthMM,
+          splitClearanceMM, splitGapMM,
+          reloadSeq];
     if (!initialized) {
       initialized = true;
       return;
@@ -684,6 +717,15 @@
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
+      splitEnabled,
+      splitAxis,
+      splitOffset,
+      splitConnectorStyle,
+      splitConnectorCount,
+      splitConnectorDiamMM,
+      splitConnectorDepthMM,
+      splitClearanceMM,
+      splitGapMM,
     };
   }
 
@@ -749,6 +791,15 @@
     if (s.alphaWrap !== undefined) alphaWrap = s.alphaWrap;
     if (s.alphaWrapAlpha !== undefined) alphaWrapAlpha = s.alphaWrapAlpha;
     if (s.alphaWrapOffset !== undefined) alphaWrapOffset = s.alphaWrapOffset;
+    if (s.splitEnabled !== undefined) splitEnabled = s.splitEnabled;
+    if (s.splitAxis !== undefined) splitAxis = s.splitAxis;
+    if (s.splitOffset !== undefined) splitOffset = s.splitOffset;
+    if (s.splitConnectorStyle !== undefined) splitConnectorStyle = s.splitConnectorStyle;
+    if (s.splitConnectorCount !== undefined) splitConnectorCount = s.splitConnectorCount;
+    if (s.splitConnectorDiamMM !== undefined) splitConnectorDiamMM = s.splitConnectorDiamMM;
+    if (s.splitConnectorDepthMM !== undefined) splitConnectorDepthMM = s.splitConnectorDepthMM;
+    if (s.splitClearanceMM !== undefined) splitClearanceMM = s.splitClearanceMM;
+    if (s.splitGapMM !== undefined) splitGapMM = s.splitGapMM;
   }
 
   async function handleSave() {
@@ -922,6 +973,17 @@
       AlphaWrap: alphaWrap,
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
       AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
+      Split: {
+        Enabled: splitEnabled,
+        Axis: splitAxis,
+        Offset: splitOffset,
+        ConnectorStyle: splitConnectorStyle,
+        ConnectorCount: splitConnectorCount,
+        ConnectorDiamMM: splitConnectorDiamMM,
+        ConnectorDepthMM: splitConnectorDepthMM,
+        ClearanceMM: splitClearanceMM,
+        GapMM: splitGapMM,
+      },
       Force: force,
       ReloadSeq: reloadSeq,
       ObjectIndex: objectIndex,
@@ -1229,6 +1291,31 @@
               {/if}
             </div>
           </div>
+        </SettingsSection>
+
+        <SettingsSection title="Split" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Cut the model into two halves that print side by side
+              and assemble back together with peg/pocket alignment.
+              Useful for build-volume limits or for painting halves
+              separately before assembly.
+            </HelpTip>
+          {/snippet}
+          <SplitControls
+            bind:enabled={splitEnabled}
+            bind:axis={splitAxis}
+            bind:offset={splitOffset}
+            bind:connectorStyle={splitConnectorStyle}
+            bind:connectorCount={splitConnectorCount}
+            bind:connectorDiamMM={splitConnectorDiamMM}
+            bind:connectorDepthMM={splitConnectorDepthMM}
+            bind:clearanceMM={splitClearanceMM}
+            bind:gapMM={splitGapMM}
+            minOffset={splitOffsetMin}
+            maxOffset={splitOffsetMax}
+            onAlphaWrapForced={() => { alphaWrap = true; }}
+          />
         </SettingsSection>
 
         <SettingsSection title="Stickers" open={false}>

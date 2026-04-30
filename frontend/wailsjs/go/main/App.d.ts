@@ -34,6 +34,8 @@ export function OpenStickerImage():Promise<string>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
 
+export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
+
 export function Quit():Promise<void>;
 
 export function ReadStickerThumbnail(arg1:string):Promise<string>;
