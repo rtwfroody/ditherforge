@@ -14,6 +14,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
@@ -125,13 +126,13 @@ func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
 	return runStage(r, StageParse, &r.parse, func() (*loader.LoadedModel, error) {
 		stage := progress.BeginStage(r.tracker, stageNames[StageParse], false, 0)
 		defer stage.Done()
-		fmt.Printf("Parsing %s...", r.opts.Input)
+		plog.Printf("Parsing %s...", r.opts.Input)
 		t := time.Now()
 		loaded, err := loadModel(r.opts.Input, r.opts.ObjectIndex)
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", filepath.Ext(r.opts.Input), err)
 		}
-		fmt.Printf(" %d vertices, %d faces in %.1fs\n",
+		plog.Printf("  Parsed: %d vertices, %d faces in %.1fs",
 			len(loaded.Vertices), len(loaded.Faces), time.Since(t).Seconds())
 		return loaded, nil
 	})
@@ -168,7 +169,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		normalizeZ(model)
 
 		ex := modelExtents(model)
-		fmt.Printf("  Extent: %.1f x %.1f x %.1f mm\n", ex[0], ex[1], ex[2])
+		plog.Printf("  Extent: %.1f x %.1f x %.1f mm", ex[0], ex[1], ex[2])
 
 		if err := r.checkCancel(); err != nil {
 			return nil, err
@@ -185,13 +186,13 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			if offset <= 0 {
 				offset = alpha / 30
 			}
-			fmt.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm...", alpha, offset)
+			plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
 			tWrap := time.Now()
 			wrapped, werr := alphawrap.Wrap(model, alpha, offset)
 			if werr != nil {
 				return nil, fmt.Errorf("alpha-wrap: %w", werr)
 			}
-			fmt.Printf(" %d vertices, %d faces in %.1fs\n",
+			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
 				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
 			geomModel = wrapped
 		}
@@ -202,7 +203,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			geomExt := modelMaxExtent(geomModel)
 			inflateOffset := (geomExt - origExt) / 2
 			if inflateOffset > 1e-4 {
-				fmt.Printf("  Inflating color-sample mesh by %.3f mm\n", inflateOffset)
+				plog.Printf("  Inflating color-sample mesh by %.3f mm", inflateOffset)
 				sampleModel = loader.InflateAlongNormals(model, inflateOffset)
 			}
 		}
@@ -251,7 +252,7 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 			return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
 		}
 
-		fmt.Println("Splitting...")
+		plog.Println("Splitting...")
 		tSplit := time.Now()
 
 		// Translate Options.Split into split.Cut + split.Layout calls.
@@ -274,7 +275,7 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 		}
 		xforms := split.Layout(res, r.opts.Split.GapMM)
 
-		fmt.Printf("  Split: cut and laid out two halves in %.1fs\n", time.Since(tSplit).Seconds())
+		plog.Printf("  Split: cut and laid out two halves in %.1fs", time.Since(tSplit).Seconds())
 		return &splitOutput{
 			Enabled:   true,
 			Halves:    res.Halves,
@@ -312,7 +313,7 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
 
 		if so.Enabled {
-			fmt.Println("Decimating (split)...")
+			plog.Println("Decimating (split)...")
 			// Use CountSurfaceCells on the unsplit lo.Model as the
 			// total target. Layout is rotation+translation, so the
 			// volume / surface area is preserved across halves;
@@ -326,7 +327,7 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 			return &decimateOutput{Halves: halves}, nil
 		}
 
-		fmt.Println("Decimating...")
+		plog.Println("Decimating...")
 		targetCells := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
 		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, targetCells, cellSize, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
@@ -393,7 +394,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 
 		bounds := img.Bounds()
 		if bounds.Dx() == 0 || bounds.Dy() == 0 {
-			fmt.Printf("  Sticker %s: 0x0 image, skipping\n", s.ImagePath)
+			plog.Printf("  Sticker %s: 0x0 image, skipping", s.ImagePath)
 			stage.Progress(base + stickerUnits)
 			continue
 		}
@@ -403,7 +404,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 		case "unfold":
 			seedTri := voxel.FindSeedTriangle(s.Center, model, si)
 			if seedTri < 0 {
-				fmt.Printf("  Sticker %s: no triangle found near center, skipping\n", s.ImagePath)
+				plog.Printf("  Sticker %s: no triangle found near center, skipping", s.ImagePath)
 				stage.Progress(base + stickerUnits)
 				continue
 			}
@@ -420,14 +421,14 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 				return nil, err
 			}
 			if len(decal.TriUVs) == 0 {
-				fmt.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping\n", s.ImagePath)
+				plog.Printf("  Sticker %s: no front-facing geometry within projection rect, skipping", s.ImagePath)
 				stage.Progress(base + stickerUnits)
 				continue
 			}
 		default:
 			return nil, fmt.Errorf("sticker %s: unknown mode %q", s.ImagePath, s.Mode)
 		}
-		fmt.Printf("  Sticker %s: %d triangles covered\n", s.ImagePath, len(decal.TriUVs))
+		plog.Printf("  Sticker %s: %d triangles covered", s.ImagePath, len(decal.TriUVs))
 		if decal.LSCMResidual > 1e-5 && r.onWarning != nil {
 			r.onWarning(fmt.Sprintf(
 				"Sticker %q didn't unfold cleanly (residual %.1e). The mesh in this region has very-poor-quality triangles; the sticker may look distorted. Try alpha-wrap or a different placement.",
@@ -484,7 +485,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
-		fmt.Println("Voxelizing...")
+		plog.Println("Voxelizing...")
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo)
@@ -521,7 +522,7 @@ func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
 			return nil, cerr
 		}
 		if !adj.IsIdentity() {
-			fmt.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs\n",
+			plog.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs",
 				r.opts.Brightness, r.opts.Contrast, r.opts.Saturation, time.Since(tAdj).Seconds())
 		}
 		return &colorAdjustOutput{Cells: cells}, nil
@@ -558,7 +559,7 @@ func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
 		if werr != nil {
 			return nil, werr
 		}
-		fmt.Printf("  Warped colors (%d pins) in %.1fs\n", len(pins), time.Since(tWarp).Seconds())
+		plog.Printf("  Warped colors (%d pins) in %.1fs", len(pins), time.Since(tWarp).Seconds())
 		return &colorWarpOutput{Cells: cells}, nil
 	})
 }
@@ -587,7 +588,7 @@ func (r *pipelineRun) Palette() (*paletteOutput, error) {
 			return nil, perr
 		}
 		if palDisplay != "" {
-			fmt.Printf("%s\n", palDisplay)
+			plog.Printf("%s", palDisplay)
 		}
 		if len(pal) == 0 {
 			return nil, fmt.Errorf("no palette colors")
@@ -596,7 +597,7 @@ func (r *pipelineRun) Palette() (*paletteOutput, error) {
 			if serr := voxel.SnapColors(r.ctx, cells, pal, r.opts.ColorSnap); serr != nil {
 				return nil, serr
 			}
-			fmt.Printf("  Snapped cell colors toward palette by delta E %.1f\n", r.opts.ColorSnap)
+			plog.Printf("  Snapped cell colors toward palette by delta E %.1f", r.opts.ColorSnap)
 		}
 		if len(pcfg.Locked) == 0 && len(pal) > 1 {
 			assigns, aerr := voxel.AssignColors(r.ctx, cells, pal)
@@ -654,7 +655,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		fmt.Printf("  Dithered (%s) %d cells in %.1fs\n", ditherMode, len(cells), time.Since(tDither).Seconds())
+		plog.Printf("  Dithered (%s) %d cells in %.1fs", ditherMode, len(cells), time.Since(tDither).Seconds())
 		counts := make([]int, len(pal))
 		for _, a := range assignments {
 			counts[a]++
@@ -667,14 +668,14 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		sort.Slice(order, func(a, b int) bool { return counts[order[a]] > counts[order[b]] })
 		for _, i := range order {
 			c := pal[i]
-			fmt.Printf("    #%02X%02X%02X: %d cells (%.1f%%)\n", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
+			plog.Printf("    #%02X%02X%02X: %d cells (%.1f%%)", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
 		}
 		tFlood := time.Now()
 		patchMap, numPatches, ferr := floodFillTwoGrids(r.ctx, cells, assignments, r.tracker)
 		if ferr != nil {
 			return nil, ferr
 		}
-		fmt.Printf("  Flood fill: %d patches in %.1fs\n", numPatches, time.Since(tFlood).Seconds())
+		plog.Printf("  Flood fill: %d patches in %.1fs", numPatches, time.Since(tFlood).Seconds())
 		patchAssignment := make([]int32, numPatches)
 		for i, c := range cells {
 			k := voxel.CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}
@@ -722,7 +723,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			if err != nil {
 				return nil, err
 			}
-			fmt.Printf("  Clipped (split): %d faces in %.1fs\n", len(out.ShellFaces), time.Since(tClip).Seconds())
+			plog.Printf("  Clipped (split): %d faces in %.1fs", len(out.ShellFaces), time.Since(tClip).Seconds())
 			return out, nil
 		}
 
@@ -731,8 +732,8 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if cerr != nil {
 			return nil, fmt.Errorf("clip: %w", cerr)
 		}
-		fmt.Printf("  Clipped mesh: %d faces in %.1fs\n", len(shellFaces), time.Since(tClip).Seconds())
-		fmt.Printf("  After clip: %s\n", voxel.CheckWatertight(shellFaces))
+		plog.Printf("  Clipped mesh: %d faces in %.1fs", len(shellFaces), time.Since(tClip).Seconds())
+		plog.Printf("  After clip: %s", voxel.CheckWatertight(shellFaces))
 		return &clipOutput{
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,
@@ -831,11 +832,11 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 			if merr != nil {
 				return nil, fmt.Errorf("merge: %w", merr)
 			}
-			fmt.Printf("  Merged shell: %d -> %d faces in %.1fs\n", before, len(shellFaces), time.Since(tMerge).Seconds())
+			plog.Printf("  Merged shell: %d -> %d faces in %.1fs", before, len(shellFaces), time.Since(tMerge).Seconds())
 		} else {
 			progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
 		}
-		fmt.Printf("  Output mesh: %s\n", voxel.CheckWatertight(shellFaces))
+		plog.Printf("  Output mesh: %s", voxel.CheckWatertight(shellFaces))
 		return &mergeOutput{
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,

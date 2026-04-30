@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -305,9 +306,9 @@ func VoxelizeTwoGrids(
 
 	for _, e := range entries {
 		if len(entries) > 1 {
-			fmt.Printf("  Input mesh (half %d): %s\n", e.halfIdx, voxel.CheckWatertight(e.mesh.Faces))
+			plog.Printf("  Input mesh (half %d): %s", e.halfIdx, voxel.CheckWatertight(e.mesh.Faces))
 		} else {
-			fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(e.mesh.Faces))
+			plog.Printf("  Input mesh: %s", voxel.CheckWatertight(e.mesh.Faces))
 		}
 	}
 
@@ -386,7 +387,7 @@ func VoxelizeTwoGrids(
 		}
 	}
 
-	fmt.Printf("  Voxelized: %d cells across %d mesh(es) in %.1fs\n",
+	plog.Printf("  Voxelized: %d cells across %d mesh(es) in %.1fs",
 		totalCells, len(entries), time.Since(tVoxelize).Seconds())
 
 	tracker.StageDone("Voxelizing")
@@ -419,7 +420,7 @@ func VoxelizeTwoGrids(
 	}
 
 	tracker.StageDone("Coloring cells")
-	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
+	plog.Printf("  Colored cells: %d cells in %.1fs", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, fmt.Errorf("no active cells found")
 	}
@@ -451,7 +452,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		colorModel = model
 	}
 
-	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
+	plog.Printf("  Input mesh: %s", voxel.CheckWatertight(model.Faces))
 
 	minV, maxV := voxel.ComputeBounds(model.Vertices)
 	xyPad := cellSize * 2
@@ -480,7 +481,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
 	cellSet := voxelizeRegion(ctx, model, p, tracker, &voxCounter)
-	fmt.Printf("  Voxelized: %d cells in %.1fs\n", len(cellSet), time.Since(tVoxelize).Seconds())
+	plog.Printf("  Voxelized: %d cells in %.1fs", len(cellSet), time.Since(tVoxelize).Seconds())
 
 	tracker.StageDone("Voxelizing")
 
@@ -492,7 +493,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		return nil, nil, [3]float32{}, err
 	}
 	tracker.StageDone("Coloring cells")
-	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
+	plog.Printf("  Colored cells: %d cells in %.1fs", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("no active cells found")
 	}
@@ -565,7 +566,7 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 			return nil, err
 		}
 		wr := voxel.CheckWatertight(decFaces)
-		fmt.Printf("  Decimated mesh: %s\n", wr)
+		plog.Printf("  Decimated mesh: %s", wr)
 		return &loader.LoadedModel{
 			Vertices: decVerts,
 			Faces:    decFaces,

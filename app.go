@@ -24,6 +24,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -395,6 +396,9 @@ func (a *App) processOne(req pipelineRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	plog.Printf("Pipeline gen %d starting: %s (reloadSeq=%d)",
+		req.gen, req.opts.Input, req.opts.ReloadSeq)
+
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelMu.Lock()
 	a.cancel = cancel
@@ -462,7 +466,7 @@ func (a *App) processOne(req pipelineRequest) {
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			fmt.Printf("Pipeline gen %d cancelled\n", req.gen)
+			plog.Printf("Pipeline gen %d cancelled", req.gen)
 			wailsRuntime.EventsEmit(a.ctx, "pipeline-cancelled", pipelineEvent{Gen: req.gen})
 			return
 		}
@@ -501,7 +505,7 @@ func (a *App) processOne(req pipelineRequest) {
 
 // LogMessage prints a message from the frontend to stdout.
 func (a *App) LogMessage(level, msg string) {
-	fmt.Printf("[JS %s] %s\n", level, msg)
+	plog.Printf("[JS %s] %s", level, msg)
 }
 
 // Version returns the application version string.
@@ -871,6 +875,7 @@ func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
 
 // LoadSettingsFile reads settings from the given path.
 func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
+	plog.Printf("Opening settings file: %s", path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)

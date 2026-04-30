@@ -15,6 +15,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/cacheblob"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
@@ -211,14 +212,17 @@ func runStageCached(
 	tracker progress.Tracker,
 	body func() error,
 ) error {
+	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
 	v, src := cache.getWithSource(stage, opts)
 	if v != nil {
-		fmt.Printf("%s: cache hit (%s, %s)\n", stageNames[stage],
-			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond))
+		plog.Printf("%s: cache hit (%s, %s) key=%s", stageNames[stage],
+			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
+			shortKey(key))
 		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
 		return nil
 	}
+	plog.Printf("%s: cache miss key=%s", stageNames[stage], shortKey(key))
 	start := time.Now()
 	if err := body(); err != nil {
 		// Errored runs don't record cost. The body may not have
@@ -231,6 +235,19 @@ func runStageCached(
 	// next sweep can rank this entry correctly.
 	cache.stampCost(stage, opts, time.Since(start))
 	return nil
+}
+
+// shortKey returns the first 12 hex chars of a stage cache key — enough
+// to disambiguate runs in console logs without dumping the full SHA. An
+// empty key (input file unhashable) renders as "?".
+func shortKey(key string) string {
+	if key == "" {
+		return "?"
+	}
+	if len(key) > 12 {
+		return key[:12]
+	}
+	return key
 }
 
 // hitSourceLabel returns a short label for console messages.

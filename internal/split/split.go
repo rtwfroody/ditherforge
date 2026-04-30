@@ -13,6 +13,7 @@ import (
 	"math"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 )
 
 // Plane is a 3D plane in original-mesh coordinates. A point p lies on the
@@ -181,7 +182,7 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 		attempt++
 	}
 	if totalShift > 0 {
-		fmt.Printf("  Split: shifted cut plane by %.3g mm to clear on-plane vertices\n", totalShift)
+		plog.Printf("  Split: shifted cut plane by %.3g mm to clear on-plane vertices", totalShift)
 	}
 
 	// 2. Build the per-half mesh by splitting crossing triangles. cutEdges

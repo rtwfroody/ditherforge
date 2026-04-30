@@ -19,6 +19,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -394,12 +395,12 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 
 	outModel := buildOutputModel(lo.ColorModel, mo)
 
-	fmt.Printf("Exporting %s...", outputPath)
+	plog.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
 	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, exportOpts); err != nil {
 		return 0, fmt.Errorf("exporting 3MF: %w", err)
 	}
-	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())
+	plog.Printf("Exported in %.1fs", time.Since(tExport).Seconds())
 
 	return len(outModel.Faces), nil
 }
@@ -669,7 +670,7 @@ func normalizeZ(model *loader.LoadedModel) {
 }
 
 func printStats(assignments []int32, paletteRGB [][3]uint8) {
-	fmt.Println("  Face counts per material:")
+	plog.Println("  Face counts per material:")
 	for i, p := range paletteRGB {
 		hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		count := 0
@@ -678,6 +679,6 @@ func printStats(assignments []int32, paletteRGB [][3]uint8) {
 				count++
 			}
 		}
-		fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
+		plog.Printf("    [%d] %s: %d faces", i, hexColor, count)
 	}
 }

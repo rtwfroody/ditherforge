@@ -3,10 +3,10 @@ package voxel
 import (
 	"container/heap"
 	"context"
-	"fmt"
 	"math"
 	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
@@ -246,7 +246,7 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 	}
 
 	outVerts, outFaces := d.compact()
-	fmt.Printf("  Decimated %d -> %d faces in %.1fs\n",
+	plog.Printf("  Decimated %d -> %d faces in %.1fs",
 		len(faces), len(outFaces), time.Since(tStart).Seconds())
 	return outVerts, outFaces, nil
 }
