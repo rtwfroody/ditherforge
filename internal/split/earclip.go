@@ -91,7 +91,67 @@ func triangulate(outer []pt2, outerIdx []uint32, holes [][]pt2, holeIdx [][]uint
 		}
 	}
 
+	// Dedup consecutive near-coincident vertices. Cap polygons recovered
+	// from dense alpha-wrapped meshes can have float-roundoff duplicates
+	// where two adjacent triangle midpoints round to the same 2D point;
+	// those break earClip's collinearity test (cross == 0). Tolerance is
+	// set relative to the polygon's bbox so it scales with the model.
+	pts, idx = dedupConsecutive(pts, idx)
+
 	return earClip(pts, idx)
+}
+
+// dedupConsecutive collapses runs of vertices that are within an
+// auto-scaled tolerance of each other. Keeps the parallel pts/idx
+// slices in sync. Tolerance is 1e-9 × bbox diagonal — tighter than
+// any meaningful geometric feature but still much larger than float
+// noise.
+func dedupConsecutive(pts []pt2, idx []uint32) ([]pt2, []uint32) {
+	if len(pts) < 2 {
+		return pts, idx
+	}
+	minX, maxX := pts[0].X, pts[0].X
+	minY, maxY := pts[0].Y, pts[0].Y
+	for _, p := range pts[1:] {
+		if p.X < minX {
+			minX = p.X
+		}
+		if p.X > maxX {
+			maxX = p.X
+		}
+		if p.Y < minY {
+			minY = p.Y
+		}
+		if p.Y > maxY {
+			maxY = p.Y
+		}
+	}
+	bboxDiag := math.Hypot(maxX-minX, maxY-minY)
+	tol := 1e-9 * bboxDiag
+	if tol <= 0 {
+		return pts, idx
+	}
+	tolSq := tol * tol
+	close := func(a, b pt2) bool {
+		dx := a.X - b.X
+		dy := a.Y - b.Y
+		return dx*dx+dy*dy < tolSq
+	}
+	out := pts[:0:0]
+	outIdx := idx[:0:0]
+	for i, p := range pts {
+		if len(out) > 0 && close(out[len(out)-1], p) {
+			continue
+		}
+		out = append(out, p)
+		outIdx = append(outIdx, idx[i])
+	}
+	// Wrap-around: if last == first, drop the last entry.
+	for len(out) > 3 && close(out[len(out)-1], out[0]) {
+		out = out[:len(out)-1]
+		outIdx = outIdx[:len(outIdx)-1]
+	}
+	return out, outIdx
 }
 
 // bridgeHole inserts a hole into the outer polygon by finding a
@@ -231,15 +291,31 @@ func earClip(pts []pt2, idx []uint32) ([][3]uint32, error) {
 	remaining := n
 	guard := 2 * n // cycle guard
 
+	// Tolerance starts strict (only accept cross > 0 — convex corners
+	// with positive triangle area). When the strict pass stalls
+	// (guard hits 0), relax to accept slightly-reflex ears (cross >
+	// -tolerance), which lets near-collinear sequences from dense
+	// alpha-wrapped cap polygons clip through. Relaxed ears still go
+	// through isEar's pointInTriangle interior check, so we never
+	// produce a self-intersecting triangulation — only thinner
+	// triangles than ideal.
+	bbDiag := bboxDiag2D(pts)
+	tolerances := []float64{0, -1e-12 * bbDiag * bbDiag, -1e-9 * bbDiag * bbDiag, -1e-6 * bbDiag * bbDiag}
+	tolIdx := 0
+
 	i := 0
 	for remaining > 3 {
 		guard--
 		if guard < 0 {
-			return nil, fmt.Errorf("earClip: failed to find an ear (degenerate polygon)")
+			tolIdx++
+			if tolIdx >= len(tolerances) {
+				return nil, fmt.Errorf("earClip: failed to find an ear after %d tolerance levels (degenerate polygon, %d vertices remaining)", len(tolerances), remaining)
+			}
+			guard = 2 * remaining
 		}
 		ip := prev[i]
 		in := next[i]
-		if isEar(pts, prev, next, ip, i, in) {
+		if isEar(pts, prev, next, ip, i, in, tolerances[tolIdx]) {
 			tris = append(tris, [3]uint32{idx[ip], idx[i], idx[in]})
 			next[ip] = in
 			prev[in] = ip
@@ -256,14 +332,44 @@ func earClip(pts []pt2, idx []uint32) ([][3]uint32, error) {
 	return tris, nil
 }
 
+// bboxDiag2D returns the diagonal of the 2D bounding box of pts.
+func bboxDiag2D(pts []pt2) float64 {
+	if len(pts) == 0 {
+		return 0
+	}
+	minX, maxX := pts[0].X, pts[0].X
+	minY, maxY := pts[0].Y, pts[0].Y
+	for _, p := range pts[1:] {
+		if p.X < minX {
+			minX = p.X
+		}
+		if p.X > maxX {
+			maxX = p.X
+		}
+		if p.Y < minY {
+			minY = p.Y
+		}
+		if p.Y > maxY {
+			maxY = p.Y
+		}
+	}
+	return math.Hypot(maxX-minX, maxY-minY)
+}
+
 // isEar reports whether vertex v with neighbours p and n forms an ear
-// of the current polygon (no other reflex vertex inside).
-func isEar(pts []pt2, prev, next []int, p, v, n int) bool {
+// of the current polygon (no other reflex vertex inside). minArea2 is
+// the lower bound for cross(a,b,c) (= 2·signed area); 0 is strict
+// (accept only convex corners). Callers that have stalled on
+// near-collinear vertices can pass a small negative minArea2 to accept
+// thin slightly-reflex ears, with the safety net that the
+// pointInTriangle interior check still runs.
+func isEar(pts []pt2, prev, next []int, p, v, n int, minArea2 float64) bool {
 	a := pts[p]
 	b := pts[v]
 	c := pts[n]
-	if cross(a, b, c) <= 0 {
-		// Reflex or collinear corner — not an ear.
+	if cross(a, b, c) <= minArea2 {
+		// Reflex beyond tolerance, collinear (when strict), or
+		// below-threshold — not an ear.
 		return false
 	}
 	// Walk all OTHER current-polygon vertices; if any reflex vertex is
