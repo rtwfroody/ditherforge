@@ -71,6 +71,13 @@ type meshEvent struct {
 	URL          string  `json:"url"`
 	PreviewScale float32 `json:"previewScale,omitempty"`
 	ExtentMM     float32 `json:"extentMM,omitempty"` // native max extent in mm, for input-mesh
+	// Per-axis bbox of the loaded model in original-mesh coords (mm,
+	// post-scale, post-normalizeZ). Populated only on input-mesh
+	// events. Used by the Split Settings panel to size the offset
+	// slider's range and pick a sensible default offset (the bbox
+	// midpoint along the chosen axis).
+	BBoxMin [3]float32 `json:"bboxMin,omitempty"`
+	BBoxMax [3]float32 `json:"bboxMax,omitempty"`
 }
 
 // NewApp creates a new App instance.
@@ -394,14 +401,21 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancelMu.Unlock()
 
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
-		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32) {
+		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32, bboxMin, bboxMax [3]float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
 			a.lastInputID = a.meshes.Store(mesh)
-			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale, ExtentMM: extentMM})
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{
+				Gen:          req.gen,
+				URL:          "/mesh/" + a.lastInputID,
+				PreviewScale: pvScale,
+				ExtentMM:     extentMM,
+				BBoxMin:      bboxMin,
+				BBoxMax:      bboxMax,
+			})
 		},
 		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Alpha-wrap mode: stickers are carried by a separate mesh

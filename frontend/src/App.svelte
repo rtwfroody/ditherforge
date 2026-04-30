@@ -160,11 +160,27 @@
   let splitConnectorDepthMM = $state(6);
   let splitClearanceMM = $state(0.15);
   let splitGapMM = $state(5);
-  // Min/max for the offset slider, computed from the loaded model's
-  // bbox along the chosen axis. Updated when the model is loaded or
-  // the axis changes.
-  let splitOffsetMin = $state(0);
-  let splitOffsetMax = $state(100);
+  // The loaded model's bbox in original-mesh coords (mm, post-scale,
+  // post-normalizeZ). Populated from the input-mesh event.
+  let modelBBoxMin = $state<[number, number, number]>([0, 0, 0]);
+  let modelBBoxMax = $state<[number, number, number]>([100, 100, 100]);
+  // Min/max for the Split offset slider — derived from the bbox along
+  // the chosen axis. Updates automatically when the user toggles axes
+  // or loads a new model.
+  const splitOffsetMin = $derived(modelBBoxMin[splitAxis] ?? 0);
+  const splitOffsetMax = $derived(modelBBoxMax[splitAxis] ?? 100);
+
+  // When the user changes the cut axis, recentre the offset on the
+  // new axis's bbox midpoint. Without this, an offset that was sane
+  // for axis Z would commonly fall outside the X or Y range.
+  $effect(() => {
+    const axis = splitAxis;
+    const lo = modelBBoxMin[axis];
+    const hi = modelBBoxMax[axis];
+    if (splitOffset < lo || splitOffset > hi) {
+      splitOffset = (lo + hi) / 2;
+    }
+  });
 
   // Cascade: turning AlphaWrap off while Split is on auto-disables
   // Split (the cut needs a watertight input). The reverse cascade
@@ -329,7 +345,7 @@
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
-  EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number; extentMM?: number }) => {
+  EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number; extentMM?: number; bboxMin?: [number, number, number]; bboxMax?: [number, number, number] }) => {
     if (event.gen < latestGen) return;
     inputMeshUrl = event.url;
     // The overlay is set/cleared deterministically by the
@@ -340,6 +356,20 @@
     }
     if (event.previewScale !== undefined) {
       applyPreviewScale(event.previewScale);
+    }
+    // Update the model bbox for the Split offset slider. The bbox
+    // is in original-mesh coords (mm, post-scale, post-normalizeZ).
+    if (event.bboxMin && event.bboxMax) {
+      modelBBoxMin = event.bboxMin;
+      modelBBoxMax = event.bboxMax;
+      // If Split was enabled with the previous model's bbox in mind
+      // (offset clamped to a range that's now invalid), recentre the
+      // offset on the new model's bbox along the chosen axis.
+      const lo = modelBBoxMin[splitAxis];
+      const hi = modelBBoxMax[splitAxis];
+      if (splitOffset < lo || splitOffset > hi) {
+        splitOffset = (lo + hi) / 2;
+      }
     }
   });
   EventsOn('input-overlay-mesh', (event: { gen: number; url: string }) => {

@@ -98,7 +98,14 @@ type WarpPin struct {
 
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
-	OnInputMesh func(*MeshData, float32, float32) // mesh, preview scale, native extent mm
+	// OnInputMesh receives:
+	//   mesh         — the preview-format mesh data
+	//   previewScale — multiply by this to convert pipeline coords back to preview coords
+	//   nativeExtentMM — native max bounding-box extent in mm
+	//   bboxMin, bboxMax — original-mesh-coord bbox (in mm, post-scale, post-normalizeZ).
+	//                       Used by the Split Settings panel to size the
+	//                       offset slider per axis.
+	OnInputMesh func(mesh *MeshData, previewScale, nativeExtentMM float32, bboxMin, bboxMax [3]float32)
 	// OnStickerOverlay is fired when stickers are placed on a mesh
 	// distinct from the input mesh — i.e. the alpha-wrap surface. The
 	// overlay should be rendered on top of the input mesh, biased
@@ -184,7 +191,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Extract callbacks, using safe defaults for nil.
-	var onInputMesh func(*MeshData, float32, float32)
+	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var onWarning func(string)
@@ -257,7 +264,25 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
 		mesh = scalePreviewMesh(mesh, lo.PreviewScale)
-		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM)
+		// Compute the original-mesh-coord bbox (in mm, post-scale,
+		// post-normalizeZ). Used by the Split UI to size the offset
+		// slider per axis.
+		var bboxMin, bboxMax [3]float32
+		if len(lo.ColorModel.Vertices) > 0 {
+			bboxMin = lo.ColorModel.Vertices[0]
+			bboxMax = lo.ColorModel.Vertices[0]
+			for _, v := range lo.ColorModel.Vertices[1:] {
+				for i := 0; i < 3; i++ {
+					if v[i] < bboxMin[i] {
+						bboxMin[i] = v[i]
+					}
+					if v[i] > bboxMax[i] {
+						bboxMax[i] = v[i]
+					}
+				}
+			}
+		}
+		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
 
 		if onStickerOverlay != nil {
 			var overlay *MeshData

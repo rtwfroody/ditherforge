@@ -127,27 +127,26 @@
         </select>
       </label>
 
-      <label class="flex flex-col gap-1">
-        <span class="text-muted-foreground flex items-center gap-1.5">
-          Count
-          <HelpTip>
-            Number of connectors along the cut. Auto picks 1, 2, or 3
-            based on the cut polygon's inscribed-circle radius.
-          </HelpTip>
-        </span>
-        <select
-          class="h-9 rounded border bg-background text-foreground px-2"
-          bind:value={connectorCount}
-          disabled={connectorStyle === 'none'}
-        >
-          <option value={0}>Auto</option>
-          <option value={1}>1</option>
-          <option value={2}>2</option>
-          <option value={3}>3</option>
-        </select>
-      </label>
-
       {#if connectorStyle !== 'none'}
+        <label class="flex flex-col gap-1">
+          <span class="text-muted-foreground flex items-center gap-1.5">
+            Count
+            <HelpTip>
+              Number of connectors along the cut. Auto picks 1, 2, or
+              3 based on the cut polygon's inscribed-circle radius.
+            </HelpTip>
+          </span>
+          <select
+            class="h-9 rounded border bg-background text-foreground px-2"
+            bind:value={connectorCount}
+          >
+            <option value={0}>Auto</option>
+            <option value={1}>1</option>
+            <option value={2}>2</option>
+            <option value={3}>3</option>
+          </select>
+        </label>
+
         <label class="flex flex-col gap-1">
           <span class="text-muted-foreground">Diameter (mm)</span>
           <input
