@@ -486,6 +486,25 @@ func (a *App) Version() string {
 	return pipeline.Version
 }
 
+// SplitPreview returns the cut-plane geometry for the model that's
+// currently in the cache, computed from the supplied SplitSettings
+// (typically the live values from the Settings panel as the user
+// drags the offset slider). The mesh used is the most recently
+// loaded model — this method does NOT trigger a full pipeline run.
+//
+// Returns an error when the model isn't loaded yet (the user hasn't
+// run the pipeline since startup).
+func (a *App) SplitPreview(s pipeline.SplitSettings) (*pipeline.SplitPreviewResult, error) {
+	a.mu.Lock()
+	opts := a.lastOpts
+	a.mu.Unlock()
+
+	if opts.Input == "" {
+		return nil, fmt.Errorf("no model loaded yet")
+	}
+	return pipeline.ComputeSplitPreview(a.cache, opts, s)
+}
+
 // PrinterOption describes one printer + its nozzle/layer-height options for
 // the frontend printer selector. Layer heights are in mm.
 type PrinterOption struct {
