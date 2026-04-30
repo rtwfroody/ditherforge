@@ -60,6 +60,7 @@
     stages = [],
     stageTick = 0,
     cutPlane = null,
+    pipelineError = '',
   }: {
     meshUrl?: string;
     overlayMeshUrl?: string;
@@ -82,6 +83,7 @@
     stages?: StageInfo[];
     stageTick?: number;
     cutPlane?: CutPlanePreview | null;
+    pipelineError?: string;
   } = $props();
 
   // Compute live elapsed time for a running stage. The _tick parameter
@@ -1121,7 +1123,7 @@
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
         {errorMessage}
       </div>
-    {:else if stages.length > 0}
+    {:else if stages.length > 0 || pipelineError}
       <div class="flex flex-col justify-end gap-2 p-4 text-sm overflow-hidden h-full">
         {#each stages as stage}
           <div class="flex items-center gap-2">
@@ -1147,6 +1149,12 @@
             </div>
           {/if}
         {/each}
+        {#if pipelineError}
+          <div class="flex items-start gap-2 text-red-500">
+            <span class="w-4 h-4 shrink-0 text-center font-bold leading-4">!</span>
+            <span class="break-words">{pipelineError}</span>
+          </div>
+        {/if}
       </div>
     {:else if loading}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground gap-2">

@@ -344,6 +344,11 @@
   let inputOverlayMeshUrl: string | undefined = $state(undefined);
   let outputMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
+  // Pipeline error from a backend stage failure. Rendered as a final
+  // red line below the stage list in the output viewer so the user can
+  // see *which* stage failed by the green checkmarks above it. Cleared
+  // at the start of each pipeline run.
+  let pipelineError = $state('');
 
   // Resolved unlocked colors from the backend (the non-locked portion of the palette).
   let resolvedUnlockedColors = $state<ColorInfo[]>([]);
@@ -458,6 +463,7 @@
     if (event.gen < latestGen) return;
     running = false;
     inputError = event.message;
+    pipelineError = event.message;
     statusMessage = `Error: ${event.message}`;
     statusType = 'error';
   });
@@ -1113,6 +1119,7 @@
     }
     running = true;
     inputError = '';
+    pipelineError = '';
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
@@ -1646,7 +1653,7 @@
       <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} cutPlane={cutPlanePreview} />
     </div>
     <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} />
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} />
     </div>
   </div>
   </div>
