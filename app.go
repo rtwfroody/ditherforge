@@ -31,11 +31,15 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex               // protects cache and lastOpts; held during pipeline execution and Export3MF
+	mu       sync.Mutex               // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
 	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
-	lastOpts pipeline.Options         // last successfully processed options
+	// lastOpts is the last successfully processed Options. Uses
+	// atomic.Pointer so SplitPreview (and other read-only Wails
+	// methods) can snapshot it without blocking on `mu`, which the
+	// pipeline worker holds for the entire duration of a run.
+	lastOpts atomic.Pointer[pipeline.Options]
 	pipeGen      atomic.Int64         // generation counter for pipeline requests
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
@@ -235,11 +239,12 @@ func (a *App) Export3MF() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	last := a.lastOpts.Load()
 	defaultName := "output.3mf"
 	defaultDir := ""
-	if a.lastOpts.Input != "" {
-		defaultDir = filepath.Dir(a.lastOpts.Input)
-		base := filepath.Base(a.lastOpts.Input)
+	if last != nil && last.Input != "" {
+		defaultDir = filepath.Dir(last.Input)
+		base := filepath.Base(last.Input)
 		ext := filepath.Ext(base)
 		stem := strings.TrimSuffix(base, ext)
 		if strings.EqualFold(ext, ".3mf") {
@@ -247,6 +252,9 @@ func (a *App) Export3MF() (string, error) {
 		} else {
 			defaultName = stem + ".3mf"
 		}
+	}
+	if last == nil {
+		return "", fmt.Errorf("no model has been processed yet")
 	}
 
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
@@ -264,10 +272,10 @@ func (a *App) Export3MF() (string, error) {
 		return "", nil
 	}
 
-	_, err = pipeline.ExportFile(a.cache, a.lastOpts, path, export3mf.Options{
-		PrinterID:      a.lastOpts.Printer,
-		NozzleDiameter: a.lastOpts.NozzleDiameter,
-		LayerHeight:    a.lastOpts.LayerHeight,
+	_, err = pipeline.ExportFile(a.cache, *last, path, export3mf.Options{
+		PrinterID:      last.Printer,
+		NozzleDiameter: last.NozzleDiameter,
+		LayerHeight:    last.LayerHeight,
 	})
 	if err != nil {
 		return "", err
@@ -450,7 +458,8 @@ func (a *App) processOne(req pipelineRequest) {
 		})
 		return
 	}
-	a.lastOpts = req.opts
+	optsCopy := req.opts
+	a.lastOpts.Store(&optsCopy)
 
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
@@ -494,15 +503,18 @@ func (a *App) Version() string {
 //
 // Returns an error when the model isn't loaded yet (the user hasn't
 // run the pipeline since startup).
+//
+// Does NOT take a.mu — the worker holds that for the entire
+// duration of a pipeline run, and the slider drag rate (~60Hz)
+// can't tolerate that. lastOpts is read via atomic.Pointer; the
+// cache read is goroutine-safe (disk-backed, no shared in-memory
+// pointer with the worker).
 func (a *App) SplitPreview(s pipeline.SplitSettings) (*pipeline.SplitPreviewResult, error) {
-	a.mu.Lock()
-	opts := a.lastOpts
-	a.mu.Unlock()
-
-	if opts.Input == "" {
+	last := a.lastOpts.Load()
+	if last == nil {
 		return nil, fmt.Errorf("no model loaded yet")
 	}
-	return pipeline.ComputeSplitPreview(a.cache, opts, s)
+	return pipeline.ComputeSplitPreview(a.cache, *last, s)
 }
 
 // PrinterOption describes one printer + its nozzle/layer-height options for

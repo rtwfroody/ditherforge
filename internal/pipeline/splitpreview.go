@@ -4,12 +4,16 @@ import (
 	"fmt"
 )
 
-// SplitPreviewResult describes the cut plane and its model-bbox
-// extent in plane-local coordinates so the frontend can draw a
-// translucent rectangle through the model that's correctly sized to
-// the model's cross-section at the cut.
+// SplitPreviewResult describes the cut plane and the model's
+// projected silhouette in plane-local coordinates so the frontend
+// can draw a translucent rectangle through the model. All vector
+// fields are in original-mesh world coordinates (the same frame as
+// the input mesh emitted via OnInputMesh) — NOT in bed coordinates.
 type SplitPreviewResult struct {
-	// Origin is a point on the cut plane, in original-mesh coords.
+	// Origin is the centre of the model's silhouette projected onto
+	// the cut plane. Lies on the plane (Normal·Origin == Offset)
+	// but is offset within the plane to the projected centroid so
+	// the rendered quad is symmetric over the model.
 	Origin [3]float32 `json:"origin"`
 	// Normal is the plane's unit normal, in original-mesh coords.
 	Normal [3]float32 `json:"normal"`
@@ -32,17 +36,30 @@ type SplitPreviewResult struct {
 // returns an error if it's not present (e.g., the user hasn't run
 // the pipeline since startup).
 //
-// The result is centered on the model's projected bbox along (U, V)
-// so the quad is symmetric over the model — convenient for
-// frontend rendering. The plane's actual world position is at
-// `Offset` along the chosen `Axis`; the centering only affects the
-// quad's corner positions, not the cut plane equation.
+// Goroutine-safe: only reads from the cache (which itself reads from
+// disk via atomic rename) and Vertices (immutable after StageLoad
+// completes). Safe to call from any goroutine, including
+// concurrently with a pipeline run.
 func ComputeSplitPreview(cache *StageCache, opts Options, s SplitSettings) (*SplitPreviewResult, error) {
 	lo := cache.getLoad(opts)
 	if lo == nil || lo.Model == nil {
 		return nil, fmt.Errorf("split preview: model load output not in cache (run the pipeline first)")
 	}
-	verts := lo.Model.Vertices
+	return computeSplitPreviewFromVertices(lo.Model.Vertices, s)
+}
+
+// computeSplitPreviewFromVertices is the pure, cache-independent
+// core of ComputeSplitPreview. Tests inject vertices directly here
+// rather than go through the cache, which would require disk-backed
+// scaffolding for round-tripping a synthetic loadOutput.
+//
+// The result is centered on the model's projected bbox along (U, V)
+// so the quad is symmetric over the model — convenient for
+// frontend rendering. The plane's actual world position is at
+// `Offset` along the chosen `Axis`; the centering only translates
+// the quad within the plane (U·Normal = V·Normal = 0), not the
+// plane equation Normal·p = Offset.
+func computeSplitPreviewFromVertices(verts [][3]float32, s SplitSettings) (*SplitPreviewResult, error) {
 	if len(verts) == 0 {
 		return nil, fmt.Errorf("split preview: model has no vertices")
 	}
@@ -62,6 +79,7 @@ func ComputeSplitPreview(cache *StageCache, opts Options, s SplitSettings) (*Spl
 
 	// Orthonormal (U, V) basis on the plane. Fixed convention per
 	// axis so the basis is stable as the user toggles axes.
+	// All three are right-handed: U × V = Normal.
 	var u, v [3]float32
 	switch axis {
 	case 0: // normal = +X → U=+Y, V=+Z
@@ -75,7 +93,12 @@ func ComputeSplitPreview(cache *StageCache, opts Options, s SplitSettings) (*Spl
 		v = [3]float32{0, 1, 0}
 	}
 
-	// Project model vertices onto (U, V); find the bbox extents.
+	// Project the model's silhouette onto (U, V); find the bbox.
+	// Note: this is the projected silhouette of all vertices, not
+	// the cross-section at the cut. The frontend renders this as a
+	// translucent overlay, so a slightly oversized rectangle is
+	// preferable to one that shrinks/grows as the cut moves through
+	// the model.
 	minU, maxU := projectAxis(verts[0], u), projectAxis(verts[0], u)
 	minV, maxV := projectAxis(verts[0], v), projectAxis(verts[0], v)
 	for _, p := range verts[1:] {
