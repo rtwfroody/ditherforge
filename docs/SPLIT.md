@@ -540,21 +540,33 @@ reconstitute the original cube.
 
 ## Phase 7 follow-up: 3MF two-object emission
 
-Phase 7 ships split-aware Clip + Merge: the pipeline runs end-to-end
-with `Options.Split.Enabled=true`, producing a single laid-out mesh
-with `mergeOutput.ShellHalfIdx` parallel to `ShellFaces` tagging
-each face with its half. `buildOutputModel` lifts that into
-`LoadedModel.FaceMeshIdx` + `NumMeshes=2`.
+The non-bambu export path (the default for non-Bambu printers like
+the Snapmaker U1) now emits one top-level `<object>` per Split half
+with one `<item>` per object in `<build>`. Each half is a
+self-contained component .model file with its own compacted vertex
+table; slicers see two independent build items and can apply
+per-object settings (different filaments, orientations, etc.).
 
-The 3MF export still emits a single `<object>` entry. To emit two
-objects (one per half), `internal/export3mf/export3mf.go:215` (and
-the bambu.go variant at line 249) needs to iterate per
-FaceMeshIdx group and emit one `<object>` per group, with a build
-item per object. The `Xform` per half is exactly what 3MF's
-`<item transform>` attribute wants. Marked as the v1 finishing
-piece — without it the user prints both halves as a single 3MF
-object, which slicers handle but lose the ability to apply
-per-object settings to each half.
+The Bambu-Studio export path (`bambu.go`) still emits a single
+`<object>` containing both halves. The Bambu path has additional
+plate metadata, multiple thumbnails, and Bambu-specific
+project_settings structure that needs per-object replication.
+Tracked as a follow-up; until it ships, Bambu users see both
+halves as one build object containing two visually-disjoint mesh
+components.
+
+Implementation notes:
+- `splitModelByMesh` (export3mf.go) partitions a multi-mesh
+  `LoadedModel` (with `FaceMeshIdx` + `NumMeshes>1`) into per-mesh
+  parts with compacted vertex tables. Returns nil for single-mesh
+  models so the unsplit path takes the unchanged code path.
+- `Export` builds a uniform `[]*part` slice (1 in single-mesh, N in
+  multi-mesh) and loops over it for the main-model `<object>`
+  entries, the inner `.model` file writes, and the model_settings
+  per-object metadata. The single-mesh path produces output
+  bit-identical to pre-feature for non-bambu exports.
+- `buildModelSettingsParts` emits one `<object>` block per part;
+  multi-part exports name parts `ditherforge_output_partN`.
 
 ## Phase 5 measurements (informational)
 
