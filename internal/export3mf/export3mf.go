@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 )
 
 // MaxFilaments is the maximum number of palette colors supported by 3MF export.
@@ -107,6 +108,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	var parts []*part
 	if mp := splitModelByMesh(model, assignments); mp != nil {
 		for i, p := range mp {
+			plog.Printf("  Export 3MF: part %d — %d verts, %d faces", i, len(p.Vertices), len(p.Faces))
 			parts = append(parts, &part{
 				objUUID:   newUUID(),
 				instUUID:  newUUID(),

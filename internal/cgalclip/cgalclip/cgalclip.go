@@ -1,8 +1,6 @@
-//go:build cgal
-
-// Package cgalclip wraps CGAL's Polygon_mesh_processing::clip to cut
-// a triangle mesh against a plane, producing a closed-watertight
-// triangle mesh (the kept half).
+// Package cgalclip is the CGO binding layer for CGAL's
+// Polygon_mesh_processing::clip. The Go-side public API lives one
+// directory up.
 package cgalclip
 
 /*

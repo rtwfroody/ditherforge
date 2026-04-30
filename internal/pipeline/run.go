@@ -274,7 +274,10 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 		}
 		xforms := split.Layout(res, r.opts.Split.GapMM)
 
-		plog.Printf("  Split: cut and laid out two halves in %.1fs", time.Since(tSplit).Seconds())
+		plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
+			time.Since(tSplit).Seconds(),
+			len(res.Halves[0].Vertices), len(res.Halves[0].Faces),
+			len(res.Halves[1].Vertices), len(res.Halves[1].Faces))
 		return &splitOutput{
 			Enabled:   true,
 			Halves:    res.Halves,

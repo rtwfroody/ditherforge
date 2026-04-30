@@ -4,19 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/rtwfroody/ditherforge/internal/cgalclip"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
-
-// skipIfNoCGAL skips a test that needs split.Cut when the binary
-// wasn't built with the cgal tag. split.Cut delegates the geometry to
-// CGAL via internal/cgalclip; without CGAL there is no usable cut.
-func skipIfNoCGAL(t *testing.T) {
-	t.Helper()
-	if !cgalclip.HasCGAL {
-		t.Skip("split.Cut requires the cgal build tag")
-	}
-}
 
 // makeUnitCube builds a closed watertight unit cube spanning [0,1]^3
 // with 12 triangles (2 per face). All faces are CCW from the outside.
@@ -187,7 +176,6 @@ func surfaceArea(m *loader.LoadedModel) float64 {
 }
 
 func TestCut_UnitCubeAtMidplane(t *testing.T) {
-	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
@@ -205,7 +193,6 @@ func TestCut_UnitCubeAtMidplane(t *testing.T) {
 }
 
 func TestCut_SphereAtEquator(t *testing.T) {
-	skipIfNoCGAL(t)
 	sphere := makeIcosphere(2)
 	areaBefore := surfaceArea(sphere)
 	// Cut slightly off the equator: subdividing the icosahedron lands
@@ -234,7 +221,6 @@ func TestCut_SphereAtEquator(t *testing.T) {
 // just inside the face, producing a thin sliver; CGAL is strict and
 // reports the empty half cleanly.
 func TestCut_TangentPlaneFails(t *testing.T) {
-	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	_, err := Cut(cube, AxisPlane(2, 1), ConnectorSettings{})
 	if err == nil {
@@ -243,7 +229,6 @@ func TestCut_TangentPlaneFails(t *testing.T) {
 }
 
 func TestCut_MissingMeshFails(t *testing.T) {
-	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	_, err := Cut(cube, AxisPlane(2, 10), ConnectorSettings{})
 	if err == nil {
@@ -252,7 +237,6 @@ func TestCut_MissingMeshFails(t *testing.T) {
 }
 
 func TestCut_NonUnitNormalFails(t *testing.T) {
-	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	_, err := Cut(cube, Plane{Normal: [3]float64{2, 0, 0}, D: 0.5}, ConnectorSettings{})
 	if err == nil {
@@ -339,7 +323,6 @@ func makeStackedCubes() *loader.LoadedModel {
 // without snap, the cap-polygon walker would see a degree-4 junction
 // at each of those vertices and break.
 func TestCut_OnPlaneVertexSnapsOff(t *testing.T) {
-	skipIfNoCGAL(t)
 	mesh := makeStackedCubes()
 	originalVerts := append([][3]float32(nil), mesh.Vertices...)
 	res, err := Cut(mesh, AxisPlane(2, 0), ConnectorSettings{})
@@ -367,7 +350,6 @@ func TestCut_OnPlaneVertexSnapsOff(t *testing.T) {
 // disjoint cube lobes). Each component triangulates as its own cap
 // region so both halves still close watertight.
 func TestCut_MultiComponentSupported(t *testing.T) {
-	skipIfNoCGAL(t)
 	// Two unit cubes side by side at x=[0,1] and x=[3,4]. Cutting at
 	// z=0.5 catches both, producing two disjoint cap polygons per
 	// half — neither nested inside the other.
@@ -400,7 +382,6 @@ func TestCut_MultiComponentSupported(t *testing.T) {
 }
 
 func TestCut_PolygonWithHoles(t *testing.T) {
-	skipIfNoCGAL(t)
 	hollow := makeHollowCube()
 	// Cut at z=0.1 (off-axis to avoid degenerate alignment with face
 	// boundaries of the inner cube).

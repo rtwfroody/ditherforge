@@ -4,10 +4,9 @@
 // the hand-rolled triangle-classification + ear-clip pipeline that
 // used to live in internal/split/.
 //
-// Built into the binary via CGO when the `cgal` build tag is set
-// (which is the default in the release workflow and dev builds).
-// Without the tag, Clip returns an error — there is no fallback,
-// because the previous naive cut wasn't reliable enough to be useful.
+// CGAL is required at build time. The release workflow installs it
+// via the system package manager (apt/brew/pacman); dev machines need
+// the same.
 //
 // Numerical kernel: CGAL's EPIC kernel — exact predicates with
 // inexact (float64) constructions. Cuts are topologically robust
@@ -38,6 +37,7 @@ package cgalclip
 import (
 	"fmt"
 
+	"github.com/rtwfroody/ditherforge/internal/cgalclip/cgalclip"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
@@ -57,5 +57,13 @@ func Clip(model *loader.LoadedModel, normal [3]float64, d float64) (*loader.Load
 	if model == nil || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("cgalclip: input mesh is empty")
 	}
-	return doClip(model, normal, d)
+	verts, faces, err := cgalclip.Clip(model.Vertices, model.Faces,
+		normal[0], normal[1], normal[2], d)
+	if err != nil {
+		return nil, err
+	}
+	return &loader.LoadedModel{
+		Vertices: verts,
+		Faces:    faces,
+	}, nil
 }

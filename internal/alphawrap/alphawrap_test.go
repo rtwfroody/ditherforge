@@ -1,21 +1,14 @@
 package alphawrap
 
 import (
-	"os/exec"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// TestWrapTetrahedron wraps a simple tetrahedron. Skipped when using the
-// Python fallback and `uv` is not installed (CI without uv still passes).
+// TestWrapTetrahedron wraps a simple tetrahedron via CGAL's
+// alpha_wrap_3.
 func TestWrapTetrahedron(t *testing.T) {
-	if !hasCGAL {
-		if _, err := exec.LookPath("uv"); err != nil {
-			t.Skip("uv not installed and cgal build tag not set; skipping alpha-wrap integration test")
-		}
-	}
-
 	model := &loader.LoadedModel{
 		Vertices: [][3]float32{
 			{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
