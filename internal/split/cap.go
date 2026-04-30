@@ -41,88 +41,99 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 			loopIdx = append(loopIdx, ix)
 		}
 
-		// Classify outer vs holes by signed area in this 2D basis.
-		// In our basis, u × v = capNormal, so a CCW polygon in 2D
-		// matches the cap's outward winding. The largest-area CCW loop
-		// is the outer; any other loop (CW or smaller-area CCW) is a
-		// hole. (For a simple non-nested cut polygon every loop will
-		// itself be CCW in the cap's outward basis; "holes" arise only
-		// for nested cavities, which this branch handles too.)
+		// Classify each loop into the outer/hole hierarchy by counting
+		// how many other loops contain its first vertex. Even depth
+		// (0, 2, 4, …) → outer of a region; odd depth → hole. For
+		// each hole, the smallest-area enclosing loop at one shallower
+		// depth is its outer parent.
+		//
+		// This handles three increasingly complex cases uniformly:
+		//   1. Single-component cut: one outer, zero or more nested
+		//      holes (e.g. cut through a torus).
+		//   2. Multi-component cut: several disjoint outer regions
+		//      (e.g. cut through an apollo capsule with thrusters
+		//      sticking out — body + each thruster is its own region).
+		//   3. Cavity-in-cavity: nested holes (rare from real
+		//      watertight meshes, but the formula handles it).
 		areas := make([]float64, len(loop2d))
 		for i, pts := range loop2d {
 			areas[i] = signedArea(pts)
 		}
-		outerI := -1
-		var bestArea float64
-		for i, a := range areas {
-			if math.Abs(a) > bestArea {
-				bestArea = math.Abs(a)
-				outerI = i
-			}
-		}
-		if outerI < 0 {
-			return 0, fmt.Errorf("triangulateCaps: half %d has no loops", h)
-		}
-		// If the outer's signed area is negative, reverse it so it's
-		// CCW (and reverse the corresponding 3D index list to match).
-		if areas[outerI] < 0 {
-			reversePoly(loop2d[outerI], loopIdx[outerI])
-			areas[outerI] = -areas[outerI]
-		}
-		// Verify each non-outer loop is actually nested inside the
-		// outer (a true hole) rather than a separate connected
-		// component (which Phase 1 doesn't support — see
-		// docs/SPLIT.md "Known limitations: more than two connected
-		// components per side"). A simple check: pick any hole
-		// vertex and test if it's inside the outer polygon.
-		for i, pts := range loop2d {
-			if i == outerI {
-				continue
-			}
-			if !pointInPolygon(pts[0], loop2d[outerI]) {
-				return 0, fmt.Errorf("triangulateCaps: half %d: cut produced multiple disconnected components in the cap (cut plane intersects the model in two or more separate regions); choose a cut that passes through one connected piece", h)
+		depth := make([]int, len(loop2d))
+		parent := make([]int, len(loop2d))
+		for i := range loop2d {
+			parent[i] = -1
+			for j, other := range loop2d {
+				if i == j {
+					continue
+				}
+				if !pointInPolygon(loop2d[i][0], other) {
+					continue
+				}
+				depth[i]++
+				if parent[i] < 0 || math.Abs(areas[j]) < math.Abs(areas[parent[i]]) {
+					parent[i] = j
+				}
 			}
 		}
 
-		// Holes must be CW in this basis.
-		var holes [][]pt2
-		var holeIxs [][]uint32
+		// Group holes under their outer parent. Walk up the parent
+		// chain to find the nearest even-depth ancestor; that's the
+		// outer this hole belongs to.
+		holesByOuter := make(map[int][]int)
 		for i := range loop2d {
-			if i == outerI {
+			if depth[i]%2 == 0 {
+				// Outer: ensure CCW so triangulate() can run as-is.
+				if areas[i] < 0 {
+					reversePoly(loop2d[i], loopIdx[i])
+					areas[i] = -areas[i]
+				}
+				if _, ok := holesByOuter[i]; !ok {
+					holesByOuter[i] = nil
+				}
 				continue
 			}
+			// Hole: find the enclosing outer.
+			outerIdx := parent[i]
+			for outerIdx >= 0 && depth[outerIdx]%2 != 0 {
+				outerIdx = parent[outerIdx]
+			}
+			if outerIdx < 0 {
+				return 0, fmt.Errorf("triangulateCaps: half %d: hole loop has no enclosing outer (loop classification is inconsistent)", h)
+			}
+			// Hole must be CW in the cap's outward basis.
 			if areas[i] > 0 {
 				reversePoly(loop2d[i], loopIdx[i])
 				areas[i] = -areas[i]
 			}
-			holes = append(holes, loop2d[i])
-			holeIxs = append(holeIxs, loopIdx[i])
+			holesByOuter[outerIdx] = append(holesByOuter[outerIdx], i)
 		}
 
-		// Triangulate.
-		tris, err := triangulate(loop2d[outerI], loopIdx[outerI], holes, holeIxs)
-		if err != nil {
-			return 0, fmt.Errorf("triangulateCaps: half %d: %w", h, err)
-		}
-
-		// Emit each triangle as a cap face on this half. Triangles
-		// from triangulate() are CCW in 2D (outward in 3D for this
-		// half's cap normal), so we can append them as-is.
-		startFace := uint32(len(half.Faces))
-		for _, t := range tris {
-			b.appendFace(h, -1, t)
-		}
-		for fi := startFace; fi < uint32(len(half.Faces)); fi++ {
-			b.capFaces[h] = append(b.capFaces[h], fi)
-		}
-
-		// Accumulate cap area in 2D (= 3D area, since the basis is
-		// orthonormal). After classification, the outer's signed area
-		// is positive (= |outer|) and each hole's is negative
-		// (= -|hole|), so summing gives outer − holes — the actual
-		// annular cap area.
-		for _, a := range areas {
-			total += a
+		// Triangulate each (outer, holes) group independently. Cap
+		// area accumulates the signed sum (outer area − hole areas)
+		// across every group.
+		for outerI, holeIdxs := range holesByOuter {
+			holes := make([][]pt2, 0, len(holeIdxs))
+			holeIxs := make([][]uint32, 0, len(holeIdxs))
+			for _, hi := range holeIdxs {
+				holes = append(holes, loop2d[hi])
+				holeIxs = append(holeIxs, loopIdx[hi])
+			}
+			tris, err := triangulate(loop2d[outerI], loopIdx[outerI], holes, holeIxs)
+			if err != nil {
+				return 0, fmt.Errorf("triangulateCaps: half %d: %w", h, err)
+			}
+			startFace := uint32(len(half.Faces))
+			for _, t := range tris {
+				b.appendFace(h, -1, t)
+			}
+			for fi := startFace; fi < uint32(len(half.Faces)); fi++ {
+				b.capFaces[h] = append(b.capFaces[h], fi)
+			}
+			total += areas[outerI]
+			for _, hi := range holeIdxs {
+				total += areas[hi] // already negative
+			}
 		}
 	}
 	return total, nil

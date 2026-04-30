@@ -454,30 +454,14 @@ func TestCut_PreservesVertexColors(t *testing.T) {
 	}
 }
 
-// TestCut_MultiComponentRejected covers the non-nested two-component
-// case (a barbell-like shape where one cut plane catches both lobes).
-// Phase 1 doesn't support this; it must produce a clear error.
-func TestCut_MultiComponentRejected(t *testing.T) {
-	// Build a barbell: two unit cubes at x=±2 connected by a thin
-	// rectangular bar at y∈[-0.1,0.1], z∈[0.45,0.55]. Cut at x=0
-	// (perpendicular to the bar) to bisect both — actually we want a
-	// horizontal cut through both cube lobes that doesn't include
-	// the bar. Simpler construction: two coaxial cubes spaced apart
-	// in z, joined by a thin column. We cheat by using two
-	// disconnected meshes — Phase 1 already rejects non-watertight
-	// inputs in subtler ways, but Cut + cap should error out before
-	// triangulation when the cut produces two separate loops.
-	//
-	// Concretely: build two unit cubes side by side at x=[0,1] and
-	// x=[2,3], connected by a thin neck at y∈[0.4,0.6], z∈[0.4,0.6]
-	// from x=1 to x=2. Cut horizontally at z=0.5 catches both cubes
-	// (loops outside the neck cross-section) and the neck (loop
-	// inside it). The two cube cross-sections are non-nested.
-	//
-	// Building this is fiddly; for now use two disconnected unit
-	// cubes (not watertight as one mesh, but topologically two
-	// closed components). The Cut will produce two independent cap
-	// loops, neither inside the other.
+// TestCut_MultiComponentSupported covers the non-nested two-component
+// case (a barbell-like cross-section where one cut plane catches two
+// disjoint cube lobes). Each component triangulates as its own cap
+// region so both halves still close watertight.
+func TestCut_MultiComponentSupported(t *testing.T) {
+	// Two unit cubes side by side at x=[0,1] and x=[3,4]. Cutting at
+	// z=0.5 catches both, producing two disjoint cap polygons per
+	// half — neither nested inside the other.
 	cube1 := makeUnitCube()
 	cube2v := make([][3]float32, len(cube1.Vertices))
 	for i, p := range cube1.Vertices {
@@ -492,9 +476,19 @@ func TestCut_MultiComponentRejected(t *testing.T) {
 		Vertices: append(cube1.Vertices, cube2v...),
 		Faces:    append(cube1.Faces, cube2f...),
 	}
-	_, err := Cut(pair, AxisPlane(2, 0.5), ConnectorSettings{})
-	if err == nil {
-		t.Fatal("expected error for non-nested multi-component cut")
+	res, err := Cut(pair, AxisPlane(2, 0.5), ConnectorSettings{})
+	if err != nil {
+		t.Fatalf("expected multi-component cut to succeed, got %v", err)
+	}
+	if res == nil || res.Halves[0] == nil || res.Halves[1] == nil {
+		t.Fatal("expected both halves to be populated")
+	}
+	// Each half's cap should have multiple triangles (one per region).
+	for h := 0; h < 2; h++ {
+		if len(res.CapFaces[h]) < 2 {
+			t.Errorf("half %d cap has %d faces, expected at least 2 (one triangle per region minimum)",
+				h, len(res.CapFaces[h]))
+		}
 	}
 }
 
