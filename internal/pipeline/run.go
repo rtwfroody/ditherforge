@@ -770,6 +770,14 @@ func (r *pipelineRun) clipSplit(do *ditherOutput, deco *decimateOutput, vo *voxe
 	var combinedAssign []int32
 	var combinedHalfIdx []byte
 	for h := 0; h < 2; h++ {
+		// Empty-half short-circuit: with no cells/patches in this
+		// half, ClipMeshByPatchesTwoGrid would still iterate the
+		// half's mesh and clip it against the SeamZ plane only,
+		// producing geometry tagged with a default assignment that
+		// no caller validated. Skip the call.
+		if deco.Halves[h] == nil || len(deco.Halves[h].Faces) == 0 || len(halfPatchMaps[h]) == 0 {
+			continue
+		}
 		verts, faces, assigns, err := voxel.ClipMeshByPatchesTwoGrid(
 			r.ctx, deco.Halves[h], halfPatchMaps[h], do.PatchAssignment, cfg, r.tracker)
 		if err != nil {

@@ -207,6 +207,52 @@ func TestClipSplit_FiltersPatchMapByHalf(t *testing.T) {
 	}
 }
 
+// TestFloodFillTwoGrids_PartitionsByHalfIdx — the load-bearing
+// safety check from the phase-7 review: flood fill must NOT bridge
+// two halves whose CellKey columns happen to be index-adjacent.
+// floodFillTwoGrids partitions by (Grid, HalfIdx); cells in
+// different halves can never end up in the same patch even if their
+// column indices are 1 apart and they share a color assignment.
+func TestFloodFillTwoGrids_PartitionsByHalfIdx(t *testing.T) {
+	cells := []voxel.ActiveCell{
+		// Two halves with column-adjacent cells, both assigned color 0.
+		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 0},
+		{Grid: 0, Col: 1, Row: 0, Layer: 0, HalfIdx: 1},
+	}
+	assignments := []int32{0, 0}
+	patchMap, numPatches, err := floodFillTwoGrids(context.Background(), cells, assignments, progress.NullTracker{})
+	if err != nil {
+		t.Fatalf("floodFillTwoGrids: %v", err)
+	}
+	if numPatches != 2 {
+		t.Errorf("got %d patches, want 2 (one per half — adjacent columns must NOT bridge)", numPatches)
+	}
+	p0 := patchMap[voxel.CellKey{Grid: 0, Col: 0, Row: 0, Layer: 0}]
+	p1 := patchMap[voxel.CellKey{Grid: 0, Col: 1, Row: 0, Layer: 0}]
+	if p0 == p1 {
+		t.Errorf("cells in different halves got the same patch ID %d (would silently merge in Clip)", p0)
+	}
+}
+
+// TestFloodFillTwoGrids_PartitionsByGridAndHalf — broader smoke
+// test: each (Grid, HalfIdx) combo gets its own patch space.
+func TestFloodFillTwoGrids_PartitionsByGridAndHalf(t *testing.T) {
+	cells := []voxel.ActiveCell{
+		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 0},
+		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 1},
+		{Grid: 1, Col: 0, Row: 0, Layer: 1, HalfIdx: 0},
+		{Grid: 1, Col: 0, Row: 0, Layer: 1, HalfIdx: 1},
+	}
+	assignments := []int32{0, 0, 0, 0}
+	_, numPatches, err := floodFillTwoGrids(context.Background(), cells, assignments, progress.NullTracker{})
+	if err != nil {
+		t.Fatalf("floodFillTwoGrids: %v", err)
+	}
+	if numPatches != 4 {
+		t.Errorf("got %d patches, want 4 (one per (Grid, HalfIdx) combo)", numPatches)
+	}
+}
+
 // TestStageSplitDescription — the eviction-log description includes
 // the connector style and offset so operators can identify entries.
 func TestStageSplitDescription(t *testing.T) {

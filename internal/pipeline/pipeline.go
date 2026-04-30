@@ -384,11 +384,12 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 //
 // When the merge output carries a per-face HalfIdx (Split was
 // enabled), the result's FaceMeshIdx is populated from it and
-// NumMeshes is set to 2. Downstream consumers that understand
-// multi-mesh inputs (e.g. a future export3mf change for two-object
-// emission) can use those fields; consumers that don't (preview
-// mesh building, single-object export) treat the result as one mesh
-// and ignore the per-face tag.
+// NumMeshes is set to 2. NO CURRENT CONSUMER READS THESE FIELDS —
+// the wiring is preparatory for the Phase 7 follow-up in
+// internal/export3mf, which will iterate per FaceMeshIdx group to
+// emit two `<object>` entries. Until that lands, the export path
+// emits a single `<object>` containing both halves with the
+// bed-layout gap between them.
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
@@ -488,44 +489,65 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	lo.appliedBaseColor = opts.BaseColor
 }
 
-// floodFillTwoGrids runs flood fill separately for each grid and merges results.
+// floodFillTwoGrids runs flood fill separately for each (Grid,
+// HalfIdx) partition and merges results. Partitioning by HalfIdx is
+// load-bearing for the Split path: FloodFillPatches operates on
+// CellKey index-arithmetic adjacency, not spatial adjacency, so two
+// halves whose CellKey columns happen to be adjacent in index space
+// (which can happen when GapMM < cellSize) would otherwise have
+// patches bridging across the bed-layout gap. With this partition,
+// patches are guaranteed to live in exactly one (Grid, HalfIdx) pair.
 func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
-	// Partition cells by grid.
-	var cells0, cells1 []voxel.ActiveCell
-	var assign0, assign1 []int32
-	idx0 := make([]int, 0, len(cells))
-	idx1 := make([]int, 0, len(cells))
+	// Up to 4 partitions: (Grid 0/1) × (HalfIdx 0/1). Empty groups are
+	// skipped; the unsplit path produces only HalfIdx=0 entries.
+	type partKey struct {
+		grid    uint8
+		halfIdx uint8
+	}
+	parts := make(map[partKey]*struct {
+		cells   []voxel.ActiveCell
+		assigns []int32
+	})
 	for i, c := range cells {
-		if c.Grid == 0 {
-			cells0 = append(cells0, c)
-			assign0 = append(assign0, assignments[i])
-			idx0 = append(idx0, i)
-		} else {
-			cells1 = append(cells1, c)
-			assign1 = append(assign1, assignments[i])
-			idx1 = append(idx1, i)
+		k := partKey{grid: c.Grid, halfIdx: c.HalfIdx}
+		p, ok := parts[k]
+		if !ok {
+			p = &struct {
+				cells   []voxel.ActiveCell
+				assigns []int32
+			}{}
+			parts[k] = p
 		}
+		p.cells = append(p.cells, c)
+		p.assigns = append(p.assigns, assignments[i])
 	}
 
 	var counter atomic.Int64
-	pm0, n0, err := voxel.FloodFillPatches(ctx, cells0, assign0, tracker, &counter)
-	if err != nil {
-		return nil, 0, err
-	}
-	pm1, n1, err := voxel.FloodFillPatches(ctx, cells1, assign1, tracker, &counter)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Merge: offset grid-1 patch IDs by n0.
 	merged := make(map[voxel.CellKey]int, len(cells))
-	for k, v := range pm0 {
-		merged[k] = v
+	totalPatches := 0
+	// Iterate parts in a deterministic order so patch IDs are stable
+	// across runs (matters for cache stability on downstream stages).
+	order := []partKey{
+		{grid: 0, halfIdx: 0},
+		{grid: 0, halfIdx: 1},
+		{grid: 1, halfIdx: 0},
+		{grid: 1, halfIdx: 1},
 	}
-	for k, v := range pm1 {
-		merged[k] = v + n0
+	for _, k := range order {
+		p, ok := parts[k]
+		if !ok {
+			continue
+		}
+		pm, n, err := voxel.FloodFillPatches(ctx, p.cells, p.assigns, tracker, &counter)
+		if err != nil {
+			return nil, 0, err
+		}
+		for ck, v := range pm {
+			merged[ck] = v + totalPatches
+		}
+		totalPatches += n
 	}
-	return merged, n0 + n1, nil
+	return merged, totalPatches, nil
 }
 
 
