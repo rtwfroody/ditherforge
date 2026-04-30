@@ -9,23 +9,13 @@ import (
 	"time"
 )
 
-// HalfLife is the recency decay halflife. A 1-hour halflife is sharp
-// enough that just-generated entries dominate over even moderately
-// stale ones (factor 1.0 vs 0.5 at one hour), preventing the
-// "expensive result evicted seconds after it was written" failure
-// mode where the prior 7-day halflife couldn't tell a few-seconds-old
-// entry from a few-hours-old one. Tied to time-since-access (mtime),
-// which the tiers bump on every cache hit.
+// HalfLife is the age at which an entry's recency factor reaches 0.5.
+// One hour is short enough that fresh entries dominate over
+// "earlier this session" peers; the power-law tail (see
+// RecencyFactor) keeps older entries ranked sensibly without a
+// clamp. Tied to time-since-access (mtime), which the tiers bump on
+// every cache hit.
 const HalfLife = 1 * time.Hour
-
-// RecencyFloor caps how far the recency factor can decay. Without it,
-// a 1-hour halflife pushes day-old entries to 2^-24 ≈ 6e-8, making
-// every old entry score essentially zero regardless of generation
-// cost. The floor preserves a meaningful score among older entries so
-// expensive ones (e.g. a 60s alpha-wrap from yesterday) still beat
-// cheap ones (e.g. a 0.5s parse) when both fall outside the
-// fresh-tier window.
-const RecencyFloor = 0.05
 
 // SizeFloor is the minimum size used in the score's sqrt denominator.
 // Entries smaller than this cluster together, so absolute cost decides
@@ -46,20 +36,29 @@ type Entry struct {
 	Mtime       time.Time
 }
 
-// RecencyFactor returns the multiplier in [RecencyFloor, 1] that age
-// contributes to an entry's score. age <= 0 (clock skew) yields 1.0.
-// The decay is exp(-age / HalfLife) clamped at RecencyFloor so old
-// entries keep a non-zero contribution that lets cost differentiate
-// among them.
+// RecencyFactor returns the multiplier in (0, 1] that age contributes
+// to an entry's score. age <= 0 (clock skew) yields 1.0.
+//
+// Shape: power-law decay,
+//
+//	factor = 1 / (1 + age / HalfLife)
+//
+// chosen over exponential decay because the marginal penalty for an
+// extra unit of age should *decrease* as the entry gets older — going
+// from 1h to 2h is meaningful (entry doubled in age), but going from
+// 24h to 25h barely changes the entry's "still-about-a-day-old"
+// status. Exponential decay treats both transitions identically (each
+// halves the weight per HalfLife), which is wrong for cache eviction.
+// The factor never reaches zero, so cost still ranks ancient entries
+// against each other without needing an explicit floor.
+//
+// At age=HalfLife the factor is exactly 0.5 (matching the constant's
+// name); at 1d (24·HL) it's ~0.040; at 1w it's ~0.006.
 func RecencyFactor(age time.Duration) float64 {
 	if age <= 0 {
 		return 1.0
 	}
-	f := math.Pow(0.5, age.Seconds()/HalfLife.Seconds())
-	if f < RecencyFloor {
-		return RecencyFloor
-	}
-	return f
+	return 1.0 / (1.0 + age.Seconds()/HalfLife.Seconds())
 }
 
 // Score is the value an entry contributes to the cache. Higher is more

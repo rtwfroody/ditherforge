@@ -39,6 +39,24 @@ func TestRecencyFactor(t *testing.T) {
 	}
 }
 
+// TestRecencyMarginalDecayDiminishes pins the power-law shape: the
+// drop in factor over a fixed time slice gets smaller as the starting
+// age grows. (An exponential curve would make every slice halve the
+// remaining factor — same proportion, but a much larger absolute drop
+// when freshly born than when already a day old. A linear or
+// step-function shape gets this directionally right but with hard
+// edges. Power-law is the smooth shape that matches the intuition.)
+func TestRecencyMarginalDecayDiminishes(t *testing.T) {
+	hl := HalfLife
+	dropFreshHour := RecencyFactor(0) - RecencyFactor(hl)         // ~0 to ~0.5
+	dropDayLater := RecencyFactor(24*hl) - RecencyFactor(25*hl)   // 24h to 25h
+	dropWeekLater := RecencyFactor(168*hl) - RecencyFactor(169*hl) // 1w to 1w+1h
+	if !(dropFreshHour > dropDayLater && dropDayLater > dropWeekLater) {
+		t.Errorf("expected marginal recency drop to shrink with age: fresh=%g day=%g week=%g",
+			dropFreshHour, dropDayLater, dropWeekLater)
+	}
+}
+
 func TestFitToBudgetSelectsLowestScore(t *testing.T) {
 	now := time.Now()
 	// Three entries, identical size, costs 1/100/10000 ms. Cap fits
@@ -90,10 +108,11 @@ func TestFitToBudgetFreshBeatsStaleHigherCost(t *testing.T) {
 	}
 }
 
-// TestRecencyFloorKeepsAgedEntriesRanked verifies that very old
-// entries don't all collapse to score 0. A high-cost ancient entry
-// must still outrank a cheap ancient one of the same size.
-func TestRecencyFloorKeepsAgedEntriesRanked(t *testing.T) {
+// TestRecencyTailPreservesRanking verifies that the power-law tail
+// keeps ancient entries from collapsing to score 0. A high-cost
+// ancient entry must still outrank a cheap ancient one of the same
+// size, just as it would when both are fresh.
+func TestRecencyTailPreservesRanking(t *testing.T) {
 	now := time.Now()
 	old := now.Add(-30 * 24 * time.Hour) // many half-lives — clamped to floor
 	entries := []Entry{
