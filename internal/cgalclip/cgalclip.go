@@ -8,6 +8,31 @@
 // (which is the default in the release workflow and dev builds).
 // Without the tag, Clip returns an error — there is no fallback,
 // because the previous naive cut wasn't reliable enough to be useful.
+//
+// Numerical kernel: CGAL's EPIC kernel — exact predicates with
+// inexact (float64) constructions. Cuts are topologically robust
+// (every triangle is unambiguously above/below/on the plane), but
+// the resulting cap-vertex coordinates are float64 with rounding
+// error. For two halves of the same cut, cap vertex positions match
+// up to a few ULPs but not bit-exactly. This is fine for the printing
+// pipeline downstream — alpha-wrap, voxelize, and merge tolerate
+// micron-scale jitter — but downstream code should not assume cap
+// vertex equality across halves.
+//
+// Failure modes worth knowing about:
+//
+//   - Self-intersecting input. Clip is configured with
+//     throw_on_self_intersection(true) so a non-watertight input
+//     surfaces a CGAL exception ("Self_intersection_exception")
+//     rather than producing garbage. Alpha-wrapped meshes are
+//     supposed to be self-intersection-free; if you hit this,
+//     re-run alpha-wrap with a tighter offset.
+//   - Plane misses the input (no triangles cross). The clipped half
+//     is empty and Clip returns an error.
+//   - Plane lies tangent to a face. CGAL is strict; one half
+//     ends up empty and Clip returns an error. The previous
+//     hand-rolled cut "snapped" tangent vertices off the plane to
+//     produce a sliver — that hack is gone.
 package cgalclip
 
 import (

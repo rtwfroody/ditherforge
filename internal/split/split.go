@@ -10,9 +10,11 @@ package split
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/rtwfroody/ditherforge/internal/cgalclip"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 )
 
 // Plane is a 3D plane in original-mesh coordinates. A point p lies on
@@ -95,50 +97,47 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 		return nil, fmt.Errorf("split.Cut: plane normal is not unit-length: %v", plane.Normal)
 	}
 
+	// TODO: re-implement connectors (Pegs/Dowels) as boolean ops on
+	// the clipped halves — generate a peg cylinder mesh, union into
+	// half[0], subtract from half[1] with clearance offset. Until
+	// then, surface the dropped setting so the user knows it's a
+	// no-op rather than silently honouring "ConnectorStyle: pegs"
+	// from a saved settings file.
+	if connectors.Style != NoConnectors {
+		plog.Printf("  Split: connectors are temporarily not supported with the CGAL cut; producing flat caps (style=%v will be re-added in a follow-up)", connectors.Style)
+	}
+
 	// Clip both halves concurrently. Each call pays the full CGAL
 	// setup cost (mesh build + clip), but they're independent and
 	// CPU-bound, so wall time roughly halves on multi-core machines.
-	type clipOut struct {
-		half *loader.LoadedModel
-		err  error
-	}
-	results := make([]clipOut, 2)
-	done := make(chan int, 2)
-
+	var (
+		halves [2]*loader.LoadedModel
+		errs   [2]error
+		wg     sync.WaitGroup
+	)
+	wg.Add(2)
 	// Half 0 (negative side): keep where Normal·p <= D.
 	go func() {
-		half, err := cgalclip.Clip(model, plane.Normal, plane.D)
-		results[0] = clipOut{half, err}
-		done <- 0
+		defer wg.Done()
+		halves[0], errs[0] = cgalclip.Clip(model, plane.Normal, plane.D)
 	}()
-	// Half 1 (positive side): keep where -Normal·p <= -D, i.e.
-	// Normal·p >= D.
+	// Half 1 (positive side): pass the flipped plane, so CGAL keeps
+	// where -Normal·p <= -D (equivalently Normal·p >= D).
 	go func() {
+		defer wg.Done()
 		negNormal := [3]float64{-plane.Normal[0], -plane.Normal[1], -plane.Normal[2]}
-		half, err := cgalclip.Clip(model, negNormal, -plane.D)
-		results[1] = clipOut{half, err}
-		done <- 1
+		halves[1], errs[1] = cgalclip.Clip(model, negNormal, -plane.D)
 	}()
-	<-done
-	<-done
+	wg.Wait()
 
-	for i := 0; i < 2; i++ {
-		if results[i].err != nil {
-			return nil, fmt.Errorf("split.Cut: half %d: %w", i, results[i].err)
+	for i := range errs {
+		if errs[i] != nil {
+			return nil, fmt.Errorf("split.Cut: half %d: %w", i, errs[i])
 		}
 	}
 
-	if connectors.Style != NoConnectors {
-		// TODO: re-implement connectors as boolean ops
-		// (cylinder ∪ half[0]; cylinder ∩ half[1] with clearance).
-		// Until then, log so the user knows the request is silently
-		// dropped.
-		// (Placeholder; suppress import-only-when-unused.)
-		_ = connectors
-	}
-
 	return &CutResult{
-		Halves: [2]*loader.LoadedModel{results[0].half, results[1].half},
+		Halves: halves,
 		Plane:  plane,
 	}, nil
 }

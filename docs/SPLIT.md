@@ -1,8 +1,24 @@
 # Split feature — design doc
 
-Status: design, not yet implemented.
+Status: implemented (CGAL clip backend, connectors stubbed pending re-impl).
 Owner: tim
-Last updated: 2026-04-29
+Last updated: 2026-04-30
+
+> **Implementation note (2026-04-30).** This doc originally described a
+> hand-rolled per-triangle classification + cap-polygon recovery +
+> ear-clip cap triangulation. That code has been replaced wholesale by a
+> single call to CGAL's `Polygon_mesh_processing::clip` per half, run
+> concurrently — see `internal/cgalclip/`. The CGAL clip handles all
+> the cases the hand-rolled code stacked hacks on top of (on-plane
+> vertices, multi-component caps, internal cavities, dense
+> alpha-wrapped tessellation) robustly via exact predicates. Watertight
+> input is still required; alpha-wrap remains the way to get there.
+>
+> Connectors (Pegs / Dowels) are a no-op stub at present: the old
+> connector code threaded through cap-polygon internals that no longer
+> exist. They'll come back as small boolean ops on the clipped halves
+> (cylinder ∪ half[0]; cylinder ∩ half[1] with clearance offset). The
+> connector design notes below still describe the intended behavior.
 
 ## Goal
 

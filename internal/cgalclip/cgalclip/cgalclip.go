@@ -57,11 +57,10 @@ func Clip(vertices [][3]float32, faces [][3]uint32, nx, ny, nz, d float64) ([][3
 		return nil, nil, fmt.Errorf("CGAL clip: %s", C.GoString(r.error))
 	}
 
+	// The C side already returns an "empty mesh" error string when
+	// either count is zero, so we just trust the inputs here.
 	onv := int(r.num_vertices)
 	onf := int(r.num_faces)
-	if onv == 0 || onf == 0 {
-		return nil, nil, fmt.Errorf("CGAL clip produced empty mesh (plane misses input?)")
-	}
 
 	outVerts := make([][3]float32, onv)
 	rv := unsafe.Slice((*C.float)(unsafe.Pointer(r.vertices)), onv*3)

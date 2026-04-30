@@ -11,6 +11,7 @@ import (
 // Both halves should sit on z=0 with their cap faces flat on the bed,
 // disjoint along X with the requested gap, and centred on y=0.
 func TestLayout_UnitCubeAtMidplane(t *testing.T) {
+	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
@@ -106,6 +107,7 @@ func TestLayout_UnitCubeAtMidplane(t *testing.T) {
 // volume before layout. Rotations and translations are isometries, so
 // the per-half volume should be invariant.
 func TestLayout_PreservesVolume(t *testing.T) {
+	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
@@ -127,6 +129,7 @@ func TestLayout_PreservesVolume(t *testing.T) {
 // should equal the post-Layout position. This is the test that
 // catches a row/column-major mixup or a sign flip in Apply.
 func TestLayout_TransformMatchesMutation(t *testing.T) {
+	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
@@ -158,6 +161,7 @@ func TestLayout_TransformMatchesMutation(t *testing.T) {
 // TestLayout_RoundTripCloud — round-trip through Apply + ApplyInverse
 // on every laid-out vertex returns the corresponding original vertex.
 func TestLayout_RoundTripCloud(t *testing.T) {
+	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
@@ -189,6 +193,7 @@ func TestLayout_RoundTripCloud(t *testing.T) {
 // rotationToNegZ (not just the antipodal special cases) by cutting
 // along the X and Y axes.
 func TestLayout_NonZAxisCut(t *testing.T) {
+	skipIfNoCGAL(t)
 	for axis := 0; axis < 2; axis++ {
 		cube := makeUnitCube()
 		res, err := Cut(cube, AxisPlane(axis, 0.5), ConnectorSettings{})
@@ -272,16 +277,11 @@ func TestLayout_PegOnBed(t *testing.T) {
 		t.Errorf("half 0 max.z = %g, want ≈ 30 (body's original z=0 lands here)", maxZ)
 	}
 
-	// Cap faces should now sit at z = peg depth = 5 (elevated above
-	// the bed by the peg).
-	for _, fi := range []uint32{} { // CapFaces removed; this test is skipped above.
-		f := half0.Faces[fi]
-		for _, vi := range f {
-			z := half0.Vertices[vi][2]
-			if math.Abs(float64(z)-5) > 1e-5 {
-				t.Errorf("half 0 cap face %d vertex %d: z=%g, want 5 (cap elevated by peg depth)", fi, vi, z)
-			}
-		}
+	// (Cap-face-on-bed check removed alongside the connector
+	// rip-out; will be reinstated when connectors return.)
+	{
+		_ = half0
+
 	}
 
 	// Inverse round-trip on the lowest-z vertex (peg tip) should
@@ -305,6 +305,7 @@ func TestLayout_PegOnBed(t *testing.T) {
 // TestLayout_TransformOnPlanePoints — plane vertices in original
 // coords should map to z=0 in bed coords via Transform.Apply.
 func TestLayout_TransformOnPlanePoints(t *testing.T) {
+	skipIfNoCGAL(t)
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
