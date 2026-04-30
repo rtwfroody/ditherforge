@@ -27,7 +27,7 @@ type StageID int
 const (
 	// StageParse parses the input file into a pristine *LoadedModel in
 	// file units, with no transformations applied. Output is small and
-	// only depends on (Input, ObjectIndex, ReloadSeq). Replaced what used
+	// only depends on (Input, ObjectIndex). Replaced what used
 	// to be a separate "raw cache" living outside the stages array.
 	StageParse StageID = iota
 	// StageLoad transforms the parsed model into a usable loadOutput:
@@ -541,16 +541,22 @@ type mergeOutput struct {
 // parseSettings is what affects the parsed-from-file *LoadedModel.
 // File-content invariants live elsewhere (the stageKey cascade adds the
 // sha256 of the file's bytes, so identical bytes hit the same cache).
+//
+// ReloadSeq deliberately is NOT here. It's a frontend-only mechanism
+// for re-triggering reactive $effects when the user re-selects the
+// same input path; including it in the cache key would make cache
+// hits depend on which UI gesture loaded the file (direct .glb open
+// bumps reloadSeq; loading a .json settings file does not), even
+// when the actual file content and pipeline settings are identical.
 type parseSettings struct {
 	Input       string
-	ReloadSeq   int64
 	ObjectIndex int
 }
 
 // loadSettings is what affects the post-parse loadOutput: scale,
 // normalize, alpha-wrap. The cumulative cascade key for StageLoad
-// includes parseSettings via stageFnv(StageParse), so changing Input or
-// ReloadSeq also invalidates StageLoad.
+// includes parseSettings via stageFnv(StageParse), so changing Input
+// also invalidates StageLoad.
 type loadSettings struct {
 	Scale           float32
 	HasSize         bool
@@ -668,7 +674,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageParse:
 		return parseSettings{
 			Input:       opts.Input,
-			ReloadSeq:   opts.ReloadSeq,
 			ObjectIndex: opts.ObjectIndex,
 		}
 	case StageLoad:
@@ -742,7 +747,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 	switch v := s.(type) {
 	case parseSettings:
 		writeString(h, v.Input)
-		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
 	case loadSettings:
 		writeFloat32(h, v.Scale)

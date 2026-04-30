@@ -109,8 +109,14 @@ func TestCacheAToggleBToggleAHitsDisk(t *testing.T) {
 }
 
 // TestParseStageKeyDependsOnInputOnly: StageParse's key changes when
-// Input/ObjectIndex/ReloadSeq change but is invariant under everything
-// else (Scale, Size, alpha-wrap, base color, etc.).
+// Input/ObjectIndex change but is invariant under everything else
+// (Scale, Size, alpha-wrap, base color, ReloadSeq, etc.).
+//
+// ReloadSeq is intentionally NOT in the parse cache key — it's a
+// frontend-only counter for re-triggering reactive effects on
+// same-path re-selects. Including it would cause spurious cache misses
+// when the same underlying file is loaded via different UI paths
+// (direct .glb open bumps reloadSeq; settings-JSON load doesn't).
 func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
 	c := NewStageCache()
 	pathA := makeFakeInput(t)
@@ -137,11 +143,12 @@ func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
 		t.Error("StageParse key did not change when ObjectIndex changed")
 	}
 
-	// ReloadSeq bump SHOULD change StageParse's key (force re-parse).
+	// ReloadSeq must NOT change StageParse's key — it's a frontend
+	// reactive-trigger counter, not a real cache invariant.
 	reloaded := base
 	reloaded.ReloadSeq = 1
-	if c.stageKey(StageParse, base) == c.stageKey(StageParse, reloaded) {
-		t.Error("StageParse key did not change when ReloadSeq bumped")
+	if c.stageKey(StageParse, base) != c.stageKey(StageParse, reloaded) {
+		t.Error("StageParse key changed when ReloadSeq bumped; cache must survive same-path re-selects")
 	}
 }
 
