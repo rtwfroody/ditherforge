@@ -67,7 +67,9 @@ type Cache struct {
 	// the meta-recorded human-readable summary, or "" if absent. Key is
 	// the cache key (the basename of the data/meta files, excluding
 	// extension), so repeated evicts of the same blob are visible.
-	OnEvict func(stage, key, description, reason string, sizeBytes, costMs int64)
+	// Mtime is the entry's newest file mtime so callers can derive
+	// the age at the moment of eviction.
+	OnEvict func(stage, key, description, reason string, sizeBytes, costMs int64, mtime time.Time)
 }
 
 func (c *Cache) reportError(stage, op, key string, err error) {
@@ -76,9 +78,9 @@ func (c *Cache) reportError(stage, op, key string, err error) {
 	}
 }
 
-func (c *Cache) reportEvict(stage, key, description, reason string, sizeBytes, costMs int64) {
+func (c *Cache) reportEvict(stage, key, description, reason string, sizeBytes, costMs int64, mtime time.Time) {
 	if c.OnEvict != nil {
-		c.OnEvict(stage, key, description, reason, sizeBytes, costMs)
+		c.OnEvict(stage, key, description, reason, sizeBytes, costMs, mtime)
 	}
 }
 
@@ -402,7 +404,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 	survivors := make([]*cacheEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.newestMtime.Before(cutoff) {
-			c.reportEvict(e.stage, e.key, e.description, "age", e.totalSize, e.costMs)
+			c.reportEvict(e.stage, e.key, e.description, "age", e.totalSize, e.costMs, e.newestMtime)
 			for _, p := range e.paths {
 				os.Remove(p)
 			}
@@ -427,7 +429,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 	}
 	for _, idx := range cachepolicy.FitToBudget(policyEntries, maxBytes, time.Now()) {
 		e := survivors[idx]
-		c.reportEvict(e.stage, e.key, e.description, "size", e.totalSize, e.costMs)
+		c.reportEvict(e.stage, e.key, e.description, "size", e.totalSize, e.costMs, e.newestMtime)
 		for _, p := range e.paths {
 			os.Remove(p)
 		}

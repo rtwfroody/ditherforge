@@ -94,13 +94,14 @@ func NewApp() *App {
 			d.OnError = func(stage, op, key string, err error) {
 				plog.Printf("disk cache %s %s key=%s: %v", stage, op, shortDiskKey(key), err)
 			}
-			d.OnEvict = func(stage, key, description, reason string, sizeBytes, costMs int64) {
+			d.OnEvict = func(stage, key, description, reason string, sizeBytes, costMs int64, mtime time.Time) {
 				what := description
 				if what == "" {
 					what = stage
 				}
-				plog.Printf("disk cache evict (%s): %s key=%s — %s, %.1fs to generate",
-					reason, what, shortDiskKey(key), humanSize(sizeBytes), float64(costMs)/1000)
+				plog.Printf("disk cache evict (%s): %s key=%s — %s, %.1fs to generate, %s old",
+					reason, what, shortDiskKey(key), humanSize(sizeBytes),
+					float64(costMs)/1000, humanAge(time.Since(mtime)))
 			}
 			cache.SetDisk(d)
 		} else {
@@ -132,6 +133,26 @@ func shortDiskKey(key string) string {
 		return key[:12]
 	}
 	return key
+}
+
+// humanAge returns a short human-readable rendering of a Duration.
+// Used by the disk-cache eviction log so the user can see at a glance
+// whether a freshly-generated entry is being thrown away or an
+// ancient one.
+func humanAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%.1fm", d.Minutes())
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	default:
+		return fmt.Sprintf("%.1fd", d.Hours()/24)
+	}
 }
 
 func humanSize(n int64) string {

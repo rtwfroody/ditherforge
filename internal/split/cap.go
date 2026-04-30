@@ -115,20 +115,18 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 		// area accumulates the signed sum (outer area − hole areas)
 		// across every group.
 		//
-		// If a single region fails to triangulate (typically a
-		// genuinely self-intersecting polygon from bridge
-		// interference or a non-manifold cut sequence), we log a
-		// warning and skip that region rather than abort the entire
-		// cut. The user gets a half that's non-watertight at the
-		// skipped region but otherwise valid — enough to see whether
-		// the cut location is worth pursuing. If every region fails
-		// and the cap ends up empty, that does abort, since a half
-		// with no cap at all is unusable.
-		regionsTried := 0
-		regionsCapped := 0
-		var lastErr error
+		// If a region's strict triangulation fails (genuinely
+		// self-intersecting polygon, e.g. from bridge interference),
+		// fall back to a fan from outer[0]. The fan is geometrically
+		// flawed for non-convex outers (some triangles wind CW and
+		// extend past the cut polygon) but it always CLOSES the
+		// cap: every outer-loop edge is incident to exactly one cap
+		// triangle, so the boundary stays watertight. Holes inside
+		// the failing region are dropped because we can't reproduce
+		// them without bridging — the cap will be slightly "fatter"
+		// than the actual cut shape over those regions.
+		regionsFanned := 0
 		for outerI, holeIdxs := range holesByOuter {
-			regionsTried++
 			holes := make([][]pt2, 0, len(holeIdxs))
 			holeIxs := make([][]uint32, 0, len(holeIdxs))
 			for _, hi := range holeIdxs {
@@ -137,12 +135,11 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 			}
 			tris, err := triangulate(loop2d[outerI], loopIdx[outerI], holes, holeIxs)
 			if err != nil {
-				lastErr = err
-				plog.Printf("  Split: half %d: skipping cap region (outer %d verts, %d hole(s)) — %v",
+				plog.Printf("  Split: half %d: cap region (%d verts, %d hole(s)) triangulation failed; using fan fallback (boundary stays closed; cap may have inverted/overlapping triangles): %v",
 					h, len(loop2d[outerI]), len(holes), err)
-				continue
+				tris = fanTriangulate(loopIdx[outerI])
+				regionsFanned++
 			}
-			regionsCapped++
 			startFace := uint32(len(half.Faces))
 			for _, t := range tris {
 				b.appendFace(h, -1, t)
@@ -155,13 +152,28 @@ func (b *cutBuilder) triangulateCaps(loops [2][][]uint32, plane Plane) (float64,
 				total += areas[hi] // already negative
 			}
 		}
-		if regionsCapped == 0 && regionsTried > 0 {
-			return 0, fmt.Errorf("triangulateCaps: half %d: all %d cap regions failed to triangulate; last error: %w", h, regionsTried, lastErr)
-		}
-		if regionsCapped < regionsTried {
-			plog.Printf("  Split: half %d: capped %d/%d regions (skipped regions leave the half non-watertight at those spots)",
-				h, regionsCapped, regionsTried)
+		if regionsFanned > 0 {
+			plog.Printf("  Split: half %d: %d region(s) used the fan fallback — cap is closed but geometrically approximate", h, regionsFanned)
 		}
 	}
 	return total, nil
+}
+
+// fanTriangulate emits triangles from idx[0] to (idx[i], idx[i+1]) for
+// i ∈ [1, n-2]. Every polygon edge appears as an edge of exactly one
+// emitted triangle, so the cap boundary stays watertight against the
+// surrounding mesh. For convex polygons this is a correct
+// triangulation; for non-convex it produces overlapping and
+// inverted-winding triangles. Used as a last-resort fallback when
+// the proper ear-clip triangulator can't find a valid simple
+// triangulation.
+func fanTriangulate(idx []uint32) [][3]uint32 {
+	if len(idx) < 3 {
+		return nil
+	}
+	out := make([][3]uint32, 0, len(idx)-2)
+	for i := 1; i < len(idx)-1; i++ {
+		out = append(out, [3]uint32{idx[0], idx[i], idx[i+1]})
+	}
+	return out
 }
