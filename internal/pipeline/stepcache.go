@@ -212,24 +212,29 @@ func runStageCached(
 	tracker progress.Tracker,
 	body func() error,
 ) error {
+	name := stageNames[stage]
 	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
 	v, src := cache.getWithSource(stage, opts)
 	if v != nil {
-		plog.Printf("%s: cache hit (%s, %s) key=%s", stageNames[stage],
+		plog.Printf("%s: cache hit (%s, %s) key=%s", name,
 			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
 			shortKey(key))
-		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
+		progress.BeginStage(tracker, name, false, 0).Done()
 		return nil
 	}
-	plog.Printf("%s: cache miss key=%s", stageNames[stage], shortKey(key))
+	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
 	if err := body(); err != nil {
 		// Errored runs don't record cost. The body may not have
 		// written its result (or wrote a partial), so a meta
 		// pointing at it would be misleading.
+		plog.Printf("%s: failed after %s — %v", name,
+			time.Since(start).Round(time.Millisecond), err)
 		return err
 	}
+	plog.Printf("%s: done in %s", name,
+		time.Since(start).Round(time.Millisecond))
 	// Body wrote the blob via the typed setter. Stamp the disk
 	// meta sidecar with description and wall-clock cost so the
 	// next sweep can rank this entry correctly.

@@ -252,7 +252,6 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 			return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
 		}
 
-		plog.Println("Splitting...")
 		tSplit := time.Now()
 
 		// Translate Options.Split into split.Cut + split.Layout calls.
@@ -313,7 +312,6 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
 
 		if so.Enabled {
-			plog.Println("Decimating (split)...")
 			// Use CountSurfaceCells on the unsplit lo.Model as the
 			// total target. Layout is rotation+translation, so the
 			// volume / surface area is preserved across halves;
@@ -327,7 +325,6 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 			return &decimateOutput{Halves: halves}, nil
 		}
 
-		plog.Println("Decimating...")
 		targetCells := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
 		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, targetCells, cellSize, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
@@ -485,7 +482,6 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
-		plog.Println("Voxelizing...")
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo)
