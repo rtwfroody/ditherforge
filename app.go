@@ -92,15 +92,15 @@ func NewApp() *App {
 	if dir, err := diskcache.DefaultDir(); err == nil {
 		if d, err := diskcache.Open(dir); err == nil {
 			d.OnError = func(stage, op, key string, err error) {
-				fmt.Fprintf(os.Stderr, "disk cache %s %s [%s]: %v\n", stage, op, key, err)
+				plog.Printf("disk cache %s %s key=%s: %v", stage, op, shortDiskKey(key), err)
 			}
-			d.OnEvict = func(stage, description, reason string, sizeBytes, costMs int64) {
+			d.OnEvict = func(stage, key, description, reason string, sizeBytes, costMs int64) {
 				what := description
 				if what == "" {
 					what = stage
 				}
-				fmt.Fprintf(os.Stderr, "disk cache evict (%s): %s — %s, %.1fs to generate\n",
-					reason, what, humanSize(sizeBytes), float64(costMs)/1000)
+				plog.Printf("disk cache evict (%s): %s key=%s — %s, %.1fs to generate",
+					reason, what, shortDiskKey(key), humanSize(sizeBytes), float64(costMs)/1000)
 			}
 			cache.SetDisk(d)
 		} else {
@@ -121,6 +121,19 @@ const (
 )
 
 // humanSize formats a byte count using KB / MB / GB units (1024-based).
+// shortDiskKey returns the first 12 hex chars of a disk-cache key — the
+// same prefix length plog uses for stage cache keys, so eviction logs
+// and stage cache hit/miss logs can be correlated by key.
+func shortDiskKey(key string) string {
+	if key == "" {
+		return "?"
+	}
+	if len(key) > 12 {
+		return key[:12]
+	}
+	return key
+}
+
 func humanSize(n int64) string {
 	const k = 1024.0
 	f := float64(n)

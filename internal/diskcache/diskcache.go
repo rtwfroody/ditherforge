@@ -64,8 +64,10 @@ type Cache struct {
 	// OnEvict, if non-nil, is called for each entry Sweep removes,
 	// before the files are deleted. reason is "age" (past maxAge) or
 	// "size" (cost-aware eviction to fit the budget). Description is
-	// the meta-recorded human-readable summary, or "" if absent.
-	OnEvict func(stage, description, reason string, sizeBytes, costMs int64)
+	// the meta-recorded human-readable summary, or "" if absent. Key is
+	// the cache key (the basename of the data/meta files, excluding
+	// extension), so repeated evicts of the same blob are visible.
+	OnEvict func(stage, key, description, reason string, sizeBytes, costMs int64)
 }
 
 func (c *Cache) reportError(stage, op, key string, err error) {
@@ -74,9 +76,9 @@ func (c *Cache) reportError(stage, op, key string, err error) {
 	}
 }
 
-func (c *Cache) reportEvict(stage, description, reason string, sizeBytes, costMs int64) {
+func (c *Cache) reportEvict(stage, key, description, reason string, sizeBytes, costMs int64) {
 	if c.OnEvict != nil {
-		c.OnEvict(stage, description, reason, sizeBytes, costMs)
+		c.OnEvict(stage, key, description, reason, sizeBytes, costMs)
 	}
 }
 
@@ -270,6 +272,7 @@ type SweepStats struct {
 // single-file entries with no cost.
 type cacheEntry struct {
 	stage       string
+	key         string
 	paths       []string
 	totalSize   int64
 	newestMtime time.Time
@@ -339,7 +342,20 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 		}
 		e, ok := entries[groupID]
 		if !ok {
-			e = &cacheEntry{stage: filepath.Base(dir)}
+			// Derive the cache key from the basename without
+			// extension. For the meta/data sibling pair this gives
+			// the same key; for stray "other" files it's the full
+			// basename.
+			var key string
+			switch {
+			case strings.HasSuffix(base, dataExt):
+				key = strings.TrimSuffix(base, dataExt)
+			case strings.HasSuffix(base, metaExt):
+				key = strings.TrimSuffix(base, metaExt)
+			default:
+				key = base
+			}
+			e = &cacheEntry{stage: filepath.Base(dir), key: key}
 			entries[groupID] = e
 		}
 		e.paths = append(e.paths, path)
@@ -386,7 +402,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 	survivors := make([]*cacheEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.newestMtime.Before(cutoff) {
-			c.reportEvict(e.stage, e.description, "age", e.totalSize, e.costMs)
+			c.reportEvict(e.stage, e.key, e.description, "age", e.totalSize, e.costMs)
 			for _, p := range e.paths {
 				os.Remove(p)
 			}
@@ -411,7 +427,7 @@ func (c *Cache) Sweep(maxAge time.Duration, maxBytes int64) (SweepStats, error) 
 	}
 	for _, idx := range cachepolicy.FitToBudget(policyEntries, maxBytes, time.Now()) {
 		e := survivors[idx]
-		c.reportEvict(e.stage, e.description, "size", e.totalSize, e.costMs)
+		c.reportEvict(e.stage, e.key, e.description, "size", e.totalSize, e.costMs)
 		for _, p := range e.paths {
 			os.Remove(p)
 		}
