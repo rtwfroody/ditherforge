@@ -138,6 +138,15 @@ export namespace main {
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
+	    splitEnabled: boolean;
+	    splitAxis: number;
+	    splitOffset: number;
+	    splitConnectorStyle: string;
+	    splitConnectorCount: number;
+	    splitConnectorDiamMM: number;
+	    splitConnectorDepthMM: number;
+	    splitClearanceMM: number;
+	    splitGapMM: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -169,6 +178,15 @@ export namespace main {
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
+	        this.splitEnabled = source["splitEnabled"];
+	        this.splitAxis = source["splitAxis"];
+	        this.splitOffset = source["splitOffset"];
+	        this.splitConnectorStyle = source["splitConnectorStyle"];
+	        this.splitConnectorCount = source["splitConnectorCount"];
+	        this.splitConnectorDiamMM = source["splitConnectorDiamMM"];
+	        this.splitConnectorDepthMM = source["splitConnectorDepthMM"];
+	        this.splitClearanceMM = source["splitClearanceMM"];
+	        this.splitGapMM = source["splitGapMM"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

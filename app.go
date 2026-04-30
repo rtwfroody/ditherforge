@@ -775,6 +775,22 @@ type Settings struct {
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
 	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
+	// Split panel state. Plain values matching the rest of the struct.
+	// Files saved before these fields existed lack the keys, which
+	// decode as zero in Go and serialise back as the explicit zero
+	// values on next save. On load, the frontend's TS Settings class
+	// reads missing JSON keys as `undefined`, and applySettings's
+	// `!== undefined` guards preserve in-memory state in that case —
+	// so older files keep round-tripping cleanly.
+	SplitEnabled          bool    `json:"splitEnabled"`
+	SplitAxis             int     `json:"splitAxis"`
+	SplitOffset           float64 `json:"splitOffset"`
+	SplitConnectorStyle   string  `json:"splitConnectorStyle"`
+	SplitConnectorCount   int     `json:"splitConnectorCount"`
+	SplitConnectorDiamMM  float64 `json:"splitConnectorDiamMM"`
+	SplitConnectorDepthMM float64 `json:"splitConnectorDepthMM"`
+	SplitClearanceMM      float64 `json:"splitClearanceMM"`
+	SplitGapMM            float64 `json:"splitGapMM"`
 }
 
 // SaveSettings writes settings to the given path.
