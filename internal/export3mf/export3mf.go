@@ -164,8 +164,17 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 	mb.WriteString(`<metadata name="Title">ditherforge output</metadata>`)
 	mb.WriteString(`<resources>`)
 	for _, p := range parts {
+		// The component references the inner file's object by its id.
+		// Each inner .model file declares <object id={p.objectID}>
+		// (see buildObjectModel call below) — using the same number
+		// for the inner object as the outer keeps every object id in
+		// the 3MF unique, which is what Bambu Studio's importer keys
+		// deduplication on. Reusing inner objectid="1" across multiple
+		// inner files (the previous behavior) caused the importer to
+		// collapse all parts into a single visual object even though
+		// each inner file held distinct geometry.
 		fmt.Fprintf(&mb, `<object id="%d" p:UUID="%s" type="model">`, p.objectID, p.objUUID)
-		fmt.Fprintf(&mb, `<components><component p:path="%s" objectid="1" p:UUID="%s" transform="%s"/></components>`, p.innerPath, p.compUUID, transform)
+		fmt.Fprintf(&mb, `<components><component p:path="%s" objectid="%d" p:UUID="%s" transform="%s"/></components>`, p.innerPath, p.objectID, p.compUUID, transform)
 		mb.WriteString(`</object>`)
 	}
 	mb.WriteString(`</resources>`)
@@ -230,7 +239,7 @@ func Export(model *loader.LoadedModel, assignments []int32, outputPath string, p
 			entryName = entryName[1:]
 		}
 		partModel := &loader.LoadedModel{Vertices: p.verts, Faces: p.faces}
-		if err := writeEntry(entryName, buildObjectModel(partModel, p.assigns, newUUID())); err != nil {
+		if err := writeEntry(entryName, buildObjectModel(partModel, p.assigns, newUUID(), p.objectID)); err != nil {
 			return err
 		}
 	}
@@ -330,7 +339,16 @@ func splitModelByMesh(model *loader.LoadedModel, assignments []int32) []*splitPa
 // buildObjectModel writes the inner /3D/Objects/object_N.model with vertices,
 // triangles, and paint_color assignments. Shared by the generic and Bambu
 // export paths; they differ only in how objUUID is sourced.
-func buildObjectModel(model *loader.LoadedModel, assignments []int32, objUUID string) string {
+//
+// objectID is the <object id="N"> the inner mesh declares. Multi-mesh
+// exports (Split) need each inner file's object id to be unique
+// across the whole 3MF — Bambu Studio's importer keys deduplication
+// on inner object id, so two inner files both using id=1 collapse
+// into a single visual object even though they live at different
+// paths and contain different meshes. Single-mesh exports can pass
+// any positive integer; the outer build references it by the same
+// number.
+func buildObjectModel(model *loader.LoadedModel, assignments []int32, objUUID string, objectID int) string {
 	var sb strings.Builder
 
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
@@ -341,7 +359,7 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32, objUUID st
 	sb.WriteString(` requiredextensions="p">`)
 	sb.WriteString(`<metadata name="BambuStudio:3mfVersion">1</metadata>`)
 	sb.WriteString(`<resources>`)
-	fmt.Fprintf(&sb, `<object id="1" p:UUID="%s" type="model">`, objUUID)
+	fmt.Fprintf(&sb, `<object id="%d" p:UUID="%s" type="model">`, objectID, objUUID)
 	sb.WriteString(`<mesh><vertices>`)
 
 	for _, v := range model.Vertices {
