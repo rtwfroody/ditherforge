@@ -386,6 +386,13 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 // call so the cache lookups hit.
 // Returns the number of faces in the output.
 func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts export3mf.Options) (int, error) {
+	// Stage outputs are written to disk asynchronously by runStage, and
+	// ExportFile reads them back from disk. After a fresh RunCached the
+	// writes may still be in flight (a 1M-face merge encode takes
+	// seconds). Block on them so the lookups below see the just-written
+	// blobs instead of reporting "pipeline has not been run yet".
+	cache.WaitForDiskWrites()
+
 	lo := cache.getLoad(opts)
 	po := cache.getPalette(opts)
 	mo := cache.getMerge(opts)
