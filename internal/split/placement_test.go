@@ -12,7 +12,7 @@ func TestPlacePegs_UnitSquareSpread(t *testing.T) {
 	square := capPolygon{
 		outer: [][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 	}
-	pegs, err := placePegs(square, 4, 0)
+	pegs, err := placePegs(square, 4, 0, 0)
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestPlacePegs_LShapeSpread(t *testing.T) {
 			{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2},
 		},
 	}
-	pegs, err := placePegs(lshape, 2, 0)
+	pegs, err := placePegs(lshape, 2, 0, 0)
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestPlacePegs_HoleAvoided(t *testing.T) {
 			{{1.25, 2.75}, {2.75, 2.75}, {2.75, 1.25}, {1.25, 1.25}}, // CW
 		},
 	}
-	pegs, err := placePegs(poly, 1, 0)
+	pegs, err := placePegs(poly, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -98,12 +98,35 @@ func TestPlacePegs_HoleAvoided(t *testing.T) {
 	}
 }
 
+// TestPlacePegs_BoundaryClearance verifies pegs sit at least
+// boundaryClearance from every edge of the polygon. With a 10×10
+// square and clearance 2, every peg must lie within [2, 8] × [2, 8].
+func TestPlacePegs_BoundaryClearance(t *testing.T) {
+	square := capPolygon{
+		outer: [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}},
+	}
+	pegs, err := placePegs(square, 4, 0, 2.0)
+	if err != nil {
+		t.Fatalf("placePegs: %v", err)
+	}
+	if len(pegs) != 4 {
+		t.Fatalf("got %d pegs, want 4", len(pegs))
+	}
+	// Allow one-pixel slack for rasterization (10mm / 200px = 0.05mm).
+	const slack = 0.1
+	for i, p := range pegs {
+		if p[0] < 2.0-slack || p[0] > 8.0+slack || p[1] < 2.0-slack || p[1] > 8.0+slack {
+			t.Errorf("peg %d at %v violates boundary clearance 2.0 (must be in [2,8]×[2,8])", i, p)
+		}
+	}
+}
+
 // TestPlacePegs_SinglePeg with count=1 places near centroid.
 func TestPlacePegs_SinglePeg(t *testing.T) {
 	square := capPolygon{
 		outer: [][2]float64{{0, 0}, {2, 0}, {2, 2}, {0, 2}},
 	}
-	pegs, err := placePegs(square, 1, 0)
+	pegs, err := placePegs(square, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}

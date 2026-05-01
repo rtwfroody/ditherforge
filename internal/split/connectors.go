@@ -44,8 +44,16 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// Spacing heuristic: at least 2.5× the connector diameter so pegs
 	// don't touch each other. Best-effort — placePegs may yield fewer
 	// pegs than requested if the polygon is small.
+	//
+	// Boundary clearance: the peg center must be at least one peg
+	// diameter from the cap polygon boundary so a circle of 2× the
+	// peg diameter fits fully inside, leaving peg-radius worth of
+	// wall around every peg. Without this guard, the greedy
+	// farthest-point placement parks pegs at corners, which then
+	// punch through the side wall.
 	minSpacing := 2.5 * settings.DiamMM
-	centers2D, err := placePegsInPolygons(polys, count, minSpacing)
+	boundaryClearance := settings.DiamMM
+	centers2D, err := placePegsInPolygons(polys, count, minSpacing, boundaryClearance)
 	if err != nil {
 		plog.Printf("  Split: peg placement failed (%v); using flat caps", err)
 		return halves
