@@ -13,9 +13,29 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
+
+// SplitInfo carries per-half geometry plus the forward transforms
+// that produced the laid-out halves. VoxelizeTwoGrids calls
+// Xform[i].ApplyInverse on each cell centroid to map bed coords
+// back into original-mesh coords, where colorModel, stickerModel,
+// and the sticker spatial index live unmoved.
+//
+// Xform is the FORWARD transform (orig → bed), not the inverse.
+// The "inverse" lives in voxelize's call to ApplyInverse, not in
+// the field. This matches splitOutput.Xform in docs/SPLIT.md.
+//
+// When SplitInfo is nil, VoxelizeTwoGrids voxelizes the single
+// `model` argument with no transform (bit-identical to the
+// pre-split path).
+type SplitInfo struct {
+	Halves [2]*loader.LoadedModel
+	Xform  [2]split.Transform
+}
 
 // Cell size multipliers relative to nozzle diameter.
 const (
@@ -104,6 +124,11 @@ func voxelizeRegion(
 //
 // stickerModel/stickerSI may be nil; when non-nil and distinct from
 // colorModel, decal lookups go against that mesh (alpha-wrap mode).
+//
+// halfIdx is recorded on every emitted cell. invXform maps the cell
+// centroid (which is in bed coords) back to original-mesh coords for
+// color sampling on the unmoved colorModel/stickerModel; pass
+// split.IdentityTransform for the unsplit path.
 func colorCells(
 	ctx context.Context,
 	colorModel *loader.LoadedModel,
@@ -115,6 +140,8 @@ func colorCells(
 	tracker progress.Tracker,
 	counter *atomic.Int64,
 	decals []*voxel.StickerDecal,
+	halfIdx uint8,
+	invXform split.Transform,
 ) ([]voxel.ActiveCell, error) {
 	colorRadius := p.CellSize * 3
 	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
@@ -159,18 +186,23 @@ func colorCells(
 				}
 				cur := counter.Add(1)
 				tracker.StageProgress("Coloring cells", int(cur))
+				// (cx, cy, cz) is in bed coords (the grid lives on the
+				// bed). For color sampling, project back into
+				// original-mesh coords via the per-half inverse
+				// transform — colorModel/stickerModel are unmoved.
 				cx := p.MinV[0] + float32(k.Col)*p.CellSize
 				cy := p.MinV[1] + float32(k.Row)*p.CellSize
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
+				samplePos := invXform.ApplyInverse([3]float32{cx, cy, cz})
 				var rgba [4]uint8
 				if separateSticker {
 					rgba = voxel.SampleNearestColorWithSticker(
-						[3]float32{cx, cy, cz},
+						samplePos,
 						colorModel, si, colorRadius, buf, decals,
 						stickerModel, stickerSI, stickerBuf)
 				} else {
 					rgba = voxel.SampleNearestColor(
-						[3]float32{cx, cy, cz},
+						samplePos,
 						colorModel, si, colorRadius, buf, decals)
 				}
 				if rgba[3] < 128 {
@@ -179,7 +211,8 @@ func colorCells(
 				local = append(local, voxel.ActiveCell{
 					Grid: k.Grid, Col: k.Col, Row: k.Row, Layer: k.Layer,
 					Cx: cx, Cy: cy, Cz: cz,
-					Color: [3]uint8{rgba[0], rgba[1], rgba[2]},
+					Color:   [3]uint8{rgba[0], rgba[1], rgba[2]},
+					HalfIdx: halfIdx,
 				})
 			}
 			workerCells[workerIdx] = local
@@ -217,6 +250,11 @@ type TwoGridResult struct {
 // mesh than the color sampler — typically the alpha-wrap mesh while
 // colorModel is the original textured mesh. Pass nil for both to use
 // colorModel for sticker lookups (which also covers the no-sticker case).
+//
+// When splitInfo is non-nil, the `model` parameter is ignored; geometry
+// comes from splitInfo.Halves and each cell records its halfIdx. The
+// `colorModel` parameter is required (no fallback) because the geometry
+// meshes are in bed coords while colorModel must be in original coords.
 func VoxelizeTwoGrids(
 	ctx context.Context,
 	model, colorModel *loader.LoadedModel,
@@ -224,17 +262,66 @@ func VoxelizeTwoGrids(
 	layer0Size, upperSize, layerH float32,
 	tracker progress.Tracker,
 	decals []*voxel.StickerDecal,
+	splitInfo *SplitInfo,
 ) (*TwoGridResult, error) {
-	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
-		return nil, fmt.Errorf("empty model")
+	// Decide the geometry meshes and per-mesh inverse transforms.
+	// Unsplit path (splitInfo == nil) takes the single `model`
+	// argument with identity transform; split path iterates the
+	// two halves with their respective inverse transforms.
+	type geomEntry struct {
+		mesh     *loader.LoadedModel
+		invXform split.Transform
+		halfIdx  uint8
 	}
+	var entries []geomEntry
+	if splitInfo == nil {
+		if model == nil || len(model.Vertices) == 0 || len(model.Faces) == 0 {
+			return nil, fmt.Errorf("empty model")
+		}
+		entries = []geomEntry{{mesh: model, invXform: split.IdentityTransform, halfIdx: 0}}
+	} else {
+		for h := 0; h < 2; h++ {
+			m := splitInfo.Halves[h]
+			if m == nil || len(m.Vertices) == 0 || len(m.Faces) == 0 {
+				return nil, fmt.Errorf("empty split half %d", h)
+			}
+			entries = append(entries, geomEntry{
+				mesh:     m,
+				invXform: splitInfo.Xform[h],
+				halfIdx:  uint8(h),
+			})
+		}
+	}
+
 	if colorModel == nil {
+		// In the unsplit path colorModel can fall back to the
+		// geometry mesh; in the split path the caller must supply
+		// colorModel explicitly (it lives in original coords,
+		// distinct from the laid-out half meshes).
+		if splitInfo != nil {
+			return nil, fmt.Errorf("split voxelize requires explicit colorModel (lives in original coords, distinct from laid-out halves)")
+		}
 		colorModel = model
 	}
 
-	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
+	for _, e := range entries {
+		if len(entries) > 1 {
+			plog.Printf("  Input mesh (half %d): %s", e.halfIdx, voxel.CheckWatertight(e.mesh.Faces))
+		} else {
+			plog.Printf("  Input mesh: %s", voxel.CheckWatertight(e.mesh.Faces))
+		}
+	}
 
-	minV, maxV := voxel.ComputeBounds(model.Vertices)
+	// Bbox is the union over all geometry meshes (in bed coords for
+	// the split path).
+	minV, maxV := voxel.ComputeBounds(entries[0].mesh.Vertices)
+	for _, e := range entries[1:] {
+		mn, mx := voxel.ComputeBounds(e.mesh.Vertices)
+		for i := 0; i < 3; i++ {
+			minV[i] = min(minV[i], mn[i])
+			maxV[i] = max(maxV[i], mx[i])
+		}
+	}
 	maxCellSize := max(layer0Size, upperSize)
 	xyPad := maxCellSize * 2
 	zPad := layerH * 2
@@ -260,12 +347,15 @@ func VoxelizeTwoGrids(
 	if nLayers > 1 {
 		regions = 2
 	}
-	tracker.StageStart("Voxelizing", true, len(model.Faces)*regions)
+	totalFaces := 0
+	for _, e := range entries {
+		totalFaces += len(e.mesh.Faces)
+	}
+	tracker.StageStart("Voxelizing", true, totalFaces*regions)
 	var voxCounter atomic.Int64
 
 	tVoxelize := time.Now()
 
-	// First layer: grid 0 (wide voxels)
 	nCols0 := int(math.Ceil(float64(maxV[0]-minV[0])/float64(layer0Size))) + 1
 	nRows0 := int(math.Ceil(float64(maxV[1]-minV[1])/float64(layer0Size))) + 1
 	p0 := regionParams{
@@ -273,48 +363,64 @@ func VoxelizeTwoGrids(
 		MinV: minV, NCols: nCols0, NRows: nRows0,
 		LayerLo: 0, LayerHi: 0,
 	}
-	cellSet0 := voxelizeRegion(ctx, model, p0, tracker, &voxCounter)
-
-	// Remaining layers: grid 1 (narrow voxels)
-	var cellSet1 map[voxel.CellKey]struct{}
 	nCols1 := int(math.Ceil(float64(maxV[0]-minV[0])/float64(upperSize))) + 1
 	nRows1 := int(math.Ceil(float64(maxV[1]-minV[1])/float64(upperSize))) + 1
-	if nLayers > 1 {
-		p1 := regionParams{
-			Grid: 1, CellSize: upperSize, LayerH: layerH,
-			MinV: minV, NCols: nCols1, NRows: nRows1,
-			LayerLo: 1, LayerHi: nLayers - 1,
-		}
-		cellSet1 = voxelizeRegion(ctx, model, p1, tracker, &voxCounter)
+	p1 := regionParams{
+		Grid: 1, CellSize: upperSize, LayerH: layerH,
+		MinV: minV, NCols: nCols1, NRows: nRows1,
+		LayerLo: 1, LayerHi: nLayers - 1,
 	}
 
-	totalCells := len(cellSet0) + len(cellSet1)
-	fmt.Printf("  Voxelized: %d cells (layer0: %d, upper: %d) in %.1fs\n",
-		totalCells, len(cellSet0), len(cellSet1), time.Since(tVoxelize).Seconds())
+	// Voxelize each geometry mesh into per-mesh region cell sets.
+	type meshCells struct {
+		layer0 map[voxel.CellKey]struct{}
+		upper  map[voxel.CellKey]struct{}
+	}
+	perMesh := make([]meshCells, len(entries))
+	totalCells := 0
+	for i, e := range entries {
+		perMesh[i].layer0 = voxelizeRegion(ctx, e.mesh, p0, tracker, &voxCounter)
+		totalCells += len(perMesh[i].layer0)
+		if nLayers > 1 {
+			perMesh[i].upper = voxelizeRegion(ctx, e.mesh, p1, tracker, &voxCounter)
+			totalCells += len(perMesh[i].upper)
+		}
+	}
+
+	plog.Printf("  Voxelized: %d cells across %d mesh(es) in %.1fs",
+		totalCells, len(entries), time.Since(tVoxelize).Seconds())
 
 	tracker.StageDone("Voxelizing")
 
-	// Color cells
+	// Color cells per mesh, threading the per-mesh inverse transform
+	// so color sampling on colorModel/stickerModel happens in
+	// original-mesh coordinates.
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, totalCells)
 	var counter atomic.Int64
 
-	cells0, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI, cellSet0, p0, tracker, &counter, decals)
-	if err != nil {
-		return nil, err
-	}
-	cells1, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI, cellSet1, regionParams{
-		Grid: 1, CellSize: upperSize, LayerH: layerH,
-		MinV: minV, NCols: nCols1, NRows: nRows1,
-		LayerLo: 1, LayerHi: nLayers - 1,
-	}, tracker, &counter, decals)
-	if err != nil {
-		return nil, err
+	var cells []voxel.ActiveCell
+	for i, e := range entries {
+		cells0, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI,
+			perMesh[i].layer0, p0, tracker, &counter, decals,
+			e.halfIdx, e.invXform)
+		if err != nil {
+			return nil, err
+		}
+		cells = append(cells, cells0...)
+		if nLayers > 1 {
+			cells1, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI,
+				perMesh[i].upper, p1, tracker, &counter, decals,
+				e.halfIdx, e.invXform)
+			if err != nil {
+				return nil, err
+			}
+			cells = append(cells, cells1...)
+		}
 	}
 
-	cells := append(cells0, cells1...)
 	tracker.StageDone("Coloring cells")
-	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
+	plog.Printf("  Colored cells: %d cells in %.1fs", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, fmt.Errorf("no active cells found")
 	}
@@ -346,7 +452,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		colorModel = model
 	}
 
-	fmt.Printf("  Input mesh: %s\n", voxel.CheckWatertight(model.Faces))
+	plog.Printf("  Input mesh: %s", voxel.CheckWatertight(model.Faces))
 
 	minV, maxV := voxel.ComputeBounds(model.Vertices)
 	xyPad := cellSize * 2
@@ -375,19 +481,19 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
 	cellSet := voxelizeRegion(ctx, model, p, tracker, &voxCounter)
-	fmt.Printf("  Voxelized: %d cells in %.1fs\n", len(cellSet), time.Since(tVoxelize).Seconds())
+	plog.Printf("  Voxelized: %d cells in %.1fs", len(cellSet), time.Since(tVoxelize).Seconds())
 
 	tracker.StageDone("Voxelizing")
 
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, len(cellSet))
 	var counter atomic.Int64
-	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals)
+	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals, 0, split.IdentityTransform)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}
 	tracker.StageDone("Coloring cells")
-	fmt.Printf("  Colored cells: %d cells in %.1fs\n", len(cells), time.Since(tColor).Seconds())
+	plog.Printf("  Colored cells: %d cells in %.1fs", len(cells), time.Since(tColor).Seconds())
 	if len(cells) == 0 {
 		return nil, nil, [3]float32{}, fmt.Errorf("no active cells found")
 	}
@@ -460,7 +566,7 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 			return nil, err
 		}
 		wr := voxel.CheckWatertight(decFaces)
-		fmt.Printf("  Decimated mesh: %s\n", wr)
+		plog.Printf("  Decimated mesh: %s", wr)
 		return &loader.LoadedModel{
 			Vertices: decVerts,
 			Faces:    decFaces,
@@ -469,4 +575,36 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 	tracker.StageStart("Decimating", false, 0)
 	tracker.StageDone("Decimating")
 	return model, nil
+}
+
+// DecimateHalves runs DecimateMesh once per Split half, splitting the
+// total target cell count between halves proportional to each half's
+// face count. Used by the StageSplit-aware pipeline path; the
+// unsplit path keeps using DecimateMesh directly.
+//
+// Each half is closed-watertight in its own right (post-Layout), so
+// the underlying voxel.Decimate runs unmodified. Cap planarity is
+// preserved by QEM's planar-affinity bias: collapsing a
+// cap-perimeter vertex moves it off the cap plane, which is high
+// quadric error and is disfavored by the heap. (Verified by
+// TestDecimate_HalfPreservesCapPlanarity.)
+func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
+	// split.Cut's contract guarantees both halves are non-nil; we rely
+	// on that here rather than guarding for nil.
+	totalFaces := len(halves[0].Faces) + len(halves[1].Faces)
+	var out [2]*loader.LoadedModel
+	for i, h := range halves {
+		// Proportional split with a floor of 1 (avoid degenerate
+		// "decimate to 0 faces" requests).
+		perHalfTarget := totalTargetCells * len(h.Faces) / totalFaces
+		if perHalfTarget < 1 {
+			perHalfTarget = 1
+		}
+		decimated, err := DecimateMesh(ctx, h, perHalfTarget, cellSize, noSimplify, tracker)
+		if err != nil {
+			return out, fmt.Errorf("decimate half %d: %w", i, err)
+		}
+		out[i] = decimated
+	}
+	return out, nil
 }

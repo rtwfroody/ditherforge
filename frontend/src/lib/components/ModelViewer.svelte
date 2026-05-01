@@ -10,6 +10,7 @@
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
   import { LoaderCircleIcon, CheckIcon } from '@lucide/svelte';
+  import type { CutPlanePreview } from '$lib/types';
 
 
   function log(msg: string) {
@@ -58,6 +59,8 @@
     loading = '',
     stages = [],
     stageTick = 0,
+    cutPlane = null,
+    pipelineError = '',
   }: {
     meshUrl?: string;
     overlayMeshUrl?: string;
@@ -79,6 +82,8 @@
     loading?: string;
     stages?: StageInfo[];
     stageTick?: number;
+    cutPlane?: CutPlanePreview | null;
+    pipelineError?: string;
   } = $props();
 
   // Compute live elapsed time for a running stage. The _tick parameter
@@ -901,6 +906,72 @@
     };
   });
 
+  // Cut-plane preview quad. Built reactively from the cutPlane prop so
+  // it tracks the Split slider in real time. Geometry corners are
+  // origin ± hU·u ± hV·v; material is translucent and double-sided
+  // with depthWrite off so the underlying mesh remains visible. No
+  // normals are computed because MeshBasicMaterial is unlit.
+  //
+  // cutPlaneRev increments on every (re)build so the Invalidator can
+  // trigger a Threlte render via a cheap monotonic key instead of
+  // stringifying the prop on every parent render. Update it via
+  // untrack() because `cutPlaneRev = cutPlaneRev + 1` would otherwise
+  // self-track inside this $effect — Svelte 5 sees the read on the
+  // RHS and tracks it as a dep, the write retriggers the effect, and
+  // the effect trips `effect_update_depth_exceeded`. The thrown error
+  // aborts mount partway, which manifests as the File menu not wiring
+  // up and `ListPrinters()` never resolving.
+  let cutPlaneGeo = $state<THREE.BufferGeometry | null>(null);
+  let cutPlaneMat = $state<THREE.MeshBasicMaterial | null>(null);
+  let cutPlaneRev = $state(0);
+  function bumpCutPlaneRev() {
+    cutPlaneRev = untrack(() => cutPlaneRev) + 1;
+  }
+  $effect(() => {
+    const cp = cutPlane;
+    if (!cp) {
+      cutPlaneGeo = null;
+      cutPlaneMat = null;
+      bumpCutPlaneRev();
+      return;
+    }
+    // Pad slightly so the plane visibly extends past the model.
+    const hU = cp.halfExtentU * 1.1;
+    const hV = cp.halfExtentV * 1.1;
+    const o = cp.origin;
+    const u = cp.u;
+    const v = cp.v;
+    const corner = (su: number, sv: number) => [
+      o[0] + su * hU * u[0] + sv * hV * v[0],
+      o[1] + su * hU * u[1] + sv * hV * v[1],
+      o[2] + su * hU * u[2] + sv * hV * v[2],
+    ];
+    const c00 = corner(-1, -1);
+    const c10 = corner(+1, -1);
+    const c11 = corner(+1, +1);
+    const c01 = corner(-1, +1);
+    const positions = new Float32Array([
+      ...c00, ...c10, ...c11,
+      ...c00, ...c11, ...c01,
+    ]);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x4080ff,
+      transparent: true,
+      opacity: 0.25,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    cutPlaneGeo = geo;
+    cutPlaneMat = mat;
+    bumpCutPlaneRev();
+    return () => {
+      geo.dispose();
+      mat.dispose();
+    };
+  });
+
   // Camera-direction bias for the overlay group: nudge it slightly toward
   // the camera so its surface always wins the depth test against the base
   // mesh, regardless of view angle. Bias size is scaled to scene extent
@@ -1039,7 +1110,11 @@
           </T.Group>
         {/if}
 
-        <Invalidator {brightness} {contrast} {saturation} extra={JSON.stringify(warpPins)} />
+        {#if cutPlaneGeo && cutPlaneMat}
+          <T.Mesh geometry={cutPlaneGeo} material={cutPlaneMat} renderOrder={999} />
+        {/if}
+
+        <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}`} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
         <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
@@ -1048,7 +1123,7 @@
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
         {errorMessage}
       </div>
-    {:else if stages.length > 0}
+    {:else if stages.length > 0 || pipelineError}
       <div class="flex flex-col justify-end gap-2 p-4 text-sm overflow-hidden h-full">
         {#each stages as stage}
           <div class="flex items-center gap-2">
@@ -1074,6 +1149,12 @@
             </div>
           {/if}
         {/each}
+        {#if pipelineError}
+          <div class="flex items-start gap-2 text-red-500">
+            <span class="w-4 h-4 shrink-0 text-center font-bold leading-4">!</span>
+            <span class="break-words">{pipelineError}</span>
+          </div>
+        {/if}
       </div>
     {:else if loading}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground gap-2">

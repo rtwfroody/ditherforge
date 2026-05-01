@@ -17,9 +17,12 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 3. Set **Nozzle diameter** and **Layer height** to match your slicer
 4. Set **Size (mm)** to your target print size
 5. Optionally, open the **Stickers** panel to apply PNG or JPEG images onto the model surface
-6. Adjust the palette and color settings — the output preview updates automatically
-7. Use **File > Export 3MF** to save the result (defaults to `<input>.3mf`)
-8. Open the exported 3MF in OrcaSlicer or BambuStudio and print
+6. Optionally, open the **Split** panel to cut the model in two halves that print side-by-side and assemble with pegs
+7. Adjust the palette and color settings — the output preview updates automatically
+8. Use **File > Export 3MF** to save the result (defaults to `<input>.3mf`)
+9. Open the exported 3MF in OrcaSlicer or BambuStudio and print
+
+All sidebar sections are collapsible — click a section header to fold or expand it.
 
 **File > Open Recent** lists both recently opened models and recently used JSON settings files.
 
@@ -191,6 +194,44 @@ regions that are nearly a single solid color.
 Set the value with the **Color snap (delta E)** slider (0 to 50, default 5).
 Set to 0 to disable.
 
+## How to Split a Model into Two Halves
+
+The **Split** panel cuts the model along an axis-aligned plane into two halves
+that print separately and assemble back into the original. Both halves are
+laid out side by side on the build plate, sitting flat on the cut face. Use
+this when the model is taller than your build volume, when supports for an
+overhang would otherwise be hard to remove, or when you want to paint each
+half before assembly.
+
+To split a model:
+
+1. Open the **Split** panel and check **Split into two parts**. Alpha-wrap is
+   forced on automatically — a clean cut needs a watertight input mesh.
+2. Choose the **Cut plane** (XY, XZ, or YZ) and the **Offset** along that
+   axis. The 3D viewer overlays a translucent quad showing the live cut
+   position.
+3. Pick a **Connector style**:
+   - **Pegs** — a solid peg on one half mates with a matching pocket on the
+     other. Best for FDM where dowel hardware isn't on hand.
+   - **Dowel holes** — matching pockets on both halves; print or buy
+     separate dowel pins to glue in.
+   - **None** — flat cut, glue-only assembly.
+4. Adjust **Count** (number of connectors along the cut; **Auto** picks 1, 2,
+   or 3 based on the cut polygon's inscribed-circle radius), **Diameter**,
+   **Depth**, **Clearance** (per-side radial gap on the female feature so
+   the peg slides in), and **Bed gap** (space between the two halves on the
+   plate) as needed.
+5. Export the result with **File > Export 3MF** as usual. The exported file
+   contains two build items, one per half, that the slicer treats as
+   independent objects.
+
+Stickers, color pins, and base color are applied to the original (unsplit)
+mesh, so they survive the cut and appear on whichever half they land on.
+Split panel state is saved and restored with the JSON settings file.
+
+If you turn off **Alpha-wrap** while Split is enabled, Split is automatically
+disabled as well. A toast explains the dependency.
+
 ## How to Save and Load Settings
 
 Use **File > Save JSON** to save all current settings — palette, color pins,
@@ -227,29 +268,45 @@ compatible with OrcaSlicer and BambuStudio.
    frontmost surface; "Unfold" mode flood-fills from the placement point
    across mesh adjacency. Sticker colors are alpha-composited over the base
    texture.
-4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
+4. **Split** (optional) — cuts the geometry mesh along the configured plane
+   using CGAL's `Polygon_mesh_processing::clip`, bakes peg or dowel
+   connectors into the cut faces via boolean ops, and lays the two halves
+   side by side on the build plate. Color sampling stays in the original
+   mesh's coordinate frame, so stickers, color pins, and base color
+   survive the cut unchanged.
+5. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
    upper cells are narrower (`nozzle × 1.05`).
-5. **Color adjust** — applies brightness, contrast, and saturation.
-6. **Color warp** — applies color pin remappings using Gaussian RBF
+6. **Color adjust** — applies brightness, contrast, and saturation.
+7. **Color warp** — applies color pin remappings using Gaussian RBF
    interpolation in CIELAB color space.
-7. **Palette** — resolves locked colors, then selects auto colors from the
+8. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
-8. **Dither** — assigns a palette color to each cell to approximate the original
+9. **Dither** — assigns a palette color to each cell to approximate the original
    texture. The default `dizzy` mode uses random traversal with error diffusion
    to spatial neighbors, producing blue-noise-like patterns. `none` assigns the
    nearest palette color with no dithering.
-9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
-   each fragment a palette color.
-10. **Merge** — merges coplanar triangles to reduce face count.
-11. **Export** — writes a 3MF file with per-face material assignments.
+10. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
+    each fragment a palette color.
+11. **Merge** — merges coplanar triangles to reduce face count.
+12. **Export** — writes a 3MF file with per-face material assignments. When
+    Split is enabled, two `<object>` entries are emitted (one per half) so
+    slicers see them as independent build items.
 
 If **Alpha-wrap** is enabled (Advanced section), it runs between Load and
-Decimate to produce a watertight shell of the input mesh.
+Decimate to produce a watertight shell of the input mesh. Split also forces
+alpha-wrap on, since the cut needs a watertight input.
 
 Each stage is cached by its settings hash. Changing a downstream parameter
-(e.g., dithering mode) skips all upstream stages on the next run.
+(e.g., dithering mode) skips all upstream stages on the next run. The Load,
+Decimate, and Alpha-wrap stage caches persist across app restarts on disk
+(zstd-compressed), so re-opening a recent model is much faster than the
+first time.
+
+While the pipeline runs, the output stage list shows live progress for each
+stage along with cache hit/miss status. If a stage fails, the error message
+appears as a final line in the list.
 
 ---
 
@@ -265,8 +322,9 @@ ditherforge-cli model.glb --size 100
 This loads `model.glb`, scales it to 100 mm, selects 4 colors from the default
 palette, and writes `model.3mf` alongside the input.
 
-Note: the CLI does not currently support stickers, color pins, or multi-object
-selection. Use the GUI to configure those and save a JSON settings file.
+Note: the CLI does not currently support stickers, color pins, splitting, or
+multi-object selection. Use the GUI to configure those and save a JSON
+settings file.
 
 ### Options
 
@@ -401,6 +459,27 @@ contrast, and saturation adjustments as the rest of the model.
 
 Stickers are saved as part of the JSON settings file.
 
+### Split
+
+Cuts the model along an axis-aligned plane into two halves laid out side by
+side on the build plate. Optional connectors register the halves during
+glue-up.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Split into two parts | off | Master toggle. When off, the rest of the section is hidden and the pipeline behaves as if Split didn't exist. Forces Alpha-wrap on; turning Alpha-wrap off auto-disables Split. |
+| Cut plane | XY | Axis-aligned plane: XY (cut along Z), XZ (cut along Y), or YZ (cut along X). |
+| Offset (mm) | bbox mid | Position of the cut plane along the chosen axis, measured from the model's local origin. Adjustable via number field or slider. |
+| Connector style | Pegs | `Pegs` (built-in male/female), `Dowel holes` (matching pockets, separate dowel pins), or `None` (flat cut). |
+| Count | Auto | Number of connectors. `Auto` picks 1, 2, or 3 based on the cut polygon's inscribed-circle radius. |
+| Diameter (mm) | 5.0 | Connector diameter. Hidden when style is None. |
+| Depth (mm) | 6.0 | Connector depth (per side for dowels). Hidden when style is None. |
+| Clearance (mm) | 0.15 | Per-side radial clearance applied to the female feature so the peg slides in. |
+| Bed gap (mm) | 5.0 | Space between the two halves on the build plate. |
+
+While the Split panel is open, a translucent overlay in the 3D viewer shows
+the live cut plane through the input model.
+
 ### Color Pins (Warp Pins)
 
 Each pin maps a source color to a target filament color using Gaussian RBF
@@ -452,7 +531,7 @@ solid-color regions.
 
 Saved settings include: input file path, size/scale, nozzle diameter, layer
 height, palette (locked colors and collection), color adjustments, color pins,
-stickers, dither mode, color snap, and advanced flags.
+stickers, dither mode, color snap, split configuration, and advanced flags.
 
 ### Advanced Options (GUI)
 

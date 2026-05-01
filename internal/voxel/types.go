@@ -22,11 +22,18 @@ type Config struct {
 }
 
 // ActiveCell represents one voxel cell to generate.
+//
+// HalfIdx identifies which Split half produced the cell when the
+// model has been split into two halves. 0 in the unsplit path; 0 or
+// 1 in the split path. Downstream stages (Merge, export3mf) use this
+// to partition cells per half so the 3MF output emits one
+// `<object>` entry per half.
 type ActiveCell struct {
 	Grid            uint8
 	Col, Row, Layer int
 	Cx, Cy, Cz     float32
 	Color           [3]uint8
+	HalfIdx         uint8
 }
 
 // CellKey is a canonical grid cell identifier.

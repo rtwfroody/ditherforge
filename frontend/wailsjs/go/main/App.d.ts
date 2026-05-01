@@ -48,4 +48,6 @@ export function SaveSettings(arg1:string,arg2:main.Settings):Promise<void>;
 
 export function SaveSettingsDialog(arg1:main.Settings):Promise<string>;
 
+export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
+
 export function Version():Promise<string>;

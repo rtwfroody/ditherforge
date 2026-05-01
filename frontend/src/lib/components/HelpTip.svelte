@@ -18,6 +18,8 @@
     tabindex={-1}
     class="inline-flex items-center justify-center text-muted-foreground hover:text-foreground cursor-help align-middle"
     aria-label="Help"
+    onclick={(e: MouseEvent) => e.stopPropagation()}
+    onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}
   >
     <InfoIcon size={13} />
   </Tooltip.Trigger>

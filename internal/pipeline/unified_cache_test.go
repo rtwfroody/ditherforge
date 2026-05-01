@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rtwfroody/ditherforge/internal/diskcache"
 )
 
 // makeFakeInput writes a tiny placeholder to a temp dir so stageKey's
@@ -16,57 +18,6 @@ func makeFakeInput(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-// TestStageMapFIFO: a stageMap evicts the oldest entry once cap is exceeded.
-func TestStageMapFIFO(t *testing.T) {
-	m := newStageMap(3)
-	m.put("a", 1)
-	m.put("b", 2)
-	m.put("c", 3)
-	m.put("d", 4) // pushes out 'a'
-	if m.get("a") != nil {
-		t.Error("oldest entry 'a' was not evicted")
-	}
-	if m.get("d") == nil {
-		t.Error("newest entry 'd' is missing")
-	}
-}
-
-// TestStageMapCapTwoToggleAB: at the production cap of 2, A↔B↔A↔B keeps
-// both entries resident — the toggle case the unified cache is designed
-// around.
-func TestStageMapCapTwoToggleAB(t *testing.T) {
-	m := newStageMap(2)
-	m.put("A", "vA")
-	m.put("B", "vB")
-	if m.get("A") != "vA" || m.get("B") != "vB" {
-		t.Fatal("setup: both entries should be present")
-	}
-	// Re-touching A and B (no new keys introduced) must not evict either.
-	m.put("A", "vA2")
-	m.put("B", "vB2")
-	if m.get("A") != "vA2" {
-		t.Errorf("A evicted by re-put cycle, got %v", m.get("A"))
-	}
-	if m.get("B") != "vB2" {
-		t.Errorf("B evicted by re-put cycle, got %v", m.get("B"))
-	}
-}
-
-// TestStageMapUpdate: putting the same key twice replaces the value but
-// does not consume an extra slot.
-func TestStageMapUpdate(t *testing.T) {
-	m := newStageMap(2)
-	m.put("a", 1)
-	m.put("a", 99)
-	m.put("b", 2)
-	if m.get("a") != 99 {
-		t.Errorf("a = %v, want 99 (update)", m.get("a"))
-	}
-	if m.get("b") != 2 {
-		t.Errorf("b should still be present after update of a")
-	}
 }
 
 // TestStageKeyCascade: changing a downstream stage's settings does not
@@ -118,45 +69,54 @@ func TestStageKeyDownstreamCascade(t *testing.T) {
 	}
 }
 
-// TestCacheAToggleBToggleAHitsMemory: the A↔B↔A scenario the user actually
+// TestCacheAToggleBToggleAHitsDisk: the A↔B↔A scenario the user actually
 // cares about. After computing for A, then B, then A again, the second
-// "A" lookup must come from in-memory cache (no recompute).
-func TestCacheAToggleBToggleAHitsMemory(t *testing.T) {
+// "A" lookup must hit the disk cache (no recompute). Identity
+// comparison doesn't apply because the cache stores blobs and decodes
+// a fresh struct on every hit.
+func TestCacheAToggleBToggleAHitsDisk(t *testing.T) {
 	c := NewStageCache()
+	d, err := diskcache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDisk(d)
+	// Cleanup safety only — the explicit WaitForDiskWrites before the
+	// reads below is what the assertions depend on.
+	defer c.WaitForDiskWrites()
+
 	path := makeFakeInput(t)
-	// Two opts that differ only in LayerHeight.
 	optsA := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
 	optsB := optsA
 	optsB.LayerHeight = 0.12
 
-	// Pretend we just computed each stage's output for A.
-	doA := &decimateOutput{}
-	c.set(StageDecimate, optsA, doA)
-	voA := &voxelizeOutput{}
-	c.set(StageVoxelize, optsA, voA)
+	c.set(StageDecimate, optsA, &decimateOutput{})
+	c.set(StageVoxelize, optsA, &voxelizeOutput{})
+	c.set(StageDecimate, optsB, &decimateOutput{})
+	c.set(StageVoxelize, optsB, &voxelizeOutput{})
+	// Wait for async writes to land before reading.
+	c.WaitForDiskWrites()
 
-	// Compute for B.
-	doB := &decimateOutput{}
-	c.set(StageDecimate, optsB, doB)
-	voB := &voxelizeOutput{}
-	c.set(StageVoxelize, optsB, voB)
-
-	// Toggle back to A — must return the original instances.
-	if got := c.get(StageDecimate, optsA); got != doA {
-		t.Errorf("Decimate A→B→A: got different instance, expected memory hit on original")
+	if _, src := c.getWithSource(StageDecimate, optsA); src != hitDisk {
+		t.Errorf("Decimate A→B→A: hit source %v, want hitDisk", src)
 	}
-	if got := c.get(StageVoxelize, optsA); got != voA {
-		t.Errorf("Voxelize A→B→A: got different instance, expected memory hit on original")
+	if _, src := c.getWithSource(StageVoxelize, optsA); src != hitDisk {
+		t.Errorf("Voxelize A→B→A: hit source %v, want hitDisk", src)
 	}
-	// And B's entries are still there too.
-	if got := c.get(StageDecimate, optsB); got != doB {
-		t.Errorf("Decimate B is missing from memory after toggle")
+	if _, src := c.getWithSource(StageDecimate, optsB); src != hitDisk {
+		t.Errorf("Decimate B: hit source %v, want hitDisk", src)
 	}
 }
 
 // TestParseStageKeyDependsOnInputOnly: StageParse's key changes when
-// Input/ObjectIndex/ReloadSeq change but is invariant under everything
-// else (Scale, Size, alpha-wrap, base color, etc.).
+// Input/ObjectIndex change but is invariant under everything else
+// (Scale, Size, alpha-wrap, base color, ReloadSeq, etc.).
+//
+// ReloadSeq is intentionally NOT in the parse cache key — it's a
+// frontend-only counter for re-triggering reactive effects on
+// same-path re-selects. Including it would cause spurious cache misses
+// when the same underlying file is loaded via different UI paths
+// (direct .glb open bumps reloadSeq; settings-JSON load doesn't).
 func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
 	c := NewStageCache()
 	pathA := makeFakeInput(t)
@@ -183,11 +143,12 @@ func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
 		t.Error("StageParse key did not change when ObjectIndex changed")
 	}
 
-	// ReloadSeq bump SHOULD change StageParse's key (force re-parse).
+	// ReloadSeq must NOT change StageParse's key — it's a frontend
+	// reactive-trigger counter, not a real cache invariant.
 	reloaded := base
 	reloaded.ReloadSeq = 1
-	if c.stageKey(StageParse, base) == c.stageKey(StageParse, reloaded) {
-		t.Error("StageParse key did not change when ReloadSeq bumped")
+	if c.stageKey(StageParse, base) != c.stageKey(StageParse, reloaded) {
+		t.Error("StageParse key changed when ReloadSeq bumped; cache must survive same-path re-selects")
 	}
 }
 

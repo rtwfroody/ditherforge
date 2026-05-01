@@ -138,6 +138,15 @@ export namespace main {
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
+	    splitEnabled: boolean;
+	    splitAxis: number;
+	    splitOffset: number;
+	    splitConnectorStyle: string;
+	    splitConnectorCount: number;
+	    splitConnectorDiamMM: number;
+	    splitConnectorDepthMM: number;
+	    splitClearanceMM: number;
+	    splitGapMM: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -169,6 +178,15 @@ export namespace main {
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
+	        this.splitEnabled = source["splitEnabled"];
+	        this.splitAxis = source["splitAxis"];
+	        this.splitOffset = source["splitOffset"];
+	        this.splitConnectorStyle = source["splitConnectorStyle"];
+	        this.splitConnectorCount = source["splitConnectorCount"];
+	        this.splitConnectorDiamMM = source["splitConnectorDiamMM"];
+	        this.splitConnectorDepthMM = source["splitConnectorDepthMM"];
+	        this.splitClearanceMM = source["splitClearanceMM"];
+	        this.splitGapMM = source["splitGapMM"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -276,6 +294,34 @@ export namespace main {
 
 export namespace pipeline {
 	
+	export class SplitSettings {
+	    Enabled: boolean;
+	    Axis: number;
+	    Offset: number;
+	    ConnectorStyle: string;
+	    ConnectorCount: number;
+	    ConnectorDiamMM: number;
+	    ConnectorDepthMM: number;
+	    ClearanceMM: number;
+	    GapMM: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SplitSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Enabled = source["Enabled"];
+	        this.Axis = source["Axis"];
+	        this.Offset = source["Offset"];
+	        this.ConnectorStyle = source["ConnectorStyle"];
+	        this.ConnectorCount = source["ConnectorCount"];
+	        this.ConnectorDiamMM = source["ConnectorDiamMM"];
+	        this.ConnectorDepthMM = source["ConnectorDepthMM"];
+	        this.ClearanceMM = source["ClearanceMM"];
+	        this.GapMM = source["GapMM"];
+	    }
+	}
 	export class Sticker {
 	    ImagePath: string;
 	    Center: number[];
@@ -348,6 +394,7 @@ export namespace pipeline {
 	    AlphaWrap: boolean;
 	    AlphaWrapAlpha: number;
 	    AlphaWrapOffset: number;
+	    Split?: SplitSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -384,6 +431,7 @@ export namespace pipeline {
 	        this.AlphaWrap = source["AlphaWrap"];
 	        this.AlphaWrapAlpha = source["AlphaWrapAlpha"];
 	        this.AlphaWrapOffset = source["AlphaWrapOffset"];
+	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -404,6 +452,29 @@ export namespace pipeline {
 		    return a;
 		}
 	}
+	export class SplitPreviewResult {
+	    origin: number[];
+	    normal: number[];
+	    u: number[];
+	    v: number[];
+	    halfExtentU: number;
+	    halfExtentV: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SplitPreviewResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.origin = source["origin"];
+	        this.normal = source["normal"];
+	        this.u = source["u"];
+	        this.v = source["v"];
+	        this.halfExtentU = source["halfExtentU"];
+	        this.halfExtentV = source["halfExtentV"];
+	    }
+	}
+	
 	
 
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -31,11 +32,15 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex               // protects cache and lastOpts; held during pipeline execution and Export3MF
+	mu       sync.Mutex               // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
 	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
 	cancel   context.CancelFunc       // cancels in-flight pipeline work
 	cache    *pipeline.StageCache     // per-stage cache across runs
-	lastOpts pipeline.Options         // last successfully processed options
+	// lastOpts is the last successfully processed Options. Uses
+	// atomic.Pointer so SplitPreview (and other read-only Wails
+	// methods) can snapshot it without blocking on `mu`, which the
+	// pipeline worker holds for the entire duration of a run.
+	lastOpts atomic.Pointer[pipeline.Options]
 	pipeGen      atomic.Int64         // generation counter for pipeline requests
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
@@ -67,6 +72,13 @@ type meshEvent struct {
 	URL          string  `json:"url"`
 	PreviewScale float32 `json:"previewScale,omitempty"`
 	ExtentMM     float32 `json:"extentMM,omitempty"` // native max extent in mm, for input-mesh
+	// Per-axis bbox of the loaded model in original-mesh coords (mm,
+	// post-scale, post-normalizeZ). Populated only on input-mesh
+	// events. Used by the Split Settings panel to size the offset
+	// slider's range and pick a sensible default offset (the bbox
+	// midpoint along the chosen axis).
+	BBoxMin [3]float32 `json:"bboxMin,omitempty"`
+	BBoxMax [3]float32 `json:"bboxMax,omitempty"`
 }
 
 // NewApp creates a new App instance.
@@ -80,7 +92,16 @@ func NewApp() *App {
 	if dir, err := diskcache.DefaultDir(); err == nil {
 		if d, err := diskcache.Open(dir); err == nil {
 			d.OnError = func(stage, op, key string, err error) {
-				fmt.Fprintf(os.Stderr, "disk cache %s %s [%s]: %v\n", stage, op, key, err)
+				plog.Printf("disk cache %s %s key=%s: %v", stage, op, shortDiskKey(key), err)
+			}
+			d.OnEvict = func(stage, key, description, reason string, sizeBytes, costMs int64, mtime time.Time) {
+				what := description
+				if what == "" {
+					what = stage
+				}
+				plog.Printf("disk cache evict (%s): %s key=%s — %s, %.1fs to generate, %s old",
+					reason, what, shortDiskKey(key), humanSize(sizeBytes),
+					float64(costMs)/1000, humanAge(time.Since(mtime)))
 			}
 			cache.SetDisk(d)
 		} else {
@@ -97,8 +118,56 @@ func NewApp() *App {
 
 const (
 	diskCacheMaxAge   = 7 * 24 * time.Hour
-	diskCacheMaxBytes = 1 << 30 // 1 GiB
+	diskCacheMaxBytes = 1 << 31 // 2 GiB
 )
+
+// humanSize formats a byte count using KB / MB / GB units (1024-based).
+// shortDiskKey returns the first 12 hex chars of a disk-cache key — the
+// same prefix length plog uses for stage cache keys, so eviction logs
+// and stage cache hit/miss logs can be correlated by key.
+func shortDiskKey(key string) string {
+	if key == "" {
+		return "?"
+	}
+	if len(key) > 12 {
+		return key[:12]
+	}
+	return key
+}
+
+// humanAge returns a short human-readable rendering of a Duration.
+// Used by the disk-cache eviction log so the user can see at a glance
+// whether a freshly-generated entry is being thrown away or an
+// ancient one.
+func humanAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%.1fm", d.Minutes())
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	default:
+		return fmt.Sprintf("%.1fd", d.Hours()/24)
+	}
+}
+
+func humanSize(n int64) string {
+	const k = 1024.0
+	f := float64(n)
+	switch {
+	case f >= k*k*k:
+		return fmt.Sprintf("%.1f GB", f/(k*k*k))
+	case f >= k*k:
+		return fmt.Sprintf("%.1f MB", f/(k*k))
+	case f >= k:
+		return fmt.Sprintf("%.1f KB", f/k)
+	}
+	return fmt.Sprintf("%d B", n)
+}
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -212,11 +281,12 @@ func (a *App) Export3MF() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	last := a.lastOpts.Load()
 	defaultName := "output.3mf"
 	defaultDir := ""
-	if a.lastOpts.Input != "" {
-		defaultDir = filepath.Dir(a.lastOpts.Input)
-		base := filepath.Base(a.lastOpts.Input)
+	if last != nil && last.Input != "" {
+		defaultDir = filepath.Dir(last.Input)
+		base := filepath.Base(last.Input)
 		ext := filepath.Ext(base)
 		stem := strings.TrimSuffix(base, ext)
 		if strings.EqualFold(ext, ".3mf") {
@@ -224,6 +294,9 @@ func (a *App) Export3MF() (string, error) {
 		} else {
 			defaultName = stem + ".3mf"
 		}
+	}
+	if last == nil {
+		return "", fmt.Errorf("no model has been processed yet")
 	}
 
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
@@ -241,10 +314,10 @@ func (a *App) Export3MF() (string, error) {
 		return "", nil
 	}
 
-	_, err = pipeline.ExportFile(a.cache, a.lastOpts, path, export3mf.Options{
-		PrinterID:      a.lastOpts.Printer,
-		NozzleDiameter: a.lastOpts.NozzleDiameter,
-		LayerHeight:    a.lastOpts.LayerHeight,
+	_, err = pipeline.ExportFile(a.cache, *last, path, export3mf.Options{
+		PrinterID:      last.Printer,
+		NozzleDiameter: last.NozzleDiameter,
+		LayerHeight:    last.LayerHeight,
 	})
 	if err != nil {
 		return "", err
@@ -357,20 +430,30 @@ func (a *App) processOne(req pipelineRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	plog.Printf("Pipeline gen %d starting: %s (reloadSeq=%d)",
+		req.gen, req.opts.Input, req.opts.ReloadSeq)
+
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelMu.Lock()
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
-		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32) {
+		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32, bboxMin, bboxMax [3]float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
 			a.lastInputID = a.meshes.Store(mesh)
-			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastInputID, PreviewScale: pvScale, ExtentMM: extentMM})
+			wailsRuntime.EventsEmit(a.ctx, "input-mesh", meshEvent{
+				Gen:          req.gen,
+				URL:          "/mesh/" + a.lastInputID,
+				PreviewScale: pvScale,
+				ExtentMM:     extentMM,
+				BBoxMin:      bboxMin,
+				BBoxMax:      bboxMax,
+			})
 		},
 		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Alpha-wrap mode: stickers are carried by a separate mesh
@@ -417,7 +500,7 @@ func (a *App) processOne(req pipelineRequest) {
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			fmt.Printf("Pipeline gen %d cancelled\n", req.gen)
+			plog.Printf("Pipeline gen %d cancelled", req.gen)
 			wailsRuntime.EventsEmit(a.ctx, "pipeline-cancelled", pipelineEvent{Gen: req.gen})
 			return
 		}
@@ -427,7 +510,8 @@ func (a *App) processOne(req pipelineRequest) {
 		})
 		return
 	}
-	a.lastOpts = req.opts
+	optsCopy := req.opts
+	a.lastOpts.Store(&optsCopy)
 
 	if result.OutputMesh != nil {
 		if a.lastOutputID != "" {
@@ -455,12 +539,34 @@ func (a *App) processOne(req pipelineRequest) {
 
 // LogMessage prints a message from the frontend to stdout.
 func (a *App) LogMessage(level, msg string) {
-	fmt.Printf("[JS %s] %s\n", level, msg)
+	plog.Printf("[JS %s] %s", level, msg)
 }
 
 // Version returns the application version string.
 func (a *App) Version() string {
 	return pipeline.Version
+}
+
+// SplitPreview returns the cut-plane geometry for the model that's
+// currently in the cache, computed from the supplied SplitSettings
+// (typically the live values from the Settings panel as the user
+// drags the offset slider). The mesh used is the most recently
+// loaded model — this method does NOT trigger a full pipeline run.
+//
+// Returns an error when the model isn't loaded yet (the user hasn't
+// run the pipeline since startup).
+//
+// Does NOT take a.mu — the worker holds that for the entire
+// duration of a pipeline run, and the slider drag rate (~60Hz)
+// can't tolerate that. lastOpts is read via atomic.Pointer; the
+// cache read is goroutine-safe (disk-backed, no shared in-memory
+// pointer with the worker).
+func (a *App) SplitPreview(s pipeline.SplitSettings) (*pipeline.SplitPreviewResult, error) {
+	last := a.lastOpts.Load()
+	if last == nil {
+		return nil, fmt.Errorf("no model loaded yet")
+	}
+	return pipeline.ComputeSplitPreview(a.cache, *last, s)
 }
 
 // PrinterOption describes one printer + its nozzle/layer-height options for
@@ -707,6 +813,22 @@ type Settings struct {
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
 	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
+	// Split panel state. Plain values matching the rest of the struct.
+	// Files saved before these fields existed lack the keys, which
+	// decode as zero in Go and serialise back as the explicit zero
+	// values on next save. On load, the frontend's TS Settings class
+	// reads missing JSON keys as `undefined`, and applySettings's
+	// `!== undefined` guards preserve in-memory state in that case —
+	// so older files keep round-tripping cleanly.
+	SplitEnabled          bool    `json:"splitEnabled"`
+	SplitAxis             int     `json:"splitAxis"`
+	SplitOffset           float64 `json:"splitOffset"`
+	SplitConnectorStyle   string  `json:"splitConnectorStyle"`
+	SplitConnectorCount   int     `json:"splitConnectorCount"`
+	SplitConnectorDiamMM  float64 `json:"splitConnectorDiamMM"`
+	SplitConnectorDepthMM float64 `json:"splitConnectorDepthMM"`
+	SplitClearanceMM      float64 `json:"splitClearanceMM"`
+	SplitGapMM            float64 `json:"splitGapMM"`
 }
 
 // SaveSettings writes settings to the given path.
@@ -787,6 +909,7 @@ func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
 
 // LoadSettingsFile reads settings from the given path.
 func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
+	plog.Printf("Opening settings file: %s", path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)

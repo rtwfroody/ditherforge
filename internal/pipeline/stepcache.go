@@ -7,13 +7,17 @@ import (
 	"hash/fnv"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rtwfroody/ditherforge/internal/cacheblob"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/split"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -23,7 +27,7 @@ type StageID int
 const (
 	// StageParse parses the input file into a pristine *LoadedModel in
 	// file units, with no transformations applied. Output is small and
-	// only depends on (Input, ObjectIndex, ReloadSeq). Replaced what used
+	// only depends on (Input, ObjectIndex). Replaced what used
 	// to be a separate "raw cache" living outside the stages array.
 	StageParse StageID = iota
 	// StageLoad transforms the parsed model into a usable loadOutput:
@@ -32,6 +36,12 @@ const (
 	// stage's body, not a separate stage — so the on-disk cache for
 	// StageLoad subsumes what used to be a separate alpha-wrap cache.
 	StageLoad
+	// StageSplit cuts the watertight loaded mesh in two and lays the
+	// halves out side-by-side on the bed (see docs/SPLIT.md). The
+	// Decimate, Voxelize, and downstream stages consume the split
+	// output when Options.Split.Enabled is true. When disabled, the
+	// stage is a passthrough.
+	StageSplit
 	StageDecimate
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
@@ -52,6 +62,8 @@ func stageSubdir(s StageID) string {
 		return "parse"
 	case StageLoad:
 		return "load"
+	case StageSplit:
+		return "split"
 	case StageDecimate:
 		return "decimate"
 	case StageSticker:
@@ -74,53 +86,69 @@ func stageSubdir(s StageID) string {
 	return "unknown"
 }
 
-// stageMemoryCap is the per-stage in-memory entry cap. Two slots is enough
-// for the canonical "toggle between A and B" workflow (e.g. LayerHeight
-// 0.2 ↔ 0.12). Cycling through three or more settings still hits disk on
-// the second pass, which is fast for these payloads. Eviction is FIFO by
-// insertion order.
-const stageMemoryCap = 2
-
-// stageMap is a per-stage in-memory cache holding up to cap entries keyed by
-// the unified cache key. Eviction is insertion-order FIFO — we don't promote
-// on read because the goal is "keep the last N computed", not "keep the last
-// N read".
-type stageMap struct {
-	cap     int
-	entries map[string]any
-	order   []string // insertion order; index 0 is oldest
-}
-
-func newStageMap(cap int) *stageMap {
-	return &stageMap{cap: cap, entries: make(map[string]any, cap)}
-}
-
-func (m *stageMap) get(key string) any {
-	return m.entries[key]
-}
-
-func (m *stageMap) put(key string, output any) {
-	if _, ok := m.entries[key]; ok {
-		m.entries[key] = output
-		return
+// stageDescription returns a short human-readable summary of what an
+// entry for (stage, opts) contains. Stored in the disk-cache meta
+// sidecar and printed during sweeps so the operator can see what's
+// being evicted ("Load: foo.glb (alpha-wrap)" beats an opaque hash).
+func stageDescription(stage StageID, opts Options) string {
+	base := filepath.Base(opts.Input)
+	switch stage {
+	case StageParse:
+		return fmt.Sprintf("Parse: %s", base)
+	case StageLoad:
+		s := fmt.Sprintf("Load: %s", base)
+		if opts.AlphaWrap {
+			s += " (alpha-wrap)"
+		}
+		return s
+	case StageSplit:
+		if !opts.Split.Enabled {
+			return fmt.Sprintf("Split: %s (off)", base)
+		}
+		axisName := []string{"X", "Y", "Z"}[opts.Split.Axis]
+		countStr := fmt.Sprintf("×%d", opts.Split.ConnectorCount)
+		if opts.Split.ConnectorCount == 0 {
+			countStr = "×auto"
+		}
+		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
+			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
+	case StageDecimate:
+		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
+	case StageSticker:
+		return fmt.Sprintf("Stickers: %s (%d)", base, len(opts.Stickers))
+	case StageVoxelize:
+		return fmt.Sprintf("Voxelize: %s @ %.2f/%.2fmm", base, opts.NozzleDiameter, opts.LayerHeight)
+	case StageColorAdjust:
+		return fmt.Sprintf("Color adjust: %s (B%+.0f C%+.0f S%+.0f)",
+			base, opts.Brightness, opts.Contrast, opts.Saturation)
+	case StageColorWarp:
+		return fmt.Sprintf("Color warp: %s (%d pins)", base, len(opts.WarpPins))
+	case StagePalette:
+		return fmt.Sprintf("Palette: %s (%d colors)", base, opts.NumColors)
+	case StageDither:
+		mode := opts.Dither
+		if mode == "" {
+			mode = "default"
+		}
+		return fmt.Sprintf("Dither: %s (%s)", base, mode)
+	case StageClip:
+		return fmt.Sprintf("Clip: %s", base)
+	case StageMerge:
+		return fmt.Sprintf("Merge: %s", base)
 	}
-	if len(m.entries) >= m.cap {
-		oldest := m.order[0]
-		m.order = m.order[1:]
-		delete(m.entries, oldest)
-	}
-	m.entries[key] = output
-	m.order = append(m.order, key)
+	return base
 }
 
-// StageCache holds per-stage cached outputs. Each stage has a multi-slot
-// in-memory cache keyed by a unified string key; the same key looks up the
-// stage's gob-encoded representation in the disk cache.
+// StageCache holds per-stage cached outputs as compressed cacheblob
+// bytes on disk. There is no separate in-memory tier of compressed
+// blobs: the OS page cache keeps recent reads resident and decode
+// (zstd + gob) dominates hit latency anyway, so a process-local copy
+// of the same compressed bytes earns very little. Within a single
+// pipeline invocation, pipelineRun (run.go) memoizes the live decoded
+// struct so a stage is decoded at most once per run.
 type StageCache struct {
-	stages [numStages]*stageMap
-
-	// disk persists the gob-encoded outputs of expensive stages across app
-	// restarts. nil = persistence disabled.
+	// disk persists cacheblobs across app restarts. nil = caching
+	// disabled (everything recomputes; tests use this).
 	disk *diskcache.Cache
 
 	// diskWrites tracks async disk-write goroutines so the app can wait
@@ -147,13 +175,10 @@ type StageCache struct {
 	invContents      string
 }
 
-// NewStageCache returns an empty stage cache.
+// NewStageCache returns an empty stage cache with no disk persistence.
+// Use SetDisk to attach a disk tier.
 func NewStageCache() *StageCache {
-	c := &StageCache{}
-	for i := range c.stages {
-		c.stages[i] = newStageMap(stageMemoryCap)
-	}
-	return c
+	return &StageCache{}
 }
 
 // SetDisk attaches a disk cache. Call this once after NewStageCache; passing
@@ -169,21 +194,17 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 //   - on a miss, times the body, lets body emit its own progress markers
 //     (some stages are spinners, some have determinate progress bars from
 //     inner functions like DecimateMesh / VoxelizeTwoGrids), and on
-//     success records the wall-clock duration as a sidecar metadata file
-//     so Sweep can make cost-aware eviction decisions.
+//     success calls stampCost to back-fill the disk meta sidecar with
+//     the wall-clock generation time.
 //
-// body is responsible for storing its result via cache.set… before
-// returning. This keeps the helper a pure cross-cut concern (cache check
-// + UI marker + cost recording) without coupling it to each stage's
-// typed output.
+// body is responsible only for producing and persisting the stage's
+// result. In normal use, callers reach this helper via runStage (in
+// run.go), which wraps body to memoize the live pointer into
+// pipelineRun and queue the async cache.set. After body returns
+// successfully, runStageCached calls stampCost to back-fill the
+// disk-side meta sidecar with description and wall-clock duration.
 //
-// Pattern:
-//
-//	return runStageCached(cache, StageDecimate, opts, tracker, func() error {
-//	    ...
-//	    cache.setDecimate(opts, &decimateOutput{...})
-//	    return nil
-//	})
+// Direct callers are rare; prefer runStage.
 func runStageCached(
 	cache *StageCache,
 	stage StageID,
@@ -191,53 +212,55 @@ func runStageCached(
 	tracker progress.Tracker,
 	body func() error,
 ) error {
+	name := stageNames[stage]
+	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
 	v, src := cache.getWithSource(stage, opts)
 	if v != nil {
-		fmt.Printf("%s: cache hit (%s, %s)\n", stageNames[stage],
-			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond))
-		progress.BeginStage(tracker, stageNames[stage], false, 0).Done()
+		plog.Printf("%s: cache hit (%s, %s) key=%s", name,
+			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
+			shortKey(key))
+		progress.BeginStage(tracker, name, false, 0).Done()
 		return nil
 	}
+	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
 	if err := body(); err != nil {
 		// Errored runs don't record cost. The body may not have
-		// written the data file (or wrote a partial), so a meta
+		// written its result (or wrote a partial), so a meta
 		// pointing at it would be misleading.
+		plog.Printf("%s: failed after %s — %v", name,
+			time.Since(start).Round(time.Millisecond), err)
 		return err
 	}
-	cache.recordCost(stage, opts, time.Since(start))
+	plog.Printf("%s: done in %s", name,
+		time.Since(start).Round(time.Millisecond))
+	// Body wrote the blob via the typed setter. Stamp the disk
+	// meta sidecar with description and wall-clock cost so the
+	// next sweep can rank this entry correctly.
+	cache.stampCost(stage, opts, time.Since(start))
 	return nil
+}
+
+// shortKey returns the first 12 hex chars of a stage cache key — enough
+// to disambiguate runs in console logs without dumping the full SHA. An
+// empty key (input file unhashable) renders as "?".
+func shortKey(key string) string {
+	if key == "" {
+		return "?"
+	}
+	if len(key) > 12 {
+		return key[:12]
+	}
+	return key
 }
 
 // hitSourceLabel returns a short label for console messages.
 func hitSourceLabel(s hitSource) string {
-	switch s {
-	case hitMemory:
-		return "memory"
-	case hitDisk:
+	if s == hitDisk {
 		return "disk"
 	}
 	return "miss"
-}
-
-// recordCost writes the sidecar metadata file capturing how long the
-// stage took to run. Async like Set, tracked by the same WaitGroup so
-// shutdown can wait for it. Failures go to OnError, never returned.
-// No-op when disk persistence is disabled.
-func (c *StageCache) recordCost(stage StageID, opts Options, cost time.Duration) {
-	if c.disk == nil {
-		return
-	}
-	key := c.stageKey(stage, opts)
-	if key == "" {
-		return
-	}
-	c.diskWrites.Add(1)
-	go func() {
-		defer c.diskWrites.Done()
-		c.disk.RecordCost(stageSubdir(stage), key, cost)
-	}()
 }
 
 // WaitForDiskWrites blocks until all in-flight async disk writes have
@@ -441,7 +464,35 @@ type colorWarpOutput struct {
 }
 
 type decimateOutput struct {
+	// DecimModel is populated for the unsplit path. nil when split is
+	// enabled.
 	DecimModel *loader.LoadedModel
+	// Halves is populated for the split path: per-half decimated
+	// laid-out meshes. Both indices nil when split is disabled.
+	Halves [2]*loader.LoadedModel
+}
+
+// splitOutput is the result of cutting a watertight model in two and
+// laying the halves out side-by-side on the bed. Halves are in bed
+// coordinates (post-Layout); Xform[i] is the forward transform from
+// original-mesh coords to bed coords for half i (Voxelize calls
+// ApplyInverse to map cell centroids back to original coords for
+// color sampling).
+//
+// When Options.Split.Enabled is false, splitOutput.Enabled is false
+// and downstream stages take their non-split path.
+//
+// CONSUMERS MUST GATE ON `Enabled`, NEVER ON `Halves[i] == nil`.
+// loader.LoadedModel.GobEncode handles nil receivers by encoding
+// an empty model, which decodes as a non-nil zero LoadedModel. So
+// after a disk-cache round-trip, Halves[0]/Halves[1] are non-nil
+// even when Enabled is false. Only the Enabled bit is reliable.
+type splitOutput struct {
+	Enabled   bool
+	Halves    [2]*loader.LoadedModel
+	Xform     [2]split.Transform
+	CutNormal [3]float64 // outward normal from half 0 toward half 1
+	CutPlaneD float64
 }
 
 type paletteOutput struct {
@@ -461,6 +512,12 @@ type clipOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	// ShellHalfIdx is parallel to ShellFaces; non-nil only when Split
+	// is enabled, in which case each face is tagged with the half it
+	// came from. Downstream Merge keeps it parallel through the
+	// per-half merge pass; Export uses it (eventually) to emit one
+	// 3MF <object> entry per half.
+	ShellHalfIdx []byte
 }
 
 // mergeOutput has the same structure as clipOutput. When NoMerge is true,
@@ -470,6 +527,7 @@ type mergeOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	ShellHalfIdx     []byte // parallel to ShellFaces; nil when Split disabled
 }
 
 // --- Per-stage settings structs for cache key computation ---
@@ -483,16 +541,22 @@ type mergeOutput struct {
 // parseSettings is what affects the parsed-from-file *LoadedModel.
 // File-content invariants live elsewhere (the stageKey cascade adds the
 // sha256 of the file's bytes, so identical bytes hit the same cache).
+//
+// ReloadSeq deliberately is NOT here. It's a frontend-only mechanism
+// for re-triggering reactive $effects when the user re-selects the
+// same input path; including it in the cache key would make cache
+// hits depend on which UI gesture loaded the file (direct .glb open
+// bumps reloadSeq; loading a .json settings file does not), even
+// when the actual file content and pipeline settings are identical.
 type parseSettings struct {
 	Input       string
-	ReloadSeq   int64
 	ObjectIndex int
 }
 
 // loadSettings is what affects the post-parse loadOutput: scale,
 // normalize, alpha-wrap. The cumulative cascade key for StageLoad
-// includes parseSettings via stageFnv(StageParse), so changing Input or
-// ReloadSeq also invalidates StageLoad.
+// includes parseSettings via stageFnv(StageParse), so changing Input
+// also invalidates StageLoad.
 type loadSettings struct {
 	Scale           float32
 	HasSize         bool
@@ -540,6 +604,23 @@ type decimateSettings struct {
 	NoSimplify     bool
 	NozzleDiameter float32
 	LayerHeight    float32
+}
+
+// splitSettings is what affects StageSplit's output. When Enabled is
+// false, only the Enabled bit is hashed so a disabled-Split run
+// produces the same downstream cache keys it would have produced
+// before the Split feature shipped. Toggling other fields while
+// Enabled=false does not invalidate the cache.
+type splitSettings struct {
+	Enabled         bool
+	Axis            int
+	Offset          float64
+	ConnectorStyle  string
+	ConnectorCount  int
+	ConnectorDiamMM  float64
+	ConnectorDepthMM float64
+	ClearanceMM      float64
+	GapMM            float64
 }
 
 type paletteSettings struct {
@@ -593,7 +674,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageParse:
 		return parseSettings{
 			Input:       opts.Input,
-			ReloadSeq:   opts.ReloadSeq,
 			ObjectIndex: opts.ObjectIndex,
 		}
 	case StageLoad:
@@ -620,6 +700,23 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
 		return colorWarpSettings{WarpPins: opts.WarpPins}
+	case StageSplit:
+		// When disabled, only the Enabled bit affects the key; this
+		// preserves cache-hit equivalence with the pre-Split path.
+		if !opts.Split.Enabled {
+			return splitSettings{Enabled: false}
+		}
+		return splitSettings{
+			Enabled:          true,
+			Axis:             opts.Split.Axis,
+			Offset:           opts.Split.Offset,
+			ConnectorStyle:   opts.Split.ConnectorStyle,
+			ConnectorCount:   opts.Split.ConnectorCount,
+			ConnectorDiamMM:  opts.Split.ConnectorDiamMM,
+			ConnectorDepthMM: opts.Split.ConnectorDepthMM,
+			ClearanceMM:      opts.Split.ClearanceMM,
+			GapMM:            opts.Split.GapMM,
+		}
 	case StageDecimate:
 		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
@@ -650,7 +747,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 	switch v := s.(type) {
 	case parseSettings:
 		writeString(h, v.Input)
-		binary.Write(h, binary.LittleEndian, v.ReloadSeq)
 		writeInt(h, v.ObjectIndex)
 	case loadSettings:
 		writeFloat32(h, v.Scale)
@@ -698,6 +794,18 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 			writeString(h, p.TargetHex)
 			writeFloat64(h, p.Sigma)
 		}
+	case splitSettings:
+		writeBool(h, v.Enabled)
+		if v.Enabled {
+			writeInt(h, v.Axis)
+			writeFloat64(h, v.Offset)
+			writeString(h, v.ConnectorStyle)
+			writeInt(h, v.ConnectorCount)
+			writeFloat64(h, v.ConnectorDiamMM)
+			writeFloat64(h, v.ConnectorDepthMM)
+			writeFloat64(h, v.ClearanceMM)
+			writeFloat64(h, v.GapMM)
+		}
 	case decimateSettings:
 		writeBool(h, v.NoSimplify)
 		writeFloat32(h, v.NozzleDiameter)
@@ -737,6 +845,8 @@ func allocOutput(stage StageID) any {
 		return &loader.LoadedModel{}
 	case StageLoad:
 		return &loadOutput{}
+	case StageSplit:
+		return &splitOutput{}
 	case StageDecimate:
 		return &decimateOutput{}
 	case StageSticker:
@@ -759,74 +869,113 @@ func allocOutput(stage StageID) any {
 	return nil
 }
 
-// hitSource indicates where a cache hit came from. Used to drive the
-// console message in runStageCached so the user can see whether disk
-// caching is paying off (disk hits) or just same-session repetition
-// (memory hits).
+// hitSource indicates where a cache hit came from. Currently only the
+// disk tier produces hits (in-process compressed-byte caching was
+// removed because the OS page cache + pipelineRun memoization already
+// cover what it would have provided).
 type hitSource int
 
 const (
 	hitMiss hitSource = iota
-	hitMemory
 	hitDisk
 )
 
 // get returns the cached output for the given stage and opts, or nil on
-// miss. Tries memory first; on miss, tries disk and warms memory on a hit.
-// Every stage is treated identically — there are no stages with special
-// caching rules.
+// miss. Every stage is treated identically — there are no stages with
+// special caching rules.
 func (c *StageCache) get(stage StageID, opts Options) any {
 	v, _ := c.getWithSource(stage, opts)
 	return v
 }
 
 // getWithSource is get plus an indicator of where the hit came from.
-// Used by runStageCached for the console "cache hit" message.
+// On a hit, decodes the blob into a freshly allocated output struct.
+// A blob that fails to decode (corrupted file, format change) is
+// deleted so the next access misses cleanly and recomputes.
 func (c *StageCache) getWithSource(stage StageID, opts Options) (any, hitSource) {
 	key := c.stageKey(stage, opts)
-	if key == "" {
+	if key == "" || c.disk == nil {
 		return nil, hitMiss
 	}
-	if v := c.stages[stage].get(key); v != nil {
-		return v, hitMemory
-	}
-	if c.disk == nil {
+	subdir := stageSubdir(stage)
+	blob := c.disk.GetBlob(subdir, key)
+	if blob == nil {
 		return nil, hitMiss
 	}
 	out := allocOutput(stage)
 	if out == nil {
 		return nil, hitMiss
 	}
-	if !c.disk.Get(stageSubdir(stage), key, out) {
+	if err := cacheblob.Decode(blob, out); err != nil {
+		c.disk.Remove(subdir, key)
 		return nil, hitMiss
 	}
-	c.stages[stage].put(key, out)
 	return out, hitDisk
 }
 
-// set stores output for the given stage and opts in memory and async-writes
-// it to disk.
+// set spawns a goroutine that encodes output and writes the resulting
+// blob to disk. Description and cost are filled in by stampCost,
+// which runStageCached calls after the body returns and the
+// wall-clock duration is known.
 //
-// Concurrency contract: after calling set, callers must treat output as
-// read-only. The disk-write goroutine reads it concurrently with downstream
-// stages; concurrent reads of immutable data are race-free.
+// Encoding happens off the calling goroutine deliberately: encoding a
+// multi-hundred-MB stage output allocates aggressively, and doing
+// that synchronously on the pipeline worker thread piled on memory
+// pressure right before CGO calls into native libraries (alpha-wrap,
+// renderer). That timing reliably tripped a SIGSEGV in a C++ runtime
+// signal handler that wasn't SA_ONSTACK-clean. Async encoding spreads
+// the allocation pressure over time and keeps the calling goroutine
+// thin.
+//
+// Lifetime: after set returns, the caller's local pointer is the
+// only live decoded copy. The encoder goroutine reads it
+// concurrently with downstream stages; concurrent reads of immutable
+// data are race-free, but the caller must not mutate.
 func (c *StageCache) set(stage StageID, opts Options, output any) {
 	key := c.stageKey(stage, opts)
-	if key == "" {
+	if key == "" || c.disk == nil {
 		return
 	}
-	c.stages[stage].put(key, output)
-	if c.disk == nil {
-		return
-	}
+	subdir := stageSubdir(stage)
 	c.diskWrites.Add(1)
 	go func() {
 		defer c.diskWrites.Done()
-		c.disk.Set(stageSubdir(stage), key, output)
+		blob, err := cacheblob.Encode(output)
+		if err != nil {
+			return
+		}
+		c.disk.SetBlob(subdir, key, blob)
 	}()
 }
 
-// Typed wrappers — return the concrete output type for each stage.
+// stampCost back-fills the disk-side meta sidecar with description and
+// wall-clock cost for the entry the most recent typed setter wrote.
+// Async; tracked by diskWrites so shutdown waits for it.
+//
+// Best-effort under same-key contention: if two pipeline runs produce
+// the same key in quick succession, their stampCost goroutines may
+// land out of order, leaving the meta with the wrong cost. The blob
+// is still correct (last writer wins on the data file too) and an
+// off-by-one cost only mildly skews future eviction scoring; not
+// worth a per-key serializer.
+func (c *StageCache) stampCost(stage StageID, opts Options, cost time.Duration) {
+	key := c.stageKey(stage, opts)
+	if key == "" || c.disk == nil {
+		return
+	}
+	subdir := stageSubdir(stage)
+	description := stageDescription(stage, opts)
+	c.diskWrites.Add(1)
+	go func() {
+		defer c.diskWrites.Done()
+		c.disk.RecordCost(subdir, key, description, cost)
+	}()
+}
+
+// Typed getters — return the concrete output type for each stage.
+// Used by callers outside the pipeline-run flow (e.g. pipeline.go's
+// post-run consumers, applyBaseColor). The per-stage Run methods use
+// runStage's generic c.get instead.
 
 func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
 	v := c.get(StageParse, opts)
@@ -834,10 +983,6 @@ func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
 		return nil
 	}
 	return v.(*loader.LoadedModel)
-}
-
-func (c *StageCache) setParse(opts Options, m *loader.LoadedModel) {
-	c.set(StageParse, opts, m)
 }
 
 func (c *StageCache) getLoad(opts Options) *loadOutput {
@@ -848,70 +993,6 @@ func (c *StageCache) getLoad(opts Options) *loadOutput {
 	return v.(*loadOutput)
 }
 
-func (c *StageCache) setLoad(opts Options, lo *loadOutput) {
-	c.set(StageLoad, opts, lo)
-}
-
-func (c *StageCache) getDecimate(opts Options) *decimateOutput {
-	v := c.get(StageDecimate, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*decimateOutput)
-}
-
-func (c *StageCache) setDecimate(opts Options, do *decimateOutput) {
-	c.set(StageDecimate, opts, do)
-}
-
-func (c *StageCache) getSticker(opts Options) *stickerOutput {
-	v := c.get(StageSticker, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*stickerOutput)
-}
-
-func (c *StageCache) setSticker(opts Options, so *stickerOutput) {
-	c.set(StageSticker, opts, so)
-}
-
-func (c *StageCache) getVoxelize(opts Options) *voxelizeOutput {
-	v := c.get(StageVoxelize, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*voxelizeOutput)
-}
-
-func (c *StageCache) setVoxelize(opts Options, vo *voxelizeOutput) {
-	c.set(StageVoxelize, opts, vo)
-}
-
-func (c *StageCache) getColorAdjust(opts Options) *colorAdjustOutput {
-	v := c.get(StageColorAdjust, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*colorAdjustOutput)
-}
-
-func (c *StageCache) setColorAdjust(opts Options, cao *colorAdjustOutput) {
-	c.set(StageColorAdjust, opts, cao)
-}
-
-func (c *StageCache) getColorWarp(opts Options) *colorWarpOutput {
-	v := c.get(StageColorWarp, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*colorWarpOutput)
-}
-
-func (c *StageCache) setColorWarp(opts Options, cwo *colorWarpOutput) {
-	c.set(StageColorWarp, opts, cwo)
-}
-
 func (c *StageCache) getPalette(opts Options) *paletteOutput {
 	v := c.get(StagePalette, opts)
 	if v == nil {
@@ -920,43 +1001,11 @@ func (c *StageCache) getPalette(opts Options) *paletteOutput {
 	return v.(*paletteOutput)
 }
 
-func (c *StageCache) setPalette(opts Options, po *paletteOutput) {
-	c.set(StagePalette, opts, po)
-}
-
-func (c *StageCache) getDither(opts Options) *ditherOutput {
-	v := c.get(StageDither, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*ditherOutput)
-}
-
-func (c *StageCache) setDither(opts Options, do *ditherOutput) {
-	c.set(StageDither, opts, do)
-}
-
-func (c *StageCache) getClip(opts Options) *clipOutput {
-	v := c.get(StageClip, opts)
-	if v == nil {
-		return nil
-	}
-	return v.(*clipOutput)
-}
-
-func (c *StageCache) setClip(opts Options, co *clipOutput) {
-	c.set(StageClip, opts, co)
-}
-
 func (c *StageCache) getMerge(opts Options) *mergeOutput {
 	v := c.get(StageMerge, opts)
 	if v == nil {
 		return nil
 	}
 	return v.(*mergeOutput)
-}
-
-func (c *StageCache) setMerge(opts Options, mo *mergeOutput) {
-	c.set(StageMerge, opts, mo)
 }
 

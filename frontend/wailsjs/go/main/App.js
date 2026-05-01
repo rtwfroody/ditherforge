@@ -90,6 +90,10 @@ export function SaveSettingsDialog(arg1) {
   return window['go']['main']['App']['SaveSettingsDialog'](arg1);
 }
 
+export function SplitPreview(arg1) {
+  return window['go']['main']['App']['SplitPreview'](arg1);
+}
+
 export function Version() {
   return window['go']['main']['App']['Version']();
 }

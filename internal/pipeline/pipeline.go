@@ -19,6 +19,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -57,6 +58,24 @@ type Options struct {
 	AlphaWrap       bool    // enable CGAL Alpha_wrap_3 post-load mesh cleanup
 	AlphaWrapAlpha  float32 // mm; 0 = auto (5 × NozzleDiameter)
 	AlphaWrapOffset float32 // mm; 0 = auto (alpha / 30)
+	Split           SplitSettings `json:"Split,omitempty"`
+}
+
+// SplitSettings controls the optional Split stage that cuts a model
+// into two halves with peg/pocket connectors and lays them out
+// side-by-side on the bed. The zero value disables the stage; the
+// pipeline runs bit-identically to the pre-Split path. See
+// docs/SPLIT.md for the architecture.
+type SplitSettings struct {
+	Enabled         bool
+	Axis            int     // 0=X, 1=Y, 2=Z
+	Offset          float64 // model-space, along Axis
+	ConnectorStyle  string  // "none", "pegs", "dowels"
+	ConnectorCount  int     // 0 = auto, 1..3 explicit
+	ConnectorDiamMM  float64
+	ConnectorDepthMM float64
+	ClearanceMM      float64
+	GapMM            float64
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
@@ -80,7 +99,14 @@ type WarpPin struct {
 
 // Callbacks groups optional callbacks for a pipeline run.
 type Callbacks struct {
-	OnInputMesh func(*MeshData, float32, float32) // mesh, preview scale, native extent mm
+	// OnInputMesh receives:
+	//   mesh         — the preview-format mesh data
+	//   previewScale — multiply by this to convert pipeline coords back to preview coords
+	//   nativeExtentMM — native max bounding-box extent in mm
+	//   bboxMin, bboxMax — original-mesh-coord bbox (in mm, post-scale, post-normalizeZ).
+	//                       Used by the Split Settings panel to size the
+	//                       offset slider per axis.
+	OnInputMesh func(mesh *MeshData, previewScale, nativeExtentMM float32, bboxMin, bboxMax [3]float32)
 	// OnStickerOverlay is fired when stickers are placed on a mesh
 	// distinct from the input mesh — i.e. the alpha-wrap surface. The
 	// overlay should be rendered on top of the input mesh, biased
@@ -100,6 +126,7 @@ type Callbacks struct {
 var stageNames = map[StageID]string{
 	StageParse:       "Parsing",
 	StageLoad:        "Loading",
+	StageSplit:       "Splitting",
 	StageVoxelize:    "Voxelizing",
 	StageSticker:     "Applying stickers",
 	StageDecimate:    "Decimating",
@@ -165,7 +192,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Extract callbacks, using safe defaults for nil.
-	var onInputMesh func(*MeshData, float32, float32)
+	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var onWarning func(string)
@@ -238,7 +265,25 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
 		mesh = scalePreviewMesh(mesh, lo.PreviewScale)
-		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM)
+		// Compute the original-mesh-coord bbox (in mm, post-scale,
+		// post-normalizeZ). Used by the Split UI to size the offset
+		// slider per axis.
+		var bboxMin, bboxMax [3]float32
+		if len(lo.ColorModel.Vertices) > 0 {
+			bboxMin = lo.ColorModel.Vertices[0]
+			bboxMax = lo.ColorModel.Vertices[0]
+			for _, v := range lo.ColorModel.Vertices[1:] {
+				for i := 0; i < 3; i++ {
+					if v[i] < bboxMin[i] {
+						bboxMin[i] = v[i]
+					}
+					if v[i] > bboxMax[i] {
+						bboxMax[i] = v[i]
+					}
+				}
+			}
+		}
+		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
 
 		if onStickerOverlay != nil {
 			var overlay *MeshData
@@ -341,6 +386,13 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 // call so the cache lookups hit.
 // Returns the number of faces in the output.
 func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts export3mf.Options) (int, error) {
+	// Stage outputs are written to disk asynchronously by runStage, and
+	// ExportFile reads them back from disk. After a fresh RunCached the
+	// writes may still be in flight (a 1M-face merge encode takes
+	// seconds). Block on them so the lookups below see the just-written
+	// blobs instead of reporting "pipeline has not been run yet".
+	cache.WaitForDiskWrites()
+
 	lo := cache.getLoad(opts)
 	po := cache.getPalette(opts)
 	mo := cache.getMerge(opts)
@@ -350,18 +402,27 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 
 	outModel := buildOutputModel(lo.ColorModel, mo)
 
-	fmt.Printf("Exporting %s...", outputPath)
+	plog.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
 	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, exportOpts); err != nil {
 		return 0, fmt.Errorf("exporting 3MF: %w", err)
 	}
-	fmt.Printf(" done in %.1fs\n", time.Since(tExport).Seconds())
+	plog.Printf("Exported in %.1fs", time.Since(tExport).Seconds())
 
 	return len(outModel.Faces), nil
 }
 
 // buildOutputModel constructs a LoadedModel from merge output, suitable for
 // export or preview mesh building.
+//
+// When the merge output carries a per-face HalfIdx (Split was
+// enabled), the result's FaceMeshIdx is populated from it and
+// NumMeshes is set to 2. NO CURRENT CONSUMER READS THESE FIELDS —
+// the wiring is preparatory for the Phase 7 follow-up in
+// internal/export3mf, which will iterate per FaceMeshIdx group to
+// emit two `<object>` entries. Until that lands, the export path
+// emits a single `<object>` containing both halves with the
+// bed-layout gap between them.
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
@@ -372,13 +433,22 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 		textures = []image.Image{placeholder}
 	}
 
-	return &loader.LoadedModel{
+	out := &loader.LoadedModel{
 		Vertices:       mo.ShellVerts,
 		Faces:          mo.ShellFaces,
 		UVs:            make([][2]float32, len(mo.ShellVerts)),
 		Textures:       textures,
 		FaceTextureIdx: make([]int32, len(mo.ShellFaces)),
 	}
+	if mo.ShellHalfIdx != nil {
+		faceMeshIdx := make([]int32, len(mo.ShellHalfIdx))
+		for i, h := range mo.ShellHalfIdx {
+			faceMeshIdx[i] = int32(h)
+		}
+		out.FaceMeshIdx = faceMeshIdx
+		out.NumMeshes = 2
+	}
+	return out
 }
 
 // applyBaseColorOverride sets the base color for all untextured faces to the
@@ -452,44 +522,65 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	lo.appliedBaseColor = opts.BaseColor
 }
 
-// floodFillTwoGrids runs flood fill separately for each grid and merges results.
+// floodFillTwoGrids runs flood fill separately for each (Grid,
+// HalfIdx) partition and merges results. Partitioning by HalfIdx is
+// load-bearing for the Split path: FloodFillPatches operates on
+// CellKey index-arithmetic adjacency, not spatial adjacency, so two
+// halves whose CellKey columns happen to be adjacent in index space
+// (which can happen when GapMM < cellSize) would otherwise have
+// patches bridging across the bed-layout gap. With this partition,
+// patches are guaranteed to live in exactly one (Grid, HalfIdx) pair.
 func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
-	// Partition cells by grid.
-	var cells0, cells1 []voxel.ActiveCell
-	var assign0, assign1 []int32
-	idx0 := make([]int, 0, len(cells))
-	idx1 := make([]int, 0, len(cells))
+	// Up to 4 partitions: (Grid 0/1) × (HalfIdx 0/1). Empty groups are
+	// skipped; the unsplit path produces only HalfIdx=0 entries.
+	type partKey struct {
+		grid    uint8
+		halfIdx uint8
+	}
+	parts := make(map[partKey]*struct {
+		cells   []voxel.ActiveCell
+		assigns []int32
+	})
 	for i, c := range cells {
-		if c.Grid == 0 {
-			cells0 = append(cells0, c)
-			assign0 = append(assign0, assignments[i])
-			idx0 = append(idx0, i)
-		} else {
-			cells1 = append(cells1, c)
-			assign1 = append(assign1, assignments[i])
-			idx1 = append(idx1, i)
+		k := partKey{grid: c.Grid, halfIdx: c.HalfIdx}
+		p, ok := parts[k]
+		if !ok {
+			p = &struct {
+				cells   []voxel.ActiveCell
+				assigns []int32
+			}{}
+			parts[k] = p
 		}
+		p.cells = append(p.cells, c)
+		p.assigns = append(p.assigns, assignments[i])
 	}
 
 	var counter atomic.Int64
-	pm0, n0, err := voxel.FloodFillPatches(ctx, cells0, assign0, tracker, &counter)
-	if err != nil {
-		return nil, 0, err
-	}
-	pm1, n1, err := voxel.FloodFillPatches(ctx, cells1, assign1, tracker, &counter)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Merge: offset grid-1 patch IDs by n0.
 	merged := make(map[voxel.CellKey]int, len(cells))
-	for k, v := range pm0 {
-		merged[k] = v
+	totalPatches := 0
+	// Iterate parts in a deterministic order so patch IDs are stable
+	// across runs (matters for cache stability on downstream stages).
+	order := []partKey{
+		{grid: 0, halfIdx: 0},
+		{grid: 0, halfIdx: 1},
+		{grid: 1, halfIdx: 0},
+		{grid: 1, halfIdx: 1},
 	}
-	for k, v := range pm1 {
-		merged[k] = v + n0
+	for _, k := range order {
+		p, ok := parts[k]
+		if !ok {
+			continue
+		}
+		pm, n, err := voxel.FloodFillPatches(ctx, p.cells, p.assigns, tracker, &counter)
+		if err != nil {
+			return nil, 0, err
+		}
+		for ck, v := range pm {
+			merged[ck] = v + totalPatches
+		}
+		totalPatches += n
 	}
-	return merged, n0 + n1, nil
+	return merged, totalPatches, nil
 }
 
 
@@ -586,7 +677,7 @@ func normalizeZ(model *loader.LoadedModel) {
 }
 
 func printStats(assignments []int32, paletteRGB [][3]uint8) {
-	fmt.Println("  Face counts per material:")
+	plog.Println("  Face counts per material:")
 	for i, p := range paletteRGB {
 		hexColor := fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2])
 		count := 0
@@ -595,6 +686,6 @@ func printStats(assignments []int32, paletteRGB [][3]uint8) {
 				count++
 			}
 		}
-		fmt.Printf("    [%d] %s: %d faces\n", i, hexColor, count)
+		plog.Printf("    [%d] %s: %d faces", i, hexColor, count)
 	}
 }

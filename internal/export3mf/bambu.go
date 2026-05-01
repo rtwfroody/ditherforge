@@ -92,7 +92,10 @@ func exportBambu(
 	creationDate := time.Now().UTC().Format("2006-01-02")
 
 	mainModel := buildBambuMainModel(applicationTag, creationDate, objID, buildID, componentID, buildItemID, buildTransform)
-	objectModel := buildObjectModel(model, assignments, subObjID)
+	// Bambu is single-object today (no Split support yet); inner
+	// object id stays 1, matching what buildBambuMainModel's outer
+	// component references (objectid="1").
+	objectModel := buildObjectModel(model, assignments, subObjID, 1)
 	modelSettings := buildBambuModelSettings(model)
 	projectSettings, err := buildBambuProjectSettings(printer, nozzle, machineProfile, filamentProfile, paletteRGB, opts.LayerHeight, variants)
 	if err != nil {
