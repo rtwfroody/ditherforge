@@ -228,7 +228,6 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 // round-trip on the peg tip recovers the peg-tip's original-coord
 // position.
 func TestLayout_PegOnBed(t *testing.T) {
-	t.Skip("connectors stubbed pending CGAL boolean re-implementation")
 	verts := [][3]float32{
 		{0, 0, 0}, {50, 0, 0}, {50, 50, 0}, {0, 50, 0},
 		{0, 0, 50}, {50, 0, 50}, {50, 50, 50}, {0, 50, 50},

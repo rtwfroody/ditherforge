@@ -14,7 +14,6 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/cgalclip"
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/plog"
 )
 
 // Plane is a 3D plane in original-mesh coordinates. A point p lies on
@@ -84,27 +83,18 @@ type CutResult struct {
 // multi-component / nested-cavity cases — robustly via exact
 // predicates.
 //
-// connectors is currently a no-op stub: the connector placement code
-// in connectors.go relied on hand-rolled cap-polygon access from the
-// old cutter. Re-adding connectors as boolean operations on the
-// CGAL-cut halves is a follow-up. Pass ConnectorSettings{} for now;
-// non-zero settings log a warning but otherwise do nothing.
+// When connectors.Style is Pegs or Dowels, applyConnectors recovers
+// the cap polygon, places connector centers, builds peg/pocket
+// cylinders, and applies CGAL boolean operations to bake them into
+// the halves. Per-connector failures isolate: any one failure logs a
+// warning and the rest of the pipeline continues. Total connector
+// failure leaves the halves with flat caps.
 func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (*CutResult, error) {
 	if model == nil || len(model.Vertices) == 0 || len(model.Faces) == 0 {
 		return nil, fmt.Errorf("split.Cut: empty model")
 	}
 	if !isUnitNormal(plane.Normal) {
 		return nil, fmt.Errorf("split.Cut: plane normal is not unit-length: %v", plane.Normal)
-	}
-
-	// TODO: re-implement connectors (Pegs/Dowels) as boolean ops on
-	// the clipped halves — generate a peg cylinder mesh, union into
-	// half[0], subtract from half[1] with clearance offset. Until
-	// then, surface the dropped setting so the user knows it's a
-	// no-op rather than silently honouring "ConnectorStyle: pegs"
-	// from a saved settings file.
-	if connectors.Style != NoConnectors {
-		plog.Printf("  Split: connectors are temporarily not supported with the CGAL cut; producing flat caps (style=%v will be re-added in a follow-up)", connectors.Style)
 	}
 
 	// Clip both halves concurrently. Each call pays the full CGAL
@@ -135,6 +125,8 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 			return nil, fmt.Errorf("split.Cut: half %d: %w", i, errs[i])
 		}
 	}
+
+	halves = applyConnectors(halves, plane, connectors)
 
 	return &CutResult{
 		Halves: halves,
