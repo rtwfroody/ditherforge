@@ -59,26 +59,27 @@ func (t Transform) ApplyInverse(p [3]float32) [3]float32 {
 // −result.Plane.Normal. Half 0 ends up to the −X side, half 1 to the
 // +X side.
 //
-// Note: `min.z = 0` puts the cap on the bed for halves whose lowest
-// extent in the cap-normal direction is the cap itself. This holds
-// for NoConnectors and Dowels (the dowel pocket extends INTO the
-// half's solid, away from the cap). For Pegs, the male peg extends
-// OUT of the half's solid past the cap, so after layout the peg
-// tip rests on the bed and the cap is elevated by the peg depth.
-// The user-facing implication is that the male peg requires either
-// a flip-and-glue assembly step or print-orientation tweak — see
-// docs/SPLIT.md "Phase 3 follow-ups" for the discussion.
+// When result.CapUp[h] is set, half h is oriented cap-up instead
+// (outward cap normal points to +Z). This is used for the male-peg
+// half so the peg tips print pointing upward rather than hanging
+// off the build plate. The bbox-min-z=0 shift still applies, so the
+// half rests with its lowest non-cap point on the bed.
 func Layout(result *CutResult, gapMM float64) [2]Transform {
 	plane := result.Plane
 	var xforms [2]Transform
 
-	// Step 1: cap-to-bed rotation per half.
+	// Step 1: cap-to-bed (or cap-up) rotation per half.
 	capNormals := [2][3]float64{
 		plane.Normal,
 		{-plane.Normal[0], -plane.Normal[1], -plane.Normal[2]},
 	}
 	for h := 0; h < 2; h++ {
-		R := rotationToNegZ(capNormals[h])
+		var R [9]float64
+		if result.CapUp[h] {
+			R = rotationToPosZ(capNormals[h])
+		} else {
+			R = rotationToNegZ(capNormals[h])
+		}
 		for i, v := range result.Halves[h].Vertices {
 			result.Halves[h].Vertices[i] = applyRotation(R, v)
 		}
@@ -168,6 +169,38 @@ func rotationToNegZ(a [3]float64) [9]float64 {
 	}
 	// Rodrigues' formula: axis = a × target (normalised), angle =
 	// acos(a · target).
+	ax := a[1]*target[2] - a[2]*target[1]
+	ay := a[2]*target[0] - a[0]*target[2]
+	az := a[0]*target[1] - a[1]*target[0]
+	axisLen := math.Sqrt(ax*ax + ay*ay + az*az)
+	ax /= axisLen
+	ay /= axisLen
+	az /= axisLen
+	angle := math.Acos(dot)
+	c := math.Cos(angle)
+	s := math.Sin(angle)
+	omc := 1 - c
+	return [9]float64{
+		c + ax*ax*omc, ax*ay*omc - az*s, ax*az*omc + ay*s,
+		ay*ax*omc + az*s, c + ay*ay*omc, ay*az*omc - ax*s,
+		az*ax*omc - ay*s, az*ay*omc + ax*s, c + az*az*omc,
+	}
+}
+
+// rotationToPosZ returns the row-major 3×3 rotation that maps the unit
+// vector a to (0, 0, +1). Used for cap-up layout.
+func rotationToPosZ(a [3]float64) [9]float64 {
+	target := [3]float64{0, 0, 1}
+	dot := a[0]*target[0] + a[1]*target[1] + a[2]*target[2]
+	const aligned = 1 - 1e-9
+	if dot > aligned {
+		return [9]float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
+	}
+	if dot < -aligned {
+		// a is −Z; rotate 180° around X (mirrors rotationToNegZ's
+		// arbitrary-axis choice).
+		return [9]float64{1, 0, 0, 0, -1, 0, 0, 0, -1}
+	}
 	ax := a[1]*target[2] - a[2]*target[1]
 	ay := a[2]*target[0] - a[0]*target[2]
 	az := a[0]*target[1] - a[1]*target[0]

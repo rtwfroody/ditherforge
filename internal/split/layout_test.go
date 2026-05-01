@@ -214,20 +214,21 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 	}
 }
 
-// TestLayout_PegOnBed — Layout combined with a peg connector.
+// TestLayout_PegUp — Layout combined with a peg connector orients
+// the male half cap-up so the pegs print pointing upward.
 //
-// Cap-down layout puts the cap face on the bed for NoConnectors and
-// Dowels, but for Pegs the peg extends in +cap_normal direction in
-// original coords, which becomes -Z in bed coords. After the
-// bbox-min-z shift, the peg tip rests on the bed and the cap is
-// elevated by the peg depth. The half's body extends from the cap
-// upward.
+// For a cube cut at z=25 with Pegs(depth=5):
+//   - Half 0 in original coords spans z ∈ [0, 25] (body) plus
+//     z ∈ [25, 30] (peg). Outward cap normal is +Z; CapUp[0]=true
+//     so the layout rotation is identity (already +Z).
+//   - bbox-min-z=0 leaves z extent [0, 30]: the body's z=0 face is
+//     on the bed, the cap is at bed z=25, and the peg tips reach
+//     bed z=30 (highest, pointing up).
 //
-// Verifies (a) the peg tip sits on the bed (z=0) on the male half,
-// (b) the cap is elevated by the peg depth, and (c) inverse
-// round-trip on the peg tip recovers the peg-tip's original-coord
-// position.
-func TestLayout_PegOnBed(t *testing.T) {
+// Verifies (a) the body face is on the bed (min.z=0), (b) the peg
+// tip is the highest point at bed z≈30, and (c) inverse round-trip
+// recovers the peg tip's original coords at z=30.
+func TestLayout_PegUp(t *testing.T) {
 	verts := [][3]float32{
 		{0, 0, 0}, {50, 0, 0}, {50, 50, 0}, {0, 50, 0},
 		{0, 0, 50}, {50, 0, 50}, {50, 50, 50}, {0, 50, 50},
@@ -245,13 +246,11 @@ func TestLayout_PegOnBed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
+	if !res.CapUp[0] || res.CapUp[1] {
+		t.Errorf("CapUp = %v, want [true, false] (peg-side half is half 0)", res.CapUp)
+	}
 	xforms := Layout(res, 5)
 
-	// Half 0's pre-cut z extent was [0, 25] (cube body) plus peg at
-	// z=25..30. After cap-down rotation + bbox-min-z shift, the peg
-	// tip (lowest extent of the half) lands at bed z=0; the cap face
-	// is at bed z=5; and the body's far end (original z=0) is at
-	// bed z=30.
 	half0 := res.Halves[0]
 	minZ := math.Inf(1)
 	maxZ := math.Inf(-1)
@@ -265,34 +264,24 @@ func TestLayout_PegOnBed(t *testing.T) {
 		}
 	}
 	if math.Abs(minZ) > 1e-5 {
-		t.Errorf("half 0 min.z = %g, want 0 (peg tip on bed)", minZ)
+		t.Errorf("half 0 min.z = %g, want 0 (body face on bed)", minZ)
 	}
 	if math.Abs(maxZ-30) > 0.5 {
-		t.Errorf("half 0 max.z = %g, want ≈ 30 (body's original z=0 lands here)", maxZ)
+		t.Errorf("half 0 max.z = %g, want ≈ 30 (peg tip points up)", maxZ)
 	}
 
-	// (Cap-face-on-bed check removed alongside the connector
-	// rip-out; will be reinstated when connectors return.)
-	{
-		_ = half0
-
-	}
-
-	// Inverse round-trip on the lowest-z vertex (peg tip) should
-	// recover original coords near (25, 25, 30) — the connector
-	// centre at peg-tip depth.
+	// Inverse round-trip on the highest-z vertex (peg tip) should
+	// recover original coords at z = 30 (cap depth + peg depth).
 	var tipBed [3]float32
 	for _, v := range half0.Vertices {
-		if float64(v[2]) < minZ+0.01 {
+		if float64(v[2]) > maxZ-0.01 {
 			tipBed = v
 			break
 		}
 	}
 	tipOrig := xforms[0].ApplyInverse(tipBed)
-	if math.Abs(float64(tipOrig[0])-25) > 5 ||
-		math.Abs(float64(tipOrig[1])-25) > 5 ||
-		math.Abs(float64(tipOrig[2])-30) > 0.1 {
-		t.Errorf("peg tip orig coords = %v, want xyz near (25, 25, 30)", tipOrig)
+	if math.Abs(float64(tipOrig[2])-30) > 0.1 {
+		t.Errorf("peg tip orig z = %g, want 30 (cap z=25 + peg depth=5)", tipOrig[2])
 	}
 }
 

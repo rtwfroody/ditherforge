@@ -69,12 +69,20 @@ func AxisPlane(axis int, offset float64) Plane {
 // that produced this result, stored so phase-3 Layout can find the
 // cap normal without the caller needing to keep track separately.
 //
+// CapUp[h] requests that Layout orient half h with its cap normal
+// pointing to +Z (cap-side up) rather than the default −Z (cap-side
+// down on the build plate). Set true on the half that carries male
+// pegs so the peg tips print upward instead of being printed
+// hanging-in-air. Default-false matches the original cap-down
+// behaviour for NoConnectors and Dowels.
+//
 // Cap faces aren't tracked separately — they're just part of each
 // half's face list. Callers that need to identify the cap should
 // match face normals against the plane normal.
 type CutResult struct {
 	Halves [2]*loader.LoadedModel
 	Plane  Plane
+	CapUp  [2]bool
 }
 
 // Cut splits a watertight model by a plane, producing two closed
@@ -128,9 +136,19 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 
 	halves = applyConnectors(halves, plane, connectors)
 
+	// For Pegs, half 0 carries the male peg geometry. Flip its layout
+	// so the peg side prints up — saves the user from a peg printed
+	// hanging upside-down with no support. Dowels stay cap-down on
+	// both halves (pockets are interior to the half, no overhang).
+	var capUp [2]bool
+	if connectors.Style == Pegs {
+		capUp[0] = true
+	}
+
 	return &CutResult{
 		Halves: halves,
 		Plane:  plane,
+		CapUp:  capUp,
 	}, nil
 }
 
