@@ -18,12 +18,18 @@ import (
 // +plane.Normal and matching pockets carve into half 1 from the
 // -plane.Normal side. Dowels punch matching pockets in both halves.
 func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings ConnectorSettings) [2]*loader.LoadedModel {
-	if settings.Style == NoConnectors || settings.Count <= 0 {
+	if settings.Style == NoConnectors {
 		return halves
 	}
 	if settings.DiamMM <= 0 || settings.DepthMM <= 0 {
 		plog.Printf("  Split: connectors requested but dimensions are zero (diam=%.3f, depth=%.3f); using flat caps", settings.DiamMM, settings.DepthMM)
 		return halves
+	}
+	// Count == 0 means "auto"; pick a sensible default. count < 0 is
+	// treated the same.
+	count := settings.Count
+	if count <= 0 {
+		count = 2
 	}
 
 	// Recover cap polygons from half 0 (cap normal = +plane.Normal).
@@ -39,7 +45,7 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// don't touch each other. Best-effort — placePegs may yield fewer
 	// pegs than requested if the polygon is small.
 	minSpacing := 2.5 * settings.DiamMM
-	centers2D, err := placePegsInPolygons(polys, settings.Count, minSpacing)
+	centers2D, err := placePegsInPolygons(polys, count, minSpacing)
 	if err != nil {
 		plog.Printf("  Split: peg placement failed (%v); using flat caps", err)
 		return halves
@@ -99,6 +105,8 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// difference fails for connector i but the half-0 union succeeded,
 	// half 0 ends up with a peg that has no pocket. Acceptable as a
 	// degraded fallback (the user sees the warning and decides).
+	plog.Printf("  Split: applying %d %s connector(s) at %d location(s)", len(ops), connectorStyleName(settings.Style), len(centers3D))
+
 	out := halves
 	for _, op := range ops {
 		cyl, err := buildCylinder(plane.Normal, op.radius, halfHeight, segments)
