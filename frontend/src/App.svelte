@@ -1400,6 +1400,20 @@
           </div>
         </SettingsSection>
 
+        <SettingsSection title="Stickers" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Stamp logos, labels, or artwork onto the model surface.
+            </HelpTip>
+          {/snippet}
+          <StickerPanel
+            bind:stickers={stickers}
+            bind:placingIndex={placingStickerIndex}
+            onAdd={addSticker}
+            onRemove={removeSticker}
+          />
+        </SettingsSection>
+
         <SettingsSection title="Split" open={false}>
           {#snippet tip()}
             <HelpTip>
@@ -1423,20 +1437,6 @@
             minOffset={splitOffsetMin}
             maxOffset={splitOffsetMax}
             onAlphaWrapForced={() => { alphaWrap = true; }}
-          />
-        </SettingsSection>
-
-        <SettingsSection title="Stickers" open={false}>
-          {#snippet tip()}
-            <HelpTip>
-              Stamp logos, labels, or artwork onto the model surface.
-            </HelpTip>
-          {/snippet}
-          <StickerPanel
-            bind:stickers={stickers}
-            bind:placingIndex={placingStickerIndex}
-            onAdd={addSticker}
-            onRemove={removeSticker}
           />
         </SettingsSection>
 
