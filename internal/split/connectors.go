@@ -74,12 +74,14 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// Pegs: half 0 gets a male cylinder (radius = DiamMM/2);
 	//       half 1 gets a female cylinder (radius = DiamMM/2 + Clearance).
 	// Dowels: both halves get female cylinders (radius = DiamMM/2 + Clearance).
-	// Cylinder height: 2*DepthMM total (so the cylinder straddles the
-	// plane; the plane sits at the midpoint and each half intersects
-	// it for DepthMM along the inward direction).
+	// Male cylinder half-height = DepthMM (peg sticks DepthMM into half 0
+	// and DepthMM past the cap into the mating space).
+	// Female cylinder half-height = DepthMM + ClearanceMM (axial slack so
+	// the peg doesn't bottom out before the cap surfaces meet).
 	maleR := settings.DiamMM / 2
 	femaleR := settings.DiamMM/2 + settings.ClearanceMM
-	halfHeight := settings.DepthMM
+	maleHalfHeight := settings.DepthMM
+	femaleHalfHeight := settings.DepthMM + settings.ClearanceMM
 
 	type opKind int
 	const (
@@ -117,7 +119,11 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 
 	out := halves
 	for _, op := range ops {
-		cyl, err := buildCylinder(plane.Normal, op.radius, halfHeight, segments)
+		h := maleHalfHeight
+		if op.op == opDifference {
+			h = femaleHalfHeight
+		}
+		cyl, err := buildCylinder(plane.Normal, op.radius, h, segments)
 		if err != nil {
 			plog.Printf("  Split: cylinder build for connector %d failed (%v); skipping", op.idx, err)
 			continue

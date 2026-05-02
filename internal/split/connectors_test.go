@@ -61,15 +61,14 @@ func TestCut_PegsAddsAndSubtractsVolume(t *testing.T) {
 	v0 := volume(res.Halves[0])
 	v1 := volume(res.Halves[1])
 
-	// Peg cylinder: radius 2, halfHeight 5 → full cylinder volume π·r²·2h = π·4·10 ≈ 125.66.
-	// Half lives above z=25, so only the +Z half (volume ≈ 62.83) adds to half 0.
-	// Wait — the cylinder is centered on z=25 with halfHeight=5, so it
-	// straddles [20, 30]. Half 0 (z<=25) gains the lower half of the
-	// cylinder (z=25 down to z=20), volume π·r²·5 = π·4·5 ≈ 62.83.
-	// Half 1 (z>=25) loses the upper half of the cylinder with female
-	// radius (2.15), volume π·2.15²·5 ≈ 72.6.
+	// Male cylinder is centered on z=25 with halfHeight=DepthMM=5, so it
+	// straddles [20, 30]. Half 0 (z<=25) gains the lower half (z=25 down
+	// to z=20), volume π·r²·DepthMM = π·4·5 ≈ 62.83.
+	// Female cylinder is centered on z=25 with halfHeight=DepthMM+Clearance=5.15,
+	// straddling [19.85, 30.15]. Half 1 (z>=25) loses the upper half with
+	// female radius 2.15 and height 5.15, volume π·2.15²·5.15 ≈ 74.78.
 	expectedAdded := math.Pi * 2 * 2 * 5
-	expectedRemoved := math.Pi * 2.15 * 2.15 * 5
+	expectedRemoved := math.Pi * 2.15 * 2.15 * 5.15
 	delta0 := v0 - flatV0
 	delta1 := flatV1 - v1
 	tol := 5.0 // tolerance for cylinder discretization (32 segments)

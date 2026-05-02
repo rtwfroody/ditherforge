@@ -47,7 +47,7 @@ type ConnectorSettings struct {
 	Count       int     // 0 = auto; 1..3 explicit
 	DiamMM      float64 // peg/dowel diameter in mm
 	DepthMM     float64 // peg/pocket depth (per side for Dowels)
-	ClearanceMM float64 // per-side radial clearance applied to female features
+	ClearanceMM float64 // per-side clearance for female features, applied both radially (pocket diameter) and axially (pocket depth)
 }
 
 // AxisPlane builds a Plane perpendicular to one of the principal
