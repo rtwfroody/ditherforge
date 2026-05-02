@@ -214,13 +214,13 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 	}
 }
 
-// TestLayout_PegUp — Layout combined with a peg connector orients
-// the male half cap-up so the pegs print pointing upward.
+// TestLayout_SeamUpOnPegHalf — when the user chooses OrientSeamUp for
+// the male-peg half, the pegs print pointing upward.
 //
 // For a cube cut at z=25 with Pegs(depth=5):
 //   - Half 0 in original coords spans z ∈ [0, 25] (body) plus
-//     z ∈ [25, 30] (peg). Outward cap normal is +Z; CapUp[0]=true
-//     so the layout rotation is identity (already +Z).
+//     z ∈ [25, 30] (peg). Outward cap normal is +Z; OrientSeamUp
+//     makes the layout rotation identity (already +Z).
 //   - bbox-min-z=0 leaves z extent [0, 30]: the body's z=0 face is
 //     on the bed, the cap is at bed z=25, and the peg tips reach
 //     bed z=30 (highest, pointing up).
@@ -228,7 +228,7 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 // Verifies (a) the body face is on the bed (min.z=0), (b) the peg
 // tip is the highest point at bed z≈30, and (c) inverse round-trip
 // recovers the peg tip's original coords at z=30.
-func TestLayout_PegUp(t *testing.T) {
+func TestLayout_SeamUpOnPegHalf(t *testing.T) {
 	verts := [][3]float32{
 		{0, 0, 0}, {50, 0, 0}, {50, 50, 0}, {0, 50, 0},
 		{0, 0, 50}, {50, 0, 50}, {50, 50, 50}, {0, 50, 50},
@@ -246,9 +246,7 @@ func TestLayout_PegUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
-	if !res.CapUp[0] || res.CapUp[1] {
-		t.Errorf("CapUp = %v, want [true, false] (peg-side half is half 0)", res.CapUp)
-	}
+	res.Orientation = [2]Orientation{OrientSeamUp, OrientSeamDown}
 	xforms := Layout(res, 5)
 
 	half0 := res.Halves[0]
@@ -286,13 +284,15 @@ func TestLayout_PegUp(t *testing.T) {
 }
 
 // TestLayout_TransformOnPlanePoints — plane vertices in original
-// coords should map to z=0 in bed coords via Transform.Apply.
+// coords should map to z=0 in bed coords via Transform.Apply when
+// both halves are oriented seam-down (cut face on the bed).
 func TestLayout_TransformOnPlanePoints(t *testing.T) {
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
+	res.Orientation = [2]Orientation{OrientSeamDown, OrientSeamDown}
 	origPoints := []struct {
 		half  int
 		point [3]float32
@@ -310,14 +310,14 @@ func TestLayout_TransformOnPlanePoints(t *testing.T) {
 	}
 }
 
-// TestRotationToNegZ_AlignsCorrectly — sanity check the rotation
-// utility: applying the rotation to the input cap normal should
-// produce (0, 0, −1) within float precision, for several axis
-// choices.
-func TestRotationToNegZ_AlignsCorrectly(t *testing.T) {
-	cases := []struct {
+// TestRotateVecToTarget_AlignsCorrectly — sanity check the rotation
+// utility: applying the rotation to the input vector should produce
+// the target within float precision, across all six world axes for
+// both source and target.
+func TestRotateVecToTarget_AlignsCorrectly(t *testing.T) {
+	axes := []struct {
 		name string
-		a    [3]float64
+		v    [3]float64
 	}{
 		{"+Z", [3]float64{0, 0, 1}},
 		{"-Z", [3]float64{0, 0, -1}},
@@ -326,15 +326,17 @@ func TestRotationToNegZ_AlignsCorrectly(t *testing.T) {
 		{"+Y", [3]float64{0, 1, 0}},
 		{"-Y", [3]float64{0, -1, 0}},
 	}
-	for _, c := range cases {
-		R := rotationToNegZ(c.a)
-		got := applyRotation(R, [3]float32{float32(c.a[0]), float32(c.a[1]), float32(c.a[2])})
-		want := [3]float32{0, 0, -1}
-		dx := math.Abs(float64(got[0] - want[0]))
-		dy := math.Abs(float64(got[1] - want[1]))
-		dz := math.Abs(float64(got[2] - want[2]))
-		if dx > 1e-5 || dy > 1e-5 || dz > 1e-5 {
-			t.Errorf("%s: rotation maps to %v, want %v", c.name, got, want)
+	for _, src := range axes {
+		for _, tgt := range axes {
+			R := rotateVecToTarget(src.v, tgt.v)
+			got := applyRotation(R, [3]float32{float32(src.v[0]), float32(src.v[1]), float32(src.v[2])})
+			want := [3]float32{float32(tgt.v[0]), float32(tgt.v[1]), float32(tgt.v[2])}
+			dx := math.Abs(float64(got[0] - want[0]))
+			dy := math.Abs(float64(got[1] - want[1]))
+			dz := math.Abs(float64(got[2] - want[2]))
+			if dx > 1e-5 || dy > 1e-5 || dz > 1e-5 {
+				t.Errorf("%s → %s: rotation maps to %v, want %v", src.name, tgt.name, got, want)
+			}
 		}
 	}
 }

@@ -48,38 +48,28 @@ func (t Transform) ApplyInverse(p [3]float32) [3]float32 {
 	}
 }
 
-// Layout rotates each half so its outward cut-face normal points to
-// −Z (cut face flat on the build plate), then places the two halves
-// side by side along +X with `gapMM` between them, centred on Y = 0
-// and resting on Z = 0. Vertex positions in result.Halves are
-// rewritten in place to bed coordinates. Returns the per-half
-// Transform that took original-mesh coords to those bed coords.
+// Layout rotates each half according to result.Orientation[h], then
+// places the two halves side by side along +X with `gapMM` between
+// them, centred on Y = 0 and resting on Z = 0. Vertex positions in
+// result.Halves are rewritten in place to bed coordinates. Returns
+// the per-half Transform that took original-mesh coords to those bed
+// coords.
 //
 // Half 0's outward cap normal is +result.Plane.Normal; half 1's is
 // −result.Plane.Normal. Half 0 ends up to the −X side, half 1 to the
-// +X side.
-//
-// When result.CapUp[h] is set, half h is oriented cap-up instead
-// (outward cap normal points to +Z). This is used for the male-peg
-// half so the peg tips print pointing upward rather than hanging
-// off the build plate. The bbox-min-z=0 shift still applies, so the
-// half rests with its lowest non-cap point on the bed.
+// +X side. The bbox-min-z=0 shift always applies, so each half rests
+// with its lowest point on the bed regardless of orientation.
 func Layout(result *CutResult, gapMM float64) [2]Transform {
 	plane := result.Plane
 	var xforms [2]Transform
 
-	// Step 1: cap-to-bed (or cap-up) rotation per half.
+	// Step 1: per-half rotation chosen by Orientation.
 	capNormals := [2][3]float64{
 		plane.Normal,
 		{-plane.Normal[0], -plane.Normal[1], -plane.Normal[2]},
 	}
 	for h := 0; h < 2; h++ {
-		var R [9]float64
-		if result.CapUp[h] {
-			R = rotationToPosZ(capNormals[h])
-		} else {
-			R = rotationToNegZ(capNormals[h])
-		}
+		R := orientationRotation(result.Orientation[h], capNormals[h])
 		for i, v := range result.Halves[h].Vertices {
 			result.Halves[h].Vertices[i] = applyRotation(R, v)
 		}
@@ -151,56 +141,65 @@ func Layout(result *CutResult, gapMM float64) [2]Transform {
 	return xforms
 }
 
-// rotationToNegZ returns the row-major 3×3 rotation that maps the unit
-// vector a to (0, 0, −1). Special-cased for the antipodal cases (a =
-// ±(0, 0, 1)) where the cross product would be zero.
-func rotationToNegZ(a [3]float64) [9]float64 {
-	target := [3]float64{0, 0, -1}
-	dot := a[0]*target[0] + a[1]*target[1] + a[2]*target[2]
-	const aligned = 1 - 1e-9
-	if dot > aligned {
-		return [9]float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
+// orientationRotation returns the row-major 3×3 rotation that orients
+// `capNormal` according to the requested Orientation. For OrientOriginal
+// the identity is returned (the half stays in its authored frame). For
+// the four Seam* orientations, capNormal is rotated to the corresponding
+// world axis (+Z, −Z, −X, +X). Z-rotation freedom is resolved by
+// `rotateVecToTarget`'s arbitrary-but-stable axis choice.
+func orientationRotation(o Orientation, capNormal [3]float64) [9]float64 {
+	switch o {
+	case OrientSeamUp:
+		return rotateVecToTarget(capNormal, [3]float64{0, 0, 1})
+	case OrientSeamDown:
+		return rotateVecToTarget(capNormal, [3]float64{0, 0, -1})
+	case OrientSeamLeft:
+		return rotateVecToTarget(capNormal, [3]float64{-1, 0, 0})
+	case OrientSeamRight:
+		return rotateVecToTarget(capNormal, [3]float64{1, 0, 0})
 	}
-	if dot < -aligned {
-		// a is +Z; rotate 180° around X. Any axis perpendicular to Z
-		// would work; X chosen arbitrarily and consistently for
-		// reproducibility.
-		return [9]float64{1, 0, 0, 0, -1, 0, 0, 0, -1}
-	}
-	// Rodrigues' formula: axis = a × target (normalised), angle =
-	// acos(a · target).
-	ax := a[1]*target[2] - a[2]*target[1]
-	ay := a[2]*target[0] - a[0]*target[2]
-	az := a[0]*target[1] - a[1]*target[0]
-	axisLen := math.Sqrt(ax*ax + ay*ay + az*az)
-	ax /= axisLen
-	ay /= axisLen
-	az /= axisLen
-	angle := math.Acos(dot)
-	c := math.Cos(angle)
-	s := math.Sin(angle)
-	omc := 1 - c
-	return [9]float64{
-		c + ax*ax*omc, ax*ay*omc - az*s, ax*az*omc + ay*s,
-		ay*ax*omc + az*s, c + ay*ay*omc, ay*az*omc - ax*s,
-		az*ax*omc - ay*s, az*ay*omc + ax*s, c + az*az*omc,
-	}
+	return [9]float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
 }
 
-// rotationToPosZ returns the row-major 3×3 rotation that maps the unit
-// vector a to (0, 0, +1). Used for cap-up layout.
-func rotationToPosZ(a [3]float64) [9]float64 {
-	target := [3]float64{0, 0, 1}
+// rotateVecToTarget returns the row-major 3×3 rotation that maps unit
+// vector `a` onto unit vector `target`. The antipodal case picks an
+// arbitrary perpendicular axis for the 180° rotation; the choice is
+// stable for reproducibility but not otherwise meaningful.
+func rotateVecToTarget(a, target [3]float64) [9]float64 {
 	dot := a[0]*target[0] + a[1]*target[1] + a[2]*target[2]
 	const aligned = 1 - 1e-9
 	if dot > aligned {
 		return [9]float64{1, 0, 0, 0, 1, 0, 0, 0, 1}
 	}
 	if dot < -aligned {
-		// a is −Z; rotate 180° around X (mirrors rotationToNegZ's
-		// arbitrary-axis choice).
-		return [9]float64{1, 0, 0, 0, -1, 0, 0, 0, -1}
+		// Pick any axis perpendicular to target. Use the world-axis
+		// least-aligned with target so the cross product is well-conditioned.
+		var perp [3]float64
+		switch {
+		case math.Abs(target[0]) <= math.Abs(target[1]) && math.Abs(target[0]) <= math.Abs(target[2]):
+			perp = [3]float64{1, 0, 0}
+		case math.Abs(target[1]) <= math.Abs(target[2]):
+			perp = [3]float64{0, 1, 0}
+		default:
+			perp = [3]float64{0, 0, 1}
+		}
+		// Project perp onto the plane orthogonal to target, then normalize.
+		d := perp[0]*target[0] + perp[1]*target[1] + perp[2]*target[2]
+		ax := perp[0] - d*target[0]
+		ay := perp[1] - d*target[1]
+		az := perp[2] - d*target[2]
+		l := math.Sqrt(ax*ax + ay*ay + az*az)
+		ax /= l
+		ay /= l
+		az /= l
+		// 180° rotation around (ax, ay, az).
+		return [9]float64{
+			2*ax*ax - 1, 2 * ax * ay, 2 * ax * az,
+			2 * ay * ax, 2*ay*ay - 1, 2 * ay * az,
+			2 * az * ax, 2 * az * ay, 2*az*az - 1,
+		}
 	}
+	// Rodrigues' formula: axis = a × target (normalised), angle = acos(a · target).
 	ax := a[1]*target[2] - a[2]*target[1]
 	ay := a[2]*target[0] - a[0]*target[2]
 	az := a[0]*target[1] - a[1]*target[0]

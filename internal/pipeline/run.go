@@ -272,6 +272,10 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 		if err != nil {
 			return nil, fmt.Errorf("split.Cut: %w", err)
 		}
+		res.Orientation = [2]split.Orientation{
+			parseOrientation(r.opts.Split.Orientation[0]),
+			parseOrientation(r.opts.Split.Orientation[1]),
+		}
 		xforms := split.Layout(res, r.opts.Split.GapMM)
 
 		plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
@@ -299,6 +303,23 @@ func parseConnectorStyle(s string) split.ConnectorStyle {
 		return split.Dowels
 	default:
 		return split.NoConnectors
+	}
+}
+
+// parseOrientation converts the Options string into the typed
+// split.Orientation. Empty / unknown values fall back to OrientOriginal.
+func parseOrientation(s string) split.Orientation {
+	switch s {
+	case "seam-up":
+		return split.OrientSeamUp
+	case "seam-down":
+		return split.OrientSeamDown
+	case "seam-left":
+		return split.OrientSeamLeft
+	case "seam-right":
+		return split.OrientSeamRight
+	default:
+		return split.OrientOriginal
 	}
 }
 

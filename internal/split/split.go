@@ -63,26 +63,50 @@ func AxisPlane(axis int, offset float64) Plane {
 	return Plane{Normal: n, D: offset}
 }
 
+// Orientation selects how Layout rotates a half before placing it on
+// the build plate. The user picks one per half independently.
+type Orientation int
+
+const (
+	// OrientOriginal leaves the half in its authored model-space
+	// rotation; only the bbox-min-z=0 shift and side-by-side
+	// translation are applied.
+	OrientOriginal Orientation = iota
+	// OrientSeamUp rotates the half so its outward cap normal points to
+	// +Z (cut face on top). Useful when male pegs would otherwise
+	// print hanging in air.
+	OrientSeamUp
+	// OrientSeamDown rotates the half so its outward cap normal points
+	// to −Z (cut face flat on the build plate). Default for most
+	// glue-up workflows.
+	OrientSeamDown
+	// OrientSeamLeft rotates the half so its outward cap normal points
+	// to −X (cut face on the left side wall).
+	OrientSeamLeft
+	// OrientSeamRight rotates the half so its outward cap normal points
+	// to +X (cut face on the right side wall).
+	OrientSeamRight
+)
+
 // CutResult is the output of Cut. Halves[0] and Halves[1] are
 // independent closed-watertight meshes corresponding to the negative
 // and positive sides of the plane respectively. Plane is the cut plane
 // that produced this result, stored so phase-3 Layout can find the
 // cap normal without the caller needing to keep track separately.
 //
-// CapUp[h] requests that Layout orient half h with its cap normal
-// pointing to +Z (cap-side up) rather than the default −Z (cap-side
-// down on the build plate). Set true on the half that carries male
-// pegs so the peg tips print upward instead of being printed
-// hanging-in-air. Default-false matches the original cap-down
-// behaviour for NoConnectors and Dowels.
+// Orientation[h] selects the per-half rotation applied by Layout. See
+// the Orientation constants for semantics. The default zero value
+// (OrientOriginal) is the simplest to reason about; the frontend
+// defaults to OrientSeamDown to match the pre-orientation-feature
+// behaviour.
 //
 // Cap faces aren't tracked separately — they're just part of each
 // half's face list. Callers that need to identify the cap should
 // match face normals against the plane normal.
 type CutResult struct {
-	Halves [2]*loader.LoadedModel
-	Plane  Plane
-	CapUp  [2]bool
+	Halves      [2]*loader.LoadedModel
+	Plane       Plane
+	Orientation [2]Orientation
 }
 
 // Cut splits a watertight model by a plane, producing two closed
@@ -136,19 +160,9 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 
 	halves = applyConnectors(halves, plane, connectors)
 
-	// For Pegs, half 0 carries the male peg geometry. Flip its layout
-	// so the peg side prints up — saves the user from a peg printed
-	// hanging upside-down with no support. Dowels stay cap-down on
-	// both halves (pockets are interior to the half, no overhang).
-	var capUp [2]bool
-	if connectors.Style == Pegs {
-		capUp[0] = true
-	}
-
 	return &CutResult{
 		Halves: halves,
 		Plane:  plane,
-		CapUp:  capUp,
 	}, nil
 }
 

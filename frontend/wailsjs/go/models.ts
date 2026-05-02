@@ -304,11 +304,12 @@ export namespace pipeline {
 	    ConnectorDepthMM: number;
 	    ClearanceMM: number;
 	    GapMM: number;
-	
+	    Orientation: string[];
+
 	    static createFrom(source: any = {}) {
 	        return new SplitSettings(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Enabled = source["Enabled"];
@@ -320,6 +321,7 @@ export namespace pipeline {
 	        this.ConnectorDepthMM = source["ConnectorDepthMM"];
 	        this.ClearanceMM = source["ClearanceMM"];
 	        this.GapMM = source["GapMM"];
+	        this.Orientation = source["Orientation"];
 	    }
 	}
 	export class Sticker {

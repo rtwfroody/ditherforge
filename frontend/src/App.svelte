@@ -161,6 +161,10 @@
   let splitConnectorDepthMM = $state(6);
   let splitClearanceMM = $state(0.15);
   let splitGapMM = $state(5);
+  // Per-half orientation. Defaults to "original" — the user picks per
+  // half independently. See SplitControls.svelte for option semantics.
+  let splitOrientationA = $state('original');
+  let splitOrientationB = $state('original');
   // The loaded model's bbox in original-mesh coords (mm, post-scale,
   // post-normalizeZ). Populated from the input-mesh event; null until
   // the first event arrives so the Split UI can distinguish "no model
@@ -568,6 +572,7 @@
           splitConnectorStyle, splitConnectorCount,
           splitConnectorDiamMM, splitConnectorDepthMM,
           splitClearanceMM, splitGapMM,
+          splitOrientationA, splitOrientationB,
           reloadSeq];
     if (!initialized) {
       initialized = true;
@@ -826,6 +831,8 @@
       splitConnectorDepthMM,
       splitClearanceMM,
       splitGapMM,
+      splitOrientationA,
+      splitOrientationB,
     };
   }
 
@@ -900,6 +907,8 @@
     if (s.splitConnectorDepthMM !== undefined) splitConnectorDepthMM = s.splitConnectorDepthMM;
     if (s.splitClearanceMM !== undefined) splitClearanceMM = s.splitClearanceMM;
     if (s.splitGapMM !== undefined) splitGapMM = s.splitGapMM;
+    if (s.splitOrientationA !== undefined) splitOrientationA = s.splitOrientationA;
+    if (s.splitOrientationB !== undefined) splitOrientationB = s.splitOrientationB;
   }
 
   async function handleSave() {
@@ -1083,6 +1092,7 @@
         ConnectorDepthMM: splitConnectorDepthMM,
         ClearanceMM: splitClearanceMM,
         GapMM: splitGapMM,
+        Orientation: [splitOrientationA, splitOrientationB],
       },
       Force: force,
       ReloadSeq: reloadSeq,
@@ -1413,6 +1423,8 @@
             bind:connectorDepthMM={splitConnectorDepthMM}
             bind:clearanceMM={splitClearanceMM}
             bind:gapMM={splitGapMM}
+            bind:orientationA={splitOrientationA}
+            bind:orientationB={splitOrientationB}
             minOffset={splitOffsetMin}
             maxOffset={splitOffsetMax}
             onAlphaWrapForced={() => { alphaWrap = true; }}

@@ -76,6 +76,10 @@ type SplitSettings struct {
 	ConnectorDepthMM float64
 	ClearanceMM      float64
 	GapMM            float64
+	// Orientation per half: "original", "seam-up", "seam-down",
+	// "seam-left", "seam-right". Empty string is treated as
+	// "original".
+	Orientation [2]string
 }
 
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.

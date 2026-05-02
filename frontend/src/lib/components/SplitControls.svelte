@@ -12,6 +12,11 @@
     connectorDepthMM: number;
     clearanceMM: number;
     gapMM: number;
+    // Per-half orientation: "original" | "seam-up" | "seam-down" |
+    // "seam-left" | "seam-right". orientationA is half 0 (low-axis
+    // side), orientationB is half 1 (high-axis side).
+    orientationA: string;
+    orientationB: string;
     // Range hint for the offset slider; populated by App.svelte from
     // the current model's bbox along the selected axis.
     minOffset: number;
@@ -29,6 +34,8 @@
     connectorDepthMM = $bindable(),
     clearanceMM = $bindable(),
     gapMM = $bindable(),
+    orientationA = $bindable(),
+    orientationB = $bindable(),
     minOffset,
     maxOffset,
     onAlphaWrapForced,
@@ -47,6 +54,18 @@
   }
 
   const axisLabel = $derived(['X', 'Y', 'Z'][axis] ?? 'Z');
+
+  // Half labels mirror the side-by-side layout: half 0 is the lower-X
+  // half on the bed, half 1 is the higher-X half. The pair of labels
+  // depends on the cut axis so the user can map the panel back to
+  // their model.
+  const halfLabels = $derived(
+    axis === 0
+      ? { a: 'Left half (−X)', b: 'Right half (+X)' }
+      : axis === 1
+        ? { a: 'Front half (−Y)', b: 'Back half (+Y)' }
+        : { a: 'Bottom half (−Z)', b: 'Top half (+Z)' }
+  );
 </script>
 
 <div class="space-y-3">
@@ -187,6 +206,44 @@
           />
         </label>
       {/if}
+
+      <label class="col-span-2 flex flex-col gap-1">
+        <span class="text-muted-foreground flex items-center gap-1.5">
+          {halfLabels.a} orientation
+          <HelpTip>
+            How this half sits on the bed. <strong>Original</strong>
+            keeps the model's authored orientation. <strong>Seam
+            up/down/left/right</strong> rotate the half so the cut
+            face points in that direction. Z-axis rotation is free
+            (the slicer picks any), so left and right are the only
+            distinct side options.
+          </HelpTip>
+        </span>
+        <select
+          class="h-9 rounded border bg-background text-foreground px-2"
+          bind:value={orientationA}
+        >
+          <option value="original">Original</option>
+          <option value="seam-up">Seam up</option>
+          <option value="seam-down">Seam down</option>
+          <option value="seam-left">Seam left</option>
+          <option value="seam-right">Seam right</option>
+        </select>
+      </label>
+
+      <label class="col-span-2 flex flex-col gap-1">
+        <span class="text-muted-foreground">{halfLabels.b} orientation</span>
+        <select
+          class="h-9 rounded border bg-background text-foreground px-2"
+          bind:value={orientationB}
+        >
+          <option value="original">Original</option>
+          <option value="seam-up">Seam up</option>
+          <option value="seam-down">Seam down</option>
+          <option value="seam-left">Seam left</option>
+          <option value="seam-right">Seam right</option>
+        </select>
+      </label>
 
       <label class="flex flex-col gap-1">
         <span class="text-muted-foreground flex items-center gap-1.5">
