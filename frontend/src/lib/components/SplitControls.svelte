@@ -205,7 +205,7 @@
         </label>
       {/if}
 
-      <label class="flex flex-col gap-1">
+      <label class="col-start-1 flex flex-col gap-1">
         <span class="text-muted-foreground flex items-center gap-1.5">
           {halfLabels.a}
           <HelpTip>
