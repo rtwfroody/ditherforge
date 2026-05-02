@@ -11,7 +11,6 @@
     connectorDiamMM: number;
     connectorDepthMM: number;
     clearanceMM: number;
-    gapMM: number;
     // Per-half orientation: "original" | "seam-up" | "seam-down" |
     // "seam-left" | "seam-right". orientationA is half 0 (low-axis
     // side), orientationB is half 1 (high-axis side).
@@ -33,7 +32,6 @@
     connectorDiamMM = $bindable(),
     connectorDepthMM = $bindable(),
     clearanceMM = $bindable(),
-    gapMM = $bindable(),
     orientationA = $bindable(),
     orientationB = $bindable(),
     minOffset,
@@ -207,9 +205,9 @@
         </label>
       {/if}
 
-      <label class="col-span-2 flex flex-col gap-1">
+      <label class="flex flex-col gap-1">
         <span class="text-muted-foreground flex items-center gap-1.5">
-          {halfLabels.a} orientation
+          {halfLabels.a}
           <HelpTip>
             How this half sits on the bed. <strong>Original</strong>
             keeps the model's authored orientation. <strong>Seam
@@ -231,8 +229,8 @@
         </select>
       </label>
 
-      <label class="col-span-2 flex flex-col gap-1">
-        <span class="text-muted-foreground">{halfLabels.b} orientation</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-muted-foreground">{halfLabels.b}</span>
         <select
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={orientationB}
@@ -245,22 +243,6 @@
         </select>
       </label>
 
-      <label class="flex flex-col gap-1">
-        <span class="text-muted-foreground flex items-center gap-1.5">
-          Bed gap (mm)
-          <HelpTip>
-            Space between the two halves when laid out side-by-side
-            on the print bed.
-          </HelpTip>
-        </span>
-        <input
-          type="number"
-          step="1"
-          min="0"
-          class="h-9 rounded border bg-background text-foreground px-2"
-          bind:value={gapMM}
-        />
-      </label>
     </div>
   {/if}
 </div>

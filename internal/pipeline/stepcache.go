@@ -620,7 +620,6 @@ type splitSettings struct {
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
-	GapMM            float64
 	Orientation      [2]string
 }
 
@@ -716,7 +715,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			ConnectorDiamMM:  opts.Split.ConnectorDiamMM,
 			ConnectorDepthMM: opts.Split.ConnectorDepthMM,
 			ClearanceMM:      opts.Split.ClearanceMM,
-			GapMM:            opts.Split.GapMM,
 			Orientation:      opts.Split.Orientation,
 		}
 	case StageDecimate:
@@ -806,7 +804,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 			writeFloat64(h, v.ConnectorDiamMM)
 			writeFloat64(h, v.ConnectorDepthMM)
 			writeFloat64(h, v.ClearanceMM)
-			writeFloat64(h, v.GapMM)
 			writeString(h, v.Orientation[0])
 			writeString(h, v.Orientation[1])
 		}

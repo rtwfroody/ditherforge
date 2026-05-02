@@ -146,7 +146,6 @@ export namespace main {
 	    splitConnectorDiamMM: number;
 	    splitConnectorDepthMM: number;
 	    splitClearanceMM: number;
-	    splitGapMM: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -186,7 +185,6 @@ export namespace main {
 	        this.splitConnectorDiamMM = source["splitConnectorDiamMM"];
 	        this.splitConnectorDepthMM = source["splitConnectorDepthMM"];
 	        this.splitClearanceMM = source["splitClearanceMM"];
-	        this.splitGapMM = source["splitGapMM"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -303,13 +301,12 @@ export namespace pipeline {
 	    ConnectorDiamMM: number;
 	    ConnectorDepthMM: number;
 	    ClearanceMM: number;
-	    GapMM: number;
 	    Orientation: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SplitSettings(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Enabled = source["Enabled"];
@@ -320,7 +317,6 @@ export namespace pipeline {
 	        this.ConnectorDiamMM = source["ConnectorDiamMM"];
 	        this.ConnectorDepthMM = source["ConnectorDepthMM"];
 	        this.ClearanceMM = source["ClearanceMM"];
-	        this.GapMM = source["GapMM"];
 	        this.Orientation = source["Orientation"];
 	    }
 	}

@@ -26,7 +26,6 @@ func TestSplitDisabled_NoCacheKeyChange(t *testing.T) {
 	tweaked.Split.ConnectorDiamMM = 5
 	tweaked.Split.ConnectorDepthMM = 6
 	tweaked.Split.ClearanceMM = 0.15
-	tweaked.Split.GapMM = 5
 	for s := StageLoad; s < numStages; s++ {
 		if c.stageKey(s, base) != c.stageKey(s, tweaked) {
 			t.Errorf("stage %d key changed when Split is off but other Split fields changed", s)
@@ -49,7 +48,6 @@ func TestSplitEnabled_CacheKeyCascade(t *testing.T) {
 	on.Split.ConnectorDiamMM = 4
 	on.Split.ConnectorDepthMM = 5
 	on.Split.ClearanceMM = 0.15
-	on.Split.GapMM = 5
 
 	// Parse and Load should NOT change.
 	if c.stageKey(StageParse, off) != c.stageKey(StageParse, on) {
@@ -77,7 +75,6 @@ func TestSplitEnabled_FieldCascade(t *testing.T) {
 	base.Split.Axis = 2
 	base.Split.Offset = 5
 	base.Split.ConnectorStyle = "dowels"
-	base.Split.GapMM = 5
 	cases := []struct {
 		name string
 		mut  func(o *Options)
@@ -89,7 +86,6 @@ func TestSplitEnabled_FieldCascade(t *testing.T) {
 		{"ConnectorDiamMM", func(o *Options) { o.Split.ConnectorDiamMM = 5 }},
 		{"ConnectorDepthMM", func(o *Options) { o.Split.ConnectorDepthMM = 6 }},
 		{"ClearanceMM", func(o *Options) { o.Split.ClearanceMM = 0.2 }},
-		{"GapMM", func(o *Options) { o.Split.GapMM = 8 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

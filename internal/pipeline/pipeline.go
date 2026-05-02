@@ -75,7 +75,6 @@ type SplitSettings struct {
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
-	GapMM            float64
 	// Orientation per half: "original", "seam-up", "seam-down",
 	// "seam-left", "seam-right". Empty string is treated as
 	// "original".
@@ -531,8 +530,9 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 // load-bearing for the Split path: FloodFillPatches operates on
 // CellKey index-arithmetic adjacency, not spatial adjacency, so two
 // halves whose CellKey columns happen to be adjacent in index space
-// (which can happen when GapMM < cellSize) would otherwise have
-// patches bridging across the bed-layout gap. With this partition,
+// (which can happen when the bed-layout gap is small relative to
+// cellSize) would otherwise have patches bridging across the
+// bed-layout gap. With this partition,
 // patches are guaranteed to live in exactly one (Grid, HalfIdx) pair.
 func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
 	// Up to 4 partitions: (Grid 0/1) × (HalfIdx 0/1). Empty groups are

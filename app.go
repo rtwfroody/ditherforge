@@ -828,7 +828,6 @@ type Settings struct {
 	SplitConnectorDiamMM  float64 `json:"splitConnectorDiamMM"`
 	SplitConnectorDepthMM float64 `json:"splitConnectorDepthMM"`
 	SplitClearanceMM      float64 `json:"splitClearanceMM"`
-	SplitGapMM            float64 `json:"splitGapMM"`
 }
 
 // SaveSettings writes settings to the given path.

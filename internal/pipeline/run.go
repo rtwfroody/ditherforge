@@ -276,7 +276,10 @@ func (r *pipelineRun) Split() (*splitOutput, error) {
 			parseOrientation(r.opts.Split.Orientation[0]),
 			parseOrientation(r.opts.Split.Orientation[1]),
 		}
-		xforms := split.Layout(res, r.opts.Split.GapMM)
+		// Bed gap between the two laid-out halves. Hardcoded — users
+		// who need a different layout rearrange in the slicer.
+		const bedGapMM = 5.0
+		xforms := split.Layout(res, bedGapMM)
 
 		plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
 			time.Since(tSplit).Seconds(),

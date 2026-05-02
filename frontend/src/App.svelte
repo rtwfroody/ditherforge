@@ -160,7 +160,6 @@
   let splitConnectorDiamMM = $state(5);
   let splitConnectorDepthMM = $state(6);
   let splitClearanceMM = $state(0.15);
-  let splitGapMM = $state(5);
   // Per-half orientation. Defaults to "original" — the user picks per
   // half independently. See SplitControls.svelte for option semantics.
   let splitOrientationA = $state('original');
@@ -571,7 +570,7 @@
           splitEnabled, splitAxis, splitOffset,
           splitConnectorStyle, splitConnectorCount,
           splitConnectorDiamMM, splitConnectorDepthMM,
-          splitClearanceMM, splitGapMM,
+          splitClearanceMM,
           splitOrientationA, splitOrientationB,
           reloadSeq];
     if (!initialized) {
@@ -830,7 +829,6 @@
       splitConnectorDiamMM,
       splitConnectorDepthMM,
       splitClearanceMM,
-      splitGapMM,
       splitOrientationA,
       splitOrientationB,
     };
@@ -906,7 +904,6 @@
     if (s.splitConnectorDiamMM !== undefined) splitConnectorDiamMM = s.splitConnectorDiamMM;
     if (s.splitConnectorDepthMM !== undefined) splitConnectorDepthMM = s.splitConnectorDepthMM;
     if (s.splitClearanceMM !== undefined) splitClearanceMM = s.splitClearanceMM;
-    if (s.splitGapMM !== undefined) splitGapMM = s.splitGapMM;
     if (s.splitOrientationA !== undefined) splitOrientationA = s.splitOrientationA;
     if (s.splitOrientationB !== undefined) splitOrientationB = s.splitOrientationB;
   }
@@ -1091,7 +1088,6 @@
         ConnectorDiamMM: splitConnectorDiamMM,
         ConnectorDepthMM: splitConnectorDepthMM,
         ClearanceMM: splitClearanceMM,
-        GapMM: splitGapMM,
         Orientation: [splitOrientationA, splitOrientationB],
       },
       Force: force,
@@ -1422,7 +1418,6 @@
             bind:connectorDiamMM={splitConnectorDiamMM}
             bind:connectorDepthMM={splitConnectorDepthMM}
             bind:clearanceMM={splitClearanceMM}
-            bind:gapMM={splitGapMM}
             bind:orientationA={splitOrientationA}
             bind:orientationB={splitOrientationB}
             minOffset={splitOffsetMin}
