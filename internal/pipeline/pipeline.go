@@ -32,6 +32,17 @@ type Options struct {
 	Scale          float32
 	Output         string
 	BaseColor      string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
+	// BaseColorMaterialX is the contents of a .mtlx file applied to
+	// untextured faces as a procedural base color. When non-empty it
+	// takes precedence over BaseColor. Stored as content (not path) so
+	// the cache key reflects the actual graph definition; cheap because
+	// procedural .mtlx files are KB-scale text.
+	BaseColorMaterialX string
+	// BaseColorMaterialXTileMM scales positions before sampling the
+	// MaterialX graph: a value of 10 means one shading-unit cycle of
+	// the procedural maps to 10 mm of object space. Zero or negative
+	// is treated as 1 mm (i.e. raw position).
+	BaseColorMaterialXTileMM float64
 	NozzleDiameter float32
 	LayerHeight    float32
 	// Printer is the printer profile ID (e.g. "snapmaker_u1") used when
@@ -478,34 +489,37 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 }
 
 // applyBaseColor resets lo.ColorModel / lo.SampleModel FaceBaseColor from the
-// pristine parse output and reapplies opts.BaseColor, then rebuilds
-// lo.InputMesh so the preview reflects the new colors. Idempotent — a no-op
-// when lo.appliedBaseColor already matches opts.BaseColor.
+// pristine parse output and reapplies the active base-color override, then
+// rebuilds lo.InputMesh so the preview reflects the new colors. Idempotent —
+// a no-op when the applied state already matches opts.
+//
+// Two override sources are supported, mutually exclusive at apply time:
+//   - opts.BaseColorMaterialX (with TileMM): per-face centroid sample of the
+//     procedural graph, baked into FaceBaseColor for the preview. The
+//     voxelizer also samples per-voxel via the same graph for higher
+//     fidelity (see buildBaseColorOverride). MaterialX takes precedence
+//     when both are set.
+//   - opts.BaseColor: legacy uniform hex override.
 //
 // This intentionally violates the cache's "outputs are immutable after set"
 // contract for loadOutput: ColorModel.FaceBaseColor and SampleModel.FaceBaseColor
 // are mutated in place every run. Safe today because (a) the pipeline runs
 // single-threaded under app.pipelineWorker, so no other reader is active when
-// this runs; (b) BaseColor is excluded from loadSettings, so multiple cached
-// loadOutput entries don't exist for the same load key with different colors.
+// this runs; (b) the base-color settings are excluded from loadSettings, so
+// multiple cached loadOutput entries don't exist for the same load key with
+// different colors.
 //
 // Invariant: whenever lo is present, parse output is reachable via
-// cache.getParse — but only when lo.appliedBaseColor != "" do we actually
-// fetch it (the empty-string case means lo is already pristine and we just
-// need to apply the override on top).
+// cache.getParse — but only when an override was previously applied do we
+// actually fetch it (the pristine case skips the parse cache lookup).
 func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
-	if lo.appliedBaseColor == opts.BaseColor {
+	if lo.appliedBaseColor == opts.BaseColor &&
+		lo.appliedBaseColorMaterialX == opts.BaseColorMaterialX &&
+		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM {
 		return
 	}
-	// When lo.appliedBaseColor is empty, lo.ColorModel.FaceBaseColor
-	// is already pristine (no override has been applied to this
-	// instance yet — runLoad doesn't apply base color, and a
-	// disk-cached lo always arrives with appliedBaseColor=""
-	// because cache.setLoad runs before applyBaseColor mutates lo).
-	// In that case we can skip the reset-from-parse step entirely,
-	// which avoids touching the StageParse cache on a warm-cache
-	// restart and saves a multi-second disk read for big inputs.
-	if lo.appliedBaseColor != "" {
+	pristine := lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
+	if !pristine {
 		raw := cache.getParse(opts)
 		if raw == nil {
 			panic("applyBaseColor: parse output missing but load cache mutated")
@@ -515,7 +529,21 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 			copy(lo.SampleModel.FaceBaseColor, raw.FaceBaseColor)
 		}
 	}
-	if opts.BaseColor != "" {
+	switch {
+	case opts.BaseColorMaterialX != "":
+		// Build the override once and reuse it across both models — parsing
+		// the .mtlx and validating the graph is cheap but non-trivial, and
+		// run.go also builds its own override for per-voxel sampling.
+		override, err := buildBaseColorOverride(opts.BaseColorMaterialX, opts.BaseColorMaterialXTileMM)
+		if err != nil {
+			log.Printf("Warning: ignoring MaterialX base color: %v", err)
+		} else if override != nil {
+			bakeMaterialXBaseColor(lo.ColorModel, override)
+			if lo.SampleModel != lo.ColorModel {
+				bakeMaterialXBaseColor(lo.SampleModel, override)
+			}
+		}
+	case opts.BaseColor != "":
 		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
 		if lo.SampleModel != lo.ColorModel {
 			applyBaseColorOverride(lo.SampleModel, opts.BaseColor)
@@ -523,6 +551,32 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	}
 	lo.InputMesh = buildInputMeshData(lo.ColorModel)
 	lo.appliedBaseColor = opts.BaseColor
+	lo.appliedBaseColorMaterialX = opts.BaseColorMaterialX
+	lo.appliedBaseColorMaterialXTileMM = opts.BaseColorMaterialXTileMM
+}
+
+// bakeMaterialXBaseColor evaluates the procedural at every untextured
+// face's centroid (in original-mesh coords) and writes the result into
+// model.FaceBaseColor. Mirrors applyBaseColorOverride's NoTextureMask
+// gating. Centroid sampling is a preview-fidelity approximation; the
+// voxelizer separately samples per-voxel for the actual print colors.
+func bakeMaterialXBaseColor(model *loader.LoadedModel, override voxel.BaseColorOverride) {
+	for i := range model.FaceBaseColor {
+		if model.NoTextureMask != nil && !model.NoTextureMask[i] {
+			continue
+		}
+		f := model.Faces[i]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+		c := [3]float32{
+			(v0[0] + v1[0] + v2[0]) / 3,
+			(v0[1] + v1[1] + v2[1]) / 3,
+			(v0[2] + v1[2] + v2[2]) / 3,
+		}
+		rgb := override.SampleBaseColor(c)
+		model.FaceBaseColor[i] = [4]uint8{rgb[0], rgb[1], rgb[2], 255}
+	}
 }
 
 // floodFillTwoGrids runs flood fill separately for each (Grid,

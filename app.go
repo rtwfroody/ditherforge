@@ -703,6 +703,35 @@ func (a *App) OpenStickerImage() (string, error) {
 	})
 }
 
+// MaterialXOpenResult is the result of OpenMaterialXFile. Path is
+// empty when the user cancels.
+type MaterialXOpenResult struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// OpenMaterialXFile opens a file dialog for selecting a procedural
+// MaterialX (.mtlx) file. Returns the path and the file contents
+// (UTF-8) so the frontend can hold the contents directly — no
+// secondary read step is needed, and the cache key reflects the actual
+// graph definition.
+func (a *App) OpenMaterialXFile() (*MaterialXOpenResult, error) {
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Select MaterialX File",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "MaterialX (*.mtlx)", Pattern: "*.mtlx"},
+		},
+	})
+	if err != nil || path == "" {
+		return &MaterialXOpenResult{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read materialx: %w", err)
+	}
+	return &MaterialXOpenResult{Path: path, Content: string(data)}, nil
+}
+
 // ReadStickerThumbnail reads a sticker image and returns a base64 data URL
 // thumbnail (max 64x64, preserving aspect ratio).
 func (a *App) ReadStickerThumbnail(path string) (string, error) {
@@ -798,6 +827,14 @@ type Settings struct {
 	NozzleDiameter      string              `json:"nozzleDiameter"`
 	LayerHeight         string              `json:"layerHeight"`
 	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
+	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
+	// file (display only). BaseMaterialXContent is the file contents
+	// at the time the user picked the file — round-tripped through
+	// settings so the project rebuilds identically without re-reading
+	// the file. BaseMaterialXTileMM is the procedural-to-mm scale.
+	BaseMaterialXPath        string  `json:"baseMaterialXPath,omitempty"`
+	BaseMaterialXContent     string  `json:"baseMaterialXContent,omitempty"`
+	BaseMaterialXTileMM      float64 `json:"baseMaterialXTileMM,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`

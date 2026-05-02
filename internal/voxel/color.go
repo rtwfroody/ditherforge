@@ -268,6 +268,16 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 	return uint8(ClampF(a+0.5, 0, 255))
 }
 
+// BaseColorOverride supplies a procedural replacement for an
+// untextured face's base color, evaluated at the sample's 3D position.
+// p is in the same coord frame Sample* receives — i.e. the original
+// (pre-split) mesh frame. Implementations must be safe to call from
+// many goroutines concurrently. Returns RGB only; alpha continues to
+// come from the model's per-face material.
+type BaseColorOverride interface {
+	SampleBaseColor(p [3]float32) [3]uint8
+}
+
 // SampleNearestColor finds the closest surface point to p on `model`, then
 // samples the texture color and alpha there. If decals are provided,
 // sticker textures are composited over the base color. Returns RGBA.
@@ -275,8 +285,8 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 // When stickers live on a *different* mesh than the base color sample
 // model (alpha-wrap mode: original mesh carries texture/UV, wrap mesh
 // carries decals), call SampleNearestColorWithSticker instead.
-func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf, decals []*StickerDecal) [4]uint8 {
-	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, nil, nil, nil)
+func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf, decals []*StickerDecal, override BaseColorOverride) [4]uint8 {
+	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, nil, nil, nil, override)
 }
 
 // SampleNearestColorWithSticker is the two-mesh form of SampleNearestColor.
@@ -287,11 +297,17 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 // is performed and decals are composited based on that result. stickerBuf
 // must be a separate SearchBuf sized for stickerModel; passing nil reuses
 // `buf` (safe because the two lookups don't overlap in time).
+//
+// override (optional) replaces the per-face base color with a
+// procedurally sampled RGB at p, but only for untextured faces — when
+// the nearest face has a usable texture, the texture wins as usual.
+// Pass nil for the legacy behavior (per-face FaceBaseColor only).
 func SampleNearestColorWithSticker(
 	p [3]float32,
 	model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf,
 	decals []*StickerDecal,
 	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+	override BaseColorOverride,
 ) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
 	bestDistSq := float32(math.MaxFloat32)
@@ -313,6 +329,10 @@ func SampleNearestColorWithSticker(
 	}
 
 	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
+	if override != nil && (texIdx < 0 || int(texIdx) >= len(model.Textures)) {
+		rgb := override.SampleBaseColor(p)
+		bc[0], bc[1], bc[2] = rgb[0], rgb[1], rgb[2]
+	}
 	f := model.Faces[bestTri]
 	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
 

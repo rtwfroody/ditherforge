@@ -54,6 +54,10 @@ export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
 
+export function OpenMaterialXFile() {
+  return window['go']['main']['App']['OpenMaterialXFile']();
+}
+
 export function OpenStickerImage() {
   return window['go']['main']['App']['OpenStickerImage']();
 }

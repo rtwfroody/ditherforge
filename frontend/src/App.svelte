@@ -26,7 +26,7 @@
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
   import type { CutPlanePreview } from '$lib/types';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -118,6 +118,12 @@
   // Base color for untextured faces: null = use model default, or {hex, label, collection}.
   let baseColor = $state<ColorInfo | null>(null);
   let baseColorPickerOpen = $state(false);
+  // Procedural MaterialX base color. Mutually exclusive with `baseColor`.
+  // baseMaterialXContent is the actual file body (round-tripped through
+  // settings); baseMaterialXPath is for display only.
+  let baseMaterialXPath = $state<string>('');
+  let baseMaterialXContent = $state<string>('');
+  let baseMaterialXTileMM = $state<number>(10);
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
   type ColorInfo = { hex: string; label: string; collection?: string };
   type ColorSlot = ColorInfo | null;
@@ -560,7 +566,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
-          layerHeight, baseColor, ...colorSlots,
+          layerHeight, baseColor, baseMaterialXContent, baseMaterialXTileMM, ...colorSlots,
           inventoryCollectionColors,
           committedBrightness, committedContrast, committedSaturation,
           JSON.stringify(warpPins),
@@ -797,6 +803,9 @@
       nozzleDiameter: String(nozzleDiameter),
       layerHeight: String(layerHeight),
       baseColor: baseColor ? { hex: baseColor.hex, label: baseColor.label, collection: baseColor.collection } : null,
+      baseMaterialXPath,
+      baseMaterialXContent,
+      baseMaterialXTileMM,
       colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection } : null),
       inventoryCollection,
       brightness,
@@ -854,6 +863,9 @@
     if (s.layerHeight !== undefined) layerHeight = s.layerHeight;
     reconcilePrinterSelection();
     if (s.baseColor !== undefined) baseColor = s.baseColor ? { hex: s.baseColor.hex, label: s.baseColor.label || '', collection: s.baseColor.collection || '' } : null;
+    if (s.baseMaterialXPath !== undefined) baseMaterialXPath = s.baseMaterialXPath;
+    if (s.baseMaterialXContent !== undefined) baseMaterialXContent = s.baseMaterialXContent;
+    if (s.baseMaterialXTileMM !== undefined) baseMaterialXTileMM = s.baseMaterialXTileMM;
     if (s.colorSlots !== undefined) {
       colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
     }
@@ -1064,6 +1076,8 @@
       LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       BaseColor: baseColor?.hex ?? '',
+      BaseColorMaterialX: baseMaterialXContent,
+      BaseColorMaterialXTileMM: baseMaterialXTileMM,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
       Printer: printerId,
@@ -1324,7 +1338,7 @@
               <div class="flex items-center gap-1.5">
                 <span class="text-sm font-medium">Base color</span>
                 <HelpTip>
-                  Color used for faces that aren't covered by the model's texture. Pick one to override the model's default.
+                  Color used for faces that aren't covered by the model's texture. Pick a single color or load a procedural MaterialX (.mtlx) file (e.g. marble, brick) — MaterialX takes precedence when both are set.
                 </HelpTip>
               </div>
               {#if sizeMode === 'size'}
@@ -1332,7 +1346,17 @@
               {:else}
                 <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
               {/if}
-              {#if baseColor}
+              {#if baseMaterialXContent}
+                <div class="flex items-center gap-2">
+                  <span
+                    class="h-9 flex-1 rounded border bg-muted text-xs flex items-center px-2 truncate"
+                    title={baseMaterialXPath}
+                  >
+                    {baseMaterialXPath ? baseMaterialXPath.split(/[\\/]/).pop() : 'inline .mtlx'}
+                  </span>
+                  <Button variant="ghost" size="sm" onclick={() => { baseMaterialXPath = ''; baseMaterialXContent = ''; }}>Clear</Button>
+                </div>
+              {:else if baseColor}
                 <div class="flex items-center gap-2">
                   <button
                     class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
@@ -1349,10 +1373,45 @@
                   Default
                 </Button>
               {/if}
+              {#if !baseMaterialXContent}
+                <div class="flex items-center gap-1.5">
+                  <span class="text-xs text-muted-foreground">MaterialX</span>
+                  <HelpTip>
+                    Load a procedural MaterialX (.mtlx) file. Only solid procedurals (position-based noise/marble/brick) are supported — image-textured materials won't render anything visible.
+                  </HelpTip>
+                </div>
+                <Button variant="outline" size="sm" onclick={async () => {
+                  const r = await OpenMaterialXFile();
+                  if (r && r.path) {
+                    baseMaterialXPath = r.path;
+                    baseMaterialXContent = r.content;
+                    // Picking a procedural retires the hex picker.
+                    baseColor = null;
+                    baseColorPickerOpen = false;
+                  }
+                }}>Load .mtlx</Button>
+              {:else}
+                <div class="flex items-center gap-1.5">
+                  <span class="text-sm font-medium">Tile size</span>
+                  <HelpTip>
+                    Object-space scale (mm per shading-unit cycle) applied to the procedural before sampling. Smaller = denser pattern.
+                  </HelpTip>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input bind:value={baseMaterialXTileMM} type="number" min={0.1} step={0.5} class="flex-1" />
+                  <span class="text-xs text-muted-foreground">mm</span>
+                </div>
+              {/if}
               {#if baseColorPickerOpen}
                 <div class="col-span-2">
                   <CollectionPicker
-                    onselect={(hex, label, collection) => { baseColor = { hex, label, collection }; baseColorPickerOpen = false; }}
+                    onselect={(hex, label, collection) => {
+                      baseColor = { hex, label, collection };
+                      baseColorPickerOpen = false;
+                      // Picking a hex retires the procedural.
+                      baseMaterialXContent = '';
+                      baseMaterialXPath = '';
+                    }}
                     onclose={() => { baseColorPickerOpen = false; }}
                   />
                 </div>

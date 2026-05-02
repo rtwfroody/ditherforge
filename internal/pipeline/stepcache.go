@@ -379,12 +379,15 @@ type loadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
-	// appliedBaseColor tracks the base color currently applied to ColorModel /
-	// SampleModel FaceBaseColor slices. Empty string means pristine (no
-	// override currently applied). applyBaseColor() resets from raw and
-	// re-applies when this diverges from opts.BaseColor, so
-	// load/decimate/sticker caches survive color changes.
-	appliedBaseColor string
+	// appliedBaseColor / appliedBaseColorMaterialX / appliedBaseColorMaterialXTileMM
+	// track the base-color override currently baked into ColorModel /
+	// SampleModel FaceBaseColor. The triple is the cache key for the
+	// in-place mutation: when any field diverges from the corresponding
+	// opts.* value, applyBaseColor resets from the parse cache and re-bakes.
+	// All three empty/zero means pristine.
+	appliedBaseColor                 string
+	appliedBaseColorMaterialX        string
+	appliedBaseColorMaterialXTileMM  float64
 }
 
 type voxelizeOutput struct {
@@ -573,16 +576,21 @@ type loadSettings struct {
 // because runSticker deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
-	NozzleDiameter float32
-	LayerHeight    float32
-	BaseColor      string
+	NozzleDiameter           float32
+	LayerHeight              float32
+	BaseColor                string
+	BaseColorMaterialX       string
+	BaseColorMaterialXTileMM float64
 }
 
 type stickerSettings struct {
 	Stickers []Sticker
-	// BaseColor is included so a base-color change invalidates the sticker
-	// stage. See voxelizeSettings doc above for the reason.
-	BaseColor string
+	// BaseColor / BaseColorMaterialX / BaseColorMaterialXTileMM are
+	// included so any base-color change invalidates the sticker stage.
+	// See voxelizeSettings doc above for the reason.
+	BaseColor                string
+	BaseColorMaterialX       string
+	BaseColorMaterialXTileMM float64
 	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
 	// original mesh), so decals built for one substrate are invalid when
 	// the toggle changes. AlphaWrapAlpha and AlphaWrapOffset live in
@@ -690,12 +698,20 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		return s
 	case StageVoxelize:
 		return voxelizeSettings{
-			NozzleDiameter: opts.NozzleDiameter,
-			LayerHeight:    opts.LayerHeight,
-			BaseColor:      opts.BaseColor,
+			NozzleDiameter:           opts.NozzleDiameter,
+			LayerHeight:              opts.LayerHeight,
+			BaseColor:                opts.BaseColor,
+			BaseColorMaterialX:       opts.BaseColorMaterialX,
+			BaseColorMaterialXTileMM: opts.BaseColorMaterialXTileMM,
 		}
 	case StageSticker:
-		return stickerSettings{Stickers: opts.Stickers, BaseColor: opts.BaseColor, AlphaWrap: opts.AlphaWrap}
+		return stickerSettings{
+			Stickers:                 opts.Stickers,
+			BaseColor:                opts.BaseColor,
+			BaseColorMaterialX:       opts.BaseColorMaterialX,
+			BaseColorMaterialXTileMM: opts.BaseColorMaterialXTileMM,
+			AlphaWrap:                opts.AlphaWrap,
+		}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -759,8 +775,12 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
 		writeString(h, v.BaseColor)
+		writeString(h, v.BaseColorMaterialX)
+		writeFloat64(h, v.BaseColorMaterialXTileMM)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
+		writeString(h, v.BaseColorMaterialX)
+		writeFloat64(h, v.BaseColorMaterialXTileMM)
 		writeBool(h, v.AlphaWrap)
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {
