@@ -130,8 +130,9 @@
           Connector style
           <HelpTip>
             <strong>Pegs</strong>: solid peg on one half, matching pocket
-            on the other. <strong>Dowels</strong>: matching pockets on
-            both halves; print or buy separate dowel pins.
+            on the other. <strong>Dowel/magnet holes</strong>: matching
+            pockets on both halves — print or buy dowel pins, or glue
+            in magnets for a magnetic catch.
             <strong>None</strong>: flat cut, glue-only assembly.
           </HelpTip>
         </span>
@@ -141,7 +142,7 @@
         >
           <option value="none">None</option>
           <option value="pegs">Pegs</option>
-          <option value="dowels">Dowel holes</option>
+          <option value="dowels">Dowel/magnet holes</option>
         </select>
       </label>
 

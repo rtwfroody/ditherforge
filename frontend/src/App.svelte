@@ -157,8 +157,8 @@
   let splitOffset = $state(0);
   let splitConnectorStyle = $state('pegs');
   let splitConnectorCount = $state(0); // 0 = auto
-  let splitConnectorDiamMM = $state(5);
-  let splitConnectorDepthMM = $state(6);
+  let splitConnectorDiamMM = $state(3);
+  let splitConnectorDepthMM = $state(2);
   let splitClearanceMM = $state(0.15);
   // Per-half orientation. Defaults to "original" — the user picks per
   // half independently. See SplitControls.svelte for option semantics.

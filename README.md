@@ -213,8 +213,8 @@ To split a model:
 3. Pick a **Connector style**:
    - **Pegs** — a solid peg on one half mates with a matching pocket on the
      other. Best for FDM where dowel hardware isn't on hand.
-   - **Dowel holes** — matching pockets on both halves; print or buy
-     separate dowel pins to glue in.
+   - **Dowel/magnet holes** — matching pockets on both halves; print
+     or buy dowel pins, or glue in magnets for a magnetic catch.
    - **None** — flat cut, glue-only assembly.
 4. Adjust **Count** (number of connectors along the cut; **Auto** picks 1, 2,
    or 3 based on the cut polygon's inscribed-circle radius), **Diameter**,
@@ -470,12 +470,11 @@ glue-up.
 | Split into two parts | off | Master toggle. When off, the rest of the section is hidden and the pipeline behaves as if Split didn't exist. Forces Alpha-wrap on; turning Alpha-wrap off auto-disables Split. |
 | Cut plane | XY | Axis-aligned plane: XY (cut along Z), XZ (cut along Y), or YZ (cut along X). |
 | Offset (mm) | bbox mid | Position of the cut plane along the chosen axis, measured from the model's local origin. Adjustable via number field or slider. |
-| Connector style | Pegs | `Pegs` (built-in male/female), `Dowel holes` (matching pockets, separate dowel pins), or `None` (flat cut). |
+| Connector style | Pegs | `Pegs` (built-in male/female), `Dowel/magnet holes` (matching pockets for separate dowel pins or glued-in magnets), or `None` (flat cut). |
 | Count | Auto | Number of connectors. `Auto` picks 1, 2, or 3 based on the cut polygon's inscribed-circle radius. |
-| Diameter (mm) | 5.0 | Connector diameter. Hidden when style is None. |
-| Depth (mm) | 6.0 | Connector depth (per side for dowels). Hidden when style is None. |
-| Clearance (mm) | 0.15 | Per-side radial clearance applied to the female feature so the peg slides in. |
-| Bed gap (mm) | 5.0 | Space between the two halves on the build plate. |
+| Diameter (mm) | 3.0 | Connector diameter. Hidden when style is None. |
+| Depth (mm) | 2.0 | Connector depth (per side for dowels/magnets). Hidden when style is None. |
+| Clearance (mm) | 0.15 | Per-side clearance applied to the female feature, both radially (pocket diameter) and axially (pocket depth). |
 
 While the Split panel is open, a translucent overlay in the 3D viewer shows
 the live cut plane through the input model.
