@@ -87,9 +87,34 @@ alone. STL files always contain a single mesh and do not show this control.
 
 Meshes sometimes have faces without a texture or vertex color (common in STL
 files and in some 3MF files). By default these faces render as plain white.
-Use the **Base color** picker in the settings panel to choose a different
-color — this acts as the "paint" applied to any face that has no other color
-assigned, before dithering and palette selection.
+The **Base color** section of the settings panel offers two modes:
+
+- **Solid** — pick a single color from any of your filament collections.
+  This acts as the "paint" applied to any face that has no other color
+  assigned, before dithering and palette selection.
+- **Texture** — load a [MaterialX](https://materialx.org/) shader graph
+  (`.mtlx` file, or a `.zip` archive containing the `.mtlx` and its
+  textures) and apply it as a procedural or image-backed pattern. Procedural
+  graphs (marble, brick) are sampled per voxel in 3D, so the pattern looks
+  carved-from-the-block rather than projected. Image-backed PBR packs
+  (Quixel, AmbientCG, …) are projected via triplanar mapping, so they wrap
+  cleanly across faces without requiring authored UVs on the mesh.
+
+  Two knobs appear once a file is loaded:
+
+  - **Tile size (mm)** — the object-space distance one shading-unit cycle
+    of the procedural maps to. For image packs this is also the texture's
+    repeat distance. Smaller = denser pattern.
+  - **Triplanar** — sharpness of the triplanar projection blend for
+    image-backed graphs. `1` is a soft cosine blend; higher values approach
+    a hard box map. Ignored by purely procedural graphs that don't read
+    texture coordinates.
+
+  Try the official [`standard_surface_marble_solid.mtlx`](https://github.com/AcademySoftwareFoundation/MaterialX/blob/main/resources/Materials/Examples/StandardSurface/standard_surface_marble_solid.mtlx)
+  for a procedural example, or any [AmbientCG](https://ambientcg.com/) pack
+  exported as a `.zip`. Only the graph's `base_color` output is consumed —
+  normal maps, roughness, etc. are ignored, and only RGB is baked into the
+  print.
 
 ## How to Configure the Color Palette
 
@@ -336,6 +361,9 @@ settings file.
 | `--color` | — | Lock a color (CSS name or `#RRGGBB`; repeatable, comma-separated) |
 | `--inventory` | — | Filament inventory file (`#RRGGBB Label` per line) for auto colors |
 | `--base-color` | — | Hex color for untextured faces (e.g. `#FF0000`) |
+| `--base-materialx` | — | Path to a MaterialX `.mtlx` file (or `.zip` archive containing one with adjacent textures) applied as the base color of untextured faces. Overrides `--base-color`. |
+| `--base-materialx-tile-mm` | `10` | Object-space scale (mm per shading-unit cycle) for the MaterialX graph |
+| `--base-materialx-triplanar-sharpness` | `4` | Triplanar projection sharpness for image-backed MaterialX (higher = sharper axis transitions; ignored by procedural `.mtlx`) |
 | `--brightness` | `0` | Brightness adjustment (-100 to +100) |
 | `--contrast` | `0` | Contrast adjustment (-100 to +100) |
 | `--saturation` | `0` | Saturation adjustment (-100 to +100) |
