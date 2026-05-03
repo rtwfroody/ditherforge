@@ -4,6 +4,7 @@
   import { Slider } from '$lib/components/ui/slider';
   import HelpTip from '$lib/components/HelpTip.svelte';
   import { ImageIcon, TrashIcon, CrosshairIcon } from '@lucide/svelte';
+  import type { StickerMode } from '$lib/settingsOptions';
 
   export type StickerUI = {
     imagePath: string;
@@ -15,7 +16,7 @@
     scale: number;
     rotation: number;
     maxAngle: number;
-    mode: 'unfold' | 'projection';
+    mode: StickerMode;
   };
 
   let {

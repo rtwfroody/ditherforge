@@ -1,21 +1,27 @@
 <script lang="ts">
   import HelpTip from './HelpTip.svelte';
   import { Checkbox } from '$lib/components/ui/checkbox';
+  import {
+    SPLIT_ORIENTATION_OPTIONS,
+    SPLIT_CONNECTOR_OPTIONS,
+    type SplitOrientation,
+    type SplitConnectorStyle,
+    type SplitAxis,
+  } from '$lib/settingsOptions';
 
   type Props = {
     enabled: boolean;
-    axis: number; // 0=X, 1=Y, 2=Z
+    axis: SplitAxis;
     offset: number;
-    connectorStyle: string; // "none" | "pegs" | "dowels"
+    connectorStyle: SplitConnectorStyle;
     connectorCount: number; // 0=auto, 1..3 explicit
     connectorDiamMM: number;
     connectorDepthMM: number;
     clearanceMM: number;
-    // Per-half orientation: "original" | "seam-up" | "seam-down" |
-    // "seam-left" | "seam-right". orientationA is half 0 (low-axis
-    // side), orientationB is half 1 (high-axis side).
-    orientationA: string;
-    orientationB: string;
+    // orientationA is half 0 (low-axis side), orientationB is half 1
+    // (high-axis side). See settingsOptions.ts for the value set.
+    orientationA: SplitOrientation;
+    orientationB: SplitOrientation;
     // Range hint for the offset slider; populated by App.svelte from
     // the current model's bbox along the selected axis.
     minOffset: number;
@@ -140,9 +146,9 @@
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={connectorStyle}
         >
-          <option value="none">None</option>
-          <option value="pegs">Pegs</option>
-          <option value="dowels">Dowel/magnet holes</option>
+          {#each SPLIT_CONNECTOR_OPTIONS as opt}
+            <option value={opt.value}>{opt.label}</option>
+          {/each}
         </select>
       </label>
 
@@ -222,11 +228,9 @@
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={orientationA}
         >
-          <option value="original">Original</option>
-          <option value="seam-up">Seam up</option>
-          <option value="seam-down">Seam down</option>
-          <option value="seam-left">Seam left</option>
-          <option value="seam-right">Seam right</option>
+          {#each SPLIT_ORIENTATION_OPTIONS as opt}
+            <option value={opt.value}>{opt.label}</option>
+          {/each}
         </select>
       </label>
 
@@ -236,11 +240,9 @@
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={orientationB}
         >
-          <option value="original">Original</option>
-          <option value="seam-up">Seam up</option>
-          <option value="seam-down">Seam down</option>
-          <option value="seam-left">Seam left</option>
-          <option value="seam-right">Seam right</option>
+          {#each SPLIT_ORIENTATION_OPTIONS as opt}
+            <option value={opt.value}>{opt.label}</option>
+          {/each}
         </select>
       </label>
 

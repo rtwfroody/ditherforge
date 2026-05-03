@@ -26,6 +26,22 @@
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
   import type { CutPlanePreview } from '$lib/types';
+  import {
+    SPLIT_ORIENTATION_VALUES,
+    SPLIT_CONNECTOR_VALUES,
+    SPLIT_AXIS_VALUES,
+    DITHER_OPTIONS,
+    DITHER_VALUES,
+    SIZE_MODE_VALUES,
+    BASE_COLOR_MODE_VALUES,
+    STICKER_MODE_VALUES,
+    type SplitOrientation,
+    type SplitConnectorStyle,
+    type SplitAxis,
+    type DitherMode,
+    type SizeMode,
+    type BaseColorMode,
+  } from '$lib/settingsOptions';
   import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, MaterialXPathOK, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
@@ -59,7 +75,7 @@
 
   // Form state with defaults matching CLI.
   let inputFile = $state('');
-  let sizeMode: 'size' | 'scale' = $state('size');
+  let sizeMode: SizeMode = $state('size');
   let sizeValue = $state('100');
   let scaleValue = $state('1.0');
   // Printer registry — populated on mount via ListPrinters(). Defines the
@@ -127,7 +143,7 @@
   // baseColorMode picks which of the two pickers (and the
   // corresponding pipeline option) is in effect. Backend only ever
   // gets one — the other is suppressed.
-  let baseColorMode = $state<'solid' | 'texture'>('solid');
+  let baseColorMode = $state<BaseColorMode>('solid');
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
   type ColorInfo = { hex: string; label: string; collection?: string };
   type ColorSlot = ColorInfo | null;
@@ -163,17 +179,17 @@
   // See docs/SPLIT.md. Defaults match the design doc's "what most
   // users want" baseline.
   let splitEnabled = $state(false);
-  let splitAxis = $state(2); // 0=X, 1=Y, 2=Z
+  let splitAxis = $state<SplitAxis>(2);
   let splitOffset = $state(0);
-  let splitConnectorStyle = $state('pegs');
+  let splitConnectorStyle = $state<SplitConnectorStyle>('pegs');
   let splitConnectorCount = $state(0); // 0 = auto
   let splitConnectorDiamMM = $state(3);
   let splitConnectorDepthMM = $state(2);
   let splitClearanceMM = $state(0.15);
   // Per-half orientation. Defaults to "original" — the user picks per
   // half independently. See SplitControls.svelte for option semantics.
-  let splitOrientationA = $state('original');
-  let splitOrientationB = $state('original');
+  let splitOrientationA = $state<SplitOrientation>('original');
+  let splitOrientationB = $state<SplitOrientation>('original');
   // The loaded model's bbox in original-mesh coords (mm, post-scale,
   // post-normalizeZ). Populated from the input-mesh event; null until
   // the first event arrives so the Split UI can distinguish "no model
@@ -848,7 +864,28 @@
     };
   }
 
+  // Validation helpers for applySettings. Every field should fall back
+  // to its FACTORY_DEFAULTS value when missing from the JSON or set to
+  // an unsupported value, so partial / older / corrupted settings
+  // files don't leave the UI in an unreachable state.
+  function pickString(v: unknown, def: string): string {
+    return typeof v === 'string' ? v : def;
+  }
+  function pickNumber(v: unknown, def: number): number {
+    return typeof v === 'number' && Number.isFinite(v) ? v : def;
+  }
+  function pickBool(v: unknown, def: boolean): boolean {
+    return typeof v === 'boolean' ? v : def;
+  }
+  function pickEnum<T extends string>(v: unknown, allowed: readonly T[], def: T): T {
+    return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : def;
+  }
+  function pickIntEnum<T extends number>(v: unknown, allowed: readonly T[], def: T): T {
+    return typeof v === 'number' && (allowed as readonly number[]).includes(v) ? (v as T) : def;
+  }
+
   function applySettings(s: any) {
+    const D = FACTORY_DEFAULTS;
     // Saved sticker coords match the saved size/scale settings. Clear
     // calibration so the next prediction/event is adopted without rescaling.
     // Also clear the cached extent: if this settings file points at a
@@ -856,28 +893,32 @@
     // before the backend replies with the true extent.
     calibratedPreviewScale = null;
     nativeExtentMM = null;
-    if (s.inputFile !== undefined) inputFile = s.inputFile;
-    objectIndex = s.objectIndex ?? -1;
-    if (s.sizeMode !== undefined) sizeMode = s.sizeMode;
-    if (s.sizeValue !== undefined) sizeValue = s.sizeValue;
-    if (s.scaleValue !== undefined) scaleValue = s.scaleValue;
-    if (s.printer !== undefined) printerId = s.printer;
+
+    inputFile = pickString(s.inputFile, D.inputFile);
+    objectIndex = pickNumber(s.objectIndex, D.objectIndex);
+    sizeMode = pickEnum(s.sizeMode, SIZE_MODE_VALUES, D.sizeMode as SizeMode);
+    sizeValue = pickString(s.sizeValue, D.sizeValue);
+    scaleValue = pickString(s.scaleValue, D.scaleValue);
+    printerId = pickString(s.printer, D.printer);
     // Legacy settings files used "nozzle"; newer ones use "nozzleDiameter".
-    if (s.nozzleDiameter !== undefined) nozzleDiameter = s.nozzleDiameter;
-    else if (s.nozzle !== undefined) nozzleDiameter = s.nozzle;
-    if (s.layerHeight !== undefined) layerHeight = s.layerHeight;
+    nozzleDiameter = pickString(s.nozzleDiameter ?? s.nozzle, D.nozzleDiameter);
+    layerHeight = pickString(s.layerHeight, D.layerHeight);
     reconcilePrinterSelection();
-    if (s.baseColor !== undefined) baseColor = s.baseColor ? { hex: s.baseColor.hex, label: s.baseColor.label || '', collection: s.baseColor.collection || '' } : null;
-    if (s.baseMaterialXPath !== undefined) baseMaterialXPath = s.baseMaterialXPath;
-    if (s.baseMaterialXTileMM !== undefined) baseMaterialXTileMM = s.baseMaterialXTileMM;
-    if (s.baseMaterialXTriplanarSharpness !== undefined) baseMaterialXTriplanarSharpness = s.baseMaterialXTriplanarSharpness;
-    // Mode falls back to "texture" when only the path is present
-    // (older settings files predate the explicit mode field).
-    if (s.baseColorMode === 'solid' || s.baseColorMode === 'texture') {
-      baseColorMode = s.baseColorMode;
-    } else {
-      baseColorMode = baseMaterialXPath ? 'texture' : 'solid';
-    }
+
+    baseColor = s.baseColor && typeof s.baseColor === 'object'
+      ? { hex: pickString(s.baseColor.hex, ''), label: pickString(s.baseColor.label, ''), collection: pickString(s.baseColor.collection, '') }
+      : D.baseColor;
+    baseMaterialXPath = pickString(s.baseMaterialXPath, D.baseMaterialXPath);
+    baseMaterialXTileMM = pickNumber(s.baseMaterialXTileMM, D.baseMaterialXTileMM);
+    baseMaterialXTriplanarSharpness = pickNumber(s.baseMaterialXTriplanarSharpness, D.baseMaterialXTriplanarSharpness);
+    // baseColorMode falls back to "texture" when only the path is
+    // present (older settings files predate the explicit mode field).
+    // Routed through pickEnum with an empty-string sentinel so the
+    // BASE_COLOR_MODE_VALUES array remains the single source of truth;
+    // the `||` filters the sentinel and applies the path-derived
+    // fallback for any unrecognised input.
+    const explicitMode = pickEnum(s.baseColorMode, BASE_COLOR_MODE_VALUES, '' as BaseColorMode);
+    baseColorMode = explicitMode || (baseMaterialXPath ? 'texture' : 'solid');
     // Best-effort check: when a settings file is loaded on a different
     // machine than where it was saved, the .mtlx path may not resolve.
     // Surface a warning immediately so the user knows before they
@@ -890,58 +931,69 @@
         }
       });
     }
-    if (s.colorSlots !== undefined) {
-      colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
-    }
-    if (s.inventoryCollection !== undefined) {
-      inventoryCollection = s.inventoryCollection;
-      loadInventoryCollectionColors(inventoryCollection);
-    }
-    if (s.brightness !== undefined) { brightness = s.brightness; committedBrightness = s.brightness; }
-    if (s.contrast !== undefined) { contrast = s.contrast; committedContrast = s.contrast; }
-    if (s.saturation !== undefined) { saturation = s.saturation; committedSaturation = s.saturation; }
-    if (s.warpPins !== undefined) {
-      warpPins = s.warpPins.map((p: any) => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel || '', sigma: p.sigma }));
-    }
-    if (s.stickers !== undefined) {
-      stickers = s.stickers.map((st: any) => ({
-        imagePath: st.imagePath,
-        fileName: (st.imagePath || '').split(/[/\\]/).pop() || st.imagePath,
-        thumbnail: '',
-        center: st.center,
-        normal: st.normal,
-        up: st.up,
-        scale: st.scale,
-        rotation: st.rotation,
-        maxAngle: st.maxAngle ?? 0,
-        mode: st.mode === 'projection' ? 'projection' : 'unfold',
-      }));
-      // Load thumbnails asynchronously.
-      stickers.forEach((st, i) => {
-        ReadStickerThumbnail(st.imagePath).then(thumb => {
-          stickers[i] = { ...stickers[i], thumbnail: thumb };
-          stickers = stickers;
-        }).catch(() => {});
-      });
-    }
-    if (s.dither !== undefined) dither = s.dither;
-    if (s.colorSnap !== undefined) { colorSnap = s.colorSnap; committedColorSnap = s.colorSnap; }
-    if (s.noMerge !== undefined) noMerge = s.noMerge;
-    if (s.noSimplify !== undefined) noSimplify = s.noSimplify;
-    if (s.stats !== undefined) stats = s.stats;
-    if (s.alphaWrap !== undefined) alphaWrap = s.alphaWrap;
-    if (s.alphaWrapAlpha !== undefined) alphaWrapAlpha = s.alphaWrapAlpha;
-    if (s.alphaWrapOffset !== undefined) alphaWrapOffset = s.alphaWrapOffset;
-    if (s.splitEnabled !== undefined) splitEnabled = s.splitEnabled;
-    if (s.splitAxis !== undefined) splitAxis = s.splitAxis;
-    if (s.splitOffset !== undefined) splitOffset = s.splitOffset;
-    if (s.splitConnectorStyle !== undefined) splitConnectorStyle = s.splitConnectorStyle;
-    if (s.splitConnectorCount !== undefined) splitConnectorCount = s.splitConnectorCount;
-    if (s.splitConnectorDiamMM !== undefined) splitConnectorDiamMM = s.splitConnectorDiamMM;
-    if (s.splitConnectorDepthMM !== undefined) splitConnectorDepthMM = s.splitConnectorDepthMM;
-    if (s.splitClearanceMM !== undefined) splitClearanceMM = s.splitClearanceMM;
-    if (s.splitOrientationA !== undefined) splitOrientationA = s.splitOrientationA;
-    if (s.splitOrientationB !== undefined) splitOrientationB = s.splitOrientationB;
+
+    colorSlots = Array.isArray(s.colorSlots)
+      ? s.colorSlots.map((c: any) => c && typeof c === 'object'
+          ? { hex: pickString(c.hex, ''), label: pickString(c.label, ''), collection: pickString(c.collection, '') }
+          : null)
+      : structuredClone(D.colorSlots);
+    inventoryCollection = pickString(s.inventoryCollection, D.inventoryCollection);
+    loadInventoryCollectionColors(inventoryCollection);
+
+    brightness = pickNumber(s.brightness, D.brightness); committedBrightness = brightness;
+    contrast = pickNumber(s.contrast, D.contrast); committedContrast = contrast;
+    saturation = pickNumber(s.saturation, D.saturation); committedSaturation = saturation;
+
+    warpPins = Array.isArray(s.warpPins)
+      ? s.warpPins.map((p: any) => ({
+          sourceHex: pickString(p?.sourceHex, ''),
+          targetHex: pickString(p?.targetHex, ''),
+          targetLabel: pickString(p?.targetLabel, ''),
+          sigma: pickNumber(p?.sigma, 0),
+        }))
+      : [];
+
+    stickers = Array.isArray(s.stickers)
+      ? s.stickers.map((st: any) => ({
+          imagePath: pickString(st?.imagePath, ''),
+          fileName: (pickString(st?.imagePath, '')).split(/[/\\]/).pop() || pickString(st?.imagePath, ''),
+          thumbnail: '',
+          center: st?.center,
+          normal: st?.normal,
+          up: st?.up,
+          scale: pickNumber(st?.scale, 1),
+          rotation: pickNumber(st?.rotation, 0),
+          maxAngle: pickNumber(st?.maxAngle, 0),
+          mode: pickEnum(st?.mode, STICKER_MODE_VALUES, 'unfold'),
+        }))
+      : [];
+    // Load thumbnails asynchronously.
+    stickers.forEach((st, i) => {
+      ReadStickerThumbnail(st.imagePath).then(thumb => {
+        stickers[i] = { ...stickers[i], thumbnail: thumb };
+        stickers = stickers;
+      }).catch(() => {});
+    });
+
+    dither = pickEnum(s.dither, DITHER_VALUES, D.dither as DitherMode);
+    colorSnap = pickNumber(s.colorSnap, D.colorSnap); committedColorSnap = colorSnap;
+    noMerge = pickBool(s.noMerge, D.noMerge);
+    noSimplify = pickBool(s.noSimplify, D.noSimplify);
+    stats = pickBool(s.stats, D.stats);
+    alphaWrap = pickBool(s.alphaWrap, D.alphaWrap);
+    alphaWrapAlpha = pickString(s.alphaWrapAlpha, D.alphaWrapAlpha);
+    alphaWrapOffset = pickString(s.alphaWrapOffset, D.alphaWrapOffset);
+
+    splitEnabled = pickBool(s.splitEnabled, D.splitEnabled);
+    splitAxis = pickIntEnum(s.splitAxis, SPLIT_AXIS_VALUES, D.splitAxis);
+    splitOffset = pickNumber(s.splitOffset, D.splitOffset);
+    splitConnectorStyle = pickEnum(s.splitConnectorStyle, SPLIT_CONNECTOR_VALUES, D.splitConnectorStyle as SplitConnectorStyle);
+    splitConnectorCount = pickNumber(s.splitConnectorCount, D.splitConnectorCount);
+    splitConnectorDiamMM = pickNumber(s.splitConnectorDiamMM, D.splitConnectorDiamMM);
+    splitConnectorDepthMM = pickNumber(s.splitConnectorDepthMM, D.splitConnectorDepthMM);
+    splitClearanceMM = pickNumber(s.splitClearanceMM, D.splitClearanceMM);
+    splitOrientationA = pickEnum(s.splitOrientationA, SPLIT_ORIENTATION_VALUES, D.splitOrientationA as SplitOrientation);
+    splitOrientationB = pickEnum(s.splitOrientationB, SPLIT_ORIENTATION_VALUES, D.splitOrientationB as SplitOrientation);
   }
 
   async function handleSave() {
@@ -1738,8 +1790,9 @@
                   {dither || 'Select...'}
                 </Select.Trigger>
                 <Select.Content>
-                  <Select.Item value="dizzy">dizzy</Select.Item>
-                  <Select.Item value="none">none</Select.Item>
+                  {#each DITHER_OPTIONS as opt}
+                    <Select.Item value={opt.value}>{opt.label}</Select.Item>
+                  {/each}
                 </Select.Content>
               </Select.Root>
             </div>
