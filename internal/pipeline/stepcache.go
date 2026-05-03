@@ -15,6 +15,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/cacheblob"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/materialx"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
@@ -173,6 +174,24 @@ type StageCache struct {
 	invContentsMtime time.Time
 	invContentsSize  int64
 	invContents      string
+
+	// mtlxSampler caches the parsed-and-compiled MaterialX sampler so
+	// applyBaseColor (preview bake) and the voxelize stage (per-voxel
+	// sample) share one parse + image-decode per pipeline run.
+	// Errors are cached too — a malformed .mtlx shouldn't be re-tried
+	// on every consumer call within a session. Tracked by (path,
+	// mtime, size) like inputHash/invContents.
+	mtlxSamplerPath  string
+	mtlxSamplerMtime time.Time
+	mtlxSamplerSize  int64
+	mtlxSampler      materialx.Sampler
+	mtlxSamplerErr   error
+	// mtlxWarnedPath suppresses duplicate "ignoring MaterialX base
+	// color" warnings: applyBaseColor and the Voxelize stage both
+	// build the override per run, and a malformed .mtlx would
+	// otherwise fire the same toast twice. Cleared whenever a
+	// different path is consulted.
+	mtlxWarnedPath string
 }
 
 // NewStageCache returns an empty stage cache with no disk persistence.
@@ -189,13 +208,21 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 
 // runStageCached is the canonical wrapper every pipeline stage uses. It:
 //
-//   - returns immediately on a cache hit, emitting a single "completed"
-//     stage marker so the UI shows the stage as done;
+//   - on a cache hit, returns the freshly-decoded value (cached != nil)
+//     so the caller can stash it directly without a second cache read;
 //   - on a miss, times the body, lets body emit its own progress markers
 //     (some stages are spinners, some have determinate progress bars from
 //     inner functions like DecimateMesh / VoxelizeTwoGrids), and on
 //     success calls stampCost to back-fill the disk meta sidecar with
 //     the wall-clock generation time.
+//
+// Returning the decoded value (rather than letting the caller re-fetch
+// it) is load-bearing: the disk cache is swept asynchronously after
+// every pipeline run, and a sweep that fires between the cache-hit
+// detection here and a second cache.get from the caller would delete
+// the file out from under us, leaving the caller with nil. Surfaced
+// previously as a SIGSEGV in applyBaseColor when Load returned
+// (nil, nil).
 //
 // body is responsible only for producing and persisting the stage's
 // result. In normal use, callers reach this helper via runStage (in
@@ -211,7 +238,7 @@ func runStageCached(
 	opts Options,
 	tracker progress.Tracker,
 	body func() error,
-) error {
+) (cached any, err error) {
 	name := stageNames[stage]
 	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
@@ -221,7 +248,7 @@ func runStageCached(
 			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
 			shortKey(key))
 		progress.BeginStage(tracker, name, false, 0).Done()
-		return nil
+		return v, nil
 	}
 	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
@@ -231,7 +258,7 @@ func runStageCached(
 		// pointing at it would be misleading.
 		plog.Printf("%s: failed after %s — %v", name,
 			time.Since(start).Round(time.Millisecond), err)
-		return err
+		return nil, err
 	}
 	plog.Printf("%s: done in %s", name,
 		time.Since(start).Round(time.Millisecond))
@@ -239,7 +266,7 @@ func runStageCached(
 	// meta sidecar with description and wall-clock cost so the
 	// next sweep can rank this entry correctly.
 	cache.stampCost(stage, opts, time.Since(start))
-	return nil
+	return nil, nil
 }
 
 // shortKey returns the first 12 hex chars of a stage cache key — enough
@@ -379,12 +406,16 @@ type loadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
-	// appliedBaseColor tracks the base color currently applied to ColorModel /
-	// SampleModel FaceBaseColor slices. Empty string means pristine (no
-	// override currently applied). applyBaseColor() resets from raw and
-	// re-applies when this diverges from opts.BaseColor, so
-	// load/decimate/sticker caches survive color changes.
-	appliedBaseColor string
+	// appliedBaseColor / appliedBaseColorMaterialX{,TileMM,TriplanarSharpness}
+	// track the base-color override currently baked into ColorModel /
+	// SampleModel FaceBaseColor. The tuple is the cache key for the
+	// in-place mutation: when any field diverges from the corresponding
+	// opts.* value, applyBaseColor resets from the parse cache and re-bakes.
+	// All empty/zero means pristine.
+	appliedBaseColor                            string
+	appliedBaseColorMaterialX                   string
+	appliedBaseColorMaterialXTileMM             float64
+	appliedBaseColorMaterialXTriplanarSharpness float64
 }
 
 type voxelizeOutput struct {
@@ -432,7 +463,7 @@ type stickerOutput struct {
 	// nearest-tri lookup (Model == sample model) or two separate lookups.
 	FromAlphaWrap bool
 
-	// si is the spatial index over Model. Seeded inside runSticker on a
+	// si is the spatial index over Model. Seeded inside the Sticker stage body on a
 	// fresh build; nil after a disk-cache decode (the field is unexported,
 	// gob skips it). Rebuilt by ensureSI() on first access. sync.Once
 	// makes the lazy build safe against the disk-encode goroutine
@@ -445,7 +476,7 @@ type stickerOutput struct {
 
 // ensureSI returns so.si, building it on first call. Safe to call from
 // multiple goroutines; in practice the single pipeline worker is the only
-// caller (runVoxelize on the alpha-wrap branch).
+// caller (the Voxelize stage body on the alpha-wrap branch).
 func (so *stickerOutput) ensureSI() *voxel.SpatialIndex {
 	so.siOnce.Do(func() {
 		if so.si == nil && so.Model != nil {
@@ -570,19 +601,30 @@ type loadSettings struct {
 // affects voxel cell coloring. A cheap per-run step reapplies the override
 // to the cached ColorModel before voxelize, so Load/Decimate caches
 // survive base-color changes. Sticker is invalidated on base-color change
-// because runSticker deep-clones ColorModel into so.Model and the per-run
+// because the Sticker stage body deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
-	NozzleDiameter float32
-	LayerHeight    float32
-	BaseColor      string
+	NozzleDiameter                       float32
+	LayerHeight                          float32
+	BaseColor                            string
+	BaseColorMaterialX                   string  // path
+	BaseColorMaterialXMTime              int64   // ns; 0 if file is missing/inaccessible
+	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
+	BaseColorMaterialXTileMM             float64
+	BaseColorMaterialXTriplanarSharpness float64
 }
 
 type stickerSettings struct {
 	Stickers []Sticker
-	// BaseColor is included so a base-color change invalidates the sticker
+	// BaseColor / BaseColorMaterialX{,MTime,Size,TileMM,TriplanarSharpness}
+	// are included so any base-color change invalidates the sticker
 	// stage. See voxelizeSettings doc above for the reason.
-	BaseColor string
+	BaseColor                            string
+	BaseColorMaterialX                   string
+	BaseColorMaterialXMTime              int64
+	BaseColorMaterialXSize               int64
+	BaseColorMaterialXTileMM             float64
+	BaseColorMaterialXTriplanarSharpness float64
 	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
 	// original mesh), so decals built for one substrate are invalid when
 	// the toggle changes. AlphaWrapAlpha and AlphaWrapOffset live in
@@ -689,13 +731,29 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		}
 		return s
 	case StageVoxelize:
+		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 		return voxelizeSettings{
-			NozzleDiameter: opts.NozzleDiameter,
-			LayerHeight:    opts.LayerHeight,
-			BaseColor:      opts.BaseColor,
+			NozzleDiameter:                       opts.NozzleDiameter,
+			LayerHeight:                          opts.LayerHeight,
+			BaseColor:                            opts.BaseColor,
+			BaseColorMaterialX:                   opts.BaseColorMaterialX,
+			BaseColorMaterialXMTime:              mtime,
+			BaseColorMaterialXSize:               size,
+			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
+			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
 		}
 	case StageSticker:
-		return stickerSettings{Stickers: opts.Stickers, BaseColor: opts.BaseColor, AlphaWrap: opts.AlphaWrap}
+		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
+		return stickerSettings{
+			Stickers:                             opts.Stickers,
+			BaseColor:                            opts.BaseColor,
+			BaseColorMaterialX:                   opts.BaseColorMaterialX,
+			BaseColorMaterialXMTime:              mtime,
+			BaseColorMaterialXSize:               size,
+			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
+			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
+			AlphaWrap:                            opts.AlphaWrap,
+		}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
 	case StageColorWarp:
@@ -739,6 +797,54 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	return nil
 }
 
+// materialXFileStamp returns the mtime (ns) and size (bytes) of the
+// MaterialX package file at path, or (0, 0) if the file is missing or
+// inaccessible. Used to invalidate the voxelize/sticker stage caches
+// when the .mtlx or .zip on disk changes.
+func materialXFileStamp(path string) (mtime, size int64) {
+	if path == "" {
+		return 0, 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0
+	}
+	return info.ModTime().UnixNano(), info.Size()
+}
+
+// materialXSampler returns the parsed-and-compiled materialx.Sampler
+// for the package at path, memoized within the session by (path,
+// mtime, size). Errors are cached so a malformed .mtlx isn't
+// re-attempted on every call. Returns (nil, nil) for an empty path.
+//
+// Same single-threaded-pipeline assumption as inventoryContents — no
+// mutex.
+func (c *StageCache) materialXSampler(path string) (materialx.Sampler, error) {
+	if path == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", path, err)
+	}
+	if c.mtlxSamplerPath == path &&
+		c.mtlxSamplerMtime.Equal(info.ModTime()) &&
+		c.mtlxSamplerSize == info.Size() {
+		return c.mtlxSampler, c.mtlxSamplerErr
+	}
+	doc, perr := materialx.ParsePackage(path)
+	var s materialx.Sampler
+	if perr == nil {
+		s, perr = doc.DefaultBaseColorSampler()
+	}
+	c.mtlxSamplerPath = path
+	c.mtlxSamplerMtime = info.ModTime()
+	c.mtlxSamplerSize = info.Size()
+	c.mtlxSampler = s
+	c.mtlxSamplerErr = perr
+	return s, perr
+}
+
 // stageFnv hashes a single stage's settings to a uint64. Used as the
 // per-stage component of the cumulative stageKey.
 func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
@@ -759,8 +865,18 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)
 		writeString(h, v.BaseColor)
+		writeString(h, v.BaseColorMaterialX)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
+		writeFloat64(h, v.BaseColorMaterialXTileMM)
+		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
+		writeString(h, v.BaseColorMaterialX)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
+		writeFloat64(h, v.BaseColorMaterialXTileMM)
+		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
 		writeBool(h, v.AlphaWrap)
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {

@@ -75,12 +75,10 @@ func (r *pipelineRun) checkCancel() error {
 //
 //  1. If the slot already holds a value (this Run already produced or
 //     decoded it), return immediately.
-//  2. Run the cache-aware wrapper. On a cache hit the body is skipped
-//     and the slot stays nil; on a miss, the body produces the value,
-//     stores it in the slot, and async-writes the encoded blob to the
-//     disk cache.
-//  3. If the slot is still nil after the wrapper, the cache-hit path
-//     ran — decode from the cache to populate the slot.
+//  2. Run the cache-aware wrapper. On a cache hit it returns the
+//     decoded value, which we stash directly into the slot. On a miss
+//     the body produces the value, stores it in the slot, and
+//     async-writes the encoded blob to the disk cache.
 //
 // The slot-then-cache-set ordering is load-bearing: a downstream call
 // to the typed getter (e.g. cache.getX) cannot return a value the
@@ -96,7 +94,7 @@ func runStage[T any](
 	if *slot != nil {
 		return *slot, nil
 	}
-	err := runStageCached(r.cache, stage, r.opts, r.tracker, func() error {
+	cached, err := runStageCached(r.cache, stage, r.opts, r.tracker, func() error {
 		out, err := body()
 		if err != nil {
 			return err
@@ -112,10 +110,20 @@ func runStage[T any](
 	if err != nil {
 		return nil, err
 	}
+	if cached != nil {
+		// Cache-hit path: stash the wrapper's already-decoded value
+		// instead of doing a second cache.get. A second call would
+		// race the background disk-cache sweep (kicked at the end of
+		// every pipeline run) and could observe the file as deleted,
+		// leaving the slot nil and the caller dereferencing it.
+		*slot = cached.(*T)
+	}
 	if *slot == nil {
-		if v := r.cache.get(stage, r.opts); v != nil {
-			*slot = v.(*T)
-		}
+		// Defensive: succeeded with neither a cache hit nor a body
+		// that populated the slot. Should be unreachable; surface
+		// loudly rather than return a nil pointer that downstream
+		// consumers will dereference.
+		return nil, fmt.Errorf("pipeline: stage %s succeeded with no result (cache file vanished?)", stageNames[stage])
 	}
 	return *slot, nil
 }
@@ -223,7 +231,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 	// Apply base-color override on top of the (possibly cached)
 	// load output. Cheap and idempotent. On a fresh disk hit
 	// (lo.appliedBaseColor=="") this skips the parse cache lookup.
-	applyBaseColor(r.cache, lo, r.opts)
+	applyBaseColor(r.cache, lo, r.opts, r.tracker)
 	return lo, nil
 }
 
@@ -509,9 +517,19 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
+		// baseColorOverride routes parse errors through the tracker
+		// itself with per-session dedup, so we just pass nil through
+		// to the voxelizer on failure.
+		baseColorOverride, _ := r.cache.baseColorOverride(
+			r.opts.BaseColorMaterialX,
+			r.opts.BaseColorMaterialXTileMM,
+			r.opts.BaseColorMaterialXTriplanarSharpness,
+			r.tracker,
+		)
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
-			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo)
+			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo,
+			baseColorOverride)
 		if verr != nil {
 			return nil, fmt.Errorf("voxelize: %w", verr)
 		}

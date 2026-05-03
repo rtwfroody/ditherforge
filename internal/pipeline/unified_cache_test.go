@@ -1,11 +1,13 @@
 package pipeline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
 // makeFakeInput writes a tiny placeholder to a temp dir so stageKey's
@@ -182,3 +184,47 @@ func TestStageKeyEmptyOnHashFailure(t *testing.T) {
 		t.Errorf("expected empty key on hash failure, got %q", k)
 	}
 }
+
+// TestRunStageCacheHitReturnsValue is the basic post-refactor invariant:
+// when the disk cache contains a usable entry for the stage, runStage
+// returns it without invoking the body, and the returned pointer is
+// non-nil. Caller code (Load → applyBaseColor) dereferences the
+// pointer immediately, so a (nil, nil) return would be a crash.
+func TestRunStageCacheHitReturnsValue(t *testing.T) {
+	c := NewStageCache()
+	d, err := diskcache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDisk(d)
+	defer c.WaitForDiskWrites()
+
+	path := makeFakeInput(t)
+	opts := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	want := &decimateOutput{}
+	c.set(StageDecimate, opts, want)
+	c.WaitForDiskWrites()
+
+	bodyRan := false
+	r := &pipelineRun{
+		ctx:     context.Background(),
+		cache:   c,
+		opts:    opts,
+		tracker: progress.NullTracker{},
+	}
+	got, err := runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
+		bodyRan = true
+		return &decimateOutput{}, nil
+	})
+	if err != nil {
+		t.Fatalf("runStage: %v", err)
+	}
+	if got == nil {
+		t.Fatal("runStage returned nil on a cache hit")
+	}
+	if bodyRan {
+		t.Error("body executed despite a cache hit being available")
+	}
+}
+

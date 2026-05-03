@@ -422,6 +422,19 @@ func (t *guiTracker) StageDone(stage string) {
 	})
 }
 
+type warnEvent struct {
+	Gen     int64  `json:"gen"`
+	Message string `json:"message"`
+}
+
+func (t *guiTracker) Warn(message string) {
+	// Reuses the existing "pipeline-warning" event listener in
+	// App.svelte; the frontend updates the status banner.
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-warning", warnEvent{
+		Gen: t.gen, Message: message,
+	})
+}
+
 // Compile-time check that guiTracker implements progress.Tracker.
 var _ progress.Tracker = (*guiTracker)(nil)
 
@@ -703,6 +716,42 @@ func (a *App) OpenStickerImage() (string, error) {
 	})
 }
 
+// MaterialXOpenResult is the result of OpenMaterialXFile. Path is
+// empty when the user cancels.
+type MaterialXOpenResult struct {
+	Path string `json:"path"`
+}
+
+// MaterialXPathOK reports whether the file at path exists and is
+// readable. Used by the frontend to warn at settings-load time that
+// a referenced .mtlx / .zip is missing on this machine. Empty path
+// returns true (means "nothing requested").
+func (a *App) MaterialXPathOK(path string) bool {
+	if path == "" {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// OpenMaterialXFile opens a file dialog for selecting a MaterialX
+// .mtlx file or a .zip archive containing one (with adjacent
+// textures). The pipeline opens the file directly from the path at
+// run time — there's no need to round-trip its content through the
+// frontend.
+func (a *App) OpenMaterialXFile() (*MaterialXOpenResult, error) {
+	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Select MaterialX File or Texture Pack",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "MaterialX (*.mtlx, *.zip)", Pattern: "*.mtlx;*.zip"},
+		},
+	})
+	if err != nil || path == "" {
+		return &MaterialXOpenResult{}, err
+	}
+	return &MaterialXOpenResult{Path: path}, nil
+}
+
 // ReadStickerThumbnail reads a sticker image and returns a base64 data URL
 // thumbnail (max 64x64, preserving aspect ratio).
 func (a *App) ReadStickerThumbnail(path string) (string, error) {
@@ -798,6 +847,22 @@ type Settings struct {
 	NozzleDiameter      string              `json:"nozzleDiameter"`
 	LayerHeight         string              `json:"layerHeight"`
 	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
+	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
+	// file or .zip archive. The pipeline reads the file at run time —
+	// settings only stores the path, so projects assume the asset
+	// lives at the same path on the next machine.
+	// BaseMaterialXTileMM is the procedural-to-mm scale.
+	// BaseMaterialXTriplanarSharpness controls image-backed graphs'
+	// triplanar projection blend (ignored by procedural .mtlx).
+	BaseMaterialXPath                string  `json:"baseMaterialXPath,omitempty"`
+	BaseMaterialXTileMM              float64 `json:"baseMaterialXTileMM,omitempty"`
+	BaseMaterialXTriplanarSharpness  float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
+	// BaseColorMode is "solid" or "texture" — UI mode toggle that
+	// decides which of (BaseColor, BaseMaterialXPath) is sent to the
+	// pipeline. The unselected mode's fields are kept around (so the
+	// user can flip the toggle without losing their other choice) but
+	// don't reach the backend Options.
+	BaseColorMode                    string  `json:"baseColorMode,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`

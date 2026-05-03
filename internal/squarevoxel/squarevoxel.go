@@ -142,6 +142,7 @@ func colorCells(
 	decals []*voxel.StickerDecal,
 	halfIdx uint8,
 	invXform split.Transform,
+	baseColorOverride voxel.BaseColorOverride,
 ) ([]voxel.ActiveCell, error) {
 	colorRadius := p.CellSize * 3
 	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
@@ -199,11 +200,13 @@ func colorCells(
 					rgba = voxel.SampleNearestColorWithSticker(
 						samplePos,
 						colorModel, si, colorRadius, buf, decals,
-						stickerModel, stickerSI, stickerBuf)
+						stickerModel, stickerSI, stickerBuf,
+						baseColorOverride)
 				} else {
 					rgba = voxel.SampleNearestColor(
 						samplePos,
-						colorModel, si, colorRadius, buf, decals)
+						colorModel, si, colorRadius, buf, decals,
+						baseColorOverride)
 				}
 				if rgba[3] < 128 {
 					continue
@@ -263,6 +266,7 @@ func VoxelizeTwoGrids(
 	tracker progress.Tracker,
 	decals []*voxel.StickerDecal,
 	splitInfo *SplitInfo,
+	baseColorOverride voxel.BaseColorOverride,
 ) (*TwoGridResult, error) {
 	// Decide the geometry meshes and per-mesh inverse transforms.
 	// Unsplit path (splitInfo == nil) takes the single `model`
@@ -403,7 +407,7 @@ func VoxelizeTwoGrids(
 	for i, e := range entries {
 		cells0, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI,
 			perMesh[i].layer0, p0, tracker, &counter, decals,
-			e.halfIdx, e.invXform)
+			e.halfIdx, e.invXform, baseColorOverride)
 		if err != nil {
 			return nil, err
 		}
@@ -411,7 +415,7 @@ func VoxelizeTwoGrids(
 		if nLayers > 1 {
 			cells1, err := colorCells(ctx, colorModel, si, stickerModel, stickerSI,
 				perMesh[i].upper, p1, tracker, &counter, decals,
-				e.halfIdx, e.invXform)
+				e.halfIdx, e.invXform, baseColorOverride)
 			if err != nil {
 				return nil, err
 			}
@@ -488,7 +492,7 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 	tColor := time.Now()
 	tracker.StageStart("Coloring cells", true, len(cellSet))
 	var counter atomic.Int64
-	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals, 0, split.IdentityTransform)
+	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals, 0, split.IdentityTransform, nil)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}

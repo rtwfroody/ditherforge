@@ -123,6 +123,10 @@ export namespace main {
 	    nozzleDiameter: string;
 	    layerHeight: string;
 	    baseColor?: ColorSlotSetting;
+	    baseMaterialXPath?: string;
+	    baseMaterialXTileMM?: number;
+	    baseMaterialXTriplanarSharpness?: number;
+	    baseColorMode?: string;
 	    colorSlots: ColorSlotSetting[];
 	    inventoryCollection: string;
 	    brightness: number;
@@ -162,6 +166,10 @@ export namespace main {
 	        this.nozzleDiameter = source["nozzleDiameter"];
 	        this.layerHeight = source["layerHeight"];
 	        this.baseColor = this.convertValues(source["baseColor"], ColorSlotSetting);
+	        this.baseMaterialXPath = source["baseMaterialXPath"];
+	        this.baseMaterialXTileMM = source["baseMaterialXTileMM"];
+	        this.baseMaterialXTriplanarSharpness = source["baseMaterialXTriplanarSharpness"];
+	        this.baseColorMode = source["baseColorMode"];
 	        this.colorSlots = this.convertValues(source["colorSlots"], ColorSlotSetting);
 	        this.inventoryCollection = source["inventoryCollection"];
 	        this.brightness = source["brightness"];
@@ -236,6 +244,18 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class MaterialXOpenResult {
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MaterialXOpenResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	    }
 	}
 	export class NozzleOption {
 	    diameter: string;
@@ -369,6 +389,9 @@ export namespace pipeline {
 	    Scale: number;
 	    Output: string;
 	    BaseColor: string;
+	    BaseColorMaterialX: string;
+	    BaseColorMaterialXTileMM: number;
+	    BaseColorMaterialXTriplanarSharpness: number;
 	    NozzleDiameter: number;
 	    LayerHeight: number;
 	    Printer: string;
@@ -406,6 +429,9 @@ export namespace pipeline {
 	        this.Scale = source["Scale"];
 	        this.Output = source["Output"];
 	        this.BaseColor = source["BaseColor"];
+	        this.BaseColorMaterialX = source["BaseColorMaterialX"];
+	        this.BaseColorMaterialXTileMM = source["BaseColorMaterialXTileMM"];
+	        this.BaseColorMaterialXTriplanarSharpness = source["BaseColorMaterialXTriplanarSharpness"];
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
 	        this.Printer = source["Printer"];

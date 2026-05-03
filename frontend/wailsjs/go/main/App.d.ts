@@ -28,7 +28,11 @@ export function LoadSettingsFile(arg1:string):Promise<main.LoadSettingsResult>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
+export function MaterialXPathOK(arg1:string):Promise<boolean>;
+
 export function OpenFileDialog():Promise<string>;
+
+export function OpenMaterialXFile():Promise<main.MaterialXOpenResult>;
 
 export function OpenStickerImage():Promise<string>;
 

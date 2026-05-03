@@ -71,6 +71,7 @@ func TestVoxelize_SplitInfoNilUnchanged(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("VoxelizeTwoGrids: %v", err)
@@ -118,6 +119,7 @@ func TestVoxelize_SplitInfoTagsHalves(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		splitInfo,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("VoxelizeTwoGrids: %v", err)
@@ -179,6 +181,7 @@ func TestVoxelize_SplitInfoInverseTransformDistinctHalves(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		splitInfo,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("VoxelizeTwoGrids: %v", err)
@@ -259,6 +262,7 @@ func TestVoxelize_SplitInfoNonIdentityRotation(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		splitInfo,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("VoxelizeTwoGrids: %v", err)
@@ -302,6 +306,7 @@ func TestVoxelize_SplitInfoRequiresColorModel(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		splitInfo,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when split path runs without colorModel")
@@ -324,6 +329,7 @@ func TestVoxelize_SplitInfoEmptyHalfRejected(t *testing.T) {
 		progress.NullTracker{},
 		nil,
 		splitInfo,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when split half is empty")
