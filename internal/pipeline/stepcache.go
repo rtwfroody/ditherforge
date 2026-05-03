@@ -202,13 +202,21 @@ func (c *StageCache) SetDisk(d *diskcache.Cache) {
 
 // runStageCached is the canonical wrapper every pipeline stage uses. It:
 //
-//   - returns immediately on a cache hit, emitting a single "completed"
-//     stage marker so the UI shows the stage as done;
+//   - on a cache hit, returns the freshly-decoded value (cached != nil)
+//     so the caller can stash it directly without a second cache read;
 //   - on a miss, times the body, lets body emit its own progress markers
 //     (some stages are spinners, some have determinate progress bars from
 //     inner functions like DecimateMesh / VoxelizeTwoGrids), and on
 //     success calls stampCost to back-fill the disk meta sidecar with
 //     the wall-clock generation time.
+//
+// Returning the decoded value (rather than letting the caller re-fetch
+// it) is load-bearing: the disk cache is swept asynchronously after
+// every pipeline run, and a sweep that fires between the cache-hit
+// detection here and a second cache.get from the caller would delete
+// the file out from under us, leaving the caller with nil. Surfaced
+// previously as a SIGSEGV in applyBaseColor when Load returned
+// (nil, nil).
 //
 // body is responsible only for producing and persisting the stage's
 // result. In normal use, callers reach this helper via runStage (in
@@ -224,7 +232,7 @@ func runStageCached(
 	opts Options,
 	tracker progress.Tracker,
 	body func() error,
-) error {
+) (cached any, err error) {
 	name := stageNames[stage]
 	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
@@ -234,7 +242,7 @@ func runStageCached(
 			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
 			shortKey(key))
 		progress.BeginStage(tracker, name, false, 0).Done()
-		return nil
+		return v, nil
 	}
 	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
@@ -244,7 +252,7 @@ func runStageCached(
 		// pointing at it would be misleading.
 		plog.Printf("%s: failed after %s — %v", name,
 			time.Since(start).Round(time.Millisecond), err)
-		return err
+		return nil, err
 	}
 	plog.Printf("%s: done in %s", name,
 		time.Since(start).Round(time.Millisecond))
@@ -252,7 +260,7 @@ func runStageCached(
 	// meta sidecar with description and wall-clock cost so the
 	// next sweep can rank this entry correctly.
 	cache.stampCost(stage, opts, time.Since(start))
-	return nil
+	return nil, nil
 }
 
 // shortKey returns the first 12 hex chars of a stage cache key — enough

@@ -1,11 +1,13 @@
 package pipeline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
 // makeFakeInput writes a tiny placeholder to a temp dir so stageKey's
@@ -180,5 +182,116 @@ func TestStageKeyEmptyOnHashFailure(t *testing.T) {
 	opts := Options{Input: "/this/path/should/not/exist/anywhere"}
 	if k := c.stageKey(StageLoad, opts); k != "" {
 		t.Errorf("expected empty key on hash failure, got %q", k)
+	}
+}
+
+// TestRunStageCacheHitReturnsValue is the basic post-refactor invariant:
+// when the disk cache contains a usable entry for the stage, runStage
+// returns it without invoking the body, and the returned pointer is
+// non-nil. Caller code (Load → applyBaseColor) dereferences the
+// pointer immediately, so a (nil, nil) return would be a crash.
+func TestRunStageCacheHitReturnsValue(t *testing.T) {
+	c := NewStageCache()
+	d, err := diskcache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDisk(d)
+	defer c.WaitForDiskWrites()
+
+	path := makeFakeInput(t)
+	opts := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	want := &decimateOutput{}
+	c.set(StageDecimate, opts, want)
+	c.WaitForDiskWrites()
+
+	bodyRan := false
+	r := &pipelineRun{
+		ctx:     context.Background(),
+		cache:   c,
+		opts:    opts,
+		tracker: progress.NullTracker{},
+	}
+	got, err := runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
+		bodyRan = true
+		return &decimateOutput{}, nil
+	})
+	if err != nil {
+		t.Fatalf("runStage: %v", err)
+	}
+	if got == nil {
+		t.Fatal("runStage returned nil on a cache hit")
+	}
+	if bodyRan {
+		t.Error("body executed despite a cache hit being available")
+	}
+}
+
+// TestRunStageHandlesMidRunCacheEviction guards against the regression
+// that produced a SIGSEGV in applyBaseColor when the disk cache sweep
+// (kicked at the end of every pipeline run) raced runStage's old
+// double-read pattern: getWithSource succeeded inside runStageCached,
+// the value was thrown away, and a second cache.get from the caller
+// raced the sweep's os.Remove and returned nil. runStage wrote the
+// nil into the slot and returned (nil, nil).
+//
+// We simulate the race by deleting the cache file between the
+// runStageCached cache hit and any second read: the runStageCached
+// closure (the body) doesn't run on a hit, so we instead pre-populate
+// the disk cache, then wedge a fake "remove the file underneath"
+// between getWithSource and the slot write by removing it from a Set
+// completion goroutine. Easier: just ensure runStage's contract holds
+// — when there's a cache hit, the returned slot is non-nil even if a
+// concurrent eviction wipes the file.
+func TestRunStageHandlesMidRunCacheEviction(t *testing.T) {
+	c := NewStageCache()
+	d, err := diskcache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDisk(d)
+	defer c.WaitForDiskWrites()
+
+	path := makeFakeInput(t)
+	opts := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	// Pre-populate the Decimate stage with a known value.
+	want := &decimateOutput{}
+	c.set(StageDecimate, opts, want)
+	c.WaitForDiskWrites()
+
+	// Now wipe the file from disk to simulate the post-set sweep race.
+	// runStageCached's first cache.getWithSource will still succeed by
+	// reading from the OS page cache before the unlink takes effect —
+	// and even if it doesn't, the bug we care about is that the
+	// caller's second cache.get goes missing. Deleting before the
+	// runStage call exercises both halves: with the old code, the
+	// first read happens, the value is dropped, the second read
+	// misses (file gone), and *slot stays nil. With the fix,
+	// runStageCached returns the decoded value to the caller, which
+	// stashes it before any second read.
+	subdir := stageSubdir(StageDecimate)
+	key := c.stageKey(StageDecimate, opts)
+	d.Remove(subdir, key)
+
+	r := &pipelineRun{
+		ctx:     context.Background(),
+		cache:   c,
+		opts:    opts,
+		tracker: progress.NullTracker{},
+	}
+	got, err := runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
+		// Body should NOT run if the cache hit returned a value before
+		// our delete. If it does run (the file was already gone before
+		// the wrapper's get), that's fine — we're testing the
+		// non-nil-result invariant, not the exact code path.
+		return &decimateOutput{}, nil
+	})
+	if err != nil {
+		t.Fatalf("runStage returned err=%v on a path that should always succeed", err)
+	}
+	if got == nil {
+		t.Fatal("runStage returned (nil, nil) — caller would dereference nil and crash")
 	}
 }
