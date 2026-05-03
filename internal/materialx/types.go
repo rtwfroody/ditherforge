@@ -1,10 +1,12 @@
-// Package materialx parses and evaluates a procedural subset of the
-// MaterialX (.mtlx) format, sampling shader graphs at 3D positions to
-// produce surface colors. Only the nodes needed to evaluate solid
-// procedural patterns (marble, brick, checkerboard, etc.) are
-// implemented; image-based, BSDF, and lighting nodes are intentionally
-// out of scope — the consumer is ditherforge's voxel-color pipeline,
-// which only needs RGB at a 3D point.
+// Package materialx parses and evaluates a base-color subset of the
+// MaterialX (.mtlx) format, sampling shader graphs at 3D positions
+// (and optionally UVs / surface normals) to produce surface colors.
+// Procedural patterns (marble, brick, checkerboard) are evaluated
+// directly; image-backed graphs (Quixel/AmbientCG-style PBR packs)
+// are supported via a ResourceResolver that loads referenced .png/.jpg
+// files from a directory or a .zip archive. BSDF, lighting, and
+// shader codegen are out of scope — the consumer is ditherforge's
+// voxel-color pipeline, which only needs RGB at a 3D point.
 package materialx
 
 import (
@@ -24,6 +26,8 @@ const (
 	TypeVector4
 	TypeColor3
 	TypeColor4
+	TypeString   // free-form ASCII (addressmode names, etc.)
+	TypeFilename // path resolved via ResourceResolver
 )
 
 func (t ValueType) String() string {
@@ -42,6 +46,10 @@ func (t ValueType) String() string {
 		return "color3"
 	case TypeColor4:
 		return "color4"
+	case TypeString:
+		return "string"
+	case TypeFilename:
+		return "filename"
 	}
 	return "unknown"
 }
@@ -62,6 +70,10 @@ func parseValueType(s string) ValueType {
 		return TypeColor3
 	case "color4":
 		return TypeColor4
+	case "string":
+		return TypeString
+	case "filename":
+		return TypeFilename
 	}
 	return TypeUnknown
 }
@@ -75,10 +87,11 @@ type Value struct {
 	Vec  [4]float64
 }
 
-func FloatValue(f float64) Value             { return Value{Type: TypeFloat, F: f} }
-func IntValue(i int) Value                   { return Value{Type: TypeInteger, I: i} }
-func Vec3Value(v [3]float64) Value           { return Value{Type: TypeVector3, Vec: [4]float64{v[0], v[1], v[2], 0}} }
-func Color3Value(v [3]float64) Value         { return Value{Type: TypeColor3, Vec: [4]float64{v[0], v[1], v[2], 0}} }
+func FloatValue(f float64) Value     { return Value{Type: TypeFloat, F: f} }
+func IntValue(i int) Value           { return Value{Type: TypeInteger, I: i} }
+func Vec2Value(v [2]float64) Value   { return Value{Type: TypeVector2, Vec: [4]float64{v[0], v[1], 0, 0}} }
+func Vec3Value(v [3]float64) Value   { return Value{Type: TypeVector3, Vec: [4]float64{v[0], v[1], v[2], 0}} }
+func Color3Value(v [3]float64) Value { return Value{Type: TypeColor3, Vec: [4]float64{v[0], v[1], v[2], 0}} }
 
 func (v Value) AsFloat() float64 {
 	switch v.Type {
@@ -116,8 +129,14 @@ func (v Value) AsVec3() [3]float64 {
 }
 
 // parseValueString converts a MaterialX attribute string ("0.8, 0.8, 0.8",
-// "3.0", "3", "1, 1, 1") into a typed Value.
+// "3.0", "3", "1, 1, 1") into a typed Value. String/filename values are
+// stored on the input directly (input.RawString) — Value remains lean
+// for the per-voxel hot path, where slots are typed Value and string
+// storage would inflate the scratch buffer needlessly.
 func parseValueString(s string, typ ValueType) (Value, error) {
+	if typ == TypeString || typ == TypeFilename {
+		return Value{}, fmt.Errorf("string-typed value should be stored on input.RawString, not parsed into Value")
+	}
 	s = strings.TrimSpace(s)
 	switch typ {
 	case TypeFloat:
@@ -163,11 +182,15 @@ func vecArity(t ValueType) int {
 	return 0
 }
 
-// Document is the parsed contents of a .mtlx file.
+// Document is the parsed contents of a .mtlx file. Resolver is
+// optional and only required for graphs that reference external files
+// (image nodes); ParsePackage and ParseFile auto-populate it,
+// ParseBytes leaves it nil.
 type Document struct {
 	NodeGraphs map[string]*nodeGraph
 	Surfaces   map[string]*surface
 	Materials  map[string]*material
+	Resolver   ResourceResolver
 }
 
 type nodeGraph struct {
@@ -205,6 +228,8 @@ type input struct {
 	Name          string
 	Type          ValueType
 	Value         *Value
+	RawString     string // populated when Type is TypeString or TypeFilename
+	Colorspace    string // optional; only meaningful on image filename inputs
 	NodeName      string
 	InterfaceName string
 	GraphName     string

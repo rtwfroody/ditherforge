@@ -1,8 +1,14 @@
 package materialx_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -414,4 +420,233 @@ func loadMarble(t *testing.T) *materialx.Document {
 		t.Fatalf("parse: %v", err)
 	}
 	return doc
+}
+
+// stripePNG returns a 4×1 PNG with horizontal stripes red, green,
+// blue, white. Used by image-graph tests.
+func stripePNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 1))
+	cells := []color.NRGBA{
+		{R: 255, A: 255},
+		{G: 255, A: 255},
+		{B: 255, A: 255},
+		{R: 255, G: 255, B: 255, A: 255},
+	}
+	for i, c := range cells {
+		img.Set(i, 0, c)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode stripe png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// imageGraphMtlx is a minimal .mtlx that wires image → texcoord
+// directly (no UV multiplier) so test UVs land at known pixel centers.
+const imageGraphMtlx = `<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <texcoord name="uv" type="vector2">
+      <input name="index" type="integer" value="0"/>
+    </texcoord>
+    <image name="img" type="color3">
+      <input name="texcoord" type="vector2" nodename="uv"/>
+      <input name="file" type="filename" value="stripe.png"/>
+      <input name="uaddressmode" type="string" value="periodic"/>
+      <input name="vaddressmode" type="string" value="periodic"/>
+      <input name="filtertype" type="string" value="closest"/>
+    </image>
+    <output name="out" type="color3" nodename="img"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>
+`
+
+func TestImageGraphSamplesExactPixelCenters(t *testing.T) {
+	doc, err := materialx.ParseBytes([]byte(imageGraphMtlx))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	doc.Resolver = materialx.NewMapResolver(map[string][]byte{
+		"stripe.png": stripePNG(t),
+	})
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("sampler: %v", err)
+	}
+	// Pixel centers for a 4-wide image are at u = 0.125, 0.375, 0.625, 0.875.
+	// V is irrelevant for a 1-tall image. Address mode is periodic but
+	// we stay inside [0, 1] here so it doesn't matter.
+	cases := []struct {
+		u    float64
+		want [3]float64
+	}{
+		{0.125, [3]float64{1, 0, 0}}, // red
+		{0.375, [3]float64{0, 1, 0}}, // green
+		{0.625, [3]float64{0, 0, 1}}, // blue
+		{0.875, [3]float64{1, 1, 1}}, // white
+	}
+	for _, tc := range cases {
+		got := s.SampleAt(materialx.SampleContext{UV: [2]float64{tc.u, 0.5}})
+		for i := range 3 {
+			if math.Abs(got[i]-tc.want[i]) > 1e-9 {
+				t.Errorf("Sample(u=%v): got %v, want %v", tc.u, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+func TestImageAddressingModes(t *testing.T) {
+	// Same fixture as TestImageGraphSamples but with each addressmode
+	// substituted in. We test by sampling outside [0, 1] and checking
+	// where the lookup lands.
+	pngBytes := stripePNG(t)
+	for _, mode := range []string{"periodic", "clamp", "mirror"} {
+		t.Run(mode, func(t *testing.T) {
+			mtlx := strings.ReplaceAll(imageGraphMtlx, `value="periodic"`, `value="`+mode+`"`)
+			doc, err := materialx.ParseBytes([]byte(mtlx))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			doc.Resolver = materialx.NewMapResolver(map[string][]byte{"stripe.png": pngBytes})
+			s, err := doc.DefaultBaseColorSampler()
+			if err != nil {
+				t.Fatalf("sampler: %v", err)
+			}
+
+			// Sample at u = -0.125 (one pixel left of u=0).
+			got := s.SampleAt(materialx.SampleContext{UV: [2]float64{-0.125, 0.5}})
+			var want [3]float64
+			switch mode {
+			case "periodic":
+				// -0.125 wraps to 0.875 → white pixel.
+				want = [3]float64{1, 1, 1}
+			case "clamp":
+				// Clamps to 0 → red pixel.
+				want = [3]float64{1, 0, 0}
+			case "mirror":
+				// Mirrors at 0 → 0.125 → red pixel.
+				want = [3]float64{1, 0, 0}
+			}
+			for i := range 3 {
+				if math.Abs(got[i]-want[i]) > 1e-9 {
+					t.Errorf("%s mode at u=-0.125: got %v, want %v", mode, got, want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// uvScaleMtlx multiplies texcoord by 2 before sampling — a single tile
+// of the texture covers UV [0, 0.5]; UV [0.5, 1] also tiles the same
+// content (with periodic addressing).
+const uvScaleMtlx = `<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <texcoord name="uv" type="vector2"><input name="index" type="integer" value="0"/></texcoord>
+    <constant name="scale" type="float"><input name="value" type="float" value="2.0"/></constant>
+    <multiply name="suv" type="vector2">
+      <input name="in1" type="vector2" nodename="uv"/>
+      <input name="in2" type="float" nodename="scale"/>
+    </multiply>
+    <image name="img" type="color3">
+      <input name="texcoord" type="vector2" nodename="suv"/>
+      <input name="file" type="filename" value="stripe.png"/>
+      <input name="filtertype" type="string" value="closest"/>
+    </image>
+    <output name="out" type="color3" nodename="img"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>
+`
+
+func TestUVScalingTilesTexture(t *testing.T) {
+	doc, err := materialx.ParseBytes([]byte(uvScaleMtlx))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	doc.Resolver = materialx.NewMapResolver(map[string][]byte{"stripe.png": stripePNG(t)})
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("sampler: %v", err)
+	}
+	// UV 0.0625 * 2 = 0.125 → red. UV 0.5625 * 2 = 1.125 wraps → 0.125 → red.
+	for _, u := range []float64{0.0625, 0.5625} {
+		got := s.SampleAt(materialx.SampleContext{UV: [2]float64{u, 0.5}})
+		want := [3]float64{1, 0, 0}
+		for i := range 3 {
+			if math.Abs(got[i]-want[i]) > 1e-9 {
+				t.Errorf("u=%v: got %v, want %v (UV scaling/wrap broken)", u, got, want)
+				break
+			}
+		}
+	}
+}
+
+func TestParsePackageZip(t *testing.T) {
+	// Build an in-memory zip containing the .mtlx + the PNG, write it
+	// to a temp file, and load via ParsePackage.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	addZip := func(name string, data []byte) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create: %v", err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatalf("zip write: %v", err)
+		}
+	}
+	addZip("pack.mtlx", []byte(imageGraphMtlx))
+	addZip("stripe.png", stripePNG(t))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "pack.zip")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+
+	doc, err := materialx.ParsePackage(tmp)
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("sampler: %v", err)
+	}
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.125, 0.5}})
+	want := [3]float64{1, 0, 0}
+	for i := range 3 {
+		if math.Abs(got[i]-want[i]) > 1e-9 {
+			t.Errorf("zip-loaded sampler at u=0.125: got %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+func TestImageGraphRequiresResolver(t *testing.T) {
+	doc, err := materialx.ParseBytes([]byte(imageGraphMtlx))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// No Resolver set — image node should fail at sampler construction.
+	if _, err := doc.DefaultBaseColorSampler(); err == nil {
+		t.Errorf("expected error when Resolver is nil, got success")
+	}
 }

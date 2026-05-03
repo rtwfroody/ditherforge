@@ -8,13 +8,26 @@ import (
 	"sync"
 )
 
+// SampleContext bundles the per-sample inputs an evaluator may read.
+// Procedural graphs only consume Pos; image-backed graphs additionally
+// read UV (via the texcoord node) and Normal (the consumer typically
+// uses this to drive triplanar projection in a wrapper, not inside the
+// evaluator). Construct via Sampler.Sample for the legacy Pos-only
+// path or Sampler.SampleAt for full control.
+type SampleContext struct {
+	Pos    [3]float64
+	UV     [2]float64
+	Normal [3]float64
+}
+
 // Sampler returns an RGB color (each channel typically in [0, 1], but
-// not clamped — the consumer decides how to handle out-of-gamut values)
-// given an object-space sample position. Compiled samplers are
-// reentrant: calling Sample concurrently from multiple goroutines is
-// safe because each call uses its own scratch slot table.
+// not clamped — the consumer decides how to handle out-of-gamut values).
+// Compiled samplers are reentrant: calling Sample/SampleAt concurrently
+// from multiple goroutines is safe because each call uses its own
+// scratch slot table.
 type Sampler interface {
 	Sample(pos [3]float64) [3]float64
+	SampleAt(ctx SampleContext) [3]float64
 }
 
 // MaterialNames returns the material names defined by the document, in
@@ -76,14 +89,15 @@ func (d *Document) samplerFromInput(in *input) (Sampler, error) {
 		if !ok {
 			return nil, fmt.Errorf("materialx: nodegraph %q has no output %q", ng.Name, outName)
 		}
-		return compileGraph(ng, out)
+		return compileGraph(ng, out, d.Resolver)
 	}
 	return nil, fmt.Errorf("materialx: input %q has no usable source", in.Name)
 }
 
 type constSampler [3]float64
 
-func (c constSampler) Sample(_ [3]float64) [3]float64 { return [3]float64(c) }
+func (c constSampler) Sample(_ [3]float64) [3]float64       { return [3]float64(c) }
+func (c constSampler) SampleAt(_ SampleContext) [3]float64  { return [3]float64(c) }
 
 // --- compiled graph evaluator ---
 //
@@ -94,7 +108,7 @@ func (c constSampler) Sample(_ [3]float64) [3]float64 { return [3]float64(c) }
 // up to slotMax entries, with a heap fallback for larger graphs. There
 // are no maps, no string lookups, and no allocations on the hot path.
 
-type evalFn func(pos [3]float64, scratch []Value) Value
+type evalFn func(ctx *SampleContext, scratch []Value) Value
 
 type compiledGraph struct {
 	nSlots  int
@@ -107,34 +121,52 @@ type compileStep struct {
 	fn   evalFn
 }
 
-// slotMax sets the pooled scratch capacity. Real-world procedural
-// graphs (marble: 14 nodes; brick/wood: ~30) fit comfortably; larger
-// graphs fall through to a per-call allocation. The closure call sites
-// cause escape analysis to give up on a stack-allocated array, so
-// pooling delivers the zero-alloc fast path while preserving reentrancy.
+// slotMax sets the pooled scratch capacity. Real-world graphs (marble:
+// 14 nodes; brick/wood: ~30; PBR pack with image+texcoord+multiply:
+// ~10) fit comfortably; larger graphs fall through to a per-call
+// allocation. The closure call sites cause escape analysis to give up
+// on a stack-allocated array, so pooling delivers the zero-alloc fast
+// path while preserving reentrancy.
 const slotMax = 64
+
+// sampleScratch bundles the per-call context and slot table into a
+// single pool-managed struct. Pooling both together keeps SampleContext
+// from escaping to the heap when its address is passed to closures —
+// the pointer points into a pool entry, not a stack-local that
+// outlives the call.
+type sampleScratch struct {
+	ctx     SampleContext
+	scratch []Value
+}
 
 var scratchPool = sync.Pool{
 	New: func() any {
-		s := make([]Value, slotMax)
-		return &s
+		return &sampleScratch{scratch: make([]Value, slotMax)}
 	},
 }
 
 func (g *compiledGraph) Sample(pos [3]float64) [3]float64 {
+	return g.SampleAt(SampleContext{Pos: pos})
+}
+
+func (g *compiledGraph) SampleAt(ctx SampleContext) [3]float64 {
 	if g.nSlots > slotMax {
-		scratch := make([]Value, g.nSlots)
-		return g.run(pos, scratch)
+		s := &sampleScratch{ctx: ctx, scratch: make([]Value, g.nSlots)}
+		return g.run(s)
 	}
-	p := scratchPool.Get().(*[]Value)
-	out := g.run(pos, (*p)[:g.nSlots])
-	scratchPool.Put(p)
+	s := scratchPool.Get().(*sampleScratch)
+	s.ctx = ctx
+	out := g.run(s)
+	// Zero the context so the next pool consumer doesn't inherit it.
+	s.ctx = SampleContext{}
+	scratchPool.Put(s)
 	return out
 }
 
-func (g *compiledGraph) run(pos [3]float64, scratch []Value) [3]float64 {
+func (g *compiledGraph) run(s *sampleScratch) [3]float64 {
+	scratch := s.scratch[:g.nSlots]
 	for _, st := range g.steps {
-		scratch[st.slot] = st.fn(pos, scratch)
+		scratch[st.slot] = st.fn(&s.ctx, scratch)
 	}
 	return scratch[g.outSlot].AsVec3()
 }
@@ -143,16 +175,19 @@ func (g *compiledGraph) run(pos [3]float64, scratch []Value) [3]float64 {
 // reachable node into an ordered list of evalFn closures. Returns an
 // error if any node references an unknown type, missing input, or
 // unsupported attribute value — eager validation is exhaustive (every
-// reachable node is compiled), unlike the prior approach of sampling
-// once at the origin.
-func compileGraph(ng *nodeGraph, out *graphOutput) (Sampler, error) {
+// reachable node is compiled). When the graph references image files
+// (image nodes), resolver must be non-nil; otherwise sampler
+// construction fails with a clear error.
+func compileGraph(ng *nodeGraph, out *graphOutput, resolver ResourceResolver) (Sampler, error) {
 	if out.NodeName == "" {
 		return nil, fmt.Errorf("materialx: nodegraph %q output %q has no nodename", ng.Name, out.Name)
 	}
 	c := &compiler{
-		ng:      ng,
-		slotOf:  map[string]int{},
-		visited: map[string]bool{},
+		ng:       ng,
+		slotOf:   map[string]int{},
+		visited:  map[string]bool{},
+		resolver: resolver,
+		images:   newImageCache(),
 	}
 	outSlot, err := c.compileNode(out.NodeName)
 	if err != nil {
@@ -166,11 +201,13 @@ func compileGraph(ng *nodeGraph, out *graphOutput) (Sampler, error) {
 }
 
 type compiler struct {
-	ng      *nodeGraph
-	slotOf  map[string]int
-	visited map[string]bool // detects cycles
-	steps   []compileStep
-	nSlots  int
+	ng       *nodeGraph
+	slotOf   map[string]int
+	visited  map[string]bool // detects cycles
+	steps    []compileStep
+	nSlots   int
+	resolver ResourceResolver
+	images   *imageCache
 }
 
 func (c *compiler) compileNode(name string) (int, error) {
@@ -214,17 +251,17 @@ func (c *compiler) compileInput(in *input) (evalFn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("input %q: %w", in.Name, err)
 		}
-		return func(_ [3]float64, scratch []Value) Value { return scratch[slot] }, nil
+		return func(_ *SampleContext, scratch []Value) Value { return scratch[slot] }, nil
 	case in.InterfaceName != "":
 		gi, ok := c.ng.inputsByName[in.InterfaceName]
 		if !ok {
 			return nil, fmt.Errorf("input %q references missing interface %q", in.Name, in.InterfaceName)
 		}
 		v := gi.Default
-		return func(_ [3]float64, _ []Value) Value { return v }, nil
+		return func(_ *SampleContext, _ []Value) Value { return v }, nil
 	case in.Value != nil:
 		v := *in.Value
-		return func(_ [3]float64, _ []Value) Value { return v }, nil
+		return func(_ *SampleContext, _ []Value) Value { return v }, nil
 	}
 	return nil, fmt.Errorf("input %q has no value", in.Name)
 }
@@ -247,6 +284,20 @@ func (c *compiler) compileRequired(n *node, name string) (evalFn, error) {
 	return c.compileInput(in)
 }
 
+// stringInputOrDefault reads a literal string-typed input by name,
+// returning def if the input is absent or has no raw value. Used by
+// builders that consume enum-style attributes (addressmode, filtertype).
+func stringInputOrDefault(n *node, name, def string) string {
+	in, ok := n.inputsByName[name]
+	if !ok {
+		return def
+	}
+	if in.RawString != "" {
+		return in.RawString
+	}
+	return def
+}
+
 // --- node builders ---
 
 type nodeBuilder func(c *compiler, n *node) (evalFn, error)
@@ -258,6 +309,7 @@ var nodeBuilders map[string]nodeBuilder
 func init() {
 	nodeBuilders = map[string]nodeBuilder{
 		"position":   buildPosition,
+		"texcoord":   buildTexcoord,
 		"constant":   buildConstant,
 		"dotproduct": buildDotProduct,
 		"multiply":   buildArithmetic(func(a, b float64) float64 { return a * b }),
@@ -270,6 +322,8 @@ func init() {
 		"power":      buildPower,
 		"clamp":      buildClamp,
 		"mix":        buildMix,
+		"image":      buildImage,
+		"extract":    buildExtract,
 	}
 }
 
@@ -277,10 +331,23 @@ func buildPosition(_ *compiler, n *node) (evalFn, error) {
 	// "space" attribute: only object-space is supported. Anything else
 	// would silently produce wrong results since the caller hands us
 	// coordinates in a single fixed frame.
-	if in, ok := n.inputsByName["space"]; ok && in.Value != nil {
-		return nil, fmt.Errorf("position node: only object-space is supported, got %v", in.Value)
+	if in, ok := n.inputsByName["space"]; ok && in.RawString != "" && in.RawString != "object" {
+		return nil, fmt.Errorf("position node: only object-space is supported, got %q", in.RawString)
 	}
-	return func(pos [3]float64, _ []Value) Value { return Vec3Value(pos) }, nil
+	return func(ctx *SampleContext, _ []Value) Value { return Vec3Value(ctx.Pos) }, nil
+}
+
+func buildTexcoord(_ *compiler, n *node) (evalFn, error) {
+	// MaterialX texcoord exposes a UV channel index (default 0). We
+	// only plumb a single UV channel through SampleContext.UV — any
+	// non-zero index would silently return the same UV. Fail loudly
+	// rather than mislead.
+	if in, ok := n.inputsByName["index"]; ok && in.Value != nil {
+		if in.Value.AsInt() != 0 {
+			return nil, fmt.Errorf("texcoord node: only UV channel 0 is supported, got %d", in.Value.AsInt())
+		}
+	}
+	return func(ctx *SampleContext, _ []Value) Value { return Vec2Value(ctx.UV) }, nil
 }
 
 func buildConstant(c *compiler, n *node) (evalFn, error) {
@@ -296,9 +363,9 @@ func buildDotProduct(c *compiler, n *node) (evalFn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return func(pos [3]float64, scratch []Value) Value {
-		av := a(pos, scratch).AsVec3()
-		bv := b(pos, scratch).AsVec3()
+	return func(ctx *SampleContext, scratch []Value) Value {
+		av := a(ctx, scratch).AsVec3()
+		bv := b(ctx, scratch).AsVec3()
 		return FloatValue(av[0]*bv[0] + av[1]*bv[1] + av[2]*bv[2])
 	}, nil
 }
@@ -317,13 +384,13 @@ func buildArithmetic(op func(a, b float64) float64) nodeBuilder {
 		arity := vecArity(out)
 		switch out {
 		case TypeFloat:
-			return func(pos [3]float64, scratch []Value) Value {
-				return FloatValue(op(a(pos, scratch).AsFloat(), b(pos, scratch).AsFloat()))
+			return func(ctx *SampleContext, scratch []Value) Value {
+				return FloatValue(op(a(ctx, scratch).AsFloat(), b(ctx, scratch).AsFloat()))
 			}, nil
 		case TypeVector2, TypeVector3, TypeVector4, TypeColor3, TypeColor4:
-			return func(pos [3]float64, scratch []Value) Value {
-				av := broadcast(a(pos, scratch))
-				bv := broadcast(b(pos, scratch))
+			return func(ctx *SampleContext, scratch []Value) Value {
+				av := broadcast(a(ctx, scratch))
+				bv := broadcast(b(ctx, scratch))
 				v := Value{Type: out}
 				for i := range arity {
 					v.Vec[i] = op(av[i], bv[i])
@@ -356,12 +423,12 @@ func buildFractal3D(c *compiler, n *node) (evalFn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return func(pos [3]float64, scratch []Value) Value {
-		p := posOrDefault(posFn, pos, scratch)
-		oct := intOrDefault(octFn, pos, scratch, 3)
-		lac := floatOrDefault(lacFn, pos, scratch, 2.0)
-		dim := floatOrDefault(dimFn, pos, scratch, 0.5)
-		amp := floatOrDefault(ampFn, pos, scratch, 1.0)
+	return func(ctx *SampleContext, scratch []Value) Value {
+		p := posOrDefault(posFn, ctx, scratch)
+		oct := intOrDefault(octFn, ctx, scratch, 3)
+		lac := floatOrDefault(lacFn, ctx, scratch, 2.0)
+		dim := floatOrDefault(dimFn, ctx, scratch, 0.5)
+		amp := floatOrDefault(ampFn, ctx, scratch, 1.0)
 		return FloatValue(amp * fractal3D(p[0], p[1], p[2], oct, lac, dim))
 	}, nil
 }
@@ -379,10 +446,10 @@ func buildNoise3D(c *compiler, n *node) (evalFn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return func(pos [3]float64, scratch []Value) Value {
-		p := posOrDefault(posFn, pos, scratch)
-		amp := floatOrDefault(ampFn, pos, scratch, 1.0)
-		piv := floatOrDefault(pivFn, pos, scratch, 0.0)
+	return func(ctx *SampleContext, scratch []Value) Value {
+		p := posOrDefault(posFn, ctx, scratch)
+		amp := floatOrDefault(ampFn, ctx, scratch, 1.0)
+		piv := floatOrDefault(pivFn, ctx, scratch, 0.0)
 		return FloatValue(perlin3D(p[0], p[1], p[2])*amp + piv)
 	}, nil
 }
@@ -393,8 +460,8 @@ func buildUnary(op func(float64) float64) nodeBuilder {
 		if err != nil {
 			return nil, err
 		}
-		return func(pos [3]float64, scratch []Value) Value {
-			return FloatValue(op(in(pos, scratch).AsFloat()))
+		return func(ctx *SampleContext, scratch []Value) Value {
+			return FloatValue(op(in(ctx, scratch).AsFloat()))
 		}, nil
 	}
 }
@@ -408,8 +475,8 @@ func buildPower(c *compiler, n *node) (evalFn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return func(pos [3]float64, scratch []Value) Value {
-		return FloatValue(math.Pow(a(pos, scratch).AsFloat(), b(pos, scratch).AsFloat()))
+	return func(ctx *SampleContext, scratch []Value) Value {
+		return FloatValue(math.Pow(a(ctx, scratch).AsFloat(), b(ctx, scratch).AsFloat()))
 	}, nil
 }
 
@@ -429,17 +496,17 @@ func buildClamp(c *compiler, n *node) (evalFn, error) {
 	out := n.OutputType
 	arity := vecArity(out)
 	if out == TypeFloat {
-		return func(pos [3]float64, scratch []Value) Value {
-			low := floatOrDefault(lowFn, pos, scratch, 0)
-			high := floatOrDefault(highFn, pos, scratch, 1)
-			return FloatValue(clampF(in(pos, scratch).AsFloat(), low, high))
+		return func(ctx *SampleContext, scratch []Value) Value {
+			low := floatOrDefault(lowFn, ctx, scratch, 0)
+			high := floatOrDefault(highFn, ctx, scratch, 1)
+			return FloatValue(clampF(in(ctx, scratch).AsFloat(), low, high))
 		}, nil
 	}
-	return func(pos [3]float64, scratch []Value) Value {
-		low := floatOrDefault(lowFn, pos, scratch, 0)
-		high := floatOrDefault(highFn, pos, scratch, 1)
+	return func(ctx *SampleContext, scratch []Value) Value {
+		low := floatOrDefault(lowFn, ctx, scratch, 0)
+		high := floatOrDefault(highFn, ctx, scratch, 1)
 		v := Value{Type: out}
-		src := in(pos, scratch).Vec
+		src := in(ctx, scratch).Vec
 		for i := range arity {
 			v.Vec[i] = clampF(src[i], low, high)
 		}
@@ -467,15 +534,15 @@ func buildMix(c *compiler, n *node) (evalFn, error) {
 	arity := vecArity(out)
 	switch out {
 	case TypeFloat:
-		return func(pos [3]float64, scratch []Value) Value {
-			t := mixFn(pos, scratch).AsFloat()
-			return FloatValue(bg(pos, scratch).AsFloat()*(1-t) + fg(pos, scratch).AsFloat()*t)
+		return func(ctx *SampleContext, scratch []Value) Value {
+			t := mixFn(ctx, scratch).AsFloat()
+			return FloatValue(bg(ctx, scratch).AsFloat()*(1-t) + fg(ctx, scratch).AsFloat()*t)
 		}, nil
 	case TypeVector2, TypeVector3, TypeVector4, TypeColor3, TypeColor4:
-		return func(pos [3]float64, scratch []Value) Value {
-			t := mixFn(pos, scratch).AsFloat()
-			bgv := broadcast(bg(pos, scratch))
-			fgv := broadcast(fg(pos, scratch))
+		return func(ctx *SampleContext, scratch []Value) Value {
+			t := mixFn(ctx, scratch).AsFloat()
+			bgv := broadcast(bg(ctx, scratch))
+			fgv := broadcast(fg(ctx, scratch))
 			v := Value{Type: out}
 			for i := range arity {
 				v.Vec[i] = bgv[i]*(1-t) + fgv[i]*t
@@ -484,6 +551,98 @@ func buildMix(c *compiler, n *node) (evalFn, error) {
 		}, nil
 	}
 	return nil, fmt.Errorf("unsupported mix output type %s", out)
+}
+
+// buildImage loads the referenced texture once at compile time and
+// returns a closure that samples it at the texcoord input's UV (or
+// SampleContext.UV directly when no texcoord is wired). The output
+// type drives how many channels are pulled from the texture; alpha is
+// dropped because ditherforge bakes alpha separately. RGB stays in
+// sRGB throughout — the consumer (voxel pipeline) wants sRGB-quantized
+// output anyway, so a linearize-then-encode round-trip would only add
+// rounding error.
+func buildImage(c *compiler, n *node) (evalFn, error) {
+	fileIn, ok := n.inputsByName["file"]
+	if !ok {
+		return nil, fmt.Errorf("image node: missing required %q input", "file")
+	}
+	if fileIn.RawString == "" {
+		return nil, fmt.Errorf("image node: %q input has no path", "file")
+	}
+	img, err := c.images.load(c.resolver, fileIn.RawString, fileIn.Colorspace)
+	if err != nil {
+		return nil, fmt.Errorf("image node: %w", err)
+	}
+	uMode := parseAddressMode(stringInputOrDefault(n, "uaddressmode", "periodic"))
+	vMode := parseAddressMode(stringInputOrDefault(n, "vaddressmode", "periodic"))
+	filter := parseFilterType(stringInputOrDefault(n, "filtertype", "linear"))
+
+	uvFn, err := c.compileOptional(n, "texcoord")
+	if err != nil {
+		return nil, err
+	}
+
+	out := n.OutputType
+	arity := vecArity(out)
+	defaultFn, err := c.compileOptional(n, "default")
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx *SampleContext, scratch []Value) Value {
+		var uv [2]float64
+		if uvFn != nil {
+			v := uvFn(ctx, scratch)
+			uv = [2]float64{v.Vec[0], v.Vec[1]}
+		} else {
+			uv = ctx.UV
+		}
+		rgb := img.sample(uv, uMode, vMode, filter)
+		v := Value{Type: out}
+		switch arity {
+		case 0: // float
+			v.Type = TypeFloat
+			v.F = rgb[0]
+			return v
+		case 2:
+			v.Vec[0] = rgb[0]
+			v.Vec[1] = rgb[1]
+		case 3:
+			v.Vec[0] = rgb[0]
+			v.Vec[1] = rgb[1]
+			v.Vec[2] = rgb[2]
+		case 4:
+			v.Vec[0] = rgb[0]
+			v.Vec[1] = rgb[1]
+			v.Vec[2] = rgb[2]
+			v.Vec[3] = 1
+		}
+		// Hush unused-default-input warning when present but unsupported;
+		// real default sampling happens implicitly via address modes.
+		_ = defaultFn
+		return v
+	}, nil
+}
+
+// buildExtract pulls one component out of a vector/color, indexed by
+// the literal `index` input (0-based).
+func buildExtract(c *compiler, n *node) (evalFn, error) {
+	in, err := c.compileRequired(n, "in")
+	if err != nil {
+		return nil, err
+	}
+	idxIn, ok := n.inputsByName["index"]
+	if !ok || idxIn.Value == nil {
+		return nil, fmt.Errorf("extract node: missing literal %q input", "index")
+	}
+	idx := idxIn.Value.AsInt()
+	if idx < 0 || idx >= 4 {
+		return nil, fmt.Errorf("extract node: index %d out of range [0, 4)", idx)
+	}
+	return func(ctx *SampleContext, scratch []Value) Value {
+		v := in(ctx, scratch)
+		return FloatValue(v.Vec[idx])
+	}, nil
 }
 
 // --- helpers ---
@@ -498,25 +657,25 @@ func broadcast(v Value) [4]float64 {
 	return v.Vec
 }
 
-func posOrDefault(fn evalFn, pos [3]float64, scratch []Value) [3]float64 {
+func posOrDefault(fn evalFn, ctx *SampleContext, scratch []Value) [3]float64 {
 	if fn == nil {
-		return pos
+		return ctx.Pos
 	}
-	return fn(pos, scratch).AsVec3()
+	return fn(ctx, scratch).AsVec3()
 }
 
-func intOrDefault(fn evalFn, pos [3]float64, scratch []Value, def int) int {
+func intOrDefault(fn evalFn, ctx *SampleContext, scratch []Value, def int) int {
 	if fn == nil {
 		return def
 	}
-	return fn(pos, scratch).AsInt()
+	return fn(ctx, scratch).AsInt()
 }
 
-func floatOrDefault(fn evalFn, pos [3]float64, scratch []Value, def float64) float64 {
+func floatOrDefault(fn evalFn, ctx *SampleContext, scratch []Value, def float64) float64 {
 	if fn == nil {
 		return def
 	}
-	return fn(pos, scratch).AsFloat()
+	return fn(ctx, scratch).AsFloat()
 }
 
 func clampF(v, lo, hi float64) float64 {

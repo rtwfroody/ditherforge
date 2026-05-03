@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // Parse reads a MaterialX document from r.
@@ -31,14 +32,21 @@ func Parse(r io.Reader) (*Document, error) {
 	}
 }
 
-// ParseFile is a convenience wrapper around Parse.
+// ParseFile is a convenience wrapper around Parse that also installs a
+// directory-based ResourceResolver rooted at the file's containing
+// directory, so image-backed graphs can find adjacent texture files.
 func ParseFile(path string) (*Document, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return Parse(f)
+	doc, err := Parse(f)
+	if err != nil {
+		return nil, err
+	}
+	doc.Resolver = &dirResolver{base: filepath.Dir(path)}
+	return doc, nil
 }
 
 // ParseBytes parses MaterialX from an in-memory byte slice.
@@ -258,12 +266,25 @@ func parseInput(dec *xml.Decoder, se xml.StartElement) (*input, error) {
 	if v, ok := attrLookup(se, "output"); ok {
 		in.OutputName = v
 	}
+	if v, ok := attrLookup(se, "colorspace"); ok {
+		in.Colorspace = v
+	}
 	if valueStr, ok := attrLookup(se, "value"); ok {
-		v, err := parseValueString(valueStr, in.Type)
-		if err != nil {
-			return nil, fmt.Errorf("input %q: %w", in.Name, err)
+		switch in.Type {
+		case TypeString, TypeFilename, TypeUnknown:
+			// Unknown types (e.g. boolean, matrix44) appear on surface
+			// shader inputs we don't consume (base_color is all we
+			// extract). Store the raw string so the parse doesn't fail;
+			// any code that tries to evaluate the input will hit a
+			// clear error later.
+			in.RawString = valueStr
+		default:
+			v, err := parseValueString(valueStr, in.Type)
+			if err != nil {
+				return nil, fmt.Errorf("input %q: %w", in.Name, err)
+			}
+			in.Value = &v
 		}
-		in.Value = &v
 	}
 	if err := skipElement(dec); err != nil {
 		return nil, err
