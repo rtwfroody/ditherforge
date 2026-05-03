@@ -509,7 +509,11 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
-		baseColorOverride := safeBaseColorOverride(r.opts.BaseColorMaterialX, r.opts.BaseColorMaterialXTileMM)
+		baseColorOverride := safeBaseColorOverride(
+			r.opts.BaseColorMaterialX,
+			r.opts.BaseColorMaterialXTileMM,
+			r.opts.BaseColorMaterialXTriplanarSharpness,
+		)
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo,

@@ -268,14 +268,46 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 	return uint8(ClampF(a+0.5, 0, 255))
 }
 
+// BaseColorContext bundles the inputs an override may consult when
+// sampling. Pos is the world-space sample point in the original
+// (pre-split) mesh frame; Normal is the unit-length surface normal of
+// the closest face (zero when the face is degenerate). Image-backed
+// MaterialX graphs use Normal to drive triplanar projection; pure-
+// procedural graphs ignore it.
+type BaseColorContext struct {
+	Pos    [3]float32
+	Normal [3]float32
+}
+
 // BaseColorOverride supplies a procedural replacement for an
 // untextured face's base color, evaluated at the sample's 3D position.
-// p is in the same coord frame Sample* receives — i.e. the original
-// (pre-split) mesh frame. Implementations must be safe to call from
-// many goroutines concurrently. Returns RGB only; alpha continues to
-// come from the model's per-face material.
+// Implementations must be safe to call from many goroutines
+// concurrently. Returns RGB only; alpha continues to come from the
+// model's per-face material.
 type BaseColorOverride interface {
-	SampleBaseColor(p [3]float32) [3]uint8
+	SampleBaseColor(ctx BaseColorContext) [3]uint8
+}
+
+// faceNormal returns the unit-length normal of the face at faceIdx
+// computed from its three vertex positions. Returns the zero vector
+// when the face is degenerate (e.g. zero area).
+func faceNormal(faceIdx int, model *loader.LoadedModel) [3]float32 {
+	f := model.Faces[faceIdx]
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	e1 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
+	e2 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
+	n := [3]float32{
+		e1[1]*e2[2] - e1[2]*e2[1],
+		e1[2]*e2[0] - e1[0]*e2[2],
+		e1[0]*e2[1] - e1[1]*e2[0],
+	}
+	l := float32(math.Sqrt(float64(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])))
+	if l < 1e-9 {
+		return [3]float32{}
+	}
+	return [3]float32{n[0] / l, n[1] / l, n[2] / l}
 }
 
 // SampleNearestColor finds the closest surface point to p on `model`, then
@@ -330,7 +362,10 @@ func SampleNearestColorWithSticker(
 
 	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
 	if override != nil && (texIdx < 0 || int(texIdx) >= len(model.Textures)) {
-		rgb := override.SampleBaseColor(p)
+		rgb := override.SampleBaseColor(BaseColorContext{
+			Pos:    p,
+			Normal: faceNormal(int(bestTri), model),
+		})
 		bc[0], bc[1], bc[2] = rgb[0], rgb[1], rgb[2]
 	}
 	f := model.Faces[bestTri]

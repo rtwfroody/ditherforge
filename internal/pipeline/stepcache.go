@@ -379,15 +379,16 @@ type loadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
-	// appliedBaseColor / appliedBaseColorMaterialX / appliedBaseColorMaterialXTileMM
+	// appliedBaseColor / appliedBaseColorMaterialX{,TileMM,TriplanarSharpness}
 	// track the base-color override currently baked into ColorModel /
-	// SampleModel FaceBaseColor. The triple is the cache key for the
+	// SampleModel FaceBaseColor. The tuple is the cache key for the
 	// in-place mutation: when any field diverges from the corresponding
 	// opts.* value, applyBaseColor resets from the parse cache and re-bakes.
-	// All three empty/zero means pristine.
-	appliedBaseColor                 string
-	appliedBaseColorMaterialX        string
-	appliedBaseColorMaterialXTileMM  float64
+	// All empty/zero means pristine.
+	appliedBaseColor                            string
+	appliedBaseColorMaterialX                   string
+	appliedBaseColorMaterialXTileMM             float64
+	appliedBaseColorMaterialXTriplanarSharpness float64
 }
 
 type voxelizeOutput struct {
@@ -576,21 +577,27 @@ type loadSettings struct {
 // because runSticker deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
-	NozzleDiameter           float32
-	LayerHeight              float32
-	BaseColor                string
-	BaseColorMaterialX       string
-	BaseColorMaterialXTileMM float64
+	NozzleDiameter                       float32
+	LayerHeight                          float32
+	BaseColor                            string
+	BaseColorMaterialX                   string  // path
+	BaseColorMaterialXMTime              int64   // ns; 0 if file is missing/inaccessible
+	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
+	BaseColorMaterialXTileMM             float64
+	BaseColorMaterialXTriplanarSharpness float64
 }
 
 type stickerSettings struct {
 	Stickers []Sticker
-	// BaseColor / BaseColorMaterialX / BaseColorMaterialXTileMM are
-	// included so any base-color change invalidates the sticker stage.
-	// See voxelizeSettings doc above for the reason.
-	BaseColor                string
-	BaseColorMaterialX       string
-	BaseColorMaterialXTileMM float64
+	// BaseColor / BaseColorMaterialX{,MTime,Size,TileMM,TriplanarSharpness}
+	// are included so any base-color change invalidates the sticker
+	// stage. See voxelizeSettings doc above for the reason.
+	BaseColor                            string
+	BaseColorMaterialX                   string
+	BaseColorMaterialXMTime              int64
+	BaseColorMaterialXSize               int64
+	BaseColorMaterialXTileMM             float64
+	BaseColorMaterialXTriplanarSharpness float64
 	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
 	// original mesh), so decals built for one substrate are invalid when
 	// the toggle changes. AlphaWrapAlpha and AlphaWrapOffset live in
@@ -697,20 +704,28 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		}
 		return s
 	case StageVoxelize:
+		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 		return voxelizeSettings{
-			NozzleDiameter:           opts.NozzleDiameter,
-			LayerHeight:              opts.LayerHeight,
-			BaseColor:                opts.BaseColor,
-			BaseColorMaterialX:       opts.BaseColorMaterialX,
-			BaseColorMaterialXTileMM: opts.BaseColorMaterialXTileMM,
+			NozzleDiameter:                       opts.NozzleDiameter,
+			LayerHeight:                          opts.LayerHeight,
+			BaseColor:                            opts.BaseColor,
+			BaseColorMaterialX:                   opts.BaseColorMaterialX,
+			BaseColorMaterialXMTime:              mtime,
+			BaseColorMaterialXSize:               size,
+			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
+			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
 		}
 	case StageSticker:
+		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 		return stickerSettings{
-			Stickers:                 opts.Stickers,
-			BaseColor:                opts.BaseColor,
-			BaseColorMaterialX:       opts.BaseColorMaterialX,
-			BaseColorMaterialXTileMM: opts.BaseColorMaterialXTileMM,
-			AlphaWrap:                opts.AlphaWrap,
+			Stickers:                             opts.Stickers,
+			BaseColor:                            opts.BaseColor,
+			BaseColorMaterialX:                   opts.BaseColorMaterialX,
+			BaseColorMaterialXMTime:              mtime,
+			BaseColorMaterialXSize:               size,
+			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
+			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
+			AlphaWrap:                            opts.AlphaWrap,
 		}
 	case StageColorAdjust:
 		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
@@ -755,6 +770,21 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	return nil
 }
 
+// materialXFileStamp returns the mtime (ns) and size (bytes) of the
+// MaterialX package file at path, or (0, 0) if the file is missing or
+// inaccessible. Used to invalidate the voxelize/sticker stage caches
+// when the .mtlx or .zip on disk changes.
+func materialXFileStamp(path string) (mtime, size int64) {
+	if path == "" {
+		return 0, 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0
+	}
+	return info.ModTime().UnixNano(), info.Size()
+}
+
 // stageFnv hashes a single stage's settings to a uint64. Used as the
 // per-stage component of the cumulative stageKey.
 func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
@@ -776,11 +806,17 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.LayerHeight)
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
 		writeFloat64(h, v.BaseColorMaterialXTileMM)
+		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
+		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
 		writeFloat64(h, v.BaseColorMaterialXTileMM)
+		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
 		writeBool(h, v.AlphaWrap)
 		writeInt(h, len(v.Stickers))
 		for _, s := range v.Stickers {

@@ -1,6 +1,24 @@
 package pipeline
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// writeMtlxTempFile drops a tiny .mtlx file into a freshly-created
+// temp dir and returns its path. Test helper for the MaterialX cache
+// tests below — the contents don't have to be a valid graph since
+// settingsForStage only stat()s the file.
+func writeMtlxTempFile(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "graph.mtlx")
+	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+		t.Fatalf("write mtlx: %v", err)
+	}
+	return p
+}
 
 // TestStickerStageKeyDependsOnBaseColor guards a cache-coherency contract:
 // runSticker deep-clones lo.ColorModel into so.Model, including
@@ -58,51 +76,78 @@ func TestVoxelizeStageKeyDependsOnBaseColor(t *testing.T) {
 }
 
 // TestVoxelizeStageKeyDependsOnMaterialX guards the same invalidation
-// contract for the procedural base-color override: changing the .mtlx
-// content or its tile size must invalidate the voxelize cache because
-// the per-voxel sampler reads them.
+// contract for the MaterialX base-color override: changing the path,
+// the file's bytes (via mtime/size), the tile size, or the triplanar
+// sharpness must each independently invalidate the voxelize cache
+// because the per-voxel sampler reads them.
 func TestVoxelizeStageKeyDependsOnMaterialX(t *testing.T) {
 	c := NewStageCache()
+	mtlxA := writeMtlxTempFile(t, "<materialx version=\"1.39\"/>")
+	mtlxB := writeMtlxTempFile(t, "<materialx version=\"1.39\"><nodegraph/></materialx>")
 	base := Options{
-		Input:                    "model.glb",
-		BaseColorMaterialX:       "<materialx version=\"1.39\"/>",
-		BaseColorMaterialXTileMM: 10,
+		Input:                                "model.glb",
+		BaseColorMaterialX:                   mtlxA,
+		BaseColorMaterialXTileMM:             10,
+		BaseColorMaterialXTriplanarSharpness: 4,
 	}
-	contentChanged := base
-	contentChanged.BaseColorMaterialX = "<materialx version=\"1.39\"><nodegraph/></materialx>"
+	pathChanged := base
+	pathChanged.BaseColorMaterialX = mtlxB
 	tileChanged := base
 	tileChanged.BaseColorMaterialXTileMM = 20
+	sharpChanged := base
+	sharpChanged.BaseColorMaterialXTriplanarSharpness = 8
 
-	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, contentChanged) {
-		t.Error("StageVoxelize key did not change when BaseColorMaterialX content changed")
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, pathChanged) {
+		t.Error("StageVoxelize key did not change when BaseColorMaterialX path changed")
 	}
 	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, tileChanged) {
 		t.Error("StageVoxelize key did not change when BaseColorMaterialXTileMM changed")
 	}
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, sharpChanged) {
+		t.Error("StageVoxelize key did not change when BaseColorMaterialXTriplanarSharpness changed")
+	}
+
+	// Edit-in-place: same path, larger file. Different size must
+	// invalidate even though the path string is unchanged.
+	beforeEdit := c.stageFnv(StageVoxelize, base)
+	if err := os.WriteFile(mtlxA, []byte("<materialx version=\"1.39\"><x/></materialx>"), 0644); err != nil {
+		t.Fatalf("rewrite mtlx: %v", err)
+	}
+	// Bump mtime forward a hair to defeat filesystems that only stamp
+	// at second granularity.
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(mtlxA, future, future)
+	afterEdit := c.stageFnv(StageVoxelize, base)
+	if beforeEdit == afterEdit {
+		t.Error("StageVoxelize key did not change after rewriting the .mtlx file (mtime/size hash broken)")
+	}
 }
 
 // TestStickerStageKeyDependsOnMaterialX is the sticker-stage analogue
-// of TestStickerStageKeyDependsOnBaseColor for the procedural override.
+// of TestStickerStageKeyDependsOnBaseColor for the MaterialX override.
 // runSticker deep-clones lo.ColorModel into so.Model with whatever
-// procedural pattern was baked into FaceBaseColor by the per-face
-// preview bake; changing the .mtlx must invalidate that cached clone.
+// pattern was baked into FaceBaseColor by the per-face preview bake;
+// any change to the underlying .mtlx must invalidate that cached
+// clone.
 func TestStickerStageKeyDependsOnMaterialX(t *testing.T) {
 	c := NewStageCache()
+	mtlxA := writeMtlxTempFile(t, "<materialx version=\"1.39\"/>")
+	mtlxB := writeMtlxTempFile(t, "<materialx version=\"1.39\"><nodegraph/></materialx>")
 	base := Options{
 		Input:                    "model.glb",
-		BaseColorMaterialX:       "<materialx version=\"1.39\"/>",
+		BaseColorMaterialX:       mtlxA,
 		BaseColorMaterialXTileMM: 10,
 		Stickers: []Sticker{
 			{ImagePath: "sticker.png", Mode: "unfold", Scale: 1, MaxAngle: 90},
 		},
 	}
-	contentChanged := base
-	contentChanged.BaseColorMaterialX = "<materialx version=\"1.39\"><nodegraph/></materialx>"
+	pathChanged := base
+	pathChanged.BaseColorMaterialX = mtlxB
 	tileChanged := base
 	tileChanged.BaseColorMaterialXTileMM = 20
 
-	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, contentChanged) {
-		t.Error("StageSticker key did not change when BaseColorMaterialX content changed; " +
+	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, pathChanged) {
+		t.Error("StageSticker key did not change when BaseColorMaterialX path changed; " +
 			"so.Model.FaceBaseColor would be stale on a cached run")
 	}
 	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, tileChanged) {
@@ -116,14 +161,18 @@ func TestStickerStageKeyDependsOnMaterialX(t *testing.T) {
 // changes.
 func TestLoadAndDecimateStageKeysIndependentOfMaterialX(t *testing.T) {
 	c := NewStageCache()
+	mtlxA := writeMtlxTempFile(t, "<materialx version=\"1.39\"/>")
+	mtlxB := writeMtlxTempFile(t, "<materialx version=\"1.39\"><nodegraph/></materialx>")
 	base := Options{
-		Input:                    "model.glb",
-		BaseColorMaterialX:       "<materialx version=\"1.39\"/>",
-		BaseColorMaterialXTileMM: 10,
+		Input:                                "model.glb",
+		BaseColorMaterialX:                   mtlxA,
+		BaseColorMaterialXTileMM:             10,
+		BaseColorMaterialXTriplanarSharpness: 4,
 	}
 	changed := base
-	changed.BaseColorMaterialX = "<materialx version=\"1.39\"><nodegraph/></materialx>"
+	changed.BaseColorMaterialX = mtlxB
 	changed.BaseColorMaterialXTileMM = 20
+	changed.BaseColorMaterialXTriplanarSharpness = 8
 
 	if c.stageFnv(StageLoad, base) != c.stageFnv(StageLoad, changed) {
 		t.Error("StageLoad key changed on MaterialX change; load cache should survive")

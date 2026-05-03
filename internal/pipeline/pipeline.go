@@ -10,6 +10,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,17 +33,26 @@ type Options struct {
 	Scale          float32
 	Output         string
 	BaseColor      string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
-	// BaseColorMaterialX is the contents of a .mtlx file applied to
-	// untextured faces as a procedural base color. When non-empty it
-	// takes precedence over BaseColor. Stored as content (not path) so
-	// the cache key reflects the actual graph definition; cheap because
-	// procedural .mtlx files are KB-scale text.
+	// BaseColorMaterialX is the path to a .mtlx file or a .zip archive
+	// containing one (with adjacent textures) applied to untextured
+	// faces as a procedural or image-backed base color. When non-empty
+	// it takes precedence over BaseColor. Cache invalidation tracks
+	// the file's mtime + size; in-place edits without mtime change
+	// won't be picked up.
 	BaseColorMaterialX string
 	// BaseColorMaterialXTileMM scales positions before sampling the
 	// MaterialX graph: a value of 10 means one shading-unit cycle of
 	// the procedural maps to 10 mm of object space. Zero or negative
 	// is treated as 1 mm (i.e. raw position).
 	BaseColorMaterialXTileMM float64
+	// BaseColorMaterialXTriplanarSharpness controls the blend
+	// weighting for image-backed graphs that get triplanar-projected
+	// onto untextured faces. Higher values produce sharper transitions
+	// between the three axis-aligned projections (closer to a hard box
+	// map); lower values blend more softly. Zero or negative falls
+	// back to a sensible default (4). Ignored by purely position-
+	// driven graphs (marble, brick).
+	BaseColorMaterialXTriplanarSharpness float64
 	NozzleDiameter float32
 	LayerHeight    float32
 	// Printer is the printer profile ID (e.g. "snapmaker_u1") used when
@@ -515,7 +525,8 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	if lo.appliedBaseColor == opts.BaseColor &&
 		lo.appliedBaseColorMaterialX == opts.BaseColorMaterialX &&
-		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM {
+		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM &&
+		lo.appliedBaseColorMaterialXTriplanarSharpness == opts.BaseColorMaterialXTriplanarSharpness {
 		return
 	}
 	pristine := lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
@@ -531,10 +542,15 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	}
 	switch {
 	case opts.BaseColorMaterialX != "":
-		// Build the override once and reuse it across both models — parsing
-		// the .mtlx and validating the graph is cheap but non-trivial, and
-		// run.go also builds its own override for per-voxel sampling.
-		override, err := buildBaseColorOverride(opts.BaseColorMaterialX, opts.BaseColorMaterialXTileMM)
+		// Build the override once and reuse it across both models —
+		// parsing the .mtlx (and decoding any referenced textures) is
+		// cheap but non-trivial, and run.go also builds its own
+		// override for per-voxel sampling.
+		override, err := buildBaseColorOverride(
+			opts.BaseColorMaterialX,
+			opts.BaseColorMaterialXTileMM,
+			opts.BaseColorMaterialXTriplanarSharpness,
+		)
 		if err != nil {
 			log.Printf("Warning: ignoring MaterialX base color: %v", err)
 		} else if override != nil {
@@ -553,6 +569,7 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 	lo.appliedBaseColor = opts.BaseColor
 	lo.appliedBaseColorMaterialX = opts.BaseColorMaterialX
 	lo.appliedBaseColorMaterialXTileMM = opts.BaseColorMaterialXTileMM
+	lo.appliedBaseColorMaterialXTriplanarSharpness = opts.BaseColorMaterialXTriplanarSharpness
 }
 
 // bakeMaterialXBaseColor evaluates the procedural at every untextured
@@ -569,12 +586,25 @@ func bakeMaterialXBaseColor(model *loader.LoadedModel, override voxel.BaseColorO
 		v0 := model.Vertices[f[0]]
 		v1 := model.Vertices[f[1]]
 		v2 := model.Vertices[f[2]]
-		c := [3]float32{
+		centroid := [3]float32{
 			(v0[0] + v1[0] + v2[0]) / 3,
 			(v0[1] + v1[1] + v2[1]) / 3,
 			(v0[2] + v1[2] + v2[2]) / 3,
 		}
-		rgb := override.SampleBaseColor(c)
+		// Face normal via cross product, normalized; degenerate faces
+		// get the zero vector and the override's triplanar fallback
+		// kicks in.
+		e1x, e1y, e1z := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+		e2x, e2y, e2z := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+		nx := e1y*e2z - e1z*e2y
+		ny := e1z*e2x - e1x*e2z
+		nz := e1x*e2y - e1y*e2x
+		nl := float32(math.Sqrt(float64(nx*nx + ny*ny + nz*nz)))
+		var normal [3]float32
+		if nl > 1e-9 {
+			normal = [3]float32{nx / nl, ny / nl, nz / nl}
+		}
+		rgb := override.SampleBaseColor(voxel.BaseColorContext{Pos: centroid, Normal: normal})
 		model.FaceBaseColor[i] = [4]uint8{rgb[0], rgb[1], rgb[2], 255}
 	}
 }

@@ -25,9 +25,16 @@ type SampleContext struct {
 // Compiled samplers are reentrant: calling Sample/SampleAt concurrently
 // from multiple goroutines is safe because each call uses its own
 // scratch slot table.
+//
+// UsesUV reports whether the underlying graph reads SampleContext.UV
+// (true for image-backed graphs and any graph containing a texcoord
+// node). Consumers can use this to skip wrapping in triplanar
+// projection when the graph is purely position-driven (e.g. marble),
+// avoiding 3× redundant evaluator calls per sample.
 type Sampler interface {
 	Sample(pos [3]float64) [3]float64
 	SampleAt(ctx SampleContext) [3]float64
+	UsesUV() bool
 }
 
 // MaterialNames returns the material names defined by the document, in
@@ -96,8 +103,9 @@ func (d *Document) samplerFromInput(in *input) (Sampler, error) {
 
 type constSampler [3]float64
 
-func (c constSampler) Sample(_ [3]float64) [3]float64       { return [3]float64(c) }
-func (c constSampler) SampleAt(_ SampleContext) [3]float64  { return [3]float64(c) }
+func (c constSampler) Sample(_ [3]float64) [3]float64      { return [3]float64(c) }
+func (c constSampler) SampleAt(_ SampleContext) [3]float64 { return [3]float64(c) }
+func (c constSampler) UsesUV() bool                        { return false }
 
 // --- compiled graph evaluator ---
 //
@@ -114,7 +122,10 @@ type compiledGraph struct {
 	nSlots  int
 	outSlot int
 	steps   []compileStep
+	usesUV  bool
 }
+
+func (g *compiledGraph) UsesUV() bool { return g.usesUV }
 
 type compileStep struct {
 	slot int
@@ -197,6 +208,7 @@ func compileGraph(ng *nodeGraph, out *graphOutput, resolver ResourceResolver) (S
 		nSlots:  c.nSlots,
 		outSlot: outSlot,
 		steps:   c.steps,
+		usesUV:  c.usesUV,
 	}, nil
 }
 
@@ -208,6 +220,7 @@ type compiler struct {
 	nSlots   int
 	resolver ResourceResolver
 	images   *imageCache
+	usesUV   bool
 }
 
 func (c *compiler) compileNode(name string) (int, error) {
@@ -337,7 +350,8 @@ func buildPosition(_ *compiler, n *node) (evalFn, error) {
 	return func(ctx *SampleContext, _ []Value) Value { return Vec3Value(ctx.Pos) }, nil
 }
 
-func buildTexcoord(_ *compiler, n *node) (evalFn, error) {
+func buildTexcoord(c *compiler, n *node) (evalFn, error) {
+	c.usesUV = true
 	// MaterialX texcoord exposes a UV channel index (default 0). We
 	// only plumb a single UV channel through SampleContext.UV — any
 	// non-zero index would silently return the same UV. Fail loudly
@@ -562,6 +576,7 @@ func buildMix(c *compiler, n *node) (evalFn, error) {
 // output anyway, so a linearize-then-encode round-trip would only add
 // rounding error.
 func buildImage(c *compiler, n *node) (evalFn, error) {
+	c.usesUV = true
 	fileIn, ok := n.inputsByName["file"]
 	if !ok {
 		return nil, fmt.Errorf("image node: missing required %q input", "file")

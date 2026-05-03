@@ -33,9 +33,10 @@ type Args struct {
 	Inventory      string   `arg:"--inventory" help:"Inventory file for remaining colors"`
 	Scale          float32  `arg:"--scale" default:"1.0" help:"Additional scale multiplier"`
 	Output         string   `arg:"--output" help:"Output .3mf file (default: <input>.3mf)"`
-	BaseColor      string   `arg:"--base-color" help:"Hex color for untextured faces (e.g. #FF0000)"`
-	BaseMaterialX  string   `arg:"--base-materialx" help:"Path to a procedural .mtlx file applied as the base color of untextured faces (overrides --base-color)"`
-	BaseMaterialXTileMM float64 `arg:"--base-materialx-tile-mm" default:"10" help:"Object-space scale (mm per shading-unit cycle) for the MaterialX procedural"`
+	BaseColor                       string  `arg:"--base-color" help:"Hex color for untextured faces (e.g. #FF0000)"`
+	BaseMaterialX                   string  `arg:"--base-materialx" help:"Path to a .mtlx file or .zip archive containing one (with adjacent textures) applied as the base color of untextured faces (overrides --base-color)"`
+	BaseMaterialXTileMM             float64 `arg:"--base-materialx-tile-mm" default:"10" help:"Object-space scale (mm per shading-unit cycle) for the MaterialX procedural"`
+	BaseMaterialXTriplanarSharpness float64 `arg:"--base-materialx-triplanar-sharpness" default:"4" help:"Triplanar projection sharpness for image-backed MaterialX (higher = sharper axis transitions; ignored by procedural .mtlx)"`
 	NozzleDiameter float32  `arg:"--nozzle-diameter" default:"0.4" help:"Nozzle diameter in mm"`
 	LayerHeight    float32  `arg:"--layer-height" default:"0.2" help:"Layer height in mm"`
 	Printer        string   `arg:"--printer" help:"Target printer profile id (e.g. snapmaker_u1, snapmaker_j1, prusa_xl, prusa_xl_5t, bambu_h2d, bambu_h2d_pro); defaults to snapmaker_u1"`
@@ -77,27 +78,18 @@ func main() {
 		}
 	}
 
-	var materialxContent string
-	if args.BaseMaterialX != "" {
-		data, err := os.ReadFile(args.BaseMaterialX)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading --base-materialx: %v\n", err)
-			os.Exit(1)
-		}
-		materialxContent = string(data)
-	}
-
 	opts := pipeline.Options{
-		Input:                    args.Input,
-		NumColors:                args.NumColors,
-		LockedColors:             expandColors(args.Color),
-		InventoryFile:            args.Inventory,
-		Scale:                    args.Scale,
-		Output:                   args.Output,
-		BaseColor:                args.BaseColor,
-		BaseColorMaterialX:       materialxContent,
-		BaseColorMaterialXTileMM: args.BaseMaterialXTileMM,
-		NozzleDiameter:           args.NozzleDiameter,
+		Input:                                args.Input,
+		NumColors:                            args.NumColors,
+		LockedColors:                         expandColors(args.Color),
+		InventoryFile:                        args.Inventory,
+		Scale:                                args.Scale,
+		Output:                               args.Output,
+		BaseColor:                            args.BaseColor,
+		BaseColorMaterialX:                   args.BaseMaterialX,
+		BaseColorMaterialXTileMM:             args.BaseMaterialXTileMM,
+		BaseColorMaterialXTriplanarSharpness: args.BaseMaterialXTriplanarSharpness,
+		NozzleDiameter:                       args.NozzleDiameter,
 		LayerHeight:    args.LayerHeight,
 		Printer:        args.Printer,
 		Brightness:     args.Brightness,
