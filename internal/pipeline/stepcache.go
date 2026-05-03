@@ -595,6 +595,11 @@ type loadSettings struct {
 	AlphaWrap       bool
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
+	// NozzleDiameter is the auto-fallback for AlphaWrapAlpha when it's 0,
+	// and also drives the pre-wrap decimate target inside Load. Including
+	// it here so changing the nozzle invalidates Load when alpha-wrap is
+	// on with auto values.
+	NozzleDiameter float32
 }
 
 // BaseColor lives on voxelizeSettings (not loadSettings) because it only
@@ -724,6 +729,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			AlphaWrap:       opts.AlphaWrap,
 			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
 			AlphaWrapOffset: opts.AlphaWrapOffset,
+			NozzleDiameter:  opts.NozzleDiameter,
 		}
 		if opts.Size != nil {
 			s.HasSize = true
@@ -861,6 +867,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeBool(h, v.AlphaWrap)
 		writeFloat32(h, v.AlphaWrapAlpha)
 		writeFloat32(h, v.AlphaWrapOffset)
+		writeFloat32(h, v.NozzleDiameter)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)
 		writeFloat32(h, v.LayerHeight)

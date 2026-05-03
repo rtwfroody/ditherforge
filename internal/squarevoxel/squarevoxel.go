@@ -543,6 +543,15 @@ func CountSurfaceCells(ctx context.Context, model *loader.LoadedModel, nozzleDia
 // DecimateMesh simplifies the model geometry purely based on shape, targeting
 // roughly one triangle per surface voxel cell.
 //
+// Contract:
+//   - targetCells is a goal, not a hard cap. The underlying QEM also stops
+//     when no topology-preserving collapse remains, so the actual face count
+//     can land above targetCells (topology is irreducible) -- callers passing
+//     a small target use this to mean "decimate as much as topology allows".
+//   - cellSize biases the collapse priority (sub-cellSize edges are cheaper),
+//     not a stopping tolerance. The result mesh is not guaranteed to have all
+//     edges shorter than cellSize.
+//
 // Emits its own "Decimating" stage events (including a progress bar when
 // decimation is actually performed). The caller should not also emit
 // StageStart/StageDone for this stage.

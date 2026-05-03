@@ -172,6 +172,17 @@ func TestLoadStageKeyInvalidatesOnAlphaWrap(t *testing.T) {
 	if c.stageKey(StageLoad, wrapped) == c.stageKey(StageLoad, wrappedTighter) {
 		t.Fatal("StageLoad key did not change when AlphaWrapAlpha changed")
 	}
+
+	// When AlphaWrapAlpha is 0 (auto), the effective alpha is derived
+	// from NozzleDiameter inside runLoad, and NozzleDiameter also drives
+	// the pre-wrap decimate tolerance. Both reads must invalidate Load.
+	wrappedAuto := base
+	wrappedAuto.AlphaWrap = true // AlphaWrapAlpha left at 0 (auto)
+	wrappedAutoBigger := wrappedAuto
+	wrappedAutoBigger.NozzleDiameter = 0.6
+	if c.stageKey(StageLoad, wrappedAuto) == c.stageKey(StageLoad, wrappedAutoBigger) {
+		t.Fatal("StageLoad key did not change when NozzleDiameter changed under auto alpha-wrap")
+	}
 }
 
 // TestStageKeyEmptyOnHashFailure: when the input file doesn't exist (so we

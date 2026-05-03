@@ -194,9 +194,35 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			if offset <= 0 {
 				offset = alpha / 30
 			}
+
+			// Pre-wrap decimation: alpha-wrap rebuilds the surface anyway,
+			// so we pass it the smallest topology-preserving mesh we can
+			// get. Use targetCells=1 (decimate as much as topology allows;
+			// see DecimateMesh contract) with cellSize=alpha so the
+			// priority queue removes sub-alpha edges first. NullTracker
+			// avoids colliding with the dedicated StageDecimate event
+			// later. Only the alpha-wrap input is decimated -- `model`
+			// stays intact for the inflate calc and for ColorModel /
+			// SampleModel below.
+			wrapInput := model
+			if !r.opts.NoSimplify {
+				preDec, derr := squarevoxel.DecimateMesh(r.ctx, model, 1, alpha, false, progress.NullTracker{})
+				if derr != nil {
+					return nil, fmt.Errorf("pre-wrap decimate: %w", derr)
+				}
+				if len(preDec.Faces) < len(model.Faces) {
+					plog.Printf("  Pre-wrap decimate: %d faces -> %d faces (alpha=%.3f mm)",
+						len(model.Faces), len(preDec.Faces), alpha)
+					wrapInput = preDec
+				}
+				if err := r.checkCancel(); err != nil {
+					return nil, err
+				}
+			}
+
 			plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
 			tWrap := time.Now()
-			wrapped, werr := alphawrap.Wrap(model, alpha, offset)
+			wrapped, werr := alphawrap.Wrap(wrapInput, alpha, offset)
 			if werr != nil {
 				return nil, fmt.Errorf("alpha-wrap: %w", werr)
 			}

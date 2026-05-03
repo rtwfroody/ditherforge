@@ -31,7 +31,7 @@ A stage's cache key changes if and only if its own settings struct changes _or_ 
 
 ```text
 parseSettings        = { Input, ReloadSeq, ObjectIndex }
-loadSettings         = { Scale, HasSize, Size, AlphaWrap, AlphaWrapAlpha, AlphaWrapOffset }
+loadSettings         = { Scale, HasSize, Size, AlphaWrap, AlphaWrapAlpha, AlphaWrapOffset, NozzleDiameter }
 decimateSettings     = { NoSimplify, NozzleDiameter, LayerHeight }
 stickerSettings      = { Stickers, BaseColor, AlphaWrap }
 voxelizeSettings     = { NozzleDiameter, LayerHeight, BaseColor }
@@ -48,7 +48,7 @@ A few subtleties:
 
 - `BaseColor` is in `voxelizeSettings` and `stickerSettings` but **not** `loadSettings`. Base color is reapplied per-run by `applyBaseColor` (`pipeline.go`); the load cache stays valid across base-color changes. Sticker invalidates because `runSticker` deep-clones `lo.ColorModel` and the per-run reapply doesn't reach into that scratch copy.
 - `AlphaWrap*` lives in `loadSettings`. `stickerSettings` includes only the `AlphaWrap` boolean (the wrap geometry comes through the Load stage's cumulative cascade).
-- `NozzleDiameter` and `LayerHeight` appear in both `decimateSettings` and `voxelizeSettings`. Both stages depend on the cell sizing.
+- `NozzleDiameter` appears in `loadSettings`, `decimateSettings`, and `voxelizeSettings`. In `loadSettings` it's the auto-fallback for `AlphaWrapAlpha` and the tolerance for the pre-wrap decimate substep; `decimateSettings` and `voxelizeSettings` use it for the cell sizing. `LayerHeight` appears in `decimateSettings` and `voxelizeSettings`.
 - `paletteSettings.InventoryContents` is the contents of the inventory file (memoized by path/mtime/size), not just its path — so editing the file invalidates the palette cache.
 
 ## Dependencies
@@ -73,9 +73,10 @@ graph TD
     subgraph Load[Load]
         direction TB
         Scale[Scale + Normalize]:::substep
+        PreDecimate[Pre-wrap decimate<br/>opts.AlphaWrap=true]:::substep
         AlphaWrap[Alpha-wrap<br/>opts.AlphaWrap=true]:::substep
         Inflate[Inflate sample mesh]:::substep
-        Scale --> AlphaWrap --> Inflate
+        Scale --> PreDecimate --> AlphaWrap --> Inflate
     end
     class Load stage
 
@@ -118,7 +119,7 @@ Reads the input file from disk and decodes it. Output is in file units, no trans
 
 ### Load — `*loadOutput`
 
-Clones the parsed model, applies `Scale` × unit-scale (with optional auto-fit-to-`Size`), normalizes Z so the model bottom sits at z=0, and optionally runs CGAL alpha-wrap on top. Builds the input MeshData preview. The result has three pointers to `*loader.LoadedModel`:
+Clones the parsed model, applies `Scale` × unit-scale (with optional auto-fit-to-`Size`), normalizes Z so the model bottom sits at z=0, and optionally runs CGAL alpha-wrap on top. When alpha-wrap is enabled, a pre-wrap decimate pass runs first (tolerance = effective alpha) so alpha-wrap doesn't pay the superlinear cost of huge input meshes for features that would be smoothed away anyway; only the geometry fed to alpha-wrap is decimated, the color/sample paths still see the original mesh. Builds the input MeshData preview. The result has three pointers to `*loader.LoadedModel`:
 
 - `Model` — geometry mesh (wrapped if alpha-wrap enabled, else aliases ColorModel)
 - `ColorModel` — original mesh, carries UVs / textures / materials
