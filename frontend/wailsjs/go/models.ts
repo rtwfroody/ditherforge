@@ -150,6 +150,8 @@ export namespace main {
 	    splitConnectorDiamMM: number;
 	    splitConnectorDepthMM: number;
 	    splitClearanceMM: number;
+	    splitOrientationA: string;
+	    splitOrientationB: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -193,6 +195,8 @@ export namespace main {
 	        this.splitConnectorDiamMM = source["splitConnectorDiamMM"];
 	        this.splitConnectorDepthMM = source["splitConnectorDepthMM"];
 	        this.splitClearanceMM = source["splitClearanceMM"];
+	        this.splitOrientationA = source["splitOrientationA"];
+	        this.splitOrientationB = source["splitOrientationB"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
