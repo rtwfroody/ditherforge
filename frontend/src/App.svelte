@@ -1007,6 +1007,30 @@
     localStorage.removeItem('recentFiles');
   }
 
+  // Snapshot the pristine state declared by the $state initializers
+  // above. Captured at script-init time, before any $effect or user
+  // action mutates anything, so it reflects the factory defaults.
+  // applySettings() rebuilds arrays/objects rather than aliasing, so
+  // reusing this snapshot across resets is safe.
+  const FACTORY_DEFAULTS = serializeSettings();
+
+  function handleNew() {
+    applySettings(FACTORY_DEFAULTS);
+    // Clear per-model viewport state — applySettings only resets
+    // the persisted settings, so without this the previously loaded
+    // mesh and its bbox would linger after "New".
+    inputMeshUrl = undefined;
+    inputOverlayMeshUrl = undefined;
+    outputMeshUrl = undefined;
+    modelBBoxMin = null;
+    modelBBoxMax = null;
+    placingStickerIndex = -1;
+    pickingPinIndex = -1;
+    settingsPath = '';
+    statusMessage = '';
+    statusType = 'idle';
+  }
+
   // Filaments menu handlers.
   collectionStore.ensureLoaded();
 
@@ -1210,6 +1234,8 @@
     <Menubar.Menu>
       <Menubar.Trigger>File</Menubar.Trigger>
       <Menubar.Content>
+        <Menubar.Item onSelect={handleNew}>New</Menubar.Item>
+        <Menubar.Separator />
         <Menubar.Item onSelect={handleOpen}>Open...</Menubar.Item>
         <Menubar.Sub>
           <Menubar.SubTrigger disabled={recentFiles.length === 0}>Open Recent</Menubar.SubTrigger>
