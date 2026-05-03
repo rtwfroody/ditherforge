@@ -118,13 +118,16 @@
   // Base color for untextured faces: null = use model default, or {hex, label, collection}.
   let baseColor = $state<ColorInfo | null>(null);
   let baseColorPickerOpen = $state(false);
-  // MaterialX base color. Mutually exclusive with `baseColor`.
-  // baseMaterialXPath is read by the backend at pipeline run time;
-  // settings round-trips just the path. Accepts .mtlx (with adjacent
+  // MaterialX base color. Path is read by the backend at pipeline run
+  // time; settings round-trips the path. Accepts .mtlx (with adjacent
   // textures) or a .zip containing both.
   let baseMaterialXPath = $state<string>('');
   let baseMaterialXTileMM = $state<number>(10);
   let baseMaterialXTriplanarSharpness = $state<number>(4);
+  // baseColorMode picks which of the two pickers (and the
+  // corresponding pipeline option) is in effect. Backend only ever
+  // gets one — the other is suppressed.
+  let baseColorMode = $state<'solid' | 'texture'>('solid');
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
   type ColorInfo = { hex: string; label: string; collection?: string };
   type ColorSlot = ColorInfo | null;
@@ -567,7 +570,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
-          layerHeight, baseColor, baseMaterialXPath, baseMaterialXTileMM, baseMaterialXTriplanarSharpness, ...colorSlots,
+          layerHeight, baseColor, baseColorMode, baseMaterialXPath, baseMaterialXTileMM, baseMaterialXTriplanarSharpness, ...colorSlots,
           inventoryCollectionColors,
           committedBrightness, committedContrast, committedSaturation,
           JSON.stringify(warpPins),
@@ -804,6 +807,7 @@
       nozzleDiameter: String(nozzleDiameter),
       layerHeight: String(layerHeight),
       baseColor: baseColor ? { hex: baseColor.hex, label: baseColor.label, collection: baseColor.collection } : null,
+      baseColorMode,
       baseMaterialXPath,
       baseMaterialXTileMM,
       baseMaterialXTriplanarSharpness,
@@ -867,6 +871,13 @@
     if (s.baseMaterialXPath !== undefined) baseMaterialXPath = s.baseMaterialXPath;
     if (s.baseMaterialXTileMM !== undefined) baseMaterialXTileMM = s.baseMaterialXTileMM;
     if (s.baseMaterialXTriplanarSharpness !== undefined) baseMaterialXTriplanarSharpness = s.baseMaterialXTriplanarSharpness;
+    // Mode falls back to "texture" when only the path is present
+    // (older settings files predate the explicit mode field).
+    if (s.baseColorMode === 'solid' || s.baseColorMode === 'texture') {
+      baseColorMode = s.baseColorMode;
+    } else {
+      baseColorMode = baseMaterialXPath ? 'texture' : 'solid';
+    }
     // Best-effort check: when a settings file is loaded on a different
     // machine than where it was saved, the .mtlx path may not resolve.
     // Surface a warning immediately so the user knows before they
@@ -1089,7 +1100,7 @@
       LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       BaseColor: baseColor?.hex ?? '',
-      BaseColorMaterialX: baseMaterialXPath,
+      BaseColorMaterialX: baseColorMode === 'texture' ? baseMaterialXPath : '',
       BaseColorMaterialXTileMM: baseMaterialXTileMM,
       BaseColorMaterialXTriplanarSharpness: baseMaterialXTriplanarSharpness,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
@@ -1335,6 +1346,7 @@
             </HelpTip>
           {/snippet}
           <div class="space-y-6">
+            <!-- Size / Scale on its own row -->
             <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
               <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-sm font-medium">
@@ -1349,61 +1361,83 @@
                   Size sets the longest dimension of the output in millimeters. Scale multiplies the model's native size.
                 </HelpTip>
               </div>
-              <div class="flex items-center gap-1.5">
-                <span class="text-sm font-medium">Base color</span>
-                <HelpTip>
-                  Color used for faces that aren't covered by the model's texture. Pick a single color or load a procedural MaterialX (.mtlx) file (e.g. marble, brick) — MaterialX takes precedence when both are set.
-                </HelpTip>
-              </div>
               {#if sizeMode === 'size'}
                 <Input id="size" bind:value={sizeValue} type="number" step={1} />
               {:else}
                 <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
               {/if}
-              {#if baseMaterialXPath}
-                <div class="flex items-center gap-2">
-                  <span
-                    class="h-9 flex-1 rounded border bg-muted text-xs flex items-center px-2 truncate"
-                    title={baseMaterialXPath}
-                  >
-                    {baseMaterialXPath.split(/[\\/]/).pop()}
-                  </span>
-                  <Button variant="ghost" size="sm" onclick={() => { baseMaterialXPath = ''; }}>Clear</Button>
-                </div>
-              {:else if baseColor}
-                <div class="flex items-center gap-2">
-                  <button
-                    class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
-                    style="background: {baseColor.hex}; color: {contrastColor(baseColor.hex)};"
-                    title={colorTooltip(baseColor)}
-                    onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}
-                  >
-                    {baseColor.label || baseColor.hex}
-                  </button>
-                  <Button variant="ghost" size="sm" onclick={() => { baseColor = null; baseColorPickerOpen = false; }}>Clear</Button>
-                </div>
+            </div>
+
+            <!-- Base color: solid/texture toggle on the left, picker for the chosen mode on the right -->
+            <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
+              <div class="flex items-center gap-3">
+                <span class="text-sm font-medium">Base color</span>
+                <label class="flex items-center gap-1.5 text-sm">
+                  <input type="radio" name="bcmode" value="solid" checked={baseColorMode === 'solid'} onchange={() => { baseColorMode = 'solid'; }} />
+                  Solid
+                </label>
+                <label class="flex items-center gap-1.5 text-sm">
+                  <input type="radio" name="bcmode" value="texture" checked={baseColorMode === 'texture'} onchange={() => { baseColorMode = 'texture'; baseColorPickerOpen = false; }} />
+                  Texture
+                </label>
+                <HelpTip>
+                  Color used for faces that aren't covered by the model's texture. Pick a single color, or load a MaterialX (.mtlx / .zip) graph for a procedural or image-backed pattern.
+                </HelpTip>
+              </div>
+              {#if baseColorMode === 'solid'}
+                {#if baseColor}
+                  <div class="flex items-center gap-2">
+                    <button
+                      class="h-9 flex-1 rounded border cursor-pointer flex items-center justify-center text-xs px-2 gap-1.5 hover:ring-2 hover:ring-primary transition-shadow"
+                      style="background: {baseColor.hex}; color: {contrastColor(baseColor.hex)};"
+                      title={colorTooltip(baseColor)}
+                      onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}
+                    >
+                      {baseColor.label || baseColor.hex}
+                    </button>
+                    <Button variant="ghost" size="sm" onclick={() => { baseColor = null; baseColorPickerOpen = false; }}>Clear</Button>
+                  </div>
+                {:else}
+                  <Button variant="outline" class="w-full" size="sm" onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}>
+                    Pick color (default if unset)
+                  </Button>
+                {/if}
               {:else}
-                <Button variant="outline" class="w-full" size="sm" onclick={() => { baseColorPickerOpen = !baseColorPickerOpen; }}>
-                  Default
-                </Button>
+                {#if baseMaterialXPath}
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="h-9 flex-1 rounded border bg-muted text-xs flex items-center px-2 truncate"
+                      title={baseMaterialXPath}
+                    >
+                      {baseMaterialXPath.split(/[\\/]/).pop()}
+                    </span>
+                    <Button variant="ghost" size="sm" onclick={() => { baseMaterialXPath = ''; }}>Clear</Button>
+                  </div>
+                {:else}
+                  <Button variant="outline" class="w-full" size="sm" onclick={async () => {
+                    const r = await OpenMaterialXFile();
+                    if (r && r.path) {
+                      baseMaterialXPath = r.path;
+                    }
+                  }}>Load .mtlx / .zip</Button>
+                {/if}
               {/if}
-              {#if !baseMaterialXPath}
-                <div class="flex items-center gap-1.5">
-                  <span class="text-xs text-muted-foreground">MaterialX</span>
-                  <HelpTip>
-                    Load a MaterialX (.mtlx) file or .zip archive containing one (with adjacent textures). Procedural graphs (marble, brick) and image-backed PBR packs are both supported.
-                  </HelpTip>
-                </div>
-                <Button variant="outline" size="sm" onclick={async () => {
-                  const r = await OpenMaterialXFile();
-                  if (r && r.path) {
-                    baseMaterialXPath = r.path;
-                    // Picking a MaterialX retires the hex picker.
-                    baseColor = null;
+            </div>
+
+            {#if baseColorMode === 'solid' && baseColorPickerOpen}
+              <div>
+                <CollectionPicker
+                  onselect={(hex, label, collection) => {
+                    baseColor = { hex, label, collection };
                     baseColorPickerOpen = false;
-                  }
-                }}>Load .mtlx / .zip</Button>
-              {:else}
+                  }}
+                  onclose={() => { baseColorPickerOpen = false; }}
+                />
+              </div>
+            {/if}
+
+            {#if baseColorMode === 'texture' && baseMaterialXPath}
+              <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
                 <div class="flex items-center gap-1.5">
                   <span class="text-sm font-medium">Tile size</span>
                   <HelpTip>
@@ -1421,21 +1455,8 @@
                   </HelpTip>
                 </div>
                 <Input bind:value={baseMaterialXTriplanarSharpness} type="number" min={0.5} max={32} step={0.5} class="flex-1" />
-              {/if}
-              {#if baseColorPickerOpen}
-                <div class="col-span-2">
-                  <CollectionPicker
-                    onselect={(hex, label, collection) => {
-                      baseColor = { hex, label, collection };
-                      baseColorPickerOpen = false;
-                      // Picking a hex retires the MaterialX.
-                      baseMaterialXPath = '';
-                    }}
-                    onclose={() => { baseColorPickerOpen = false; }}
-                  />
-                </div>
-              {/if}
-            </div>
+              </div>
+            {/if}
 
             <!-- Alpha-wrap -->
             <div class="space-y-2">

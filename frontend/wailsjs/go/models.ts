@@ -126,6 +126,7 @@ export namespace main {
 	    baseMaterialXPath?: string;
 	    baseMaterialXTileMM?: number;
 	    baseMaterialXTriplanarSharpness?: number;
+	    baseColorMode?: string;
 	    colorSlots: ColorSlotSetting[];
 	    inventoryCollection: string;
 	    brightness: number;
@@ -168,6 +169,7 @@ export namespace main {
 	        this.baseMaterialXPath = source["baseMaterialXPath"];
 	        this.baseMaterialXTileMM = source["baseMaterialXTileMM"];
 	        this.baseMaterialXTriplanarSharpness = source["baseMaterialXTriplanarSharpness"];
+	        this.baseColorMode = source["baseColorMode"];
 	        this.colorSlots = this.convertValues(source["colorSlots"], ColorSlotSetting);
 	        this.inventoryCollection = source["inventoryCollection"];
 	        this.brightness = source["brightness"];

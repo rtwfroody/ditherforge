@@ -857,6 +857,12 @@ type Settings struct {
 	BaseMaterialXPath                string  `json:"baseMaterialXPath,omitempty"`
 	BaseMaterialXTileMM              float64 `json:"baseMaterialXTileMM,omitempty"`
 	BaseMaterialXTriplanarSharpness  float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
+	// BaseColorMode is "solid" or "texture" — UI mode toggle that
+	// decides which of (BaseColor, BaseMaterialXPath) is sent to the
+	// pipeline. The unselected mode's fields are kept around (so the
+	// user can flip the toggle without losing their other choice) but
+	// don't reach the backend Options.
+	BaseColorMode                    string  `json:"baseColorMode,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`

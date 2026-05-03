@@ -50,16 +50,16 @@ export function LogMessage(arg1, arg2) {
   return window['go']['main']['App']['LogMessage'](arg1, arg2);
 }
 
+export function MaterialXPathOK(arg1) {
+  return window['go']['main']['App']['MaterialXPathOK'](arg1);
+}
+
 export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
 
 export function OpenMaterialXFile() {
   return window['go']['main']['App']['OpenMaterialXFile']();
-}
-
-export function MaterialXPathOK(arg1) {
-  return window['go']['main']['App']['MaterialXPathOK'](arg1);
 }
 
 export function OpenStickerImage() {
