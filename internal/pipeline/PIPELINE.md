@@ -31,7 +31,7 @@ A stage's cache key changes if and only if its own settings struct changes _or_ 
 
 ```text
 parseSettings        = { Input, ReloadSeq, ObjectIndex }
-loadSettings         = { Scale, HasSize, Size, AlphaWrap, AlphaWrapAlpha, AlphaWrapOffset, NozzleDiameter, LayerHeight, NoSimplify }
+loadSettings         = { Scale, HasSize, Size, AlphaWrap, AlphaWrapAlpha, AlphaWrapOffset, NozzleDiameter, NoSimplify }
 decimateSettings     = { NoSimplify, NozzleDiameter, LayerHeight }
 stickerSettings      = { Stickers, BaseColor, AlphaWrap }
 voxelizeSettings     = { NozzleDiameter, LayerHeight, BaseColor }
@@ -48,7 +48,7 @@ A few subtleties:
 
 - `BaseColor` is in `voxelizeSettings` and `stickerSettings` but **not** `loadSettings`. Base color is reapplied per-run by `applyBaseColor` (`pipeline.go`); the load cache stays valid across base-color changes. Sticker invalidates because `runSticker` deep-clones `lo.ColorModel` and the per-run reapply doesn't reach into that scratch copy.
 - `AlphaWrap*` lives in `loadSettings`. `stickerSettings` includes only the `AlphaWrap` boolean (the wrap geometry comes through the Load stage's cumulative cascade).
-- `NozzleDiameter` and `LayerHeight` appear in `loadSettings`, `decimateSettings`, and `voxelizeSettings`. In `loadSettings` they drive the pre-wrap decimate tolerance (alpha) and the post-wrap decimate target (`CountSurfaceCells`); `decimateSettings` and `voxelizeSettings` use them for the cell sizing. `NoSimplify` is also in `loadSettings` because it gates the pre- and post-wrap decimate substeps.
+- `NozzleDiameter` appears in `loadSettings`, `decimateSettings`, and `voxelizeSettings`. In `loadSettings` it sets the cellSize and error-budget for the pre- and post-wrap decimate substeps (and is the auto-fallback for `AlphaWrapAlpha`); `decimateSettings` and `voxelizeSettings` use it for the cell sizing. `LayerHeight` is in `decimateSettings` and `voxelizeSettings` for cell sizing — *not* in `loadSettings`, since the pre-/post-wrap decimate uses only the XY cell pitch (`NozzleDiameter * UpperCellScale`). `NoSimplify` is in `loadSettings` because it gates the pre- and post-wrap decimate substeps.
 - `paletteSettings.InventoryContents` is the contents of the inventory file (memoized by path/mtime/size), not just its path — so editing the file invalidates the palette cache.
 
 ## Dependencies
@@ -120,7 +120,7 @@ Reads the input file from disk and decodes it. Output is in file units, no trans
 
 ### Load — `*loadOutput`
 
-Clones the parsed model, applies `Scale` × unit-scale (with optional auto-fit-to-`Size`), normalizes Z so the model bottom sits at z=0, and optionally runs CGAL alpha-wrap on top. When alpha-wrap is enabled, a pre-wrap decimate pass runs first (cellSize = effective alpha) so alpha-wrap doesn't pay the input-side cost on huge meshes for features that would be smoothed away anyway, and a post-wrap decimate pass runs after (target = `CountSurfaceCells`) so the dense alpha-wrap output isn't carried into Sticker / Voxelize / StageDecimate. Both pre- and post-wrap decimate are gated on `!NoSimplify`, and only the geometry fed downstream is decimated — the color/sample paths still see the original mesh. Builds the input MeshData preview.
+Clones the parsed model, applies `Scale` × unit-scale (with optional auto-fit-to-`Size`), normalizes Z so the model bottom sits at z=0, and optionally runs CGAL alpha-wrap on top. When alpha-wrap is enabled, a pre-wrap decimate pass runs first so alpha-wrap doesn't pay the input-side cost on huge meshes for features that would be smoothed away anyway, and a post-wrap decimate pass runs after so the dense alpha-wrap output isn't carried into Sticker / Voxelize / StageDecimate. Both substeps use the same cost-cutoff decimation as `StageDecimate`: cellSize is the voxel cell pitch (`NozzleDiameter * UpperCellScale`), and the QEM cost ceiling is `(cellSize/2)²` — vertices can drift up to roughly half a voxel cell from the original surface, which is below voxelization's resolving power. Both pre- and post-wrap decimate are gated on `!NoSimplify`, and only the geometry fed downstream is decimated — the color/sample paths still see the original mesh. Builds the input MeshData preview.
 
 Beyond the per-stage CPU savings, post-wrap decimation also shrinks the live `*loader.LoadedModel` in RAM by the same ratio. In the GUI (the only context that uses the disk cache), the `load/*.gob.zst` entry shrinks by the same ratio too — relieving pressure on the 1 GiB cache budget and speeding up the cache-hit decode path on warm restarts. The CLI doesn't use the disk cache, so only the in-memory savings apply there.
 
@@ -134,7 +134,7 @@ The result has three pointers to `*loader.LoadedModel`:
 
 ### Decimate — `*decimateOutput`
 
-Runs QEM mesh decimation (`squarevoxel.DecimateMesh`) on `lo.Model` to reduce triangle count to roughly the voxel grid resolution. Used by Clip to build the output shell.
+Runs QEM mesh decimation (`squarevoxel.DecimateMesh`) on `lo.Model` with the same cost-cutoff configuration as the pre-/post-wrap substeps inside Load: cellSize = `NozzleDiameter * UpperCellScale`, error budget = `(cellSize/2)²`. When alpha-wrap is on, the post-wrap substep already brought `lo.Model` down to the cost-cutoff floor, so this stage is usually a near no-op (DecimateMesh's "no work to do" guard fires). When alpha-wrap is off, this is where decimation happens. Used by Clip to build the output shell.
 
 ### Sticker — `*stickerOutput`
 

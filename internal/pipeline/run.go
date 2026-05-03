@@ -130,6 +130,19 @@ func runStage[T any](
 
 // ----- Stage methods -----
 
+// decimateErrorBudget translates a voxel cell size into the QEM cost
+// ceiling we hand to DecimateMesh: the squared half-cell. QEM cost
+// tracks the squared distance the merged vertex moves from every
+// tangent plane it represents (sums quadrics across collapses), so
+// capping it at (cellSize/2)² keeps any single vertex from drifting
+// more than ~½ a voxel from the original surface. Below voxelization's
+// resolving power -- safe to compress everywhere in the pipeline that
+// uses voxel cell sizing.
+func decimateErrorBudget(cellSize float32) float64 {
+	half := float64(cellSize) / 2
+	return half * half
+}
+
 func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
 	return runStage(r, StageParse, &r.parse, func() (*loader.LoadedModel, error) {
 		stage := progress.BeginStage(r.tracker, stageNames[StageParse], false, 0)
@@ -197,23 +210,25 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			}
 
 			// Pre-wrap decimation: alpha-wrap rebuilds the surface anyway,
-			// so we pass it the smallest topology-preserving mesh we can
-			// get. Use targetCells=1 (decimate as much as topology allows;
-			// see DecimateMesh contract) with cellSize=alpha so the
-			// priority queue removes sub-alpha edges first. NullTracker
-			// avoids colliding with the dedicated StageDecimate event
-			// later. Only the alpha-wrap input is decimated -- `model`
-			// stays intact for the inflate calc and for ColorModel /
-			// SampleModel below.
+			// so feed it a mesh already pruned to voxel resolution.
+			// errorBudget bounds geometric drift to ~½ a voxel cell --
+			// finer detail than that won't survive voxelization
+			// downstream, so it's safe to discard before alpha-wrap.
+			// NullTracker avoids colliding with the dedicated
+			// StageDecimate event later. Only the alpha-wrap input is
+			// decimated -- `model` stays intact for the inflate calc and
+			// for ColorModel / SampleModel below.
 			wrapInput := model
 			if !r.opts.NoSimplify {
-				preDec, derr := squarevoxel.DecimateMesh(r.ctx, model, 1, alpha, false, progress.NullTracker{})
+				cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+				budget := decimateErrorBudget(cellSize)
+				preDec, derr := squarevoxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
 					return nil, fmt.Errorf("pre-wrap decimate: %w", derr)
 				}
 				if len(preDec.Faces) < len(model.Faces) {
-					plog.Printf("  Pre-wrap decimate: %d faces -> %d faces (alpha=%.3f mm)",
-						len(model.Faces), len(preDec.Faces), alpha)
+					plog.Printf("  Pre-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+						len(model.Faces), len(preDec.Faces), cellSize)
 					wrapInput = preDec
 				}
 				if err := r.checkCancel(); err != nil {
@@ -245,26 +260,24 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 				sampleModel = loader.InflateAlongNormals(model, inflateOffset)
 			}
 
-			// Post-wrap decimation: alpha-wrap output is dense (one face
-			// per ~alpha² of surface area), but downstream stages
-			// (Sticker, Voxelize, StageDecimate) only need ~one face per
-			// surface voxel cell. Decimate to that target here so the
-			// cached loadOutput is small and Sticker/Voxelize aren't
-			// iterating millions of triangles. StageDecimate runs again
-			// on the already-decimated mesh and short-circuits when
-			// targetCells >= face count. DecimateMesh is also a no-op
-			// when targetCells is already >= the face count, so no
-			// outer guard is needed.
+			// Post-wrap decimation: alpha-wrap output is dense (~one face
+			// per α² of surface area), but downstream stages (Sticker,
+			// Voxelize, StageDecimate) only need detail at voxel cell
+			// resolution. errorBudget caps drift at ½ a cell, so flat
+			// regions collapse aggressively while curved silhouettes
+			// stop being thinned once cumulative drift would exceed
+			// what voxelization can resolve. NullTracker avoids
+			// colliding with the dedicated StageDecimate event later.
 			if !r.opts.NoSimplify {
 				cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
-				target := squarevoxel.CountSurfaceCells(r.ctx, geomModel, r.opts.NozzleDiameter, r.opts.LayerHeight)
-				postDec, derr := squarevoxel.DecimateMesh(r.ctx, geomModel, target, cellSize, false, progress.NullTracker{})
+				budget := decimateErrorBudget(cellSize)
+				postDec, derr := squarevoxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
 					return nil, fmt.Errorf("post-wrap decimate: %w", derr)
 				}
 				if len(postDec.Faces) < len(geomModel.Faces) {
-					plog.Printf("  Post-wrap decimate: %d faces -> %d faces (target=%d)",
-						len(geomModel.Faces), len(postDec.Faces), target)
+					plog.Printf("  Post-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+						len(geomModel.Faces), len(postDec.Faces), cellSize)
 					geomModel = postDec
 				}
 				if err := r.checkCancel(); err != nil {
@@ -402,23 +415,20 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 			return nil, err
 		}
 		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+		budget := decimateErrorBudget(cellSize)
 
 		if so.Enabled {
-			// Use CountSurfaceCells on the unsplit lo.Model as the
-			// total target. Layout is rotation+translation, so the
-			// volume / surface area is preserved across halves;
-			// proportional per-half splitting lives inside
-			// DecimateHalves.
-			combinedTarget := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
-			halves, derr := squarevoxel.DecimateHalves(r.ctx, so.Halves, combinedTarget, cellSize, r.opts.NoSimplify, r.tracker)
+			// Targets are vestigial under the cost-budget regime --
+			// pass 1 (DecimateHalves clamps to a per-half floor of 1)
+			// and let `budget` be the actual stopping criterion.
+			halves, derr := squarevoxel.DecimateHalves(r.ctx, so.Halves, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
 			if derr != nil {
 				return nil, fmt.Errorf("decimate (split): %w", derr)
 			}
 			return &decimateOutput{Halves: halves}, nil
 		}
 
-		targetCells := squarevoxel.CountSurfaceCells(r.ctx, lo.Model, r.opts.NozzleDiameter, r.opts.LayerHeight)
-		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, targetCells, cellSize, r.opts.NoSimplify, r.tracker)
+		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
 			return nil, fmt.Errorf("decimate: %w", derr)
 		}

@@ -511,51 +511,25 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 	return cells, cellAssignMap, minV, nil
 }
 
-// CountSurfaceCells quickly counts the number of surface voxel cells for the
-// given model and grid parameters, without performing color sampling.
-func CountSurfaceCells(ctx context.Context, model *loader.LoadedModel, nozzleDiameter, layerHeight float32) int {
-	cellSize := nozzleDiameter * UpperCellScale
-
-	minV, maxV := voxel.ComputeBounds(model.Vertices)
-	xyPad := cellSize * 2
-	zPad := layerHeight * 2
-	minV[0] -= xyPad
-	minV[1] -= xyPad
-	minV[2] -= zPad
-	maxV[0] += xyPad
-	maxV[1] += xyPad
-	maxV[2] += zPad
-
-	nCols := int(math.Ceil(float64(maxV[0]-minV[0])/float64(cellSize))) + 1
-	nRows := int(math.Ceil(float64(maxV[1]-minV[1])/float64(cellSize))) + 1
-	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerHeight))) + 1
-
-	p := regionParams{
-		Grid: 0, CellSize: cellSize, LayerH: layerHeight,
-		MinV: minV, NCols: nCols, NRows: nRows,
-		LayerLo: 0, LayerHi: nLayers - 1,
-	}
-	var discard atomic.Int64
-	cellSet := voxelizeRegion(ctx, model, p, progress.NullTracker{}, &discard)
-	return len(cellSet)
-}
-
-// DecimateMesh simplifies the model geometry purely based on shape, targeting
-// roughly one triangle per surface voxel cell.
+// DecimateMesh simplifies the model geometry using QEM edge collapse.
 //
 // Contract:
-//   - targetCells is a goal, not a hard cap. The underlying QEM also stops
-//     when no topology-preserving collapse remains, so the actual face count
-//     can land above targetCells (topology is irreducible) -- callers passing
-//     a small target use this to mean "decimate as much as topology allows".
-//   - cellSize biases the collapse priority (sub-cellSize edges are cheaper),
-//     not a stopping tolerance. The result mesh is not guaranteed to have all
-//     edges shorter than cellSize.
+//   - When errorBudget > 0, it is the primary stopping criterion:
+//     collapses stop when the cheapest remaining one would exceed it.
+//     Caller computes it from cellSize (typically (cellSize/2)²) so
+//     drift stays within ~½ a voxel cell -- below voxelization's
+//     resolving power. Pass 1 for targetCells in this mode to let
+//     errorBudget decide everything.
+//   - When errorBudget <= 0 (legacy / target-driven mode), targetCells
+//     is the only criterion: collapses stop when face count drops to
+//     it. Used by tests and any caller that wants the old behavior.
+//   - cellSize biases collapse priority (sub-cellSize edges cheaper).
+//     It is not a stopping tolerance on its own.
 //
 // Emits its own "Decimating" stage events (including a progress bar when
 // decimation is actually performed). The caller should not also emit
 // StageStart/StageDone for this stage.
-func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) (*loader.LoadedModel, error) {
+func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells int, cellSize float32, errorBudget float64, noSimplify bool, tracker progress.Tracker) (*loader.LoadedModel, error) {
 	if noSimplify {
 		tracker.StageStart("Decimating", false, 0)
 		tracker.StageDone("Decimating")
@@ -568,26 +542,26 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 			opaqueFaces = append(opaqueFaces, model.Faces[fi])
 		}
 	}
-	// Target ~1 triangle per surface cell. Clipping recreates geometry
-	// at voxel boundaries, so the decimated mesh just needs a rough hull.
-	if targetCells < len(opaqueFaces) {
-		tracker.StageStart("Decimating", true, len(opaqueFaces)-targetCells)
-		defer tracker.StageDone("Decimating")
-
-		decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetCells, float64(cellSize), tracker)
-		if err != nil {
-			return nil, err
-		}
-		wr := voxel.CheckWatertight(decFaces)
-		plog.Printf("  Decimated mesh: %s", wr)
-		return &loader.LoadedModel{
-			Vertices: decVerts,
-			Faces:    decFaces,
-		}, nil
+	if len(opaqueFaces) <= targetCells && errorBudget <= 0 {
+		// No work to do: we're already at the safety floor and there's
+		// no cost cap that could otherwise eliminate redundant triangles.
+		tracker.StageStart("Decimating", false, 0)
+		tracker.StageDone("Decimating")
+		return model, nil
 	}
-	tracker.StageStart("Decimating", false, 0)
-	tracker.StageDone("Decimating")
-	return model, nil
+	tracker.StageStart("Decimating", true, len(opaqueFaces)-targetCells)
+	defer tracker.StageDone("Decimating")
+
+	decVerts, decFaces, err := voxel.Decimate(ctx, model.Vertices, opaqueFaces, targetCells, float64(cellSize), errorBudget, tracker)
+	if err != nil {
+		return nil, err
+	}
+	wr := voxel.CheckWatertight(decFaces)
+	plog.Printf("  Decimated mesh: %s", wr)
+	return &loader.LoadedModel{
+		Vertices: decVerts,
+		Faces:    decFaces,
+	}, nil
 }
 
 // DecimateHalves runs DecimateMesh once per Split half, splitting the
@@ -601,7 +575,7 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 // cap-perimeter vertex moves it off the cap plane, which is high
 // quadric error and is disfavored by the heap. (Verified by
 // TestDecimate_HalfPreservesCapPlanarity.)
-func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
+func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, errorBudget float64, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
 	// split.Cut's contract guarantees both halves are non-nil; we rely
 	// on that here rather than guarding for nil.
 	totalFaces := len(halves[0].Faces) + len(halves[1].Faces)
@@ -613,7 +587,7 @@ func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTar
 		if perHalfTarget < 1 {
 			perHalfTarget = 1
 		}
-		decimated, err := DecimateMesh(ctx, h, perHalfTarget, cellSize, noSimplify, tracker)
+		decimated, err := DecimateMesh(ctx, h, perHalfTarget, cellSize, errorBudget, noSimplify, tracker)
 		if err != nil {
 			return out, fmt.Errorf("decimate half %d: %w", i, err)
 		}

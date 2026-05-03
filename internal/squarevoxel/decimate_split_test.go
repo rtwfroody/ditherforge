@@ -102,7 +102,7 @@ func TestDecimate_HalfPreservesCapPlanarity(t *testing.T) {
 		half := res.Halves[h]
 		origFaces := len(half.Faces)
 		target := origFaces * 50 / 100
-		dec, err := DecimateMesh(context.Background(), half, target, cellSize, false, progress.NullTracker{})
+		dec, err := DecimateMesh(context.Background(), half, target, cellSize, 0, false, progress.NullTracker{})
 		if err != nil {
 			t.Fatalf("half %d: DecimateMesh: %v", h, err)
 		}
@@ -145,7 +145,7 @@ func TestDecimateHalves_ProportionalTargets(t *testing.T) {
 	}
 	totalFaces := len(res.Halves[0].Faces) + len(res.Halves[1].Faces)
 	target := totalFaces * 50 / 100
-	out, err := DecimateHalves(context.Background(), res.Halves, target, 0.05, false, progress.NullTracker{})
+	out, err := DecimateHalves(context.Background(), res.Halves, target, 0.05, 0, false, progress.NullTracker{})
 	if err != nil {
 		t.Fatalf("DecimateHalves: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestDecimateHalves_NoSimplifyPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split.Cut: %v", err)
 	}
-	out, err := DecimateHalves(context.Background(), res.Halves, 1, 0.1, true, progress.NullTracker{})
+	out, err := DecimateHalves(context.Background(), res.Halves, 1, 0.1, 0, true, progress.NullTracker{})
 	if err != nil {
 		t.Fatalf("DecimateHalves: %v", err)
 	}

@@ -596,16 +596,10 @@ type loadSettings struct {
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
 	// NozzleDiameter is the auto-fallback for AlphaWrapAlpha when it's 0,
-	// and also drives the pre-/post-wrap decimate target inside Load.
-	// Including it here so changing the nozzle invalidates Load when
-	// alpha-wrap is on (with auto values, or just because the post-wrap
-	// decimate target moves).
+	// and also drives the pre-/post-wrap decimate cellSize and error
+	// budget inside Load. Including it here so changing the nozzle
+	// invalidates Load when alpha-wrap is on.
 	NozzleDiameter float32
-	// LayerHeight feeds CountSurfaceCells for the post-wrap decimate
-	// target. Only consulted when AlphaWrap is on, but unconditionally
-	// hashed (matching NozzleDiameter's treatment) so toggling AlphaWrap
-	// plus a layer change can't collide on the cache key.
-	LayerHeight float32
 	// NoSimplify gates the pre- and post-wrap decimate substeps. With
 	// NoSimplify on, alpha-wrap input/output are passed through verbatim,
 	// so the cached loadOutput differs from the simplified case.
@@ -740,7 +734,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
 			AlphaWrapOffset: opts.AlphaWrapOffset,
 			NozzleDiameter:  opts.NozzleDiameter,
-			LayerHeight:     opts.LayerHeight,
 			NoSimplify:      opts.NoSimplify,
 		}
 		if opts.Size != nil {
@@ -880,7 +873,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.AlphaWrapAlpha)
 		writeFloat32(h, v.AlphaWrapOffset)
 		writeFloat32(h, v.NozzleDiameter)
-		writeFloat32(h, v.LayerHeight)
 		writeBool(h, v.NoSimplify)
 	case voxelizeSettings:
 		writeFloat32(h, v.NozzleDiameter)

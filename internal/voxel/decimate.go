@@ -143,15 +143,29 @@ type decimator struct {
 }
 
 // Decimate reduces mesh face count using QEM edge collapse.
-// Preserves topology (manifoldness/watertightness). Stops at targetFaces
-// or when no more safe collapses exist. cellSize is used to prioritize
-// collapsing edges shorter than a voxel — their cost is scaled down so
-// sub-voxel detail is removed first regardless of QEM error.
+// Preserves topology (manifoldness/watertightness). Stops when any of
+// these is true:
+//   - face count <= targetFaces, OR
+//   - errorBudget > 0 and the next collapse's cost exceeds it, OR
+//   - no more safe collapses exist.
+//
+// errorBudget is the per-collapse cost ceiling, in the same units as
+// the QEM error (squared distance, mm²). The QEM cost at a vertex is
+// the sum of squared distances from all tangent planes the vertex
+// participates in -- so by induction over the merge sequence, it
+// tracks cumulative geometric drift, not just the most recent step.
+// Setting errorBudget = (cellSize/2)² caps drift at ~½ a voxel cell.
+// Pass errorBudget = 0 to disable the cost cap (legacy
+// target-driven behavior).
+//
+// cellSize biases collapse priority: edges shorter than cellSize
+// have their cost scaled down so sub-cell detail is removed first.
+// It is not a stopping tolerance -- only errorBudget is.
 //
 // If tracker is non-nil, it receives periodic StageProgress("Decimating")
 // updates measured in faces removed. The caller is responsible for the
 // corresponding StageStart/StageDone.
-func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64, tracker progress.Tracker) ([][3]float32, [][3]uint32, error) {
+func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, targetFaces int, cellSize float64, errorBudget float64, tracker progress.Tracker) ([][3]float32, [][3]uint32, error) {
 	if len(faces) <= targetFaces {
 		return verts, faces, nil
 	}
@@ -239,6 +253,14 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 		if d.vertVersion[c.edge.v1] != c.v1ver || d.vertVersion[c.edge.v2] != c.v2ver {
 			continue
 		}
+		// Budget check on the cheapest VALID collapse: if it exceeds the
+		// budget, every other valid collapse in the heap is at least this
+		// expensive (min-heap), so none of them are eligible either.
+		// canCollapse() runs after to avoid stopping when the cheap
+		// candidate happens to be unsafe (we'd want to keep popping).
+		if errorBudget > 0 && c.cost > errorBudget {
+			break
+		}
 		if !d.canCollapse(c.edge, c.pos) {
 			continue
 		}
@@ -273,7 +295,10 @@ func (d *decimator) faceQuadric(fi uint32) quadric {
 
 // pushEdge computes the collapse cost for an edge and adds it to the heap.
 // Cost is scaled by min(edgeLength/cellSize, 1) so that edges shorter than
-// a voxel cell are collapsed first regardless of QEM error.
+// a voxel cell are collapsed first regardless of QEM error. The discounted
+// cost is also what gets compared against errorBudget, by design: sub-cell
+// drift is below voxelization's resolving power, so under-counting it lets
+// short-edge cleanup happen even when the budget is tight.
 func (d *decimator) pushEdge(ek decimEdgeKey) {
 	var q quadric
 	q = d.quadrics[ek.v1]
