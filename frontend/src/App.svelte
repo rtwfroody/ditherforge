@@ -1368,10 +1368,17 @@
               {/if}
             </div>
 
-            <!-- Base color: solid/texture toggle on the left, picker for the chosen mode on the right -->
+            <!-- Base color: label spans both columns (matching the Printer section's
+                 layout); below it, the solid/texture toggle on the left and the
+                 picker for the chosen mode on the right. -->
             <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
-              <div class="flex items-center gap-3">
+              <div class="col-span-2 flex items-center gap-1.5">
                 <span class="text-sm font-medium">Base color</span>
+                <HelpTip>
+                  Color used for faces that aren't covered by the model's texture. Pick a single color, or load a MaterialX (.mtlx / .zip) graph for a procedural or image-backed pattern.
+                </HelpTip>
+              </div>
+              <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-sm">
                   <input type="radio" name="bcmode" value="solid" checked={baseColorMode === 'solid'} onchange={() => { baseColorMode = 'solid'; }} />
                   Solid
@@ -1380,9 +1387,6 @@
                   <input type="radio" name="bcmode" value="texture" checked={baseColorMode === 'texture'} onchange={() => { baseColorMode = 'texture'; baseColorPickerOpen = false; }} />
                   Texture
                 </label>
-                <HelpTip>
-                  Color used for faces that aren't covered by the model's texture. Pick a single color, or load a MaterialX (.mtlx / .zip) graph for a procedural or image-backed pattern.
-                </HelpTip>
               </div>
               {#if baseColorMode === 'solid'}
                 {#if baseColor}
