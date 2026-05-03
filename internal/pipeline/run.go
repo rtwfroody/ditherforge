@@ -185,6 +185,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
 		geomModel := model
+		sampleModel := model
 		if r.opts.AlphaWrap {
 			alpha := r.opts.AlphaWrapAlpha
 			if alpha <= 0 {
@@ -229,16 +230,46 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
 				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
 			geomModel = wrapped
-		}
 
-		sampleModel := model
-		if geomModel != model {
+			// Compute the inflate offset from the wrap envelope before
+			// post-decimation runs: post-decimate can nudge the bbox
+			// slightly and the inflate amount must reflect what
+			// alpha-wrap actually expanded, not the decimated
+			// approximation of it. Kept inside the AlphaWrap block so
+			// the dependency on `wrapped` is explicit and can't be
+			// silently broken by a future refactor.
 			origExt := modelMaxExtent(model)
-			geomExt := modelMaxExtent(geomModel)
-			inflateOffset := (geomExt - origExt) / 2
+			inflateOffset := (modelMaxExtent(geomModel) - origExt) / 2
 			if inflateOffset > 1e-4 {
 				plog.Printf("  Inflating color-sample mesh by %.3f mm", inflateOffset)
 				sampleModel = loader.InflateAlongNormals(model, inflateOffset)
+			}
+
+			// Post-wrap decimation: alpha-wrap output is dense (one face
+			// per ~alpha² of surface area), but downstream stages
+			// (Sticker, Voxelize, StageDecimate) only need ~one face per
+			// surface voxel cell. Decimate to that target here so the
+			// cached loadOutput is small and Sticker/Voxelize aren't
+			// iterating millions of triangles. StageDecimate runs again
+			// on the already-decimated mesh and short-circuits when
+			// targetCells >= face count. DecimateMesh is also a no-op
+			// when targetCells is already >= the face count, so no
+			// outer guard is needed.
+			if !r.opts.NoSimplify {
+				cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+				target := squarevoxel.CountSurfaceCells(r.ctx, geomModel, r.opts.NozzleDiameter, r.opts.LayerHeight)
+				postDec, derr := squarevoxel.DecimateMesh(r.ctx, geomModel, target, cellSize, false, progress.NullTracker{})
+				if derr != nil {
+					return nil, fmt.Errorf("post-wrap decimate: %w", derr)
+				}
+				if len(postDec.Faces) < len(geomModel.Faces) {
+					plog.Printf("  Post-wrap decimate: %d faces -> %d faces (target=%d)",
+						len(geomModel.Faces), len(postDec.Faces), target)
+					geomModel = postDec
+				}
+				if err := r.checkCancel(); err != nil {
+					return nil, err
+				}
 			}
 		}
 

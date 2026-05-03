@@ -51,22 +51,30 @@ func TestStageKeyCascade(t *testing.T) {
 	}
 }
 
-// TestStageKeyDownstreamCascade: changing LayerHeight (which is in
-// decimateSettings) invalidates the decimate stage and every stage after
-// it, but not StageLoad.
+// TestStageKeyDownstreamCascade: changing Brightness (which is in
+// colorAdjustSettings) invalidates StageColorAdjust and every stage
+// after it, but not the upstream stages (Load, Decimate, Sticker,
+// Voxelize).
+//
+// LayerHeight and NozzleDiameter both legitimately affect StageLoad
+// now (via the post-/pre-wrap decimate inside Load), so they're no
+// longer good "downstream-only" probes. Brightness has no upstream
+// effect by construction.
 func TestStageKeyDownstreamCascade(t *testing.T) {
 	c := NewStageCache()
 	path := makeFakeInput(t)
 	base := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
 	other := base
-	other.LayerHeight = 0.12
+	other.Brightness = 0.5
 
-	if c.stageKey(StageLoad, base) != c.stageKey(StageLoad, other) {
-		t.Error("StageLoad key changed when only LayerHeight changed")
+	for s := StageParse; s < StageColorAdjust; s++ {
+		if c.stageKey(s, base) != c.stageKey(s, other) {
+			t.Errorf("upstream stage %d key changed when only Brightness changed", s)
+		}
 	}
-	for s := StageDecimate; s < numStages; s++ {
+	for s := StageColorAdjust; s < numStages; s++ {
 		if c.stageKey(s, base) == c.stageKey(s, other) {
-			t.Errorf("stage %d key did not change when LayerHeight changed", s)
+			t.Errorf("stage %d key did not change when Brightness changed", s)
 		}
 	}
 }
