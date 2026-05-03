@@ -706,30 +706,25 @@ func (a *App) OpenStickerImage() (string, error) {
 // MaterialXOpenResult is the result of OpenMaterialXFile. Path is
 // empty when the user cancels.
 type MaterialXOpenResult struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path string `json:"path"`
 }
 
-// OpenMaterialXFile opens a file dialog for selecting a procedural
-// MaterialX (.mtlx) file. Returns the path and the file contents
-// (UTF-8) so the frontend can hold the contents directly — no
-// secondary read step is needed, and the cache key reflects the actual
-// graph definition.
+// OpenMaterialXFile opens a file dialog for selecting a MaterialX
+// .mtlx file or a .zip archive containing one (with adjacent
+// textures). The pipeline opens the file directly from the path at
+// run time — there's no need to round-trip its content through the
+// frontend.
 func (a *App) OpenMaterialXFile() (*MaterialXOpenResult, error) {
 	path, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Select MaterialX File",
+		Title: "Select MaterialX File or Texture Pack",
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "MaterialX (*.mtlx)", Pattern: "*.mtlx"},
+			{DisplayName: "MaterialX (*.mtlx, *.zip)", Pattern: "*.mtlx;*.zip"},
 		},
 	})
 	if err != nil || path == "" {
 		return &MaterialXOpenResult{}, err
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read materialx: %w", err)
-	}
-	return &MaterialXOpenResult{Path: path, Content: string(data)}, nil
+	return &MaterialXOpenResult{Path: path}, nil
 }
 
 // ReadStickerThumbnail reads a sticker image and returns a base64 data URL
@@ -828,13 +823,15 @@ type Settings struct {
 	LayerHeight         string              `json:"layerHeight"`
 	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
 	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
-	// file (display only). BaseMaterialXContent is the file contents
-	// at the time the user picked the file — round-tripped through
-	// settings so the project rebuilds identically without re-reading
-	// the file. BaseMaterialXTileMM is the procedural-to-mm scale.
-	BaseMaterialXPath        string  `json:"baseMaterialXPath,omitempty"`
-	BaseMaterialXContent     string  `json:"baseMaterialXContent,omitempty"`
-	BaseMaterialXTileMM      float64 `json:"baseMaterialXTileMM,omitempty"`
+	// file or .zip archive. The pipeline reads the file at run time —
+	// settings only stores the path, so projects assume the asset
+	// lives at the same path on the next machine.
+	// BaseMaterialXTileMM is the procedural-to-mm scale.
+	// BaseMaterialXTriplanarSharpness controls image-backed graphs'
+	// triplanar projection blend (ignored by procedural .mtlx).
+	BaseMaterialXPath                string  `json:"baseMaterialXPath,omitempty"`
+	BaseMaterialXTileMM              float64 `json:"baseMaterialXTileMM,omitempty"`
+	BaseMaterialXTriplanarSharpness  float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`

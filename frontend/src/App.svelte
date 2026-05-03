@@ -118,12 +118,13 @@
   // Base color for untextured faces: null = use model default, or {hex, label, collection}.
   let baseColor = $state<ColorInfo | null>(null);
   let baseColorPickerOpen = $state(false);
-  // Procedural MaterialX base color. Mutually exclusive with `baseColor`.
-  // baseMaterialXContent is the actual file body (round-tripped through
-  // settings); baseMaterialXPath is for display only.
+  // MaterialX base color. Mutually exclusive with `baseColor`.
+  // baseMaterialXPath is read by the backend at pipeline run time;
+  // settings round-trips just the path. Accepts .mtlx (with adjacent
+  // textures) or a .zip containing both.
   let baseMaterialXPath = $state<string>('');
-  let baseMaterialXContent = $state<string>('');
   let baseMaterialXTileMM = $state<number>(10);
+  let baseMaterialXTriplanarSharpness = $state<number>(4);
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
   type ColorInfo = { hex: string; label: string; collection?: string };
   type ColorSlot = ColorInfo | null;
@@ -566,7 +567,7 @@
   $effect(() => {
     // Read all form values to establish tracking.
     void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
-          layerHeight, baseColor, baseMaterialXContent, baseMaterialXTileMM, ...colorSlots,
+          layerHeight, baseColor, baseMaterialXPath, baseMaterialXTileMM, baseMaterialXTriplanarSharpness, ...colorSlots,
           inventoryCollectionColors,
           committedBrightness, committedContrast, committedSaturation,
           JSON.stringify(warpPins),
@@ -804,8 +805,8 @@
       layerHeight: String(layerHeight),
       baseColor: baseColor ? { hex: baseColor.hex, label: baseColor.label, collection: baseColor.collection } : null,
       baseMaterialXPath,
-      baseMaterialXContent,
       baseMaterialXTileMM,
+      baseMaterialXTriplanarSharpness,
       colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection } : null),
       inventoryCollection,
       brightness,
@@ -864,8 +865,8 @@
     reconcilePrinterSelection();
     if (s.baseColor !== undefined) baseColor = s.baseColor ? { hex: s.baseColor.hex, label: s.baseColor.label || '', collection: s.baseColor.collection || '' } : null;
     if (s.baseMaterialXPath !== undefined) baseMaterialXPath = s.baseMaterialXPath;
-    if (s.baseMaterialXContent !== undefined) baseMaterialXContent = s.baseMaterialXContent;
     if (s.baseMaterialXTileMM !== undefined) baseMaterialXTileMM = s.baseMaterialXTileMM;
+    if (s.baseMaterialXTriplanarSharpness !== undefined) baseMaterialXTriplanarSharpness = s.baseMaterialXTriplanarSharpness;
     if (s.colorSlots !== undefined) {
       colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
     }
@@ -1076,8 +1077,9 @@
       LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       BaseColor: baseColor?.hex ?? '',
-      BaseColorMaterialX: baseMaterialXContent,
+      BaseColorMaterialX: baseMaterialXPath,
       BaseColorMaterialXTileMM: baseMaterialXTileMM,
+      BaseColorMaterialXTriplanarSharpness: baseMaterialXTriplanarSharpness,
       NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
       LayerHeight: parseFloat(layerHeight) || 0.2,
       Printer: printerId,
@@ -1346,15 +1348,15 @@
               {:else}
                 <Input id="scale" bind:value={scaleValue} type="number" step={0.1} />
               {/if}
-              {#if baseMaterialXContent}
+              {#if baseMaterialXPath}
                 <div class="flex items-center gap-2">
                   <span
                     class="h-9 flex-1 rounded border bg-muted text-xs flex items-center px-2 truncate"
                     title={baseMaterialXPath}
                   >
-                    {baseMaterialXPath ? baseMaterialXPath.split(/[\\/]/).pop() : 'inline .mtlx'}
+                    {baseMaterialXPath.split(/[\\/]/).pop()}
                   </span>
-                  <Button variant="ghost" size="sm" onclick={() => { baseMaterialXPath = ''; baseMaterialXContent = ''; }}>Clear</Button>
+                  <Button variant="ghost" size="sm" onclick={() => { baseMaterialXPath = ''; }}>Clear</Button>
                 </div>
               {:else if baseColor}
                 <div class="flex items-center gap-2">
@@ -1373,34 +1375,40 @@
                   Default
                 </Button>
               {/if}
-              {#if !baseMaterialXContent}
+              {#if !baseMaterialXPath}
                 <div class="flex items-center gap-1.5">
                   <span class="text-xs text-muted-foreground">MaterialX</span>
                   <HelpTip>
-                    Load a procedural MaterialX (.mtlx) file. Only solid procedurals (position-based noise/marble/brick) are supported — image-textured materials won't render anything visible.
+                    Load a MaterialX (.mtlx) file or .zip archive containing one (with adjacent textures). Procedural graphs (marble, brick) and image-backed PBR packs are both supported.
                   </HelpTip>
                 </div>
                 <Button variant="outline" size="sm" onclick={async () => {
                   const r = await OpenMaterialXFile();
                   if (r && r.path) {
                     baseMaterialXPath = r.path;
-                    baseMaterialXContent = r.content;
-                    // Picking a procedural retires the hex picker.
+                    // Picking a MaterialX retires the hex picker.
                     baseColor = null;
                     baseColorPickerOpen = false;
                   }
-                }}>Load .mtlx</Button>
+                }}>Load .mtlx / .zip</Button>
               {:else}
                 <div class="flex items-center gap-1.5">
                   <span class="text-sm font-medium">Tile size</span>
                   <HelpTip>
-                    Object-space scale (mm per shading-unit cycle) applied to the procedural before sampling. Smaller = denser pattern.
+                    Object-space scale (mm per shading-unit cycle) applied before sampling. Smaller = denser pattern. For image-backed packs this is also the texture's repeat distance.
                   </HelpTip>
                 </div>
                 <div class="flex items-center gap-2">
                   <Input bind:value={baseMaterialXTileMM} type="number" min={0.1} step={0.5} class="flex-1" />
                   <span class="text-xs text-muted-foreground">mm</span>
                 </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="text-sm font-medium">Triplanar</span>
+                  <HelpTip>
+                    Sharpness of the triplanar projection blend for image-backed MaterialX. 1 is a soft cosine blend; higher values approach a hard box map. Ignored by procedural .mtlx that don't read texture coordinates.
+                  </HelpTip>
+                </div>
+                <Input bind:value={baseMaterialXTriplanarSharpness} type="number" min={0.5} max={32} step={0.5} class="flex-1" />
               {/if}
               {#if baseColorPickerOpen}
                 <div class="col-span-2">
@@ -1408,8 +1416,7 @@
                     onselect={(hex, label, collection) => {
                       baseColor = { hex, label, collection };
                       baseColorPickerOpen = false;
-                      // Picking a hex retires the procedural.
-                      baseMaterialXContent = '';
+                      // Picking a hex retires the MaterialX.
                       baseMaterialXPath = '';
                     }}
                     onclose={() => { baseColorPickerOpen = false; }}

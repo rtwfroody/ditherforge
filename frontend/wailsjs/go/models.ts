@@ -124,8 +124,8 @@ export namespace main {
 	    layerHeight: string;
 	    baseColor?: ColorSlotSetting;
 	    baseMaterialXPath?: string;
-	    baseMaterialXContent?: string;
 	    baseMaterialXTileMM?: number;
+	    baseMaterialXTriplanarSharpness?: number;
 	    colorSlots: ColorSlotSetting[];
 	    inventoryCollection: string;
 	    brightness: number;
@@ -166,8 +166,8 @@ export namespace main {
 	        this.layerHeight = source["layerHeight"];
 	        this.baseColor = this.convertValues(source["baseColor"], ColorSlotSetting);
 	        this.baseMaterialXPath = source["baseMaterialXPath"];
-	        this.baseMaterialXContent = source["baseMaterialXContent"];
 	        this.baseMaterialXTileMM = source["baseMaterialXTileMM"];
+	        this.baseMaterialXTriplanarSharpness = source["baseMaterialXTriplanarSharpness"];
 	        this.colorSlots = this.convertValues(source["colorSlots"], ColorSlotSetting);
 	        this.inventoryCollection = source["inventoryCollection"];
 	        this.brightness = source["brightness"];
@@ -391,6 +391,7 @@ export namespace pipeline {
 	    BaseColor: string;
 	    BaseColorMaterialX: string;
 	    BaseColorMaterialXTileMM: number;
+	    BaseColorMaterialXTriplanarSharpness: number;
 	    NozzleDiameter: number;
 	    LayerHeight: number;
 	    Printer: string;
@@ -430,6 +431,7 @@ export namespace pipeline {
 	        this.BaseColor = source["BaseColor"];
 	        this.BaseColorMaterialX = source["BaseColorMaterialX"];
 	        this.BaseColorMaterialXTileMM = source["BaseColorMaterialXTileMM"];
+	        this.BaseColorMaterialXTriplanarSharpness = source["BaseColorMaterialXTriplanarSharpness"];
 	        this.NozzleDiameter = source["NozzleDiameter"];
 	        this.LayerHeight = source["LayerHeight"];
 	        this.Printer = source["Printer"];
