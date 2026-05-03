@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/rtwfroody/ditherforge/internal/materialx"
+	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -168,14 +169,29 @@ func floatToByte(f float64) uint8 {
 // the voxelizer. The expensive parts (XML parse + image decode) are
 // memoized on StageCache, so applyBaseColor and the voxelize stage
 // share one parse per pipeline run.
-func (c *StageCache) baseColorOverride(path string, tileMM, triplanarSharpness float64) (voxel.BaseColorOverride, error) {
+//
+// On parse error, tracker.Warn is invoked once per session per
+// (path, mtime, size) — applyBaseColor and Voxelize both call this
+// per run, and we don't want the same toast twice. The error is
+// still returned so callers can skip downstream work, but only the
+// first call surfaces it to the user.
+func (c *StageCache) baseColorOverride(path string, tileMM, triplanarSharpness float64, tracker progress.Tracker) (voxel.BaseColorOverride, error) {
 	if path == "" {
+		c.mtlxWarnedPath = ""
 		return nil, nil
 	}
 	s, err := c.materialXSampler(path)
 	if err != nil {
-		return nil, fmt.Errorf("MaterialX %q: %w", path, err)
+		err = fmt.Errorf("MaterialX %q: %w", path, err)
+		if c.mtlxWarnedPath != path {
+			tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", err))
+			c.mtlxWarnedPath = path
+		}
+		return nil, err
 	}
+	// Successful resolution clears the dedup so a future failure on
+	// this path warns again.
+	c.mtlxWarnedPath = ""
 	if s == nil {
 		return nil, nil
 	}

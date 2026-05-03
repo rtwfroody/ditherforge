@@ -186,6 +186,12 @@ type StageCache struct {
 	mtlxSamplerSize  int64
 	mtlxSampler      materialx.Sampler
 	mtlxSamplerErr   error
+	// mtlxWarnedPath suppresses duplicate "ignoring MaterialX base
+	// color" warnings: applyBaseColor and the Voxelize stage both
+	// build the override per run, and a malformed .mtlx would
+	// otherwise fire the same toast twice. Cleared whenever a
+	// different path is consulted.
+	mtlxWarnedPath string
 }
 
 // NewStageCache returns an empty stage cache with no disk persistence.
@@ -457,7 +463,7 @@ type stickerOutput struct {
 	// nearest-tri lookup (Model == sample model) or two separate lookups.
 	FromAlphaWrap bool
 
-	// si is the spatial index over Model. Seeded inside runSticker on a
+	// si is the spatial index over Model. Seeded inside the Sticker stage body on a
 	// fresh build; nil after a disk-cache decode (the field is unexported,
 	// gob skips it). Rebuilt by ensureSI() on first access. sync.Once
 	// makes the lazy build safe against the disk-encode goroutine
@@ -470,7 +476,7 @@ type stickerOutput struct {
 
 // ensureSI returns so.si, building it on first call. Safe to call from
 // multiple goroutines; in practice the single pipeline worker is the only
-// caller (runVoxelize on the alpha-wrap branch).
+// caller (the Voxelize stage body on the alpha-wrap branch).
 func (so *stickerOutput) ensureSI() *voxel.SpatialIndex {
 	so.siOnce.Do(func() {
 		if so.si == nil && so.Model != nil {
@@ -595,7 +601,7 @@ type loadSettings struct {
 // affects voxel cell coloring. A cheap per-run step reapplies the override
 // to the cached ColorModel before voxelize, so Load/Decimate caches
 // survive base-color changes. Sticker is invalidated on base-color change
-// because runSticker deep-clones ColorModel into so.Model and the per-run
+// because the Sticker stage body deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
 	NozzleDiameter                       float32

@@ -517,14 +517,15 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
-		baseColorOverride, bcoErr := r.cache.baseColorOverride(
+		// baseColorOverride routes parse errors through the tracker
+		// itself with per-session dedup, so we just pass nil through
+		// to the voxelizer on failure.
+		baseColorOverride, _ := r.cache.baseColorOverride(
 			r.opts.BaseColorMaterialX,
 			r.opts.BaseColorMaterialXTileMM,
 			r.opts.BaseColorMaterialXTriplanarSharpness,
+			r.tracker,
 		)
-		if bcoErr != nil {
-			r.tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", bcoErr))
-		}
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo,

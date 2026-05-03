@@ -103,7 +103,7 @@ func writeMtlxTempFile(t *testing.T, body string) string {
 }
 
 // TestStickerStageKeyDependsOnBaseColor guards a cache-coherency contract:
-// runSticker deep-clones lo.ColorModel into so.Model, including
+// the Sticker stage body deep-clones lo.ColorModel into so.Model, including
 // FaceBaseColor. The per-run applyBaseColor reapplies the override to
 // lo.ColorModel/lo.SampleModel but not to so.Model. So a base-color change
 // must invalidate the sticker stage; otherwise voxelize samples colors from
@@ -122,7 +122,7 @@ func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 
 	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, changed) {
 		t.Fatal("StageSticker key did not change when BaseColor changed; " +
-			"runSticker's so.Model.FaceBaseColor would be stale on a cached run")
+			"the Sticker stage body's so.Model.FaceBaseColor would be stale on a cached run")
 	}
 }
 
@@ -207,7 +207,7 @@ func TestVoxelizeStageKeyDependsOnMaterialX(t *testing.T) {
 
 // TestStickerStageKeyDependsOnMaterialX is the sticker-stage analogue
 // of TestStickerStageKeyDependsOnBaseColor for the MaterialX override.
-// runSticker deep-clones lo.ColorModel into so.Model with whatever
+// the Sticker stage body deep-clones lo.ColorModel into so.Model with whatever
 // pattern was baked into FaceBaseColor by the per-face preview bake;
 // any change to the underlying .mtlx must invalidate that cached
 // clone.
@@ -216,9 +216,10 @@ func TestStickerStageKeyDependsOnMaterialX(t *testing.T) {
 	mtlxA := writeMtlxTempFile(t, "<materialx version=\"1.39\"/>")
 	mtlxB := writeMtlxTempFile(t, "<materialx version=\"1.39\"><nodegraph/></materialx>")
 	base := Options{
-		Input:                    "model.glb",
-		BaseColorMaterialX:       mtlxA,
-		BaseColorMaterialXTileMM: 10,
+		Input:                                "model.glb",
+		BaseColorMaterialX:                   mtlxA,
+		BaseColorMaterialXTileMM:             10,
+		BaseColorMaterialXTriplanarSharpness: 4,
 		Stickers: []Sticker{
 			{ImagePath: "sticker.png", Mode: "unfold", Scale: 1, MaxAngle: 90},
 		},
@@ -227,13 +228,18 @@ func TestStickerStageKeyDependsOnMaterialX(t *testing.T) {
 	pathChanged.BaseColorMaterialX = mtlxB
 	tileChanged := base
 	tileChanged.BaseColorMaterialXTileMM = 20
+	sharpChanged := base
+	sharpChanged.BaseColorMaterialXTriplanarSharpness = 8
 
 	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, pathChanged) {
 		t.Error("StageSticker key did not change when BaseColorMaterialX path changed; " +
-			"so.Model.FaceBaseColor would be stale on a cached run")
+			"the Sticker stage body's so.Model.FaceBaseColor would be stale on a cached run")
 	}
 	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, tileChanged) {
 		t.Error("StageSticker key did not change when BaseColorMaterialXTileMM changed")
+	}
+	if c.stageFnv(StageSticker, base) == c.stageFnv(StageSticker, sharpChanged) {
+		t.Error("StageSticker key did not change when BaseColorMaterialXTriplanarSharpness changed")
 	}
 }
 

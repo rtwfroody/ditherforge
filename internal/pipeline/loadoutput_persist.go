@@ -14,7 +14,7 @@ import (
 // applyBaseColor (pipeline.go) and voxel.SampleNearestColorWithSticker
 // (color.go) both branch on whether these pointers are equal.
 //
-// runLoad produces exactly these three configurations:
+// the Load stage body produces exactly these three configurations:
 //
 //   1. Alpha-wrap off:           Model == ColorModel == SampleModel
 //   2. Alpha-wrap on, inflate:   Model != ColorModel, SampleModel != ColorModel,
@@ -28,7 +28,7 @@ import (
 // Invariant: SampleModel ∈ {Model, ColorModel}. The encoding does NOT
 // handle a hypothetical "Model == SampleModel but != ColorModel"
 // configuration — both fields would round-trip as distinct copies,
-// silently losing the Model==SampleModel aliasing. If runLoad ever
+// silently losing the Model==SampleModel aliasing. If the Load stage body ever
 // produces that configuration, this encoder needs a third alias bit.
 
 type loadOutputOnDisk struct {
@@ -40,8 +40,8 @@ type loadOutputOnDisk struct {
 	ExtentMM       float32
 	// The applied-base-color triple (appliedBaseColor,
 	// appliedBaseColorMaterialX, appliedBaseColorMaterialXTileMM) is
-	// intentionally not persisted: cache.setLoad is called inside
-	// runLoad (before applyBaseColor runs), so the disk version's
+	// intentionally not persisted: cache.set is called inside
+	// the Load stage body (before applyBaseColor runs), so the disk version's
 	// "applied" state is always pristine. On disk hit applyBaseColor
 	// sees the pristine triple and skips the reset-from-parse path
 	// (since lo.ColorModel is already pristine); only an in-session

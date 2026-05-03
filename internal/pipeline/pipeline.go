@@ -506,7 +506,7 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 //   - opts.BaseColorMaterialX (with TileMM): per-face centroid sample of the
 //     procedural graph, baked into FaceBaseColor for the preview. The
 //     voxelizer also samples per-voxel via the same graph for higher
-//     fidelity (see buildBaseColorOverride). MaterialX takes precedence
+//     fidelity (see cache.baseColorOverride). MaterialX takes precedence
 //     when both are set.
 //   - opts.BaseColor: legacy uniform hex override.
 //
@@ -541,23 +541,24 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 	}
 	switch {
 	case opts.BaseColorMaterialX != "":
-		// Build the override once and reuse it across both models —
-		// parsing the .mtlx (and decoding any referenced textures) is
-		// cheap but non-trivial, and run.go also builds its own
-		// override for per-voxel sampling.
+		// Build the override once and reuse it across both models.
+		// The expensive parts (XML parse + image decode) are memoized
+		// on StageCache so the Voxelize stage's per-voxel sampler
+		// reuses the same compiled graph; the warning on parse error
+		// is also deduped inside baseColorOverride.
 		override, err := cache.baseColorOverride(
 			opts.BaseColorMaterialX,
 			opts.BaseColorMaterialXTileMM,
 			opts.BaseColorMaterialXTriplanarSharpness,
+			tracker,
 		)
-		if err != nil {
-			tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", err))
-		} else if override != nil {
+		if err == nil && override != nil {
 			bakeMaterialXBaseColor(lo.ColorModel, override)
 			if lo.SampleModel != lo.ColorModel {
 				bakeMaterialXBaseColor(lo.SampleModel, override)
 			}
 		}
+		_ = err // baseColorOverride already routed the warning through tracker.
 	case opts.BaseColor != "":
 		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
 		if lo.SampleModel != lo.ColorModel {
