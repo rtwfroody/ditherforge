@@ -58,6 +58,10 @@ export function OpenMaterialXFile() {
   return window['go']['main']['App']['OpenMaterialXFile']();
 }
 
+export function MaterialXPathOK(arg1) {
+  return window['go']['main']['App']['MaterialXPathOK'](arg1);
+}
+
 export function OpenStickerImage() {
   return window['go']['main']['App']['OpenStickerImage']();
 }

@@ -32,6 +32,8 @@ export function OpenFileDialog():Promise<string>;
 
 export function OpenMaterialXFile():Promise<main.MaterialXOpenResult>;
 
+export function MaterialXPathOK(arg1:string):Promise<boolean>;
+
 export function OpenStickerImage():Promise<string>;
 
 export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;

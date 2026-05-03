@@ -7,6 +7,88 @@ import (
 	"time"
 )
 
+// TestMaterialXSamplerMemoizedByFileStamp verifies the cache keyed
+// by (path, mtime, size). Constant-base-color samplers are value-typed
+// so we observe behavior via the sampled color, not pointer identity:
+// rewriting the file with a different constant must change the
+// reported color, while two calls without a rewrite must not.
+func TestMaterialXSamplerMemoizedByFileStamp(t *testing.T) {
+	c := NewStageCache()
+
+	// Empty path → (nil, nil) every time.
+	if s, err := c.materialXSampler(""); s != nil || err != nil {
+		t.Errorf("empty path: got (%v, %v), want (nil, nil)", s, err)
+	}
+
+	mtlx := func(hex string) string {
+		return `<?xml version="1.0"?>
+<materialx version="1.39">
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" value="` + hex + `"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>`
+	}
+	p := writeMtlxTempFile(t, mtlx("0.5, 0.5, 0.5"))
+	s1, err := c.materialXSampler(p)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if got := s1.Sample([3]float64{}); got != [3]float64{0.5, 0.5, 0.5} {
+		t.Fatalf("first sample: got %v, want (0.5, 0.5, 0.5)", got)
+	}
+
+	// Same file, second call: cache hit, same color.
+	s2, err := c.materialXSampler(p)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got := s2.Sample([3]float64{}); got != [3]float64{0.5, 0.5, 0.5} {
+		t.Errorf("cache hit but color drifted: got %v, want (0.5, 0.5, 0.5)", got)
+	}
+
+	// Rewrite with a different constant + bump mtime → cache miss →
+	// new sampler reflects the new color.
+	if err := os.WriteFile(p, []byte(mtlx("0.1, 0.2, 0.3")), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(p, future, future)
+	s3, err := c.materialXSampler(p)
+	if err != nil {
+		t.Fatalf("post-edit call: %v", err)
+	}
+	if got := s3.Sample([3]float64{}); got != [3]float64{0.1, 0.2, 0.3} {
+		t.Errorf("post-edit color: got %v, want (0.1, 0.2, 0.3) — cache key ignored an mtime change", got)
+	}
+
+	// Parse error caching: malformed file → error both calls.
+	bad := writeMtlxTempFile(t, `<not valid mtlx>`)
+	if _, err := c.materialXSampler(bad); err == nil {
+		t.Fatalf("malformed mtlx: expected error, got nil")
+	}
+	if _, err := c.materialXSampler(bad); err == nil {
+		t.Fatalf("second call on malformed mtlx: expected cached error, got nil")
+	}
+}
+
+// TestMaterialXFileStampMissingPath is the boundary case for the
+// path-based MaterialX cache key: a missing or unstat-able path must
+// hash to (0, 0) so two missing-path Options collide consistently
+// (which is what we want — there's nothing to cache).
+func TestMaterialXFileStampMissingPath(t *testing.T) {
+	mtime, size := materialXFileStamp("/no/such/path.mtlx")
+	if mtime != 0 || size != 0 {
+		t.Errorf("missing path: got (%d, %d), want (0, 0)", mtime, size)
+	}
+	mtime, size = materialXFileStamp("")
+	if mtime != 0 || size != 0 {
+		t.Errorf("empty path: got (%d, %d), want (0, 0)", mtime, size)
+	}
+}
+
 // writeMtlxTempFile drops a tiny .mtlx file into a freshly-created
 // temp dir and returns its path. Test helper for the MaterialX cache
 // tests below — the contents don't have to be a valid graph since

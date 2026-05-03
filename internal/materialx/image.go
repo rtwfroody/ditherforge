@@ -5,6 +5,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"math"
 	"strings"
 	"sync"
@@ -61,10 +62,8 @@ type decodedImage struct {
 	srgb bool
 }
 
-func decodeImage(rc interface {
-	Read(p []byte) (int, error)
-}, srgb bool) (*decodedImage, error) {
-	img, _, err := image.Decode(readerFunc(rc.Read))
+func decodeImage(r io.Reader, srgb bool) (*decodedImage, error) {
+	img, _, err := image.Decode(r)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
@@ -84,13 +83,6 @@ func decodeImage(rc interface {
 	}
 	return &decodedImage{w: w, h: h, pixels: pixels, srgb: srgb}, nil
 }
-
-// readerFunc lets us pass a Read method directly into image.Decode
-// without requiring it to satisfy the full io.Reader interface
-// upstream of decodeImage's caller.
-type readerFunc func(p []byte) (int, error)
-
-func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // sample looks up an RGB triplet at the given UV with the requested
 // address/filter modes. Output is in [0, 1] per channel; alpha is

@@ -599,10 +599,11 @@ func buildImage(c *compiler, n *node) (evalFn, error) {
 
 	out := n.OutputType
 	arity := vecArity(out)
-	defaultFn, err := c.compileOptional(n, "default")
-	if err != nil {
-		return nil, err
-	}
+	// `default` input intentionally ignored: the only scenario the
+	// MaterialX spec uses it for is "file load failed at runtime",
+	// which we surface at compile time via images.load returning an
+	// error. Out-of-bounds UVs are handled by the address-mode
+	// inputs, not the default.
 
 	return func(ctx *SampleContext, scratch []Value) Value {
 		var uv [2]float64
@@ -632,9 +633,6 @@ func buildImage(c *compiler, n *node) (evalFn, error) {
 			v.Vec[2] = rgb[2]
 			v.Vec[3] = 1
 		}
-		// Hush unused-default-input warning when present but unsupported;
-		// real default sampling happens implicitly via address modes.
-		_ = defaultFn
 		return v
 	}, nil
 }

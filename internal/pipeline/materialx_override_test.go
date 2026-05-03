@@ -114,6 +114,71 @@ func TestTriplanarBlendsWhenNormalIsDiagonal(t *testing.T) {
 	}
 }
 
+// TestTriplanarUVSignFlip verifies the per-plane sign flip: a face
+// with +X normal samples YZ at u=+pos.y; a -X normal samples at
+// u=-pos.y. Without the flip, mirror seams appear on opposite-facing
+// parallel faces with directional textures.
+func TestTriplanarUVSignFlip(t *testing.T) {
+	pos32 := [3]float32{0.25, 0.5, 0.75}
+	py, pz := float64(pos32[1]), float64(pos32[2])
+	var seenUVs []float64
+	fake := &fakeSampler{
+		usesUV: true,
+		cb: func(ctx materialx.SampleContext) [3]float64 {
+			seenUVs = append(seenUVs, ctx.UV[0])
+			return [3]float64{1, 1, 1}
+		},
+	}
+	o := &materialxOverride{sampler: fake, invTileMM: 1, useUV: true, sharpness: 8}
+
+	seenUVs = nil
+	o.SampleBaseColor(voxel.BaseColorContext{Pos: pos32, Normal: [3]float32{1, 0, 0}})
+	if len(seenUVs) == 0 || seenUVs[0] != py {
+		t.Errorf("+X normal should sample YZ with u=+pos.y=%v; saw %v", py, seenUVs)
+	}
+
+	seenUVs = nil
+	o.SampleBaseColor(voxel.BaseColorContext{Pos: pos32, Normal: [3]float32{-1, 0, 0}})
+	if len(seenUVs) == 0 || seenUVs[0] != -py {
+		t.Errorf("-X normal should sample YZ with u=-pos.y=%v; saw %v", -py, seenUVs)
+	}
+	_ = pz
+}
+
+// TestTriplanarDegenerateNormalAveragesAllPlanes verifies that a
+// zero-length normal produces an equal three-way blend rather than
+// silently picking one plane. A face with random distinct per-plane
+// colors should resolve to their average.
+func TestTriplanarDegenerateNormalAveragesAllPlanes(t *testing.T) {
+	pos32 := [3]float32{0.25, 0.5, 0.75}
+	px, py, pz := float64(pos32[0]), float64(pos32[1]), float64(pos32[2])
+	colors := map[[2]float64][3]float64{
+		{py, pz}: {0.6, 0.0, 0.0},
+		{px, pz}: {0.0, 0.6, 0.0},
+		{px, py}: {0.0, 0.0, 0.6},
+	}
+	fake := &fakeSampler{
+		usesUV: true,
+		cb: func(ctx materialx.SampleContext) [3]float64 {
+			return colors[ctx.UV]
+		},
+	}
+	o := &materialxOverride{sampler: fake, invTileMM: 1, useUV: true, sharpness: 4}
+	got := o.SampleBaseColor(voxel.BaseColorContext{
+		Pos:    pos32,
+		Normal: [3]float32{0, 0, 0},
+	})
+	// Each channel: 0.6 / 3 = 0.2 → 0.2*255+0.5 = 51.5 → 51.
+	want := [3]uint8{51, 51, 51}
+	for i := range 3 {
+		if got[i] < 50 || got[i] > 52 {
+			t.Errorf("degenerate normal: channel %d got %d, want ~51 (3-way average)", i, got[i])
+			break
+		}
+	}
+	_ = want
+}
+
 // TestNonUVSamplerSkipsTriplanar verifies the fast path: a
 // non-UV-using sampler is consulted exactly once per call regardless
 // of normal, since no projection is needed.

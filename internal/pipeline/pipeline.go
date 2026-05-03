@@ -10,7 +10,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log"
-	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -522,7 +521,7 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // Invariant: whenever lo is present, parse output is reachable via
 // cache.getParse — but only when an override was previously applied do we
 // actually fetch it (the pristine case skips the parse cache lookup).
-func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
+func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
 	if lo.appliedBaseColor == opts.BaseColor &&
 		lo.appliedBaseColorMaterialX == opts.BaseColorMaterialX &&
 		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM &&
@@ -546,13 +545,13 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options) {
 		// parsing the .mtlx (and decoding any referenced textures) is
 		// cheap but non-trivial, and run.go also builds its own
 		// override for per-voxel sampling.
-		override, err := buildBaseColorOverride(
+		override, err := cache.baseColorOverride(
 			opts.BaseColorMaterialX,
 			opts.BaseColorMaterialXTileMM,
 			opts.BaseColorMaterialXTriplanarSharpness,
 		)
 		if err != nil {
-			log.Printf("Warning: ignoring MaterialX base color: %v", err)
+			tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", err))
 		} else if override != nil {
 			bakeMaterialXBaseColor(lo.ColorModel, override)
 			if lo.SampleModel != lo.ColorModel {
@@ -591,20 +590,10 @@ func bakeMaterialXBaseColor(model *loader.LoadedModel, override voxel.BaseColorO
 			(v0[1] + v1[1] + v2[1]) / 3,
 			(v0[2] + v1[2] + v2[2]) / 3,
 		}
-		// Face normal via cross product, normalized; degenerate faces
-		// get the zero vector and the override's triplanar fallback
-		// kicks in.
-		e1x, e1y, e1z := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
-		e2x, e2y, e2z := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
-		nx := e1y*e2z - e1z*e2y
-		ny := e1z*e2x - e1x*e2z
-		nz := e1x*e2y - e1y*e2x
-		nl := float32(math.Sqrt(float64(nx*nx + ny*ny + nz*nz)))
-		var normal [3]float32
-		if nl > 1e-9 {
-			normal = [3]float32{nx / nl, ny / nl, nz / nl}
-		}
-		rgb := override.SampleBaseColor(voxel.BaseColorContext{Pos: centroid, Normal: normal})
+		rgb := override.SampleBaseColor(voxel.BaseColorContext{
+			Pos:    centroid,
+			Normal: voxel.FaceNormal(i, model),
+		})
 		model.FaceBaseColor[i] = [4]uint8{rgb[0], rgb[1], rgb[2], 255}
 	}
 }

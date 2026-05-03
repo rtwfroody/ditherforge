@@ -15,6 +15,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/cacheblob"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/materialx"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
@@ -173,6 +174,18 @@ type StageCache struct {
 	invContentsMtime time.Time
 	invContentsSize  int64
 	invContents      string
+
+	// mtlxSampler caches the parsed-and-compiled MaterialX sampler so
+	// applyBaseColor (preview bake) and the voxelize stage (per-voxel
+	// sample) share one parse + image-decode per pipeline run.
+	// Errors are cached too — a malformed .mtlx shouldn't be re-tried
+	// on every consumer call within a session. Tracked by (path,
+	// mtime, size) like inputHash/invContents.
+	mtlxSamplerPath  string
+	mtlxSamplerMtime time.Time
+	mtlxSamplerSize  int64
+	mtlxSampler      materialx.Sampler
+	mtlxSamplerErr   error
 }
 
 // NewStageCache returns an empty stage cache with no disk persistence.
@@ -783,6 +796,39 @@ func materialXFileStamp(path string) (mtime, size int64) {
 		return 0, 0
 	}
 	return info.ModTime().UnixNano(), info.Size()
+}
+
+// materialXSampler returns the parsed-and-compiled materialx.Sampler
+// for the package at path, memoized within the session by (path,
+// mtime, size). Errors are cached so a malformed .mtlx isn't
+// re-attempted on every call. Returns (nil, nil) for an empty path.
+//
+// Same single-threaded-pipeline assumption as inventoryContents — no
+// mutex.
+func (c *StageCache) materialXSampler(path string) (materialx.Sampler, error) {
+	if path == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", path, err)
+	}
+	if c.mtlxSamplerPath == path &&
+		c.mtlxSamplerMtime.Equal(info.ModTime()) &&
+		c.mtlxSamplerSize == info.Size() {
+		return c.mtlxSampler, c.mtlxSamplerErr
+	}
+	doc, perr := materialx.ParsePackage(path)
+	var s materialx.Sampler
+	if perr == nil {
+		s, perr = doc.DefaultBaseColorSampler()
+	}
+	c.mtlxSamplerPath = path
+	c.mtlxSamplerMtime = info.ModTime()
+	c.mtlxSamplerSize = info.Size()
+	c.mtlxSampler = s
+	c.mtlxSamplerErr = perr
+	return s, perr
 }
 
 // stageFnv hashes a single stage's settings to a uint64. Used as the

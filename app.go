@@ -422,6 +422,19 @@ func (t *guiTracker) StageDone(stage string) {
 	})
 }
 
+type warnEvent struct {
+	Gen     int64  `json:"gen"`
+	Message string `json:"message"`
+}
+
+func (t *guiTracker) Warn(message string) {
+	// Reuses the existing "pipeline-warning" event listener in
+	// App.svelte; the frontend updates the status banner.
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-warning", warnEvent{
+		Gen: t.gen, Message: message,
+	})
+}
+
 // Compile-time check that guiTracker implements progress.Tracker.
 var _ progress.Tracker = (*guiTracker)(nil)
 
@@ -707,6 +720,18 @@ func (a *App) OpenStickerImage() (string, error) {
 // empty when the user cancels.
 type MaterialXOpenResult struct {
 	Path string `json:"path"`
+}
+
+// MaterialXPathOK reports whether the file at path exists and is
+// readable. Used by the frontend to warn at settings-load time that
+// a referenced .mtlx / .zip is missing on this machine. Empty path
+// returns true (means "nothing requested").
+func (a *App) MaterialXPathOK(path string) bool {
+	if path == "" {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // OpenMaterialXFile opens a file dialog for selecting a MaterialX

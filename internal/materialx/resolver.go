@@ -2,12 +2,14 @@ package materialx
 
 import (
 	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -56,7 +58,15 @@ type dirResolver struct {
 
 func (d *dirResolver) Open(relpath string) (io.ReadCloser, error) {
 	clean := filepath.FromSlash(filepath.Clean(relpath))
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+	if filepath.IsAbs(clean) {
+		return nil, fmt.Errorf("materialx: refusing to resolve absolute path %q", relpath)
+	}
+	// Reject any path segment equal to ".." — this is robust on both
+	// "/" (Linux/macOS) and "\" (Windows) separators, where a naive
+	// HasPrefix("..") would let "..\foo" through on Windows after
+	// FromSlash converts forward slashes but leaves the existing
+	// backslashes alone.
+	if slices.Contains(strings.Split(clean, string(filepath.Separator)), "..") {
 		return nil, fmt.Errorf("materialx: refusing to resolve %q outside %q", relpath, d.base)
 	}
 	return os.Open(filepath.Join(d.base, clean))
@@ -170,23 +180,9 @@ func (m mapResolver) Open(relpath string) (io.ReadCloser, error) {
 	if !ok {
 		return nil, fmt.Errorf("materialx: %q not found in map resolver", relpath)
 	}
-	return io.NopCloser(byteReader{b: b}), nil
+	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
 // NewMapResolver returns an in-memory ResourceResolver backed by the
 // given path-to-bytes map. Test-only.
 func NewMapResolver(files map[string][]byte) ResourceResolver { return mapResolver(files) }
-
-type byteReader struct {
-	b []byte
-	i int
-}
-
-func (r byteReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.i:])
-	r.i += n
-	return n, nil
-}

@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"log"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
@@ -18,6 +19,12 @@ type Tracker interface {
 
 	// StageDone signals that a stage has completed.
 	StageDone(stage string)
+
+	// Warn surfaces a non-fatal warning to the user (e.g. malformed
+	// MaterialX file, missing inventory entry). The pipeline continues
+	// after the warning is logged. Implementations route this to
+	// stderr (CLI), the GUI's toast/notification panel, or both.
+	Warn(message string)
 }
 
 // NullTracker is a no-op Tracker for use when progress reporting is not needed.
@@ -26,6 +33,7 @@ type NullTracker struct{}
 func (NullTracker) StageStart(string, bool, int) {}
 func (NullTracker) StageProgress(string, int)    {}
 func (NullTracker) StageDone(string)             {}
+func (NullTracker) Warn(string)                  {}
 
 // Stage is a handle returned by BeginStage. Its Done method ends the stage
 // and is idempotent — safe to call from defer plus explicitly when you want
@@ -103,4 +111,8 @@ func (t *CLITracker) StageDone(stage string) {
 		FinishBar(s.bar, stage, "done", time.Since(s.start))
 		delete(t.bars, stage)
 	}
+}
+
+func (t *CLITracker) Warn(message string) {
+	log.Printf("Warning: %s", message)
 }

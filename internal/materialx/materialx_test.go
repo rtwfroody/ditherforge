@@ -640,6 +640,49 @@ func TestParsePackageZip(t *testing.T) {
 	}
 }
 
+func TestParsePackageZipWithSubdirectory(t *testing.T) {
+	// Many real-world packs have the .mtlx + textures inside a single
+	// top-level folder rather than at the archive root. Verify the
+	// resolver's prefix logic handles that case (image's relative
+	// "stripe.png" resolves via the .mtlx's containing directory).
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	addZip := func(name string, data []byte) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create: %v", err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatalf("zip write: %v", err)
+		}
+	}
+	addZip("Pack/pack.mtlx", []byte(imageGraphMtlx))
+	addZip("Pack/stripe.png", stripePNG(t))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	tmp := filepath.Join(t.TempDir(), "pack.zip")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+	doc, err := materialx.ParsePackage(tmp)
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("sampler: %v", err)
+	}
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.125, 0.5}})
+	want := [3]float64{1, 0, 0}
+	for i := range 3 {
+		if math.Abs(got[i]-want[i]) > 1e-9 {
+			t.Errorf("subdir-zip-loaded sampler at u=0.125: got %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 func TestImageGraphRequiresResolver(t *testing.T) {
 	doc, err := materialx.ParseBytes([]byte(imageGraphMtlx))
 	if err != nil {

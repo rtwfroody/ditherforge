@@ -223,7 +223,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 	// Apply base-color override on top of the (possibly cached)
 	// load output. Cheap and idempotent. On a fresh disk hit
 	// (lo.appliedBaseColor=="") this skips the parse cache lookup.
-	applyBaseColor(r.cache, lo, r.opts)
+	applyBaseColor(r.cache, lo, r.opts, r.tracker)
 	return lo, nil
 }
 
@@ -509,11 +509,14 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 		}
 
-		baseColorOverride := safeBaseColorOverride(
+		baseColorOverride, bcoErr := r.cache.baseColorOverride(
 			r.opts.BaseColorMaterialX,
 			r.opts.BaseColorMaterialXTileMM,
 			r.opts.BaseColorMaterialXTriplanarSharpness,
 		)
+		if bcoErr != nil {
+			r.tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", bcoErr))
+		}
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
 			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo,

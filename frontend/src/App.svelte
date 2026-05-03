@@ -26,7 +26,7 @@
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
   import type { CutPlanePreview } from '$lib/types';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, MaterialXPathOK, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -867,6 +867,18 @@
     if (s.baseMaterialXPath !== undefined) baseMaterialXPath = s.baseMaterialXPath;
     if (s.baseMaterialXTileMM !== undefined) baseMaterialXTileMM = s.baseMaterialXTileMM;
     if (s.baseMaterialXTriplanarSharpness !== undefined) baseMaterialXTriplanarSharpness = s.baseMaterialXTriplanarSharpness;
+    // Best-effort check: when a settings file is loaded on a different
+    // machine than where it was saved, the .mtlx path may not resolve.
+    // Surface a warning immediately so the user knows before they
+    // first click Generate.
+    if (baseMaterialXPath) {
+      MaterialXPathOK(baseMaterialXPath).then((ok: boolean) => {
+        if (!ok) {
+          statusMessage = `MaterialX file not found: ${baseMaterialXPath}. Re-pick or place the file at that path.`;
+          statusType = 'warning';
+        }
+      });
+    }
     if (s.colorSlots !== undefined) {
       colorSlots = s.colorSlots.map((c: any) => c ? { hex: c.hex, label: c.label || '', collection: c.collection || '' } : null);
     }

@@ -288,10 +288,11 @@ type BaseColorOverride interface {
 	SampleBaseColor(ctx BaseColorContext) [3]uint8
 }
 
-// faceNormal returns the unit-length normal of the face at faceIdx
-// computed from its three vertex positions. Returns the zero vector
-// when the face is degenerate (e.g. zero area).
-func faceNormal(faceIdx int, model *loader.LoadedModel) [3]float32 {
+// FaceNormal returns the unit-length normal of the face at faceIdx
+// computed from its three vertex positions (right-handed cross
+// product, v0→v1 × v0→v2). Returns the zero vector when the face is
+// degenerate (zero area within float32 precision).
+func FaceNormal(faceIdx int, model *loader.LoadedModel) [3]float32 {
 	f := model.Faces[faceIdx]
 	v0 := model.Vertices[f[0]]
 	v1 := model.Vertices[f[1]]
@@ -364,7 +365,7 @@ func SampleNearestColorWithSticker(
 	if override != nil && (texIdx < 0 || int(texIdx) >= len(model.Textures)) {
 		rgb := override.SampleBaseColor(BaseColorContext{
 			Pos:    p,
-			Normal: faceNormal(int(bestTri), model),
+			Normal: FaceNormal(int(bestTri), model),
 		})
 		bc[0], bc[1], bc[2] = rgb[0], rgb[1], rgb[2]
 	}
