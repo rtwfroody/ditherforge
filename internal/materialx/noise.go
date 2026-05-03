@@ -65,6 +65,14 @@ func grad3(hash int, x, y, z float64) float64 {
 	return u + v
 }
 
+// perlinGradientScale3d compensates for the fact that the gradient
+// vectors used by grad3 (cube-edge directions) aren't unit-length, so
+// raw Perlin output peaks slightly above 1. The constant matches
+// MaterialX's mx_gradient_scale3d so single-octave Perlin output
+// across our evaluator and the reference GLSL implementation stays in
+// the same numeric range.
+const perlinGradientScale3d = 0.9820
+
 // perlin3D returns a value in approximately [-1, 1].
 func perlin3D(x, y, z float64) float64 {
 	fx := math.Floor(x)
@@ -85,40 +93,39 @@ func perlin3D(x, y, z float64) float64 {
 	B := perm[X+1] + Y
 	BA := perm[B] + Z
 	BB := perm[B+1] + Z
-	return lerp(w,
+	r := lerp(w,
 		lerp(v,
 			lerp(u, grad3(perm[AA], x, y, z), grad3(perm[BA], x-1, y, z)),
 			lerp(u, grad3(perm[AB], x, y-1, z), grad3(perm[BB], x-1, y-1, z))),
 		lerp(v,
 			lerp(u, grad3(perm[AA+1], x, y, z-1), grad3(perm[BA+1], x-1, y, z-1)),
 			lerp(u, grad3(perm[AB+1], x, y-1, z-1), grad3(perm[BB+1], x-1, y-1, z-1))))
+	return r * perlinGradientScale3d
 }
 
-// fractal3D returns a fractal Brownian motion sum of Perlin noises.
-//
-// The MaterialX 1.39 fractal3d spec only states the output is
-// "approximately [-1, 1]" without nailing down the exact accumulation
-// formula. We sum amp * perlin3D(p * freq) per octave (with freq *=
-// lacunarity, amp *= diminish) and divide by the sum of amplitudes —
-// this keeps the result inside [-1, 1] regardless of octave count,
-// which is what most reference implementations (Houdini's mtlx
-// fractal3d, Arnold's standard_surface marble) do but is not mandated
-// by spec. Single-octave output is identical to perlin3D.
+// fractal3D returns a fractal Brownian motion sum of Perlin noises,
+// matching the reference MaterialX implementation
+// (libraries/stdlib/genglsl/lib/mx_noise.glsl, mx_fractal3d_noise_float):
+// raw amplitude-weighted sum without normalization. With diminish=0.5
+// and octaves=3 the output ranges roughly [-1.75, 1.75]; the spec
+// only commits to "approximately [-1, 1]" but every reference
+// implementation we've checked (GLSL/OSL/MDL gen libraries) skips the
+// normalize step. Normalizing here makes the noise term in
+// downstream graphs (e.g. standard_surface_marble_solid.mtlx, where
+// scale_noise = 3 * fractal3d competes with a linear position carrier
+// term) under-amplitude relative to the reference, which produces
+// visibly straighter bands.
 func fractal3D(x, y, z float64, octaves int, lacunarity, diminish float64) float64 {
 	if octaves < 1 {
 		octaves = 1
 	}
-	var sum, ampSum float64
+	var sum float64
 	amp := 1.0
 	freq := 1.0
 	for i := 0; i < octaves; i++ {
 		sum += amp * perlin3D(x*freq, y*freq, z*freq)
-		ampSum += amp
 		freq *= lacunarity
 		amp *= diminish
-	}
-	if ampSum > 0 {
-		sum /= ampSum
 	}
 	return sum
 }

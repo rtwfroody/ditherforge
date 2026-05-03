@@ -362,9 +362,9 @@ func TestPerlinGoldenValues(t *testing.T) {
 		want    float64
 	}{
 		{0, 0, 0, 0},
-		{0.5, 0.5, 0.5, -0.25},
-		{0.25, 0.6, 0.1, -0.10208973162000007},
-		{1.5, 2.5, 3.5, 0.125},
+		{0.5, 0.5, 0.5, -0.2455},
+		{0.25, 0.6, 0.1, -0.10025211645084006},
+		{1.5, 2.5, 3.5, 0.12275},
 	}
 	for _, tc := range cases {
 		got := materialx.PerlinForTest(tc.x, tc.y, tc.z)
