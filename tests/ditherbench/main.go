@@ -709,6 +709,10 @@ func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster
 		b.oG += float64(pal[a][1])
 		b.oB += float64(pal[a][2])
 	}
+	totalCells := 0
+	for _, b := range buckets {
+		totalCells += b.count
+	}
 	for k, b := range buckets {
 		if b.count == 0 {
 			fmt.Printf("    cluster #%02X%02X%02X: 0 cells (empty)\n",
@@ -716,14 +720,30 @@ func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster
 			continue
 		}
 		n := float64(b.count)
+		avgIn := [3]uint8{
+			uint8(b.iR / n),
+			uint8(b.iG / n),
+			uint8(b.iB / n),
+		}
 		dR := (b.oR - b.iR) / n
 		dG := (b.oG - b.iG) / n
 		dB := (b.oB - b.iB) / n
 		iL, iA, iBl := toLab(b.iR/n, b.iG/n, b.iB/n)
 		oL, oA, oBl := toLab(b.oR/n, b.oG/n, b.oB/n)
 		dE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
-		fmt.Printf("    cluster #%02X%02X%02X: %7d cells  ΔRGB=(%+6.2f,%+6.2f,%+6.2f)  ΔE=%5.2f\n",
-			pal[k][0], pal[k][1], pal[k][2], b.count, dR, dG, dB, dE)
+		// Cell count alone is misleading — palette-Voronoi clustering
+		// in RGB Euclidean space biases mid-luminance pixels toward
+		// whichever palette entry is mid-luminance, regardless of
+		// hue. Reporting avg input color exposes what each cluster
+		// actually contains: a 97% Grey-cluster doesn't mean "97%
+		// visually grey," it means "97% have palette Grey as their
+		// nearest RGB neighbor" — which can include warm-brown
+		// pixels that the eye reads as brick.
+		fmt.Printf("    cluster #%02X%02X%02X (%5.1f%% cells, avg in #%02X%02X%02X): ΔRGB=(%+6.2f,%+6.2f,%+6.2f)  ΔE=%5.2f\n",
+			pal[k][0], pal[k][1], pal[k][2],
+			100*n/float64(totalCells),
+			avgIn[0], avgIn[1], avgIn[2],
+			dR, dG, dB, dE)
 	}
 }
 
