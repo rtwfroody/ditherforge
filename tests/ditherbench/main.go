@@ -212,6 +212,17 @@ func loadAllFixtures() []fixture {
 		// silently breaks energy conservation will look "blue-noise"
 		// here while drift_ΔE blows up.
 		makeUniformFixture("uniform_saturated_magenta", 512, 512, [3]uint8{0xFF, 0x00, 0xFF}),
+		// Checkerboard of two colors that aren't in the Panchroma
+		// palette: warm orange (#E08840) and cool teal (#40A0E0).
+		// Each check is 16x16 cells; whole fixture is 512x512 with
+		// 32x32 checks. Tests whether dither algorithms blur the
+		// sharp color boundaries -- error diffusion crosses pixel
+		// boundaries via spatial neighbor propagation, so we expect
+		// some "bleeding" of one check's color into the next. The
+		// extent of bleed varies by algorithm; visually inspect the
+		// --out PNGs to compare.
+		makeCheckerboardFixture("checkerboard_orange_teal", 512, 512, 16,
+			[3]uint8{0xE0, 0x88, 0x40}, [3]uint8{0x40, 0xA0, 0xE0}),
 	)
 	return out
 }
@@ -255,6 +266,33 @@ func loadPNGFixture(path string) (fixture, error) {
 	}
 	name := strings.TrimSuffix(filepath.Base(path), ".png")
 	return fixture{name: name, cells: cells, width: b.Dx(), height: b.Dy()}, nil
+}
+
+// makeCheckerboardFixture builds a w×h grid where each checkSize×
+// checkSize block alternates between c1 (even sum of check
+// coordinates) and c2 (odd). Tests dither behavior at sharp color
+// boundaries: error diffusion algorithms will "bleed" some of one
+// check's color into the adjacent check via spatial neighbor
+// propagation; the extent and visibility of the bleed varies by
+// algorithm.
+func makeCheckerboardFixture(name string, w, h, checkSize int, c1, c2 [3]uint8) fixture {
+	cells := make([]voxel.ActiveCell, 0, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			checkX := x / checkSize
+			checkY := y / checkSize
+			c := c1
+			if (checkX+checkY)&1 == 1 {
+				c = c2
+			}
+			cells = append(cells, voxel.ActiveCell{
+				Col:   x,
+				Row:   y,
+				Color: c,
+			})
+		}
+	}
+	return fixture{name: name, cells: cells, width: w, height: h}
 }
 
 func makeUniformFixture(name string, w, h int, c [3]uint8) fixture {
