@@ -1797,7 +1797,7 @@
               <div class="flex items-center gap-1.5">
                 <Label for="dither">Dither mode</Label>
                 <HelpTip>
-                  Algorithm used to blend palette colors across the surface. "dizzy" is the default ordered dither; "none" disables dithering entirely.
+                  Algorithm used to blend palette colors across the surface. "dizzy" is a randomized error-diffusion that produces a blue-noise look but can drift toward a color cast on sparse 3D surfaces. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma more accurately, at the cost of visible directional structure. "none" disables dithering and snaps each cell to the nearest palette color.
                 </HelpTip>
               </div>
               <Select.Root type="single" bind:value={dither}>

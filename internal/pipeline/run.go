@@ -757,6 +757,9 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "dizzy":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
+		case "floyd-steinberg":
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
 		default:
 			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		}

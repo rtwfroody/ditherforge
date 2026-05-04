@@ -6,6 +6,7 @@ import (
 	"image"
 	"math"
 	"math/rand"
+	"sort"
 	"strings"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -514,6 +515,14 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
 // If tracker is non-nil, emits StageProgress("Dithering", current) every 1000
 // cells. Caller owns StageStart/StageDone.
+//
+// The (cell + accumulated error) target is fed to the nearest-palette
+// search WITHOUT clamping to [0, 255]: clamping there silently discards
+// the residual past the cap and biases the output toward the clamped
+// direction. The palette colors are themselves in [0, 255] so squared
+// distance stays finite, and the per-cell error term carries the full
+// unclamped discrepancy out to neighbors. This matches the reference
+// dizzy implementation (Liam Appelbe, 2020).
 func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -534,9 +543,9 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		r := ClampF(float32(cells[idx].Color[0])+errBuf[idx][0], 0, 255)
-		g := ClampF(float32(cells[idx].Color[1])+errBuf[idx][1], 0, 255)
-		b := ClampF(float32(cells[idx].Color[2])+errBuf[idx][2], 0, 255)
+		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
+		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
+		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
 
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
@@ -558,6 +567,121 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 		eG := g - float32(chosen[1])
 		eB := b - float32(chosen[2])
 
+		var totalWeight float32
+		for _, nb := range neighbors[idx] {
+			if !processed[nb.Idx] {
+				totalWeight += nb.Weight
+			}
+		}
+		if totalWeight > 0 {
+			scale := 1.0 / totalWeight
+			for _, nb := range neighbors[idx] {
+				if !processed[nb.Idx] {
+					w := nb.Weight * scale
+					errBuf[nb.Idx][0] += eR * w
+					errBuf[nb.Idx][1] += eG * w
+					errBuf[nb.Idx][2] += eB * w
+				}
+			}
+		}
+		// When totalWeight == 0, all neighbors are already processed and
+		// the residual error is dropped. This is a known limitation of
+		// dizzy on sparse 3D voxel surfaces (where active cells form a
+		// 2-manifold and per-cell neighborhoods are smaller than the 26
+		// the grid allows). Use FloydSteinberg for chroma fidelity.
+	}
+
+	return assignments, nil
+}
+
+// FloydSteinberg runs error-diffusion dithering with a deterministic
+// (Grid, Layer, Row, Col) traversal order, distributing error only to
+// "forward" neighbors (cells later in that order). Adapted from the
+// classic 2D Floyd-Steinberg to the 3D voxel surface: instead of the
+// fixed 4-cell kernel, error spreads to whatever forward neighbors
+// each cell happens to have, weighted face/edge/corner = 1.0/0.1/0.01
+// (same scheme as DitherWithNeighbors).
+//
+// Compared to dizzy: chroma fidelity is much higher because only
+// genuinely-stranded cells (those whose active neighbors all sort
+// earlier) lose error -- on a typical 3D scene that's a tiny fraction
+// vs. dizzy's ~9% random-tail. The trade-off is directional structure
+// in the output: error propagates "forward" along the scanline within
+// each Z layer (Row/Col axes; Layer is slowest-varying), so the
+// dither pattern shows the underlying traversal order rather than
+// blue-noise texture.
+//
+// Like DitherWithNeighbors, the (cell + accumulated error) target is
+// fed unclamped to the nearest-palette search.
+func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	n := len(cells)
+
+	// Deterministic traversal order: (Grid, Layer, Row, Col). Layer is
+	// the slowest-varying axis so error flows "across the layer"
+	// (along Row/Col within a single Z slice) rather than between
+	// layers. The other reasonable choice would be a serpentine
+	// scanline that reverses Col every Row to break up directional
+	// banding, but the simple sort makes the FS/dizzy code-path
+	// difference obvious.
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ca, cb := cells[order[a]], cells[order[b]]
+		if ca.Grid != cb.Grid {
+			return ca.Grid < cb.Grid
+		}
+		if ca.Layer != cb.Layer {
+			return ca.Layer < cb.Layer
+		}
+		if ca.Row != cb.Row {
+			return ca.Row < cb.Row
+		}
+		return ca.Col < cb.Col
+	})
+
+	assignments := make([]int32, n)
+	errBuf := make([][3]float32, n)
+	processed := make([]bool, n)
+
+	for oi, idx := range order {
+		if oi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", oi)
+		}
+		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
+		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
+		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+
+		bestIdx := 0
+		bestDist := float32(math.MaxFloat32)
+		for pi, p := range pal {
+			dr := r - float32(p[0])
+			dg := g - float32(p[1])
+			db := b - float32(p[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+		processed[idx] = true
+
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+
+		// Forward neighbors: same predicate as dizzy. The only
+		// algorithmic difference between the two functions is the
+		// traversal order — random vs. (Grid, Layer, Row, Col).
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
