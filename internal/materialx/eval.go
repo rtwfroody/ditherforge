@@ -334,9 +334,11 @@ func init() {
 		"cos":        buildUnary(math.Cos),
 		"power":      buildPower,
 		"clamp":      buildClamp,
+		"floor":      buildUnary(math.Floor),
 		"mix":        buildMix,
 		"image":      buildImage,
 		"extract":    buildExtract,
+		"hsvadjust":  buildHSVAdjust,
 	}
 }
 
@@ -613,28 +615,145 @@ func buildImage(c *compiler, n *node) (evalFn, error) {
 		} else {
 			uv = ctx.UV
 		}
-		rgb := img.sample(uv, uMode, vMode, filter)
+		rgba := img.sample(uv, uMode, vMode, filter)
 		v := Value{Type: out}
 		switch arity {
 		case 0: // float
 			v.Type = TypeFloat
-			v.F = rgb[0]
+			v.F = rgba[0]
 			return v
 		case 2:
-			v.Vec[0] = rgb[0]
-			v.Vec[1] = rgb[1]
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
 		case 3:
-			v.Vec[0] = rgb[0]
-			v.Vec[1] = rgb[1]
-			v.Vec[2] = rgb[2]
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
+			v.Vec[2] = rgba[2]
 		case 4:
-			v.Vec[0] = rgb[0]
-			v.Vec[1] = rgb[1]
-			v.Vec[2] = rgb[2]
-			v.Vec[3] = 1
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
+			v.Vec[2] = rgba[2]
+			v.Vec[3] = rgba[3]
 		}
 		return v
 	}, nil
+}
+
+// buildHSVAdjust implements MaterialX hsvadjust: convert RGB to HSV,
+// add amount.x to hue (cycles, wraps into [0, 1)), multiply S by
+// amount.y, multiply V by amount.z, convert back.
+//
+// Spec is defined on displayable colors so RGB inputs are clamped to
+// [0, 1] before conversion — this avoids producing s > 1 or v < 0 from
+// any negative channel an upstream graph node might emit. Saturation
+// is then clamped after scaling so that amount.y > 1 (Polyhaven packs
+// commonly use 1.2 or 2.0 to push grout colors) saturates to 1 instead
+// of going negative through the 1-s term in hsvToRGB. Value is
+// intentionally not clamped on output: amount.z > 1 brightens past
+// white and the downstream sRGB byte quantizer clamps each channel,
+// which preserves the relative tint better than clamping V before
+// reconstruction. Color4 inputs pass the alpha component through;
+// color3 inputs widened to color4 fill alpha with 1.
+func buildHSVAdjust(c *compiler, n *node) (evalFn, error) {
+	in, err := c.compileRequired(n, "in")
+	if err != nil {
+		return nil, err
+	}
+	amount, err := c.compileRequired(n, "amount")
+	if err != nil {
+		return nil, err
+	}
+	out := n.OutputType
+	if out != TypeColor3 && out != TypeColor4 {
+		return nil, fmt.Errorf("hsvadjust: unsupported output type %s", out)
+	}
+	return func(ctx *SampleContext, scratch []Value) Value {
+		src := in(ctx, scratch)
+		amt := amount(ctx, scratch).AsVec3()
+		rgb := src.AsVec3()
+		h, s, v := rgbToHSV(
+			clampF(rgb[0], 0, 1),
+			clampF(rgb[1], 0, 1),
+			clampF(rgb[2], 0, 1),
+		)
+		h += amt[0]
+		s = clampF(s*amt[1], 0, 1)
+		v *= amt[2]
+		nr, ng, nb := hsvToRGB(h, s, v)
+		r := Value{Type: out}
+		r.Vec[0], r.Vec[1], r.Vec[2] = nr, ng, nb
+		if out == TypeColor4 {
+			if src.Type == TypeColor4 {
+				r.Vec[3] = src.Vec[3]
+			} else {
+				r.Vec[3] = 1
+			}
+		}
+		return r
+	}, nil
+}
+
+func rgbToHSV(r, g, b float64) (h, s, v float64) {
+	maxC := math.Max(r, math.Max(g, b))
+	minC := math.Min(r, math.Min(g, b))
+	v = maxC
+	delta := maxC - minC
+	if maxC > 0 {
+		s = delta / maxC
+	}
+	if delta == 0 {
+		return 0, s, v
+	}
+	switch {
+	case maxC == r:
+		h = (g - b) / delta
+		if g < b {
+			h += 6
+		}
+	case maxC == g:
+		h = (b-r)/delta + 2
+	default:
+		h = (r-g)/delta + 4
+	}
+	h /= 6
+	return h, s, v
+}
+
+// hsvToRGB owns the hue wraparound so callers can pass any real-valued
+// h (e.g. h+amount.x where amount.x can be negative or > 1). Saturation
+// must be in [0, 1]; value is unclamped (callers that want clamping
+// apply it themselves).
+func hsvToRGB(h, s, v float64) (r, g, b float64) {
+	if s <= 0 {
+		return v, v, v
+	}
+	h = math.Mod(h, 1)
+	if h < 0 {
+		h += 1
+	}
+	sector := h * 6
+	i := math.Floor(sector)
+	f := sector - i
+	p := v * (1 - s)
+	q := v * (1 - s*f)
+	t := v * (1 - s*(1-f))
+	// `% 6` guards the boundary case where h rounds up to exactly 1.0
+	// after wraparound (sector = 6, i = 6); the modulo lands it on the
+	// red sector instead of the default branch.
+	switch int(i) % 6 {
+	case 0:
+		return v, t, p
+	case 1:
+		return q, v, p
+	case 2:
+		return p, v, t
+	case 3:
+		return p, q, v
+	case 4:
+		return t, p, v
+	default:
+		return v, p, q
+	}
 }
 
 // buildExtract pulls one component out of a vector/color, indexed by

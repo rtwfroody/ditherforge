@@ -22,6 +22,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/materialx"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	"github.com/rtwfroody/ditherforge/internal/plog"
@@ -722,16 +723,32 @@ type MaterialXOpenResult struct {
 	Path string `json:"path"`
 }
 
-// MaterialXPathOK reports whether the file at path exists and is
-// readable. Used by the frontend to warn at settings-load time that
-// a referenced .mtlx / .zip is missing on this machine. Empty path
-// returns true (means "nothing requested").
-func (a *App) MaterialXPathOK(path string) bool {
+// ValidateMaterialX parses the file at path and tries to compile a
+// base-color sampler from it, returning a human-readable warning when
+// anything is wrong (file missing, malformed XML, unsupported node
+// type, or — since image nodes load their texture during compile —
+// a missing texture inside a .zip). Empty result means the file is
+// usable. Called by the frontend right after the user picks a file
+// (and at JSON settings load) so problems surface immediately, not
+// after a full pipeline run.
+func (a *App) ValidateMaterialX(path string) string {
 	if path == "" {
-		return true
+		return ""
 	}
-	_, err := os.Stat(path)
-	return err == nil
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("MaterialX file not found: %s. Re-pick or place the file at that path.", path)
+		}
+		return fmt.Sprintf("MaterialX file unreadable: %v", err)
+	}
+	doc, err := materialx.ParsePackage(path)
+	if err != nil {
+		return fmt.Sprintf("MaterialX parse failed: %v", err)
+	}
+	if _, err := doc.DefaultBaseColorSampler(); err != nil {
+		return fmt.Sprintf("MaterialX base color unsupported: %v", err)
+	}
+	return ""
 }
 
 // OpenMaterialXFile opens a file dialog for selecting a MaterialX

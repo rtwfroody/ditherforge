@@ -3,6 +3,7 @@ package materialx_test
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -691,5 +692,235 @@ func TestImageGraphRequiresResolver(t *testing.T) {
 	// No Resolver set — image node should fail at sampler construction.
 	if _, err := doc.DefaultBaseColorSampler(); err == nil {
 		t.Errorf("expected error when Resolver is nil, got success")
+	}
+}
+
+// TestHSVAdjustShiftsHueAndScalesSV exercises the hsvadjust node added
+// for Polyhaven-style PBR packs (Bricks_2k_8b et al.). Round-trip
+// through HSV with no shift should leave color unchanged; a 1/3-cycle
+// hue shift on pure red should produce green.
+func TestHSVAdjustShiftsHueAndScalesSV(t *testing.T) {
+	const tmpl = `<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="ng">
+    <constant name="src" type="color3"><input name="value" type="color3" value="1.0, 0.0, 0.0"/></constant>
+    <constant name="amt" type="vector3"><input name="value" type="vector3" value="AMOUNT"/></constant>
+    <hsvadjust name="adj" type="color3">
+      <input name="in" type="color3" nodename="src"/>
+      <input name="amount" type="vector3" nodename="amt"/>
+    </hsvadjust>
+    <output name="out" type="color3" nodename="adj"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>`
+	cases := []struct {
+		name   string
+		amount string
+		want   [3]float64
+	}{
+		{"no-shift", "0.0, 1.0, 1.0", [3]float64{1, 0, 0}},
+		{"hue+1/3 → green", "0.333333333333, 1.0, 1.0", [3]float64{0, 1, 0}},
+		{"sat=0 → grayscale value", "0.0, 0.0, 1.0", [3]float64{1, 1, 1}},
+		{"value=0 → black", "0.0, 1.0, 0.0", [3]float64{0, 0, 0}},
+		// Polyhaven Bricks_2k_8b uses sat > 1 to push grout colors and
+		// value > 1 to brighten. Sat must clamp at 1 before back-conversion
+		// (otherwise the 1-s term in hsvToRGB goes negative and produces
+		// garbage); value can pass through and let the byte quantizer clamp
+		// per-channel. Pure red is already maximally saturated, so sat*1.2
+		// stays at 1; value*2.0 exceeds 1 but clamps to 1 per channel.
+		{"sat=1.2 idempotent on already-saturated", "0.0, 1.2, 1.0", [3]float64{1, 0, 0}},
+		{"value=2.0 brightens past 1", "0.0, 1.0, 2.0", [3]float64{2, 0, 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := materialx.ParseBytes([]byte(strings.Replace(tmpl, "AMOUNT", tc.amount, 1)))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			s, err := doc.DefaultBaseColorSampler()
+			if err != nil {
+				t.Fatalf("sampler: %v", err)
+			}
+			got := s.SampleAt(materialx.SampleContext{})
+			for i := range 3 {
+				if math.Abs(got[i]-tc.want[i]) > 1e-6 {
+					t.Errorf("got %v, want %v", got, tc.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestImageVector4ReadsAlpha ensures vector4-typed image nodes pull the
+// actual alpha channel out of the PNG instead of pinning it to 1. PBR
+// packs use 4-channel mask textures where alpha encodes data (leak
+// presence, etc.) — pinning alpha breaks the masking math. The graph
+// extracts each channel of the image node directly so the assertion
+// pins the buildImage vector4 path with no intermediate ops to mask
+// regressions.
+func TestImageVector4ReadsAlpha(t *testing.T) {
+	// 1×1 RGBA = (10, 20, 30, 200).
+	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.NRGBA{R: 10, G: 20, B: 30, A: 200})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	// Build a graph with one extract per channel, wired into a
+	// constant-from-floats color3 reconstruction (R from the alpha
+	// extract, G/B from the R/G extracts) so we can read all four
+	// channels of the source image through one base_color call.
+	const mtlx = `<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="ng">
+    <texcoord name="uv" type="vector2"><input name="index" type="integer" value="0"/></texcoord>
+    <image name="img" type="vector4">
+      <input name="texcoord" type="vector2" nodename="uv"/>
+      <input name="file" type="filename" value="px.png"/>
+      <input name="uaddressmode" type="string" value="clamp"/>
+      <input name="vaddressmode" type="string" value="clamp"/>
+      <input name="filtertype" type="string" value="closest"/>
+    </image>
+    <extract name="ch_INDEX" type="float">
+      <input name="in" type="vector4" nodename="img"/>
+      <input name="index" type="integer" value="INDEX"/>
+    </extract>
+    <output name="out" type="float" nodename="ch_INDEX"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>`
+	cases := []struct {
+		index int
+		want  float64
+	}{
+		{0, 10.0 / 255},
+		{1, 20.0 / 255},
+		{2, 30.0 / 255},
+		{3, 200.0 / 255},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("index=%d", tc.index), func(t *testing.T) {
+			src := strings.ReplaceAll(mtlx, "INDEX", fmt.Sprintf("%d", tc.index))
+			doc, err := materialx.ParseBytes([]byte(src))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			doc.Resolver = materialx.NewMapResolver(map[string][]byte{"px.png": buf.Bytes()})
+			s, err := doc.DefaultBaseColorSampler()
+			if err != nil {
+				t.Fatalf("sampler: %v", err)
+			}
+			// Float-typed output broadcasts across the color3 sample;
+			// sampling all three channels and checking one is enough.
+			got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.5, 0.5}})
+			if math.Abs(got[0]-tc.want) > 1e-6 {
+				t.Errorf("got %v, want %v", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestPolyhavenStyleGraphCompiles end-to-end-parses a graph that
+// mirrors the Polyhaven Bricks_2k_8b structure (image → extract on a
+// vector4 mask, hsvadjust on the base color, floor on the leak gate,
+// mix to combine). Guards against a regression where any one of those
+// node types stops compiling and the override silently falls through
+// to gray.
+func TestPolyhavenStyleGraphCompiles(t *testing.T) {
+	// 1×1 mask image; alpha < 1 so floor(alpha) = 0, exercising the
+	// branch that motivated the bug fix.
+	maskImg := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	maskImg.Set(0, 0, color.NRGBA{R: 50, G: 100, B: 150, A: 200})
+	var maskBuf bytes.Buffer
+	if err := png.Encode(&maskBuf, maskImg); err != nil {
+		t.Fatalf("encode mask: %v", err)
+	}
+	colorImg := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	colorImg.Set(0, 0, color.NRGBA{R: 180, G: 80, B: 40, A: 255})
+	var colorBuf bytes.Buffer
+	if err := png.Encode(&colorBuf, colorImg); err != nil {
+		t.Fatalf("encode color: %v", err)
+	}
+	const mtlx = `<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="ng">
+    <texcoord name="uv" type="vector2"><input name="index" type="integer" value="0"/></texcoord>
+    <image name="basecol" type="color3">
+      <input name="texcoord" type="vector2" nodename="uv"/>
+      <input name="file" type="filename" value="color.png"/>
+      <input name="uaddressmode" type="string" value="periodic"/>
+      <input name="vaddressmode" type="string" value="periodic"/>
+    </image>
+    <image name="mask" type="vector4">
+      <input name="texcoord" type="vector2" nodename="uv"/>
+      <input name="file" type="filename" value="mask.png"/>
+      <input name="uaddressmode" type="string" value="periodic"/>
+      <input name="vaddressmode" type="string" value="periodic"/>
+    </image>
+    <extract name="alpha" type="float">
+      <input name="in" type="vector4" nodename="mask"/>
+      <input name="index" type="integer" value="3"/>
+    </extract>
+    <floor name="gate" type="float"><input name="in" type="float" nodename="alpha"/></floor>
+    <constant name="shift" type="vector3"><input name="value" type="vector3" value="0.0, 1.2, 0.9"/></constant>
+    <hsvadjust name="adj" type="color3">
+      <input name="in" type="color3" nodename="basecol"/>
+      <input name="amount" type="vector3" nodename="shift"/>
+    </hsvadjust>
+    <constant name="leak" type="color3"><input name="value" type="color3" value="0.04, 0.05, 0.11"/></constant>
+    <mix name="combine" type="color3">
+      <input name="bg" type="color3" nodename="adj"/>
+      <input name="fg" type="color3" nodename="leak"/>
+      <input name="mix" type="float" nodename="gate"/>
+    </mix>
+    <output name="out" type="color3" nodename="combine"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>`
+	doc, err := materialx.ParseBytes([]byte(mtlx))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	doc.Resolver = materialx.NewMapResolver(map[string][]byte{
+		"color.png": colorBuf.Bytes(),
+		"mask.png":  maskBuf.Bytes(),
+	})
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("sampler (regression: did a node type stop compiling?): %v", err)
+	}
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.5, 0.5}})
+	// Mask alpha = 200/255 < 1, floor = 0, mix selects bg (the hsvadjust
+	// result). Expect non-zero RGB derived from (180, 80, 40) shifted in
+	// HSV space — the exact value depends on the round-trip but it must
+	// not match the leak constant and must be finite/non-negative.
+	leak := [3]float64{0.04, 0.05, 0.11}
+	allLeak := true
+	for i := range 3 {
+		if math.Abs(got[i]-leak[i]) > 1e-3 {
+			allLeak = false
+		}
+		if got[i] < 0 || math.IsNaN(got[i]) || math.IsInf(got[i], 0) {
+			t.Errorf("channel %d went out of bounds: %v", i, got[i])
+		}
+	}
+	if allLeak {
+		t.Errorf("got leak color %v, expected hsvadjust output (mask gate should be 0)", got)
 	}
 }

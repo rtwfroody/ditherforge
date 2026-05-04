@@ -3,6 +3,7 @@ package materialx
 import (
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -73,21 +74,28 @@ func decodeImage(r io.Reader, srgb bool) (*decodedImage, error) {
 	idx := 0
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
-			r, g, bl, a := img.At(x, y).RGBA()
-			pixels[idx+0] = uint8(r >> 8)
-			pixels[idx+1] = uint8(g >> 8)
-			pixels[idx+2] = uint8(bl >> 8)
-			pixels[idx+3] = uint8(a >> 8)
+			// Convert through NRGBAModel so per-channel reads aren't
+			// scaled by alpha. Multi-channel mask textures (PBR packs
+			// where R, G, B, A each encode independent data) need
+			// straight alpha; the default color.Color.RGBA() returns
+			// premultiplied values, which would entangle the data
+			// channels with alpha.
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			pixels[idx+0] = c.R
+			pixels[idx+1] = c.G
+			pixels[idx+2] = c.B
+			pixels[idx+3] = c.A
 			idx += 4
 		}
 	}
 	return &decodedImage{w: w, h: h, pixels: pixels, srgb: srgb}, nil
 }
 
-// sample looks up an RGB triplet at the given UV with the requested
-// address/filter modes. Output is in [0, 1] per channel; alpha is
-// ignored (ditherforge bakes alpha separately from base color).
-func (img *decodedImage) sample(uv [2]float64, uMode, vMode AddressMode, filter FilterType) [3]float64 {
+// sample looks up an RGBA quad at the given UV with the requested
+// address/filter modes. Output is in [0, 1] per channel. Color3 callers
+// drop the 4th component; vector4 callers (e.g. multi-channel mask
+// textures where alpha encodes data) need it intact.
+func (img *decodedImage) sample(uv [2]float64, uMode, vMode AddressMode, filter FilterType) [4]float64 {
 	u := wrapUV(uv[0], uMode)
 	v := wrapUV(uv[1], vMode)
 	// MaterialX texture origin is bottom-left; image package origin
@@ -119,8 +127,8 @@ func (img *decodedImage) sample(uv [2]float64, uMode, vMode AddressMode, filter 
 	c10 := img.fetch(x1, y0)
 	c01 := img.fetch(x0, y1)
 	c11 := img.fetch(x1, y1)
-	var out [3]float64
-	for i := range 3 {
+	var out [4]float64
+	for i := range 4 {
 		a := c00[i]*(1-fx) + c10[i]*fx
 		b := c01[i]*(1-fx) + c11[i]*fx
 		out[i] = a*(1-fy) + b*fy
@@ -128,14 +136,15 @@ func (img *decodedImage) sample(uv [2]float64, uMode, vMode AddressMode, filter 
 	return out
 }
 
-// fetch returns the un-converted RGB at integer pixel (x, y) in [0, 1].
+// fetch returns the un-converted RGBA at integer pixel (x, y) in [0, 1].
 // Caller must have already wrapped (x, y) into the image bounds.
-func (img *decodedImage) fetch(x, y int) [3]float64 {
+func (img *decodedImage) fetch(x, y int) [4]float64 {
 	off := 4 * (y*img.w + x)
-	return [3]float64{
+	return [4]float64{
 		float64(img.pixels[off+0]) / 255,
 		float64(img.pixels[off+1]) / 255,
 		float64(img.pixels[off+2]) / 255,
+		float64(img.pixels[off+3]) / 255,
 	}
 }
 

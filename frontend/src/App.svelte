@@ -42,7 +42,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, MaterialXPathOK, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -884,6 +884,25 @@
     return typeof v === 'number' && (allowed as readonly number[]).includes(v) ? (v as T) : def;
   }
 
+  // Validates a MaterialX file (existence + parse + base-color sampler
+  // compile) and surfaces any problem as a status warning right away,
+  // so users learn at file-pick time about missing files or unsupported
+  // graphs instead of after a full pipeline run.
+  //
+  // The result race-guards against concurrent picks: if the user
+  // selects file B while validation of file A is in flight, A's late
+  // result is dropped instead of overwriting whatever we already said
+  // about B.
+  async function validateMaterialXFile(path: string): Promise<void> {
+    if (!path) return;
+    const warning = await ValidateMaterialX(path);
+    if (path !== baseMaterialXPath) return;
+    if (warning) {
+      statusMessage = warning;
+      statusType = 'warning';
+    }
+  }
+
   function applySettings(s: any) {
     const D = FACTORY_DEFAULTS;
     // Saved sticker coords match the saved size/scale settings. Clear
@@ -920,16 +939,11 @@
     const explicitMode = pickEnum(s.baseColorMode, BASE_COLOR_MODE_VALUES, '' as BaseColorMode);
     baseColorMode = explicitMode || (baseMaterialXPath ? 'texture' : 'solid');
     // Best-effort check: when a settings file is loaded on a different
-    // machine than where it was saved, the .mtlx path may not resolve.
-    // Surface a warning immediately so the user knows before they
-    // first click Generate.
+    // machine than where it was saved, the .mtlx path may not resolve,
+    // or the file may use unsupported nodes. Surface a warning
+    // immediately so the user knows before they first click Generate.
     if (baseMaterialXPath) {
-      MaterialXPathOK(baseMaterialXPath).then((ok: boolean) => {
-        if (!ok) {
-          statusMessage = `MaterialX file not found: ${baseMaterialXPath}. Re-pick or place the file at that path.`;
-          statusType = 'warning';
-        }
-      });
+      validateMaterialXFile(baseMaterialXPath);
     }
 
     colorSlots = Array.isArray(s.colorSlots)
@@ -1500,6 +1514,7 @@
                     const r = await OpenMaterialXFile();
                     if (r && r.path) {
                       baseMaterialXPath = r.path;
+                      await validateMaterialXFile(r.path);
                     }
                   }}>Load .mtlx / .zip</Button>
                 {/if}

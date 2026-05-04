@@ -28,8 +28,6 @@ export function LoadSettingsFile(arg1:string):Promise<main.LoadSettingsResult>;
 
 export function LogMessage(arg1:string,arg2:string):Promise<void>;
 
-export function MaterialXPathOK(arg1:string):Promise<boolean>;
-
 export function OpenFileDialog():Promise<string>;
 
 export function OpenMaterialXFile():Promise<main.MaterialXOpenResult>;
@@ -53,5 +51,7 @@ export function SaveSettings(arg1:string,arg2:main.Settings):Promise<void>;
 export function SaveSettingsDialog(arg1:main.Settings):Promise<string>;
 
 export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
+
+export function ValidateMaterialX(arg1:string):Promise<string>;
 
 export function Version():Promise<string>;

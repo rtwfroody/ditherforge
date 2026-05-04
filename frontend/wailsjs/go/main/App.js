@@ -50,10 +50,6 @@ export function LogMessage(arg1, arg2) {
   return window['go']['main']['App']['LogMessage'](arg1, arg2);
 }
 
-export function MaterialXPathOK(arg1) {
-  return window['go']['main']['App']['MaterialXPathOK'](arg1);
-}
-
 export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
@@ -100,6 +96,10 @@ export function SaveSettingsDialog(arg1) {
 
 export function SplitPreview(arg1) {
   return window['go']['main']['App']['SplitPreview'](arg1);
+}
+
+export function ValidateMaterialX(arg1) {
+  return window['go']['main']['App']['ValidateMaterialX'](arg1);
 }
 
 export function Version() {
