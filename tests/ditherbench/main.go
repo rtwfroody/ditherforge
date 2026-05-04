@@ -97,9 +97,11 @@ func main() {
 		// strictly improve on its building block.
 		{"dizzy", wrapDizzy},
 		{"dizzy-corrected", wrapDizzyCorrected},
+		{"dizzy-rcorrected", wrapDizzyRCorrected},
 		{"dizzy-prop", wrapDizzyProp},
 		{"dizzy-rprop", wrapDizzyRProp},
 		{"floyd-steinberg", wrapFS},
+		{"riemersma", wrapRiemersma},
 		{"auto", wrapAuto},
 	}
 	if *onlyMode != "" {
@@ -276,6 +278,8 @@ func loadPNGFixture(path string) (fixture, error) {
 			cells = append(cells, voxel.ActiveCell{
 				Col:   x,
 				Row:   y,
+				Cx:    float32(x),
+				Cy:    float32(y),
 				Color: [3]uint8{c.R, c.G, c.B},
 			})
 		}
@@ -371,6 +375,9 @@ func wrapDizzy(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nb
 func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherCorrected(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
+func wrapDizzyRCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherRegionalCorrected(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
 func wrapDizzyProp(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherProportional(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
@@ -379,6 +386,9 @@ func wrapDizzyRProp(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapRiemersma(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.Riemersma(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapAuto(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherAuto(ctx, cells, pal, nbrs, progress.NullTracker{})

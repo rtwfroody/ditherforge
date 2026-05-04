@@ -1147,6 +1147,385 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	return assignments, nil
 }
 
+// RiemersmaWindowSize is the sliding-window length used by
+// Riemersma — the number of past errors each cell sees, weighted by
+// age. 16 is the value Riemersma's original 1998 description used
+// and the typical setting in compuphase's reference implementation.
+// Larger windows smear error over a wider region (less local
+// fidelity); smaller windows behave closer to a deterministic FS-
+// alike. 16 hits the usual blue-noise/detail balance.
+const RiemersmaWindowSize = 16
+
+// RiemersmaDecayRatio is the geometric decay between newest and
+// oldest in-window errors: weight[k] = ratio^(k/(L-1)), with k=0
+// being newest and k=L-1 being oldest. The 1/16 default matches
+// Riemersma's recommendation: oldest entry contributes 1/16 of the
+// newest, so the contribution from each cell's error fades out over
+// the window without abrupt edges. Smaller ratios localize the
+// effect more (closer to "no diffusion past a small neighborhood");
+// larger ratios spread error wider (closer to a blue-noise mask).
+const RiemersmaDecayRatio = 1.0 / 16.0
+
+// Riemersma dithers cells by walking them along a locally-coherent
+// tour through the neighbor graph and maintaining a sliding window
+// of recent errors that diffuse into the current cell with
+// exponentially decaying weights. Unlike Floyd-Steinberg's scanline
+// schedule it has no axis-aligned scan direction, so flat areas
+// don't band; unlike dizzy it has no stranded random tail, so global
+// chroma is preserved by construction (every cell's error is
+// integrated into subsequent cells, with steady-state DC gain 1).
+//
+// The tour is a greedy nearest-neighbor walk through the cell
+// neighbor graph: at each step, move to the unvisited neighbor with
+// smallest 3D distance from the current cell. On a dead end (no
+// unvisited neighbors), jump to the globally nearest unvisited
+// cell. For surface meshes, dead-end jumps are rare; the few that
+// occur introduce a brief high-error transient that the window
+// absorbs over the next L cells.
+//
+// Cost: O(N · L) for the dither, plus O(N · avg_degree) for the
+// tour with O(N) extra work per dead end.
+func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	n := len(cells)
+	if n == 0 {
+		return nil, nil
+	}
+
+	// Weights indexed by age (0 = newest, L-1 = oldest).
+	// Normalized so steady-state DC gain is 1 — i.e., a constant
+	// error e replicated through the window contributes exactly e
+	// of corrected target back to each subsequent cell, preserving
+	// chroma in expectation.
+	L := RiemersmaWindowSize
+	weights := make([]float32, L)
+	var total float32
+	for k := 0; k < L; k++ {
+		weights[k] = float32(math.Pow(RiemersmaDecayRatio, float64(k)/float64(L-1)))
+		total += weights[k]
+	}
+	for k := range weights {
+		weights[k] /= total
+	}
+
+	tour := buildRiemersmaTour(cells, neighbors)
+
+	// Circular buffer of error vectors. head points at the slot
+	// that will be overwritten next (i.e., currently the oldest).
+	window := make([][3]float32, L)
+	head := 0
+
+	assigns := make([]int32, n)
+	for ti, idx := range tour {
+		if ti%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", ti)
+		}
+
+		// Weighted sum of in-window errors. Slot indexed by age:
+		// age 0 (newest) lives at (head - 1 + L) % L, age k at
+		// (head - 1 - k + L) % L.
+		var eR, eG, eB float32
+		for k := 0; k < L; k++ {
+			slot := (head + L - 1 - k) % L
+			eR += weights[k] * window[slot][0]
+			eG += weights[k] * window[slot][1]
+			eB += weights[k] * window[slot][2]
+		}
+
+		r := float32(cells[idx].Color[0]) + eR
+		g := float32(cells[idx].Color[1]) + eG
+		b := float32(cells[idx].Color[2]) + eB
+
+		bestIdx := 0
+		bestDist := float32(math.MaxFloat32)
+		for pi, p := range pal {
+			dr := r - float32(p[0])
+			dg := g - float32(p[1])
+			db := b - float32(p[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestDist {
+				bestDist = d
+				bestIdx = pi
+			}
+		}
+		assigns[idx] = int32(bestIdx)
+
+		chosen := pal[bestIdx]
+		window[head][0] = r - float32(chosen[0])
+		window[head][1] = g - float32(chosen[1])
+		window[head][2] = b - float32(chosen[2])
+		head = (head + 1) % L
+	}
+	return assigns, nil
+}
+
+// buildRiemersmaTour produces a Hamiltonian-path-ish ordering of
+// cells suitable for Riemersma. Starts at cell 0; at each step
+// moves to the unvisited neighbor closest in 3D space; on a dead
+// end (no unvisited neighbors), jumps to the globally nearest
+// unvisited cell.
+//
+// The "globally nearest" fallback is O(N) per dead end. For a
+// closed surface mesh, dead ends are uncommon (every cell has
+// 4-8 neighbors, walks rarely paint themselves into corners) and
+// the fallback cost is amortized fine.
+func buildRiemersmaTour(cells []ActiveCell, neighbors [][]Neighbor) []int {
+	n := len(cells)
+	visited := make([]bool, n)
+	tour := make([]int, 0, n)
+
+	// Spatial bucket grid over (Cx, Cy, Cz). On dead ends we expand
+	// outward in shells of buckets and pick the nearest unvisited
+	// cell found. Without this, each dead-end fallback was an O(N)
+	// global scan; on complex meshes with many dead ends the total
+	// tour-build time was quadratic. With the bucket grid each
+	// dead-end resolution is O(avg_bucket_size) amortized.
+	grid := newCellBucketGrid(cells)
+
+	cur := 0
+	visited[cur] = true
+	tour = append(tour, cur)
+	grid.markVisited(cur)
+	for len(tour) < n {
+		bestNb := -1
+		bestNbD := float32(math.MaxFloat32)
+		for _, nb := range neighbors[cur] {
+			if visited[nb.Idx] {
+				continue
+			}
+			dx := cells[cur].Cx - cells[nb.Idx].Cx
+			dy := cells[cur].Cy - cells[nb.Idx].Cy
+			dz := cells[cur].Cz - cells[nb.Idx].Cz
+			d := dx*dx + dy*dy + dz*dz
+			if d < bestNbD {
+				bestNbD = d
+				bestNb = nb.Idx
+			}
+		}
+		if bestNb >= 0 {
+			visited[bestNb] = true
+			tour = append(tour, bestNb)
+			grid.markVisited(bestNb)
+			cur = bestNb
+			continue
+		}
+		// Dead end: bucket-grid search for nearest unvisited.
+		next := grid.nearestUnvisited(cur, cells, visited)
+		visited[next] = true
+		tour = append(tour, next)
+		grid.markVisited(next)
+		cur = next
+	}
+	return tour
+}
+
+// cellBucketGrid is a sparse 3D bucket grid over cell positions.
+// Each bucket holds the indices of unvisited cells that fall within
+// it; markVisited removes a cell index from its bucket. The grid is
+// sized so the average bucket holds ~32 cells (cuberoot scaling),
+// which keeps both per-step expansion shells small and bookkeeping
+// overhead bounded.
+type cellBucketGrid struct {
+	minX, minY, minZ float32
+	stepX, stepY, stepZ float32
+	nx, ny, nz int
+	buckets map[int][]int
+	cellBucket []int // per-cell linear bucket index
+}
+
+func newCellBucketGrid(cells []ActiveCell) *cellBucketGrid {
+	n := len(cells)
+	if n == 0 {
+		return &cellBucketGrid{buckets: map[int][]int{}}
+	}
+	minX, minY, minZ := cells[0].Cx, cells[0].Cy, cells[0].Cz
+	maxX, maxY, maxZ := minX, minY, minZ
+	for i := 1; i < n; i++ {
+		c := cells[i]
+		if c.Cx < minX {
+			minX = c.Cx
+		} else if c.Cx > maxX {
+			maxX = c.Cx
+		}
+		if c.Cy < minY {
+			minY = c.Cy
+		} else if c.Cy > maxY {
+			maxY = c.Cy
+		}
+		if c.Cz < minZ {
+			minZ = c.Cz
+		} else if c.Cz > maxZ {
+			maxZ = c.Cz
+		}
+	}
+	rangeX := maxX - minX
+	rangeY := maxY - minY
+	rangeZ := maxZ - minZ
+	// Target ~32 cells per bucket.
+	side := int(math.Round(math.Cbrt(float64(n) / 32.0)))
+	if side < 1 {
+		side = 1
+	}
+	nx, ny, nz := side, side, side
+	stepX := rangeX / float32(nx)
+	stepY := rangeY / float32(ny)
+	stepZ := rangeZ / float32(nz)
+	if stepX <= 0 {
+		stepX = 1
+	}
+	if stepY <= 0 {
+		stepY = 1
+	}
+	if stepZ <= 0 {
+		stepZ = 1
+	}
+	g := &cellBucketGrid{
+		minX: minX, minY: minY, minZ: minZ,
+		stepX: stepX, stepY: stepY, stepZ: stepZ,
+		nx: nx, ny: ny, nz: nz,
+		buckets:    make(map[int][]int, nx*ny*nz),
+		cellBucket: make([]int, n),
+	}
+	for i, c := range cells {
+		bx, by, bz := g.bucketIdx(c.Cx, c.Cy, c.Cz)
+		key := g.linearKey(bx, by, bz)
+		g.buckets[key] = append(g.buckets[key], i)
+		g.cellBucket[i] = key
+	}
+	return g
+}
+
+func (g *cellBucketGrid) bucketIdx(x, y, z float32) (int, int, int) {
+	bx := int((x - g.minX) / g.stepX)
+	by := int((y - g.minY) / g.stepY)
+	bz := int((z - g.minZ) / g.stepZ)
+	if bx < 0 {
+		bx = 0
+	} else if bx >= g.nx {
+		bx = g.nx - 1
+	}
+	if by < 0 {
+		by = 0
+	} else if by >= g.ny {
+		by = g.ny - 1
+	}
+	if bz < 0 {
+		bz = 0
+	} else if bz >= g.nz {
+		bz = g.nz - 1
+	}
+	return bx, by, bz
+}
+
+func (g *cellBucketGrid) linearKey(bx, by, bz int) int {
+	return (bz*g.ny+by)*g.nx + bx
+}
+
+func (g *cellBucketGrid) markVisited(cellIdx int) {
+	key := g.cellBucket[cellIdx]
+	bucket := g.buckets[key]
+	for i, idx := range bucket {
+		if idx == cellIdx {
+			bucket[i] = bucket[len(bucket)-1]
+			bucket = bucket[:len(bucket)-1]
+			if len(bucket) == 0 {
+				delete(g.buckets, key)
+			} else {
+				g.buckets[key] = bucket
+			}
+			return
+		}
+	}
+}
+
+func (g *cellBucketGrid) nearestUnvisited(curIdx int, cells []ActiveCell, visited []bool) int {
+	cur := cells[curIdx]
+	cbx, cby, cbz := g.bucketIdx(cur.Cx, cur.Cy, cur.Cz)
+	best := -1
+	bestD := float32(math.MaxFloat32)
+	// Expand in shells until at least one candidate is found AND
+	// the next shell can't possibly contain a closer cell. The
+	// minimum-possible distance to a cell in a shell of radius r
+	// (in bucket units) is (r-1) * minStep, so we stop expanding
+	// once bestD < ((r-1) * minStep)^2.
+	minStep := g.stepX
+	if g.stepY < minStep {
+		minStep = g.stepY
+	}
+	if g.stepZ < minStep {
+		minStep = g.stepZ
+	}
+	maxRadius := g.nx
+	if g.ny > maxRadius {
+		maxRadius = g.ny
+	}
+	if g.nz > maxRadius {
+		maxRadius = g.nz
+	}
+	for r := 0; r <= maxRadius; r++ {
+		// Iterate the surface of the shell at radius r, skipping
+		// the interior we already covered at smaller radii.
+		x0, x1 := cbx-r, cbx+r
+		y0, y1 := cby-r, cby+r
+		z0, z1 := cbz-r, cbz+r
+		if x0 < 0 {
+			x0 = 0
+		}
+		if y0 < 0 {
+			y0 = 0
+		}
+		if z0 < 0 {
+			z0 = 0
+		}
+		if x1 >= g.nx {
+			x1 = g.nx - 1
+		}
+		if y1 >= g.ny {
+			y1 = g.ny - 1
+		}
+		if z1 >= g.nz {
+			z1 = g.nz - 1
+		}
+		for bz := z0; bz <= z1; bz++ {
+			for by := y0; by <= y1; by++ {
+				for bx := x0; bx <= x1; bx++ {
+					if r > 0 && bx > cbx-r && bx < cbx+r && by > cby-r && by < cby+r && bz > cbz-r && bz < cbz+r {
+						continue
+					}
+					bucket := g.buckets[g.linearKey(bx, by, bz)]
+					for _, idx := range bucket {
+						if visited[idx] {
+							continue
+						}
+						dx := cur.Cx - cells[idx].Cx
+						dy := cur.Cy - cells[idx].Cy
+						dz := cur.Cz - cells[idx].Cz
+						d := dx*dx + dy*dy + dz*dz
+						if d < bestD {
+							bestD = d
+							best = idx
+						}
+					}
+				}
+			}
+		}
+		if best >= 0 {
+			// We have a candidate. Continue expanding only if the
+			// next shell could plausibly contain a closer cell.
+			minPossibleDist := float32(r) * minStep
+			if minPossibleDist*minPossibleDist >= bestD {
+				return best
+			}
+		}
+	}
+	return best
+}
+
 // DizzyCorrectionPasses is the number of dizzy iterations
 // DitherCorrected runs. Pass 1 measures the algorithm's natural
 // drift; each subsequent pass shifts the cell inputs by the
@@ -1290,6 +1669,272 @@ func computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB float64) float64 {
 	oL, oA, oBl := out.Lab()
 	dL, dA, dB := (iL-oL)*100, (iA-oA)*100, (iBl-oBl)*100
 	return math.Sqrt(dL*dL + dA*dA + dB*dB)
+}
+
+// RegionalCorrectionPasses is the per-cluster pass cap used by
+// DitherRegionalCorrected. Same budget per cluster as DitherCorrected
+// uses globally; per-cluster monotone non-regression freezes any
+// cluster as soon as a pass regresses, so the actual pass count is
+// often less.
+const RegionalCorrectionPasses = 3
+
+// regionalMinClusterFrac is the minimum fraction of total cells each
+// cluster must contain. The largest K in [2, regionalMaxClusters]
+// satisfying this constraint is chosen; otherwise the algorithm
+// degenerates to a single cluster (equivalent to DitherCorrected).
+//
+// 10% chosen to keep clusters large enough that drift estimates are
+// statistically meaningful — micro-clusters of a few cells would
+// produce noisy drift measurements that the iteration can't
+// usefully chase.
+const regionalMinClusterFrac = 0.10
+
+// regionalMaxClusters caps cluster count. Implied by regionalMinClusterFrac
+// (10 × 10% = 100%) but stated explicitly for clarity.
+const regionalMaxClusters = 10
+
+// DitherRegionalCorrected partitions cells by input color into up to
+// regionalMaxClusters clusters (each ≥ regionalMinClusterFrac of N)
+// and runs DitherCorrected-style iterative drift correction
+// independently per cluster. Each cluster carries its own cumulative
+// input shift, driven by its own measured drift; per-cluster monotone
+// non-regression freezes a cluster as soon as a pass increases its
+// drift.
+//
+// Hypothesis: DC's iterative drift correction works best on
+// approximately-unimodal input distributions. Multimodal scenes
+// (bricks_benchy: mortar+brick) violate DC's translation-invariance
+// assumption — a global shift cancels at one mode and overshoots at
+// another. Per-cluster shift addresses this by giving each mode its
+// own correction.
+//
+// All clusters are dithered together in a single shared dizzy pass
+// per iteration (error diffuses freely across cluster boundaries);
+// only the shift-per-cluster and best-assignment-tracking are
+// partitioned by cluster.
+func DitherRegionalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	if len(cells) == 0 {
+		return nil, nil
+	}
+	N := len(cells)
+
+	cellCluster, K := clusterByInputColor(cells)
+
+	iSum := make([][3]float64, K)
+	counts := make([]int, K)
+	for i, c := range cells {
+		k := cellCluster[i]
+		iSum[k][0] += float64(c.Color[0])
+		iSum[k][1] += float64(c.Color[1])
+		iSum[k][2] += float64(c.Color[2])
+		counts[k]++
+	}
+	iAvg := make([][3]float64, K)
+	for k := 0; k < K; k++ {
+		if counts[k] == 0 {
+			continue
+		}
+		n := float64(counts[k])
+		iAvg[k][0] = iSum[k][0] / n
+		iAvg[k][1] = iSum[k][1] / n
+		iAvg[k][2] = iSum[k][2] / n
+	}
+
+	correction := make([][3]float64, K)
+	bestDrift := make([]float64, K)
+	for k := range bestDrift {
+		bestDrift[k] = math.Inf(1)
+	}
+	bestAssigns := make([]int32, N)
+	frozen := make([]bool, K)
+
+	shifted := make([]ActiveCell, N)
+	copy(shifted, cells)
+
+	for pass := 0; pass < RegionalCorrectionPasses; pass++ {
+		passTracker := ditherPassTracker{real: tracker, offset: pass * N}
+		assigns, err := DitherWithNeighbors(ctx, shifted, pal, neighbors, passTracker)
+		if err != nil {
+			return nil, err
+		}
+
+		oSum := make([][3]float64, K)
+		for i, a := range assigns {
+			k := cellCluster[i]
+			oSum[k][0] += float64(pal[a][0])
+			oSum[k][1] += float64(pal[a][1])
+			oSum[k][2] += float64(pal[a][2])
+		}
+
+		allFrozen := true
+		for k := 0; k < K; k++ {
+			if counts[k] == 0 || frozen[k] {
+				continue
+			}
+			n := float64(counts[k])
+			oAvg := [3]float64{oSum[k][0] / n, oSum[k][1] / n, oSum[k][2] / n}
+			driftDE := computeDriftDEFromAvg(iAvg[k][0], iAvg[k][1], iAvg[k][2], oAvg[0], oAvg[1], oAvg[2])
+			if driftDE < bestDrift[k] {
+				bestDrift[k] = driftDE
+				for i := 0; i < N; i++ {
+					if cellCluster[i] == k {
+						bestAssigns[i] = assigns[i]
+					}
+				}
+				correction[k][0] += oAvg[0] - iAvg[k][0]
+				correction[k][1] += oAvg[1] - iAvg[k][1]
+				correction[k][2] += oAvg[2] - iAvg[k][2]
+				allFrozen = false
+			} else {
+				frozen[k] = true
+			}
+		}
+		if allFrozen || pass == RegionalCorrectionPasses-1 {
+			break
+		}
+
+		for i := 0; i < N; i++ {
+			k := cellCluster[i]
+			shifted[i].Color[0] = clampUint8(float64(cells[i].Color[0]) - correction[k][0])
+			shifted[i].Color[1] = clampUint8(float64(cells[i].Color[1]) - correction[k][1])
+			shifted[i].Color[2] = clampUint8(float64(cells[i].Color[2]) - correction[k][2])
+		}
+	}
+	return bestAssigns, nil
+}
+
+// clusterByInputColor partitions cells into the largest K in
+// [2, regionalMaxClusters] such that every cluster has ≥
+// regionalMinClusterFrac × N cells. Tries K from regionalMaxClusters
+// down. If no K ≥ 2 satisfies the constraint, returns a single
+// cluster covering all cells.
+func clusterByInputColor(cells []ActiveCell) ([]int, int) {
+	N := len(cells)
+	minCluster := int(math.Ceil(regionalMinClusterFrac * float64(N)))
+	for K := regionalMaxClusters; K >= 2; K-- {
+		cellCluster, counts := kmeansRGB(cells, K)
+		ok := true
+		for _, c := range counts {
+			if c < minCluster {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return cellCluster, K
+		}
+	}
+	return make([]int, N), 1
+}
+
+// kmeansRGB runs K-means on cell input colors with K-means++
+// seeding. Deterministic via a fixed RNG seed so results are
+// reproducible across runs. Returns per-cell cluster index and
+// per-cluster cell count.
+func kmeansRGB(cells []ActiveCell, K int) ([]int, []int) {
+	N := len(cells)
+	rng := rand.New(rand.NewSource(int64(K) * 7919))
+
+	centers := make([][3]float64, K)
+	seed := rng.Intn(N)
+	centers[0][0] = float64(cells[seed].Color[0])
+	centers[0][1] = float64(cells[seed].Color[1])
+	centers[0][2] = float64(cells[seed].Color[2])
+
+	distSq := make([]float64, N)
+	for k := 1; k < K; k++ {
+		var totalD float64
+		for i, c := range cells {
+			cR := float64(c.Color[0])
+			cG := float64(c.Color[1])
+			cB := float64(c.Color[2])
+			best := math.MaxFloat64
+			for j := 0; j < k; j++ {
+				dr := cR - centers[j][0]
+				dg := cG - centers[j][1]
+				db := cB - centers[j][2]
+				d := dr*dr + dg*dg + db*db
+				if d < best {
+					best = d
+				}
+			}
+			distSq[i] = best
+			totalD += best
+		}
+		if totalD == 0 {
+			centers[k] = centers[0]
+			continue
+		}
+		target := rng.Float64() * totalD
+		var sum float64
+		chosen := N - 1
+		for i, d := range distSq {
+			sum += d
+			if sum >= target {
+				chosen = i
+				break
+			}
+		}
+		centers[k][0] = float64(cells[chosen].Color[0])
+		centers[k][1] = float64(cells[chosen].Color[1])
+		centers[k][2] = float64(cells[chosen].Color[2])
+	}
+
+	cellCluster := make([]int, N)
+	counts := make([]int, K)
+	sums := make([][3]float64, K)
+	for iter := 0; iter < kmeansMaxIter; iter++ {
+		for k := range counts {
+			counts[k] = 0
+			sums[k][0], sums[k][1], sums[k][2] = 0, 0, 0
+		}
+		for i, c := range cells {
+			cR := float64(c.Color[0])
+			cG := float64(c.Color[1])
+			cB := float64(c.Color[2])
+			best := 0
+			bestD := math.MaxFloat64
+			for k, cen := range centers {
+				dr := cR - cen[0]
+				dg := cG - cen[1]
+				db := cB - cen[2]
+				d := dr*dr + dg*dg + db*db
+				if d < bestD {
+					bestD = d
+					best = k
+				}
+			}
+			cellCluster[i] = best
+			sums[best][0] += cR
+			sums[best][1] += cG
+			sums[best][2] += cB
+			counts[best]++
+		}
+		var maxMove float64
+		for k := 0; k < K; k++ {
+			if counts[k] == 0 {
+				continue
+			}
+			n := float64(counts[k])
+			newR := sums[k][0] / n
+			newG := sums[k][1] / n
+			newB := sums[k][2] / n
+			move := math.Abs(newR-centers[k][0]) + math.Abs(newG-centers[k][1]) + math.Abs(newB-centers[k][2])
+			if move > maxMove {
+				maxMove = move
+			}
+			centers[k][0] = newR
+			centers[k][1] = newG
+			centers[k][2] = newB
+		}
+		if maxMove < 0.5 {
+			break
+		}
+	}
+	return cellCluster, counts
 }
 
 // AutoModeDriftThresholdDE is the global Lab ΔE drift cutoff used by

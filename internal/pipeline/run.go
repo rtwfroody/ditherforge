@@ -756,6 +756,8 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		switch ditherMode {
 		case "dizzy-corrected":
 			ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
+		case "dizzy-rcorrected":
+			ditherUnits = voxel.RegionalCorrectionPasses * len(po.Cells)
 		case "auto":
 			// Worst case: dizzy-corrected runs all 3 passes AND the
 			// FS fallback fires. On the common case (drift below
@@ -783,6 +785,9 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "dizzy-corrected":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
+		case "dizzy-rcorrected":
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.DitherRegionalCorrected(r.ctx, cells, pal, neighbors, r.tracker)
 		case "dizzy-prop":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherProportional(r.ctx, cells, pal, neighbors, r.tracker)
@@ -792,6 +797,9 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
+		case "riemersma":
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.tracker)
 		case "auto":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherAuto(r.ctx, cells, pal, neighbors, r.tracker)

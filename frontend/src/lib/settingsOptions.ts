@@ -41,12 +41,14 @@ export const SPLIT_AXIS_OPTIONS = [
 export type SplitAxis = typeof SPLIT_AXIS_OPTIONS[number]['value'];
 
 export const DITHER_OPTIONS = [
-  { value: 'auto',            label: 'auto'            },
-  { value: 'dizzy-corrected', label: 'dizzy-corrected' },
-  { value: 'dizzy-prop',      label: 'dizzy-prop'      },
-  { value: 'dizzy-rprop',     label: 'dizzy-rprop'     },
-  { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
-  { value: 'none',            label: 'none'            },
+  { value: 'auto',             label: 'auto'             },
+  { value: 'dizzy-corrected',  label: 'dizzy-corrected'  },
+  { value: 'dizzy-rcorrected', label: 'dizzy-rcorrected' },
+  { value: 'dizzy-prop',       label: 'dizzy-prop'       },
+  { value: 'dizzy-rprop',      label: 'dizzy-rprop'      },
+  { value: 'floyd-steinberg',  label: 'Floyd-Steinberg'  },
+  { value: 'riemersma',        label: 'Riemersma'        },
+  { value: 'none',             label: 'none'             },
 ] as const;
 export type DitherMode = typeof DITHER_OPTIONS[number]['value'];
 
