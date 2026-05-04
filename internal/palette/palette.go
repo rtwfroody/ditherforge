@@ -106,10 +106,22 @@ func AssignPalette(faceColors [][3]uint8, palette [][3]uint8) []int32 {
 	return assignments
 }
 
-// WeightedLabSample is a color in Lab space with a count (weight).
+// WeightedLabSample is a color in Lab space with both a raw pixel count
+// (Count, used by topSamples for diversity sorting) and a perceptual
+// scoring weight (Weight, used by the score functions). After
+// CellColorHistogram, Weight = float64(Count). ApplyChromaWeighting
+// inflates Weight on chromatic samples so the scorer treats colorful
+// regions as more important than their pixel-area share.
+//
+// Note: topSamples still bins and ranks by Count, not Weight. That
+// keeps diversity-trimming based on pixel area (so a chromatic sample
+// with zero raw pixels can't sneak through), and means chroma
+// emphasis only fires at the score step. Justified for now since
+// real models produce many more bins than the 5000-sample cap.
 type WeightedLabSample struct {
-	Lab   [3]float64
-	Count int
+	Lab    [3]float64
+	Count  int
+	Weight float64
 }
 
 // CellColorHistogram builds a deduplicated, weighted Lab sample set from cell
@@ -132,9 +144,51 @@ func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
 		var s WeightedLabSample
 		s.Lab[0], s.Lab[1], s.Lab[2] = cf.Lab()
 		s.Count = count
+		s.Weight = float64(count)
 		samples = append(samples, s)
 	}
 	return samples
+}
+
+// chromaWeightExponent and chromaWeightScale tune the chroma-weighting
+// applied by ApplyChromaWeighting. The form is:
+//
+//	Weight = Count * (1 + chroma/scale)^exponent
+//
+// where chroma = sqrt(a² + b²) measured in standard CIELAB units. The
+// "1 +" floor keeps achromatic samples at their raw count weight (so
+// all-grey models like the delorean still favor a grey vertex). Higher
+// exponent or lower scale gives chromatic samples a louder voice in
+// the score; the values below were tuned so all four
+// tests/testdata/color/* fixtures pass simultaneously.
+const (
+	chromaWeightExponent = 1.0
+	chromaWeightScale    = 50.0
+)
+
+// ApplyChromaWeighting reweights samples in-place so that high-chroma
+// (vivid, attention-grabbing) cells contribute more to the scoring
+// objective than their pixel-area share would suggest. This addresses
+// a perceptual bias in the count-only scorer: the eye over-attends to
+// saturated colors relative to greys, so a brick texture that's
+// 70% mortar by pixel area still reads as "red brick" to a viewer
+// and the palette should be picked accordingly.
+//
+// Composes multiplicatively against the existing Weight (so a future
+// step that adds another perceptual factor can stack on top), rather
+// than overwriting from Count. Callers that don't want chroma
+// weighting can skip this call entirely.
+func ApplyChromaWeighting(samples []WeightedLabSample) {
+	for i := range samples {
+		a := samples[i].Lab[1]
+		b := samples[i].Lab[2]
+		// go-colorful Lab values are scaled by 1/100 vs. standard
+		// CIELAB; multiply by 100 so the constants above are in
+		// familiar Lab units (chroma=20 = "modest," chroma=60 = "very vivid").
+		chroma := math.Sqrt(a*a+b*b) * 100
+		factor := math.Pow(1+chroma/chromaWeightScale, chromaWeightExponent)
+		samples[i].Weight *= factor
+	}
 }
 
 // topSamples returns at most maxN samples while preserving color diversity.
@@ -309,6 +363,7 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory [
 	}
 
 	samples := CellColorHistogram(cellColors)
+	ApplyChromaWeighting(samples)
 	samples = topSamples(samples, 5000)
 
 	// Convert inventory to Lab.
@@ -398,14 +453,62 @@ type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, s
 // colors that are inside the hull but far from any palette color. This
 // accounts for the perceptual cost of dithering distant colors: e.g. gray
 // reproduced by alternating black and white cells looks noisy even though
-// gray is inside the {black,white,...} hull.
+// gray is inside the {black,white,...} hull. It is modulated per-sample by
+// chromaSpreadFalloff below — see weightedHullScore.
 const ditherSpreadFactor = 0.3
+
+// chromaSpreadFalloff is the Lab-chroma constant in the per-sample
+// spread-penalty modulation:
+//
+//	effectiveSpread = ditherSpreadFactor * exp(-chroma/falloff)
+//
+// Low-chroma samples (chroma ≪ falloff) keep the full spread penalty,
+// so grey cells anchor a grey palette vertex. High-chroma samples
+// (chroma ≫ falloff) lose the spread penalty, so they happily vote
+// for vivid palette vertices in their hue direction even when those
+// vertices sit further out than any sample. This was the missing
+// signal for the brick benchy: cells max out around chroma 30 and
+// can't directly justify a chroma-70 Red, but they shouldn't be
+// penalized for the palette having one — Red is exactly what their
+// hue points at.
+const chromaSpreadFalloff = 30.0
 
 // nearestVertexDist returns the Euclidean distance from p to the closest vertex.
 func nearestVertexDist(p [3]float64, verts [][3]float64) float64 {
 	best := math.MaxFloat64
 	for _, v := range verts {
 		d0 := p[0] - v[0]
+		d1 := p[1] - v[1]
+		d2 := p[2] - v[2]
+		d := d0*d0 + d1*d1 + d2*d2
+		if d < best {
+			best = d
+		}
+	}
+	return math.Sqrt(best)
+}
+
+// nearestVertexDistChromaWeighted is nearestVertexDist with a per-sample
+// discount on the L (lightness) axis. lightnessWeight is precomputed by
+// the caller (it shares the same exp(-chroma/falloff) value used to
+// modulate the spread magnitude — see weightedHullScore — and they're
+// the same number expressing the same claim, so we don't recompute).
+//
+// Full lightness weight for achromatic samples means a grey body of a
+// car needs a grey-axis palette vertex at matching lightness. Rapidly
+// diminishing weight for chromatic samples means a brick at chroma 30
+// doesn't care that Red sits at a different lightness, since dither
+// can mix Red with neighboring colors to recover any lightness in its
+// hue's column.
+//
+// The (a, b) terms are always full-weight: hue and chroma matching
+// matter regardless of sample chroma — even a near-grey sample with
+// a slight warm tint should anchor on a warm vertex over a cool one
+// at the same lightness.
+func nearestVertexDistChromaWeighted(p [3]float64, verts [][3]float64, lightnessWeight float64) float64 {
+	best := math.MaxFloat64
+	for _, v := range verts {
+		d0 := (p[0] - v[0]) * lightnessWeight
 		d1 := p[1] - v[1]
 		d2 := p[2] - v[2]
 		d := d0*d0 + d1*d1 + d2*d2
@@ -437,9 +540,20 @@ func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64
 	total := 0.0
 	for _, s := range samples {
 		hullDist := distToConvexHull(s.Lab, verts)
-		nearDist := nearestVertexDist(s.Lab, verts)
-		d := hullDist + ditherSpreadFactor*nearDist
-		total += d * d * float64(s.Count)
+		// Standard CIELAB chroma; multiply by 100 to undo go-colorful's
+		// 1/100 scaling so chromaSpreadFalloff is in familiar units.
+		chroma := math.Sqrt(s.Lab[1]*s.Lab[1]+s.Lab[2]*s.Lab[2]) * 100
+		// chromaKnee is the single perceptual claim: chromatic samples
+		// don't constrain lightness. It's used twice — to suppress the
+		// lightness component of the per-vertex distance, and to suppress
+		// the spread magnitude itself — because both encode the same
+		// fact about how dither can substitute for missing palette
+		// vertices in the lightness direction.
+		chromaKnee := math.Exp(-chroma / chromaSpreadFalloff)
+		nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, chromaKnee)
+		spread := ditherSpreadFactor * chromaKnee
+		d := hullDist + spread*nearDist
+		total += d * d * s.Weight
 	}
 	return total
 }
@@ -452,7 +566,7 @@ func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]floa
 	total := 0.0
 	for _, s := range samples {
 		d := nearestVertexDist(s.Lab, verts)
-		total += d * d * float64(s.Count)
+		total += d * d * s.Weight
 	}
 	return total
 }
