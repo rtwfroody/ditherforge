@@ -13,6 +13,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
+	"github.com/rtwfroody/ditherforge/tests/inventories"
 )
 
 // Inventory used across color tests. Matches the user's physical filament stock.
@@ -32,36 +33,8 @@ var testInventory = []palette.InventoryEntry{
 }
 
 // panchromaInventory is the Panchroma Basic filament set (28 colors).
-var panchromaInventory = []palette.InventoryEntry{
-	{Color: [3]uint8{0x08, 0x0A, 0x0D}, Label: "Black"},
-	{Color: [3]uint8{0x55, 0x33, 0x1A}, Label: "Brown"},
-	{Color: [3]uint8{0xE7, 0x2F, 0x1D}, Label: "Red"},
-	{Color: [3]uint8{0xD6, 0x02, 0x12}, Label: "Wine Red"},
-	{Color: [3]uint8{0xF2, 0x45, 0x74}, Label: "Magenta"},
-	{Color: [3]uint8{0xF1, 0xA1, 0xAF}, Label: "Pink"},
-	{Color: [3]uint8{0xF6, 0x74, 0x05}, Label: "Orange"},
-	{Color: [3]uint8{0xFF, 0xE8, 0x00}, Label: "Yellow"},
-	{Color: [3]uint8{0xEE, 0xD2, 0x30}, Label: "Lemon Yellow"},
-	{Color: [3]uint8{0xEE, 0xD1, 0xA8}, Label: "Cream"},
-	{Color: [3]uint8{0xC2, 0xAB, 0x72}, Label: "Beige"},
-	{Color: [3]uint8{0xA7, 0x9E, 0x82}, Label: "Tan"},
-	{Color: [3]uint8{0x06, 0x92, 0x4D}, Label: "Green"},
-	{Color: [3]uint8{0xD5, 0xD7, 0x01}, Label: "Lime Green"},
-	{Color: [3]uint8{0x4E, 0x74, 0x2D}, Label: "Jungle Green"},
-	{Color: [3]uint8{0x94, 0x89, 0x02}, Label: "Olive Green"},
-	{Color: [3]uint8{0x57, 0x5B, 0x54}, Label: "Dark Olive Drab"},
-	{Color: [3]uint8{0x00, 0x37, 0x76}, Label: "Blue"},
-	{Color: [3]uint8{0x00, 0x66, 0xD9}, Label: "Azure Blue"},
-	{Color: [3]uint8{0x48, 0x7B, 0xA2}, Label: "Stone Blue"},
-	{Color: [3]uint8{0x5E, 0xBD, 0xDB}, Label: "Aqua Blue"},
-	{Color: [3]uint8{0x4C, 0xC0, 0xC7}, Label: "Polymaker Teal"},
-	{Color: [3]uint8{0x6C, 0x47, 0xB2}, Label: "Purple"},
-	{Color: [3]uint8{0x48, 0x52, 0x59}, Label: "Dark Grey"},
-	{Color: [3]uint8{0x61, 0x64, 0x69}, Label: "Steel Grey"},
-	{Color: [3]uint8{0x8C, 0x90, 0x99}, Label: "Grey"},
-	{Color: [3]uint8{0xD9, 0xDF, 0xE5}, Label: "Cold White"},
-	{Color: [3]uint8{0xEB, 0xF7, 0xFF}, Label: "White"},
-}
+// Lives in tests/inventories so the bench tool can share it.
+var panchromaInventory = inventories.Panchroma()
 
 // colorTestCase defines a test for inventory palette selection. Each
 // case names a fixture PNG under testdata/color/<name>.png that the
