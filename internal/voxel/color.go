@@ -705,35 +705,44 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	return assignments, nil
 }
 
-// RiemersmaInputBias trades pure-Riemersma chroma fidelity (DC
-// gain 1, perfect average color match) for cell-by-cell fidelity
-// to input. The palette pick scores each candidate as
+// RiemersmaInputBiasMax is the maximum α (input-bias weight) used
+// in the per-cell adaptive blend
 //
-//   (1 - α) · dist²(target, palette) + α · dist²(input, palette)
+//   score = (1 - α) · dist²(target, palette) + α · dist²(input, palette)
 //
-// where target = input + windowed_error.
+// α is computed per-cell from the input's distance to the nearest
+// palette color (see RiemersmaInputBiasRange). The fundamental
+// trade-off the bias resolves:
 //
-// 0.0: pure Riemersma. Achieves zero average drift by swinging
-//      palette to perfectly cancel accumulated error. For inputs
-//      near a palette boundary this manifests as runaway-style
-//      oscillation: a single black injects window error, next
-//      cell picks white to cancel, etc. — "optimal mix of
-//      opposites" behavior.
+//   - Pure Riemersma (α = 0): zero average drift, chroma-balanced
+//     by swinging palette to cancel accumulated error. Looks bad
+//     on flat near-palette regions (grey hood: black/white
+//     oscillation around grey instead of just picking grey).
 //
-// 1.0: snap to nearest input. No dither.
+//   - Pure snap (α = 1): each cell goes to nearest-input palette.
+//     Looks bad on textured surfaces (all bricks snap to the same
+//     palette → posterized patches).
 //
-// 0.65 (current): close-to-input palettes carry a moderate
-//      quadratic penalty against far ones — enough to suppress the
-//      chroma-balancing oscillation that produces visible black/
-//      white patches in flat near-grey regions, but not so heavy
-//      that textured surfaces get "snapped" into visible patches
-//      of single-palette posterization. Note: damping the
-//      integrator at the feedback layer gives much worse drift
-//      than equivalent α-blend tuning because feedback damping
-//      shrinks the errors pushed onto the window — the integrator
-//      never accumulates enough state to balance chroma even when
-//      the algorithm "wants" to.
-const RiemersmaInputBias = 0.65
+// Adaptive: high α when input is near a palette (snap dominates,
+// kills oscillation), low α when input is between palettes (dither
+// dominates, smooths gradients). One pass through the palette
+// finds the cell's nearest-input distance; α is a linear ramp
+// down from RiemersmaInputBiasMax at distance 0 to 0 at distance
+// RiemersmaInputBiasRange.
+const RiemersmaInputBiasMax = 0.85
+
+// RiemersmaInputBiasRange is the input-distance (in 8-bit RGB
+// units, Euclidean) at which α drops to 0. Inputs farther than
+// this from every palette are dithered with no input bias (pure
+// Riemersma). Inputs at distance d ∈ [0, range] get α =
+// RiemersmaInputBiasMax · (1 - d/range).
+//
+// 30 chosen as roughly the half-radius of a typical Voronoi cell
+// for a 4-palette spanning 256 levels (mean palette spacing ~100,
+// half-radius ~50, but we want the snap region tighter so that
+// inputs only modestly close to a palette still get full
+// dithering).
+const RiemersmaInputBiasRange = 30.0
 
 // RiemersmaWindowSize is the sliding-window length used by
 // Riemersma — the number of past errors each cell sees, weighted by
@@ -806,6 +815,7 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 	head := 0
 
 	assigns := make([]int32, n)
+	dI := make([]float32, len(pal))
 	for ti, idx := range tour {
 		if ti%1000 == 0 {
 			if ctx.Err() != nil {
@@ -832,13 +842,29 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		g := iG + eG
 		b := iB + eB
 
-		// Score = (1-α)·dist²(target, palette) + α·dist²(input, palette).
-		// α = RiemersmaInputBias. Quadratic penalty against far-from-
-		// input palettes resists the chroma-balancing palette
-		// swings that produce visible alternation between palette
-		// extremes when input is near a palette boundary.
-		const wt = 1.0 - RiemersmaInputBias
-		const wi = RiemersmaInputBias
+		// First pass: dist²(input, p) for each palette, plus min.
+		// Second pass scores with α derived from the min-distance.
+		// α is high when input is near a palette (snap suppresses
+		// runaway oscillation in flat regions) and low when input
+		// is between palettes (dither smooths textured gradients).
+		var minDI float32 = math.MaxFloat32
+		for pi := range pal {
+			drI := iR - float32(pal[pi][0])
+			dgI := iG - float32(pal[pi][1])
+			dbI := iB - float32(pal[pi][2])
+			d := drI*drI + dgI*dgI + dbI*dbI
+			dI[pi] = d
+			if d < minDI {
+				minDI = d
+			}
+		}
+		nearDist := float32(math.Sqrt(float64(minDI)))
+		alpha := RiemersmaInputBiasMax * (1 - nearDist/RiemersmaInputBiasRange)
+		if alpha < 0 {
+			alpha = 0
+		}
+		wt := 1 - alpha
+		wi := alpha
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
 		for pi, p := range pal {
@@ -846,11 +872,7 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			dgT := g - float32(p[1])
 			dbT := b - float32(p[2])
 			dT := drT*drT + dgT*dgT + dbT*dbT
-			drI := iR - float32(p[0])
-			dgI := iG - float32(p[1])
-			dbI := iB - float32(p[2])
-			dI := drI*drI + dgI*dgI + dbI*dbI
-			d := wt*dT + wi*dI
+			d := wt*dT + wi*dI[pi]
 			if d < bestDist {
 				bestDist = d
 				bestIdx = pi
