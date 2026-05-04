@@ -777,7 +777,17 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		tracker = progress.NullTracker{}
 	}
 
+	// Best-so-far tracking: each pass's drift is checked against the
+	// best previous drift, and if a new pass made things WORSE we
+	// return the previous best instead. The iterative correction
+	// usually converges, but on some inputs (e.g., bench's
+	// checkerboard fixture) the second pass's correction overshoots
+	// and increases drift; without monotone non-regression we'd
+	// ship the worse result. Keep a copy of the best assignments
+	// because subsequent passes overwrite the live `assigns` slice.
 	var assigns []int32
+	bestAssigns := make([]int32, len(cells))
+	bestDriftDE := math.Inf(1)
 	for pass := 0; pass < DizzyCorrectionPasses; pass++ {
 		// Wrap the tracker so this pass's per-cell progress (which
 		// reports oi in [0, n)) lands on the outer bar at the right
@@ -788,11 +798,8 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		if err != nil {
 			return nil, err
 		}
-		if pass == DizzyCorrectionPasses-1 {
-			break
-		}
 
-		// Compute output average and drift relative to ORIGINAL input.
+		// Measure drift relative to ORIGINAL input.
 		var oR, oG, oB float64
 		for _, a := range assigns {
 			oR += float64(pal[a][0])
@@ -802,22 +809,46 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		oR /= n
 		oG /= n
 		oB /= n
-		dR := oR - iR
-		dG := oG - iG
-		dB := oB - iB
+		driftDE := computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB)
 
-		// Roll the drift into the cumulative correction; shift the
-		// next pass's inputs by the new total.
-		cR += dR
-		cG += dG
-		cB += dB
+		if driftDE < bestDriftDE {
+			bestDriftDE = driftDE
+			copy(bestAssigns, assigns)
+		} else {
+			// This pass regressed. Stop and return the previous best.
+			return bestAssigns, nil
+		}
+
+		if pass == DizzyCorrectionPasses-1 {
+			break
+		}
+
+		// Roll the per-channel drift into the cumulative correction;
+		// shift the next pass's inputs by the new total.
+		cR += oR - iR
+		cG += oG - iG
+		cB += oB - iB
 		for i := range shifted {
 			shifted[i].Color[0] = clampUint8(float64(cells[i].Color[0]) - cR)
 			shifted[i].Color[1] = clampUint8(float64(cells[i].Color[1]) - cG)
 			shifted[i].Color[2] = clampUint8(float64(cells[i].Color[2]) - cB)
 		}
 	}
-	return assigns, nil
+	return bestAssigns, nil
+}
+
+// computeDriftDEFromAvg returns the Lab ΔE between two
+// pre-computed average colors (each as 8-bit-style sRGB scalars in
+// [0, 255]). Inlined version of computeDriftDE for callers that
+// already have the input and output averages and don't want to
+// pay for a second pass over the cell array.
+func computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB float64) float64 {
+	in := colorful.Color{R: iR / 255, G: iG / 255, B: iB / 255}
+	out := colorful.Color{R: oR / 255, G: oG / 255, B: oB / 255}
+	iL, iA, iBl := in.Lab()
+	oL, oA, oBl := out.Lab()
+	dL, dA, dB := (iL-oL)*100, (iA-oA)*100, (iBl-oBl)*100
+	return math.Sqrt(dL*dL + dA*dA + dB*dB)
 }
 
 // AutoModeDriftThresholdDE is the global Lab ΔE drift cutoff used by
