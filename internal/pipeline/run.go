@@ -786,6 +786,9 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "dizzy-prop":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherProportional(r.ctx, cells, pal, neighbors, r.tracker)
+		case "dizzy-rprop":
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.DitherProportionalRegional(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)

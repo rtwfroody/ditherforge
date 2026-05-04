@@ -98,6 +98,7 @@ func main() {
 		{"dizzy", wrapDizzy},
 		{"dizzy-corrected", wrapDizzyCorrected},
 		{"dizzy-prop", wrapDizzyProp},
+		{"dizzy-rprop", wrapDizzyRProp},
 		{"floyd-steinberg", wrapFS},
 		{"auto", wrapAuto},
 	}
@@ -372,6 +373,9 @@ func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]
 }
 func wrapDizzyProp(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherProportional(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapDizzyRProp(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherProportionalRegional(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})

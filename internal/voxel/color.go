@@ -652,6 +652,242 @@ func DitherProportional(ctx context.Context, cells []ActiveCell, pal [][3]uint8,
 	return assignments, nil
 }
 
+// DitherProportionalRegional is dizzy-prop with per-region
+// (rather than global) optimal-mix targets. K-means clusters the
+// input cells, each cluster gets its OWN optimal palette mix
+// computed from that cluster's mean input color, and each cell's
+// proportional bias targets its cluster's mix.
+//
+// Why: dizzy-prop dramatically improves bricks (8.81 -> 2.06 ΔE)
+// because bricks is unimodal and a single global optimal mix is
+// the right target everywhere. But on multimodal scenes (earth,
+// pheasant) dizzy-prop regresses because forcing the global mix
+// distorts local color regions: earth's ocean wants mostly blue,
+// the land wants mostly brown/green, and the global average is a
+// muddy compromise neither region wants. Per-region targets give
+// each cluster its own appropriate mix.
+//
+// Clusters: k-means on input cell colors, K = palette size,
+// initialized from palette colors and refined for kmeansMaxIter
+// iterations. Hard cluster assignment per cell (nearest center) —
+// soft membership added more boundary noise than it removed in
+// the dropped dc-soft variants.
+//
+// Per-region mix: solve the 4×4 linear system for each cluster's
+// mean color. Falls back to plain dizzy if any cluster has a
+// degenerate mix (palette singular for that target) — better to
+// take dizzy's drift than to apply a meaningless correction.
+//
+// Same lambda value as dizzy-prop. Same error diffusion.
+func DitherProportionalRegional(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	if len(cells) == 0 {
+		return nil, nil
+	}
+	N := len(cells)
+	K := len(pal)
+	if K != 4 {
+		// Optimal-mix solver is K=4 only.
+		return DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+	}
+
+	// 1. Cluster cells by input color (palette-seeded k-means).
+	centers := paletteSeededKMeans(cells, pal, kmeansMaxIter)
+	if len(centers) != K {
+		return DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+	}
+
+	// 2. For each cluster, compute its optimal palette mix.
+	clusterMix := make([][4]float64, K)
+	for k, c := range centers {
+		mix, ok := optimalMixForK4(pal, float64(c[0]), float64(c[1]), float64(c[2]))
+		if !ok {
+			return DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+		}
+		clusterMix[k] = mix
+	}
+
+	// 3. Hard-assign each cell to its nearest cluster center.
+	cellCluster := make([]int, N)
+	for i, c := range cells {
+		bestK := 0
+		bestD := math.MaxFloat64
+		for k, cc := range centers {
+			dr := float64(c.Color[0]) - float64(cc[0])
+			dg := float64(c.Color[1]) - float64(cc[1])
+			db := float64(c.Color[2]) - float64(cc[2])
+			d := dr*dr + dg*dg + db*db
+			if d < bestD {
+				bestD = d
+				bestK = k
+			}
+		}
+		cellCluster[i] = bestK
+	}
+
+	// 4. Run dizzy with per-cluster proportional bias. Each
+	// cluster has its own running palette-assignment counts and
+	// its own target mix. A cell biases its palette pick toward
+	// its cluster's mix, not toward the global mix.
+	rng := rand.New(rand.NewSource(42))
+	order := rng.Perm(N)
+	assignments := make([]int32, N)
+	errBuf := make([][3]float32, N)
+	processed := make([]bool, N)
+	assignedPerCluster := make([][]int, K)
+	cellsPerCluster := make([]int, K)
+	for k := range assignedPerCluster {
+		assignedPerCluster[k] = make([]int, K)
+	}
+
+	for oi, idx := range order {
+		if oi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", oi)
+		}
+		ck := cellCluster[idx]
+		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
+		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
+		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+
+		bestIdx := 0
+		bestScore := math.MaxFloat64
+		for pi, p := range pal {
+			dr := float64(r) - float64(p[0])
+			dg := float64(g) - float64(p[1])
+			db := float64(b) - float64(p[2])
+			d2 := dr*dr + dg*dg + db*db
+			score := d2
+			if cellsPerCluster[ck] > 0 {
+				M := float64(cellsPerCluster[ck])
+				surplus := float64(assignedPerCluster[ck][pi])/M - clusterMix[ck][pi]
+				score += proportionalLambda * surplus
+			}
+			if score < bestScore {
+				bestScore = score
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+		assignedPerCluster[ck][bestIdx]++
+		cellsPerCluster[ck]++
+		processed[idx] = true
+
+		// Error diffusion to unprocessed neighbors — same as dizzy.
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+		var totalWeight float32
+		for _, nb := range neighbors[idx] {
+			if !processed[nb.Idx] {
+				totalWeight += nb.Weight
+			}
+		}
+		if totalWeight > 0 {
+			scale := 1.0 / totalWeight
+			for _, nb := range neighbors[idx] {
+				if !processed[nb.Idx] {
+					w := nb.Weight * scale
+					errBuf[nb.Idx][0] += eR * w
+					errBuf[nb.Idx][1] += eG * w
+					errBuf[nb.Idx][2] += eB * w
+				}
+			}
+		}
+	}
+	return assignments, nil
+}
+
+// kmeansMaxIter caps the number of k-means refinement iterations.
+// 20 is well past convergence on natural color distributions
+// (typical convergence is 5-10 iterations); the cap protects
+// against pathological inputs that don't converge but doesn't
+// constrain real cases.
+const kmeansMaxIter = 20
+
+// paletteSeededKMeans runs k-means on cells' input colors,
+// initialized from the palette colors as cluster seeds. Returns K
+// cluster centers (where K = len(pal)) as 8-bit RGB.
+//
+// Empty clusters keep their previous center rather than randomly
+// re-seeding — soft-membership downstream code handles them by
+// simply weighting them low. Deterministic given fixed input.
+func paletteSeededKMeans(cells []ActiveCell, pal [][3]uint8, maxIter int) [][3]uint8 {
+	K := len(pal)
+	if K == 0 || len(cells) == 0 {
+		return pal
+	}
+	centers := make([][3]float64, K)
+	for k, p := range pal {
+		centers[k][0] = float64(p[0])
+		centers[k][1] = float64(p[1])
+		centers[k][2] = float64(p[2])
+	}
+	sums := make([][3]float64, K)
+	counts := make([]int, K)
+	for iter := 0; iter < maxIter; iter++ {
+		for k := range sums {
+			sums[k][0], sums[k][1], sums[k][2] = 0, 0, 0
+			counts[k] = 0
+		}
+		for _, c := range cells {
+			cR := float64(c.Color[0])
+			cG := float64(c.Color[1])
+			cB := float64(c.Color[2])
+			best := 0
+			bestD := math.MaxFloat64
+			for k, cen := range centers {
+				dr := cR - cen[0]
+				dg := cG - cen[1]
+				db := cB - cen[2]
+				d := dr*dr + dg*dg + db*db
+				if d < bestD {
+					bestD = d
+					best = k
+				}
+			}
+			sums[best][0] += cR
+			sums[best][1] += cG
+			sums[best][2] += cB
+			counts[best]++
+		}
+		var maxMove float64
+		for k := range centers {
+			if counts[k] == 0 {
+				continue
+			}
+			n := float64(counts[k])
+			newR := sums[k][0] / n
+			newG := sums[k][1] / n
+			newB := sums[k][2] / n
+			move := math.Abs(newR-centers[k][0]) + math.Abs(newG-centers[k][1]) + math.Abs(newB-centers[k][2])
+			if move > maxMove {
+				maxMove = move
+			}
+			centers[k][0] = newR
+			centers[k][1] = newG
+			centers[k][2] = newB
+		}
+		if maxMove < 0.5 {
+			break
+		}
+	}
+	out := make([][3]uint8, K)
+	for k := range centers {
+		out[k] = [3]uint8{
+			clampUint8(centers[k][0]),
+			clampUint8(centers[k][1]),
+			clampUint8(centers[k][2]),
+		}
+	}
+	return out
+}
+
 // proportionalLambda controls how strongly DitherProportional
 // steers assignments toward the optimal mix vs. honoring per-
 // cell nearest-palette-color matching. Empirically tuned: too

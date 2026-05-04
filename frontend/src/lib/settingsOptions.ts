@@ -44,6 +44,7 @@ export const DITHER_OPTIONS = [
   { value: 'auto',            label: 'auto'            },
   { value: 'dizzy-corrected', label: 'dizzy-corrected' },
   { value: 'dizzy-prop',      label: 'dizzy-prop'      },
+  { value: 'dizzy-rprop',     label: 'dizzy-rprop'     },
   { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
   { value: 'none',            label: 'none'            },
 ] as const;

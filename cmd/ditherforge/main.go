@@ -43,7 +43,7 @@ type Args struct {
 	Brightness                      float32  `arg:"--brightness" default:"0" help:"Brightness adjustment (-100 to +100)"`
 	Contrast                        float32  `arg:"--contrast" default:"0" help:"Contrast adjustment (-100 to +100)"`
 	Saturation                      float32  `arg:"--saturation" default:"0" help:"Saturation adjustment (-100 to +100)"`
-	Dither                          string   `arg:"--dither" default:"auto" help:"Dithering mode: auto, none, dizzy-corrected, dizzy-prop, floyd-steinberg"`
+	Dither                          string   `arg:"--dither" default:"auto" help:"Dithering mode: auto, none, dizzy-corrected, dizzy-prop, dizzy-rprop, floyd-steinberg"`
 	NoMerge                         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
