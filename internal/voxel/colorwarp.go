@@ -24,9 +24,9 @@ type ColorWarpPin struct {
 
 // rbfSystem holds precomputed RBF weights for color warping.
 type rbfSystem struct {
-	sourceLab  [][3]float64 // pin source colors in Lab
-	weights    [][3]float64 // solved weights per pin (L, a, b)
-	sigmas     []float64    // per-pin scaled sigma (go-colorful scale)
+	sourceLab [][3]float64 // pin source colors in Lab
+	weights   [][3]float64 // solved weights per pin (L, a, b)
+	sigmas    []float64    // per-pin scaled sigma (go-colorful scale)
 }
 
 // rbfKernel evaluates a Gaussian with hard cutoff at the reach radius.

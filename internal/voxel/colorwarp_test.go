@@ -138,7 +138,7 @@ func TestWarpHeterogeneousSigmas(t *testing.T) {
 	olive := [3]uint8{128, 128, 0}
 
 	pins := []ColorWarpPin{
-		{Source: red, Target: blue, Sigma: 5},    // very tight
+		{Source: red, Target: blue, Sigma: 5},      // very tight
 		{Source: green, Target: yellow, Sigma: 80}, // very wide
 	}
 

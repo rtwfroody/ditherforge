@@ -17,8 +17,8 @@ func TestLSCMFlatPlaneIsExact(t *testing.T) {
 	}
 
 	// Pin two corner vertices to their true (x,y) coords.
-	v0 := model.Vertices[0]                              // (0,0,0)
-	v1 := model.Vertices[5]                              // (10,0,0)
+	v0 := model.Vertices[0] // (0,0,0)
+	v1 := model.Vertices[5] // (10,0,0)
 	uv0 := [2]float32{v0[0], v0[1]}
 	uv1 := [2]float32{v1[0], v1[1]}
 

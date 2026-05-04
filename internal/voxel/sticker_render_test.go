@@ -284,7 +284,7 @@ func makeFilletedBowlRim(rOuter, rInner, h, f float32, segs, fSegs int) *loader.
 	addArc(rInner+f, -h/2+f, math.Pi)               // fillet BL (α π→3π/2)
 	profile = append(profile, rz{rInner + f, -h / 2})
 	profile = append(profile, rz{rOuter - f, -h / 2})
-	addArc(rOuter-f, -h/2+f, 3*math.Pi/2)           // fillet BR (α 3π/2→2π)
+	addArc(rOuter-f, -h/2+f, 3*math.Pi/2) // fillet BR (α 3π/2→2π)
 	// last point is implicit (loops back to profile[0]).
 
 	nP := len(profile)

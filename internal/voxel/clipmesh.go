@@ -689,4 +689,3 @@ func polyCentroid(poly [][3]float32) [3]float32 {
 	n := float32(len(poly))
 	return [3]float32{sx / n, sy / n, sz / n}
 }
-

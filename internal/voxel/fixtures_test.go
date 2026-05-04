@@ -225,4 +225,3 @@ func makeCylinderArc(r, h, arcDeg float32, segs int) *loader.LoadedModel {
 	}
 	return &loader.LoadedModel{Vertices: verts, Faces: faces}
 }
-

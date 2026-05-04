@@ -31,7 +31,7 @@ type Config struct {
 type ActiveCell struct {
 	Grid            uint8
 	Col, Row, Layer int
-	Cx, Cy, Cz     float32
+	Cx, Cy, Cz      float32
 	Color           [3]uint8
 	HalfIdx         uint8
 }

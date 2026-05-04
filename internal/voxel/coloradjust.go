@@ -23,8 +23,8 @@ func (ca ColorAdjustment) IsIdentity() bool {
 // to a single RGB color. The math here must match the GLSL shader exactly.
 func AdjustColor(r, g, b uint8, adj ColorAdjustment) (uint8, uint8, uint8) {
 	// Map slider values to internal parameters.
-	brightness := adj.Brightness / 100.0 // -1.0 to +1.0
-	contrast := (100.0 + adj.Contrast) / 100.0   // 0.0 to 2.0
+	brightness := adj.Brightness / 100.0           // -1.0 to +1.0
+	contrast := (100.0 + adj.Contrast) / 100.0     // 0.0 to 2.0
 	saturation := (100.0 + adj.Saturation) / 100.0 // 0.0 to 2.0
 
 	rf := float32(r) / 255.0

@@ -55,10 +55,10 @@ func SolveLSCM(
 	}
 
 	type triRec struct {
-		v          [3]int     // decal vertex indices
-		refX       [3]float64 // 2D x in isometric reference frame
-		refY       [3]float64 // 2D y
-		twiceArea  float64
+		v         [3]int     // decal vertex indices
+		refX      [3]float64 // 2D x in isometric reference frame
+		refY      [3]float64 // 2D y
+		twiceArea float64
 	}
 	tris := make([]triRec, 0, len(triSet))
 	for _, ti := range triSet {
