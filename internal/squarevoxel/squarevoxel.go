@@ -194,27 +194,63 @@ func colorCells(
 				cx := p.MinV[0] + float32(k.Col)*p.CellSize
 				cy := p.MinV[1] + float32(k.Row)*p.CellSize
 				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
-				samplePos := invXform.ApplyInverse([3]float32{cx, cy, cz})
-				var rgba [4]uint8
-				if separateSticker {
-					rgba = voxel.SampleNearestColorWithSticker(
-						samplePos,
-						colorModel, si, colorRadius, buf, decals,
-						stickerModel, stickerSI, stickerBuf,
-						baseColorOverride)
-				} else {
-					rgba = voxel.SampleNearestColor(
-						samplePos,
-						colorModel, si, colorRadius, buf, decals,
-						baseColorOverride)
+				// Multi-sample the texture across the voxel's volume
+				// to anti-alias high-frequency surface texture (e.g.
+				// brick/mortar) into a per-voxel average. Without
+				// this, each voxel picks a single texel — adjacent
+				// voxels covering the same brick/mortar boundary can
+				// snap to opposite colors, producing high-frequency
+				// input noise that the dither then has to smooth
+				// out (or, with a strong input bias, fails to and
+				// shows as visible patches). 2³=8 stratified
+				// samples per voxel; alpha<128 samples are skipped
+				// and the RGB is averaged over surviving samples.
+				const samplesPerAxis = 2
+				var sumR, sumG, sumB uint32
+				var validCount int
+				for sx := 0; sx < samplesPerAxis; sx++ {
+					for sy := 0; sy < samplesPerAxis; sy++ {
+						for sz := 0; sz < samplesPerAxis; sz++ {
+							ox := (float32(sx)+0.5)/float32(samplesPerAxis) - 0.5
+							oy := (float32(sy)+0.5)/float32(samplesPerAxis) - 0.5
+							oz := (float32(sz)+0.5)/float32(samplesPerAxis) - 0.5
+							sxp := cx + ox*p.CellSize
+							syp := cy + oy*p.CellSize
+							szp := cz + oz*p.LayerH
+							samplePos := invXform.ApplyInverse([3]float32{sxp, syp, szp})
+							var rgba [4]uint8
+							if separateSticker {
+								rgba = voxel.SampleNearestColorWithSticker(
+									samplePos,
+									colorModel, si, colorRadius, buf, decals,
+									stickerModel, stickerSI, stickerBuf,
+									baseColorOverride)
+							} else {
+								rgba = voxel.SampleNearestColor(
+									samplePos,
+									colorModel, si, colorRadius, buf, decals,
+									baseColorOverride)
+							}
+							if rgba[3] >= 128 {
+								sumR += uint32(rgba[0])
+								sumG += uint32(rgba[1])
+								sumB += uint32(rgba[2])
+								validCount++
+							}
+						}
+					}
 				}
-				if rgba[3] < 128 {
+				if validCount == 0 {
 					continue
 				}
 				local = append(local, voxel.ActiveCell{
 					Grid: k.Grid, Col: k.Col, Row: k.Row, Layer: k.Layer,
 					Cx: cx, Cy: cy, Cz: cz,
-					Color:   [3]uint8{rgba[0], rgba[1], rgba[2]},
+					Color: [3]uint8{
+						uint8(sumR / uint32(validCount)),
+						uint8(sumG / uint32(validCount)),
+						uint8(sumB / uint32(validCount)),
+					},
 					HalfIdx: halfIdx,
 				})
 			}
