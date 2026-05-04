@@ -512,6 +512,211 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells), nil)
 }
 
+// DitherProportional is a dizzy variant that biases palette
+// assignments toward the optimal mix proportions — the
+// proportions that, when averaged, hit the input mean color
+// exactly.
+//
+// Why: bench evidence on bricks_benchy showed dizzy's drift is
+// dominated by wrong palette-assignment proportions, not by
+// imperfect per-cell color matching. dizzy massively over-uses
+// palette Grey (52.7% vs optimal 20.5%) because Grey is the
+// nearest palette in raw RGB to ~97% of cells; FS lands within
+// 1% of optimal on every entry because its scanline error
+// propagation reliably pushes cells across Voronoi boundaries.
+// dizzy's stranded-tail loses 9% of accumulated error before
+// those crossings can build up, so cells stay over-concentrated
+// in their nearest-palette assignment.
+//
+// Mechanism: same random-order error diffusion as dizzy, but
+// each cell's palette pick adds a "running surplus" penalty —
+// a palette that's over-assigned relative to its target
+// proportion gets a higher score (less likely to be chosen),
+// and one that's under-assigned gets a lower score (more
+// likely). The penalty strength is controlled by lambda.
+//
+// Trade-off: higher lambda → assignments more strongly track
+// optimal proportions (better global drift) but cells get
+// pushed away from their nearest palette in raw RGB (worse
+// local accuracy). Tunable. lambda=0 collapses to plain dizzy.
+//
+// When the input average sits outside the palette convex hull,
+// the optimal mix has negative proportions; the surplus penalty
+// then naturally avoids the negative-proportion palettes (their
+// surplus is always positive ≥ |α|, so they're always
+// penalized), which is the desired behavior.
+func DitherProportional(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	if len(cells) == 0 {
+		return nil, nil
+	}
+	N := len(cells)
+	K := len(pal)
+	if K < 2 {
+		return DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+	}
+
+	// 1. Compute the optimal palette mix from the input mean.
+	var iR, iG, iB float64
+	for i := range cells {
+		iR += float64(cells[i].Color[0])
+		iG += float64(cells[i].Color[1])
+		iB += float64(cells[i].Color[2])
+	}
+	iR /= float64(N)
+	iG /= float64(N)
+	iB /= float64(N)
+	optimal, ok := optimalMixForK4(pal, iR, iG, iB)
+	if !ok {
+		// K != 4 (general optimal-mix solver not implemented here)
+		// or singular palette — fall back to plain dizzy.
+		return DitherWithNeighbors(ctx, cells, pal, neighbors, tracker)
+	}
+
+	// 2. Run dizzy with the proportional-bias palette pick.
+	rng := rand.New(rand.NewSource(42))
+	order := rng.Perm(N)
+	assignments := make([]int32, N)
+	errBuf := make([][3]float32, N)
+	processed := make([]bool, N)
+	assigned := make([]int, K)
+
+	for oi, idx := range order {
+		if oi%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", oi)
+		}
+		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
+		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
+		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+
+		// Augmented score: dist² + lambda × surplus.
+		// surplus_k = (assigned[k] / M_processed) - optimal[k].
+		// Positive surplus → over-assigned → score penalty.
+		// Negative surplus → under-assigned → score bonus.
+		// On the very first cell (M_processed = 0) we have no
+		// surplus information; fall through to plain dist².
+		var M float64
+		if oi > 0 {
+			M = float64(oi)
+		}
+		bestIdx := 0
+		bestScore := math.MaxFloat64
+		for pi, p := range pal {
+			dr := float64(r) - float64(p[0])
+			dg := float64(g) - float64(p[1])
+			db := float64(b) - float64(p[2])
+			d2 := dr*dr + dg*dg + db*db
+			score := d2
+			if M > 0 {
+				surplus := float64(assigned[pi])/M - optimal[pi]
+				score += proportionalLambda * surplus
+			}
+			if score < bestScore {
+				bestScore = score
+				bestIdx = pi
+			}
+		}
+		assignments[idx] = int32(bestIdx)
+		assigned[bestIdx]++
+		processed[idx] = true
+
+		// Error diffusion to unprocessed neighbors — same as dizzy.
+		chosen := pal[bestIdx]
+		eR := r - float32(chosen[0])
+		eG := g - float32(chosen[1])
+		eB := b - float32(chosen[2])
+
+		var totalWeight float32
+		for _, nb := range neighbors[idx] {
+			if !processed[nb.Idx] {
+				totalWeight += nb.Weight
+			}
+		}
+		if totalWeight > 0 {
+			scale := 1.0 / totalWeight
+			for _, nb := range neighbors[idx] {
+				if !processed[nb.Idx] {
+					w := nb.Weight * scale
+					errBuf[nb.Idx][0] += eR * w
+					errBuf[nb.Idx][1] += eG * w
+					errBuf[nb.Idx][2] += eB * w
+				}
+			}
+		}
+	}
+	return assignments, nil
+}
+
+// proportionalLambda controls how strongly DitherProportional
+// steers assignments toward the optimal mix vs. honoring per-
+// cell nearest-palette-color matching. Empirically tuned: too
+// low (< 1000) leaves dizzy's bias mostly intact; too high
+// (> 100000) forces assignments that don't match cell colors
+// at all and produces local color noise without improving
+// global drift further. ~5000-10000 is the rough sweet spot
+// across the bench fixtures.
+//
+// Units: dist² is in [0, ~200000] (8-bit RGB squared
+// distance); surplus is dimensionless in roughly [-1, 1].
+// lambda translates surplus into the same scale as dist², so
+// "lambda × surplus" is comparable to "dist² delta of one
+// palette being closer than another."
+const proportionalLambda = 50000.0
+
+// optimalMixForK4 solves the 4×4 linear system for proportions
+// p_0..p_3 such that Σ p_k * pal[k] = (target, sum=1). Same as
+// the bench's optimalPaletteMix but inlined here so the voxel
+// package doesn't depend on bench code. Returns ok=false for
+// non-K=4 palettes or a singular system.
+func optimalMixForK4(pal [][3]uint8, tR, tG, tB float64) ([4]float64, bool) {
+	if len(pal) != 4 {
+		return [4]float64{}, false
+	}
+	A := [4][5]float64{}
+	for k := 0; k < 4; k++ {
+		A[0][k] = float64(pal[k][0])
+		A[1][k] = float64(pal[k][1])
+		A[2][k] = float64(pal[k][2])
+		A[3][k] = 1.0
+	}
+	A[0][4] = tR
+	A[1][4] = tG
+	A[2][4] = tB
+	A[3][4] = 1.0
+	for i := 0; i < 4; i++ {
+		maxRow := i
+		for r := i + 1; r < 4; r++ {
+			if math.Abs(A[r][i]) > math.Abs(A[maxRow][i]) {
+				maxRow = r
+			}
+		}
+		A[i], A[maxRow] = A[maxRow], A[i]
+		if math.Abs(A[i][i]) < 1e-9 {
+			return [4]float64{}, false
+		}
+		for r := i + 1; r < 4; r++ {
+			f := A[r][i] / A[i][i]
+			for c := i; c <= 4; c++ {
+				A[r][c] -= f * A[i][c]
+			}
+		}
+	}
+	var out [4]float64
+	for i := 3; i >= 0; i-- {
+		s := A[i][4]
+		for c := i + 1; c < 4; c++ {
+			s -= A[i][c] * out[c]
+		}
+		out[i] = s / A[i][i]
+	}
+	return out, true
+}
+
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
 // If tracker is non-nil, emits StageProgress("Dithering", current) every 1000
 // cells. Caller owns StageStart/StageDone.

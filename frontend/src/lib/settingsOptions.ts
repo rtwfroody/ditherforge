@@ -43,6 +43,7 @@ export type SplitAxis = typeof SPLIT_AXIS_OPTIONS[number]['value'];
 export const DITHER_OPTIONS = [
   { value: 'auto',            label: 'auto'            },
   { value: 'dizzy-corrected', label: 'dizzy-corrected' },
+  { value: 'dizzy-prop',      label: 'dizzy-prop'      },
   { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
   { value: 'none',            label: 'none'            },
 ] as const;
