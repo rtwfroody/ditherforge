@@ -145,6 +145,10 @@ func main() {
 			cellCluster[i] = nearestPaletteIdx(c.Color, pal)
 		}
 		printHeader(blockScales)
+		// Retain assignments per mode so we can do cross-mode
+		// diagnostics (palette-assignment distribution, per-cluster
+		// drift) without re-running each algorithm.
+		modeAssigns := make(map[string][]int32, len(modes))
 		for _, m := range modes {
 			assigns, err := m.run(context.Background(), fx.cells, pal, nbrs)
 			if err != nil {
@@ -153,6 +157,7 @@ func main() {
 			}
 			met := computeMetrics(fx, pal, assigns, blockScales)
 			printRow(m.name, met, blockScales)
+			modeAssigns[m.name] = assigns
 
 			if *outDir != "" {
 				path := filepath.Join(*outDir, fmt.Sprintf("%s.%s.png", fx.name, m.name))
@@ -162,19 +167,28 @@ func main() {
 			}
 		}
 
+		// Palette-assignment distribution: shows what proportion of
+		// cells each algorithm assigned to each palette entry, side
+		// by side with the OPTIMAL mix — the proportions that, when
+		// averaged, would exactly hit the input mean color. Drift
+		// is determined entirely by the gap between actual mix and
+		// optimal mix; this table makes the gap explicit per palette
+		// entry.
+		printAssignmentDistribution(fx, pal, modes, modeAssigns)
+
 		// Per-cluster drift diagnostic for the most-recently-run mode
 		// (skipped if no dither work — none mode has identical input
 		// and output structure, drift = quantization). Show drift per
 		// cluster against dizzy's output, which is the un-corrected
 		// baseline most likely to surface the multimodal-bias effect.
-		if dizzyAssigns, err := wrapDizzy(context.Background(), fx.cells, pal, nbrs); err == nil {
+		if dizzyAssigns, ok := modeAssigns["dizzy"]; ok {
 			fmt.Println("  per-cluster drift (cluster center = nearest palette in input space, dizzy output):")
 			printClusterDrifts(fx, pal, dizzyAssigns, cellCluster)
 		}
 		// Also dizzy-corrected, since that's what auto-mode picks on
 		// borderline scenes — useful to see whether residual drift
 		// after correction is concentrated in one cluster.
-		if dcAssigns, err := wrapDizzyCorrected(context.Background(), fx.cells, pal, nbrs); err == nil {
+		if dcAssigns, ok := modeAssigns["dizzy-corrected"]; ok {
 			fmt.Println("  per-cluster drift (dizzy-corrected output):")
 			printClusterDrifts(fx, pal, dcAssigns, cellCluster)
 		}
@@ -698,6 +712,144 @@ func writeOutputPNG(path string, fx fixture, pal [][3]uint8, assigns []int32) er
 }
 
 // ----- helpers -----
+
+// printAssignmentDistribution emits a side-by-side comparison of the
+// fraction of cells each algorithm assigned to each palette entry,
+// alongside the OPTIMAL mix — the proportions that, if achievable,
+// would make output average exactly equal input average.
+//
+// Output drift is determined entirely by the difference between
+// actual assignment proportions and the optimal proportions. So
+// gaps in this table directly explain each algorithm's drift_ΔE
+// reported above. If FS's mix is close to optimal and dizzy's is
+// off, the gap pinpoints which palette entries dizzy over- or
+// under-uses to land at its drift number.
+func printAssignmentDistribution(fx fixture, pal [][3]uint8, modes []dmode, modeAssigns map[string][]int32) {
+	fmt.Println("  palette assignment distribution (% of cells assigned to each palette entry):")
+	fmt.Print("    palette entry    ")
+	for _, m := range modes {
+		if _, ok := modeAssigns[m.name]; !ok {
+			continue
+		}
+		fmt.Printf("%-9s ", abbreviateModeName(m.name))
+	}
+	fmt.Println("optimal")
+	// Compute optimal mix from input avg.
+	var iR, iG, iB float64
+	for _, c := range fx.cells {
+		iR += float64(c.Color[0])
+		iG += float64(c.Color[1])
+		iB += float64(c.Color[2])
+	}
+	n := float64(len(fx.cells))
+	iR /= n
+	iG /= n
+	iB /= n
+	optimal, optimalOK := optimalPaletteMix(pal, [3]float64{iR, iG, iB})
+	for k, p := range pal {
+		fmt.Printf("    [%d] #%02X%02X%02X    ", k, p[0], p[1], p[2])
+		for _, m := range modes {
+			assigns, ok := modeAssigns[m.name]
+			if !ok {
+				continue
+			}
+			count := 0
+			for _, a := range assigns {
+				if int(a) == k {
+					count++
+				}
+			}
+			fmt.Printf("%8.2f%% ", 100*float64(count)/n)
+		}
+		if optimalOK {
+			fmt.Printf("%7.2f%%", 100*optimal[k])
+		} else {
+			fmt.Print("    n/a")
+		}
+		fmt.Println()
+	}
+}
+
+// abbreviateModeName trims long mode names to fit the assignment-
+// distribution table columns. Keeps the most distinguishing
+// substring; full names are printed elsewhere.
+func abbreviateModeName(name string) string {
+	switch name {
+	case "floyd-steinberg":
+		return "fs"
+	case "dizzy-corrected":
+		return "dc"
+	}
+	return name
+}
+
+// optimalPaletteMix solves for non-negative proportions
+// (p_0, ..., p_{K-1}) summing to 1 that minimize
+// ||Σ p_k * pal_k - target||² in RGB space. For K=4 the system
+// (3 RGB equations + sum-to-1) is exactly determined and we solve
+// it directly via Gaussian elimination. Returns ok=false for
+// other K, or when the solver hits a degenerate matrix.
+//
+// Negative proportions in the result indicate the target lies
+// outside the convex hull of the palette — no valid mix can hit
+// it exactly. Caller should treat that as a signal that the
+// "optimal" mix is unreachable; we return the unconstrained
+// solution anyway because the negative-proportion magnitudes are
+// still informative (showing which palette entry's contribution
+// would have to be "subtracted" to match the target).
+func optimalPaletteMix(pal [][3]uint8, target [3]float64) ([]float64, bool) {
+	K := len(pal)
+	if K != 4 {
+		return nil, false
+	}
+	// Build the 4×4 system:
+	//   [R0 R1 R2 R3] [p0]   [iR]
+	//   [G0 G1 G2 G3] [p1] = [iG]
+	//   [B0 B1 B2 B3] [p2]   [iB]
+	//   [ 1  1  1  1] [p3]   [ 1]
+	A := [4][5]float64{}
+	for k := 0; k < 4; k++ {
+		A[0][k] = float64(pal[k][0])
+		A[1][k] = float64(pal[k][1])
+		A[2][k] = float64(pal[k][2])
+		A[3][k] = 1.0
+	}
+	A[0][4] = target[0]
+	A[1][4] = target[1]
+	A[2][4] = target[2]
+	A[3][4] = 1.0
+	// Gaussian elimination with partial pivoting.
+	for i := 0; i < 4; i++ {
+		// Pivot
+		maxRow := i
+		for r := i + 1; r < 4; r++ {
+			if math.Abs(A[r][i]) > math.Abs(A[maxRow][i]) {
+				maxRow = r
+			}
+		}
+		A[i], A[maxRow] = A[maxRow], A[i]
+		if math.Abs(A[i][i]) < 1e-9 {
+			return nil, false
+		}
+		// Eliminate below
+		for r := i + 1; r < 4; r++ {
+			f := A[r][i] / A[i][i]
+			for c := i; c <= 4; c++ {
+				A[r][c] -= f * A[i][c]
+			}
+		}
+	}
+	// Back-substitute
+	out := make([]float64, 4)
+	for i := 3; i >= 0; i-- {
+		s := A[i][4]
+		for c := i + 1; c < 4; c++ {
+			s -= A[i][c] * out[c]
+		}
+		out[i] = s / A[i][i]
+	}
+	return out, true
+}
 
 // nearestPaletteIdx returns the index of the palette entry closest
 // to color in unweighted RGB Euclidean distance. Used to build the
