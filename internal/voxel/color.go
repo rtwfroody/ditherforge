@@ -1147,33 +1147,36 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	return assignments, nil
 }
 
-// RiemersmaInputBias trades chroma fidelity against the algorithm's
-// willingness to use far-from-input palette colors to balance
-// accumulated error. The palette pick scores each candidate by
+// RiemersmaInputBias trades pure-Riemersma chroma fidelity (DC
+// gain 1, perfect average color match) for cell-by-cell fidelity
+// to input. The palette pick scores each candidate as
 //
-//   (1 - RiemersmaInputBias) * dist²(target, palette)
-//   +   RiemersmaInputBias  * dist²(input, palette)
+//   (1 - α) · dist²(target, palette) + α · dist²(input, palette)
 //
 // where target = input + windowed_error.
 //
-// 0.0: pure Riemersma. DC gain 1 means accumulated error is
-//      perfectly compensated by the next palette pick, but for
-//      input near a palette boundary that compensation can swing
-//      the pick to a far palette ("optimal 50/50 black+white mix
-//      to match grey average" instead of "mostly grey"). Best
-//      possible average chroma; least cell-by-cell fidelity.
+// 0.0: pure Riemersma. Achieves zero average drift by swinging
+//      palette to perfectly cancel accumulated error. For inputs
+//      near a palette boundary this manifests as runaway-style
+//      oscillation: a single black injects window error, next
+//      cell picks white to cancel, etc. — "optimal mix of
+//      opposites" behavior.
 //
-// 1.0: snap to nearest input. No dither. Loses both chroma and
-//      detail.
+// 1.0: snap to nearest input. No dither.
 //
-// 0.5: neutral blend. The algorithm tolerates moderate windowed
-//      error before switching palette, preferring the locally-
-//      closest color. Visually closer to FS/dizzy: lots of one
-//      palette color with occasional dither cells. Some drift
-//      appears (small) but the look is consistently "mostly the
-//      close color, occasional imperfections" rather than "even
-//      mix of opposites."
-const RiemersmaInputBias = 0.5
+// 0.8 (current): close-to-input palettes carry a strong quadratic
+//      penalty against far ones, so the algorithm tolerates large
+//      accumulated windowed error before deciding the target
+//      shift "earns" a palette swing. Visually: lots of one
+//      palette color with sparse dither cells, FS/dizzy-style.
+//      Sub-quadratic drift in exchange (still much lower than no-
+//      dither, but non-zero). Note: damping the integrator at the
+//      feedback layer gives much worse drift than equivalent α-
+//      blend tuning because feedback damping shrinks the errors
+//      pushed onto the window — the integrator never accumulates
+//      enough state to balance chroma even when the algorithm
+//      "wants" to.
+const RiemersmaInputBias = 0.8
 
 // RiemersmaWindowSize is the sliding-window length used by
 // Riemersma — the number of past errors each cell sees, weighted by
@@ -1273,10 +1276,10 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		b := iB + eB
 
 		// Score = (1-α)·dist²(target, palette) + α·dist²(input, palette).
-		// α = RiemersmaInputBias dampens the algorithm's tendency
-		// to swing palette to a far color to compensate for
-		// accumulated windowed error — keeps the pick near input
-		// when the close palette is nearly as good as the far one.
+		// α = RiemersmaInputBias. Quadratic penalty against far-from-
+		// input palettes resists the chroma-balancing palette
+		// swings that produce visible alternation between palette
+		// extremes when input is near a palette boundary.
 		const wt = 1.0 - RiemersmaInputBias
 		const wi = RiemersmaInputBias
 		bestIdx := 0
