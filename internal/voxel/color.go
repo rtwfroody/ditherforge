@@ -1266,25 +1266,29 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 
 // buildRiemersmaTour produces a Hamiltonian-path-ish ordering of
 // cells suitable for Riemersma. Starts at cell 0; at each step
-// moves to the unvisited neighbor closest in 3D space; on a dead
-// end (no unvisited neighbors), jumps to the globally nearest
-// unvisited cell.
+// picks a UNIFORM-RANDOM unvisited neighbor (reservoir sampling
+// with a fixed seed for reproducibility); on a dead end (no
+// unvisited neighbors), jumps to the nearest unvisited cell via
+// the bucket-grid spatial index.
 //
-// The "globally nearest" fallback is O(N) per dead end. For a
-// closed surface mesh, dead ends are uncommon (every cell has
-// 4-8 neighbors, walks rarely paint themselves into corners) and
-// the fallback cost is amortized fine.
+// Random neighbor pick (vs the obvious "nearest unvisited") is
+// deliberate: on uniform-color surfaces the deterministic walk
+// produces regular spatial structure which the dither's blue-noise
+// goal then has to fight. Randomizing the per-step direction
+// breaks that structure, giving dizzy-like noisy texture on flat
+// areas while still preserving FS-level chroma fidelity (the
+// sliding-window math is independent of tour shape).
+//
+// The bucket-grid dead-end fallback stays nearest-by-distance —
+// when jumping between disconnected regions we want the next
+// region to be physically close, since the window will spend the
+// next L cells averaging in errors from the old region.
 func buildRiemersmaTour(cells []ActiveCell, neighbors [][]Neighbor) []int {
 	n := len(cells)
 	visited := make([]bool, n)
 	tour := make([]int, 0, n)
+	rng := rand.New(rand.NewSource(42))
 
-	// Spatial bucket grid over (Cx, Cy, Cz). On dead ends we expand
-	// outward in shells of buckets and pick the nearest unvisited
-	// cell found. Without this, each dead-end fallback was an O(N)
-	// global scan; on complex meshes with many dead ends the total
-	// tour-build time was quadratic. With the bucket grid each
-	// dead-end resolution is O(avg_bucket_size) amortized.
 	grid := newCellBucketGrid(cells)
 
 	cur := 0
@@ -1292,29 +1296,28 @@ func buildRiemersmaTour(cells []ActiveCell, neighbors [][]Neighbor) []int {
 	tour = append(tour, cur)
 	grid.markVisited(cur)
 	for len(tour) < n {
-		bestNb := -1
-		bestNbD := float32(math.MaxFloat32)
+		// Reservoir-sample one unvisited neighbor uniformly at
+		// random in a single pass: each candidate replaces the
+		// current pick with probability 1/k where k is the count
+		// of candidates seen so far.
+		pick := -1
+		count := 0
 		for _, nb := range neighbors[cur] {
 			if visited[nb.Idx] {
 				continue
 			}
-			dx := cells[cur].Cx - cells[nb.Idx].Cx
-			dy := cells[cur].Cy - cells[nb.Idx].Cy
-			dz := cells[cur].Cz - cells[nb.Idx].Cz
-			d := dx*dx + dy*dy + dz*dz
-			if d < bestNbD {
-				bestNbD = d
-				bestNb = nb.Idx
+			count++
+			if rng.Intn(count) == 0 {
+				pick = nb.Idx
 			}
 		}
-		if bestNb >= 0 {
-			visited[bestNb] = true
-			tour = append(tour, bestNb)
-			grid.markVisited(bestNb)
-			cur = bestNb
+		if pick >= 0 {
+			visited[pick] = true
+			tour = append(tour, pick)
+			grid.markVisited(pick)
+			cur = pick
 			continue
 		}
-		// Dead end: bucket-grid search for nearest unvisited.
 		next := grid.nearestUnvisited(cur, cells, visited)
 		visited[next] = true
 		tour = append(tour, next)
