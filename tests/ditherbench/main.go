@@ -135,6 +135,15 @@ func main() {
 		fmt.Println()
 
 		nbrs := buildNeighbors2D(fx.cells)
+		// Cluster cells by their nearest palette entry in INPUT-color
+		// space. Stable across passes (depends only on input), so
+		// suitable for diagnosing whether per-cluster drifts differ
+		// in direction (which would suggest segmented correction
+		// could outperform global correction).
+		cellCluster := make([]int, len(fx.cells))
+		for i, c := range fx.cells {
+			cellCluster[i] = nearestPaletteIdx(c.Color, pal)
+		}
 		printHeader(blockScales)
 		for _, m := range modes {
 			assigns, err := m.run(context.Background(), fx.cells, pal, nbrs)
@@ -151,6 +160,23 @@ func main() {
 					fmt.Printf("    write %s: %v\n", path, werr)
 				}
 			}
+		}
+
+		// Per-cluster drift diagnostic for the most-recently-run mode
+		// (skipped if no dither work — none mode has identical input
+		// and output structure, drift = quantization). Show drift per
+		// cluster against dizzy's output, which is the un-corrected
+		// baseline most likely to surface the multimodal-bias effect.
+		if dizzyAssigns, err := wrapDizzy(context.Background(), fx.cells, pal, nbrs); err == nil {
+			fmt.Println("  per-cluster drift (cluster center = nearest palette in input space, dizzy output):")
+			printClusterDrifts(fx, pal, dizzyAssigns, cellCluster)
+		}
+		// Also dizzy-corrected, since that's what auto-mode picks on
+		// borderline scenes — useful to see whether residual drift
+		// after correction is concentrated in one cluster.
+		if dcAssigns, err := wrapDizzyCorrected(context.Background(), fx.cells, pal, nbrs); err == nil {
+			fmt.Println("  per-cluster drift (dizzy-corrected output):")
+			printClusterDrifts(fx, pal, dcAssigns, cellCluster)
 		}
 		fmt.Println()
 	}
@@ -634,6 +660,72 @@ func writeOutputPNG(path string, fx fixture, pal [][3]uint8, assigns []int32) er
 }
 
 // ----- helpers -----
+
+// nearestPaletteIdx returns the index of the palette entry closest
+// to color in unweighted RGB Euclidean distance. Used to build the
+// per-cell cluster assignment for the per-cluster drift diagnostic;
+// the choice of distance metric (RGB vs Lab) doesn't matter much
+// for the diagnostic since clusters are coarse and stable.
+func nearestPaletteIdx(color [3]uint8, pal [][3]uint8) int {
+	bestIdx := 0
+	bestD := 1 << 30
+	for i, p := range pal {
+		dr := int(color[0]) - int(p[0])
+		dg := int(color[1]) - int(p[1])
+		db := int(color[2]) - int(p[2])
+		d := dr*dr + dg*dg + db*db
+		if d < bestD {
+			bestD = d
+			bestIdx = i
+		}
+	}
+	return bestIdx
+}
+
+// printClusterDrifts emits one row per cluster: the palette color
+// that defines the cluster, the cell count assigned to it, and the
+// drift (avg output - avg input) restricted to those cells, in
+// per-channel ΔRGB plus Lab ΔE. If clusters drift in the same
+// direction with similar magnitude, global correction is as good
+// as per-cluster could be. If they drift in different directions
+// or differ greatly in magnitude, segmented correction has room
+// to improve.
+func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster []int) {
+	type bucket struct {
+		count            int
+		iR, iG, iB       float64
+		oR, oG, oB       float64
+	}
+	buckets := make([]bucket, len(pal))
+	for i, c := range fx.cells {
+		k := cellCluster[i]
+		b := &buckets[k]
+		b.count++
+		b.iR += float64(c.Color[0])
+		b.iG += float64(c.Color[1])
+		b.iB += float64(c.Color[2])
+		a := assigns[i]
+		b.oR += float64(pal[a][0])
+		b.oG += float64(pal[a][1])
+		b.oB += float64(pal[a][2])
+	}
+	for k, b := range buckets {
+		if b.count == 0 {
+			fmt.Printf("    cluster #%02X%02X%02X: 0 cells (empty)\n",
+				pal[k][0], pal[k][1], pal[k][2])
+			continue
+		}
+		n := float64(b.count)
+		dR := (b.oR - b.iR) / n
+		dG := (b.oG - b.iG) / n
+		dB := (b.oB - b.iB) / n
+		iL, iA, iBl := toLab(b.iR/n, b.iG/n, b.iB/n)
+		oL, oA, oBl := toLab(b.oR/n, b.oG/n, b.oB/n)
+		dE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
+		fmt.Printf("    cluster #%02X%02X%02X: %7d cells  ΔRGB=(%+6.2f,%+6.2f,%+6.2f)  ΔE=%5.2f\n",
+			pal[k][0], pal[k][1], pal[k][2], b.count, dR, dG, dB, dE)
+	}
+}
 
 // percentile uses lower-floor nearest-rank interpolation: pct(0.5)
 // of a 2-element slice returns the first element, not the average.
