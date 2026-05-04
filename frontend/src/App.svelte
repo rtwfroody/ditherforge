@@ -166,7 +166,7 @@
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
-  let dither = $state('auto');
+  let dither = $state('riemersma');
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
@@ -1797,7 +1797,7 @@
               <div class="flex items-center gap-1.5">
                 <Label for="dither">Dither mode</Label>
                 <HelpTip>
-                  Algorithm used to blend palette colors across the surface. "auto" runs dizzy-corrected first; if its global color cast is perceptually significant it also runs Floyd-Steinberg and picks whichever produced lower drift. "dizzy-corrected" is a randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — produces a blue-noise look with no directional structure on flat areas, at 3× the cost of a single dither pass. "dizzy-rcorrected" partitions the surface into up to 10 input-color clusters (each ≥10% of cells) and runs dizzy-corrected's drift correction independently per cluster — helps multimodal scenes where one global shift can't simultaneously fix every region. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma like FS but without scanline directionality, since the tour has no global axis. "none" disables dithering and snaps each cell to the nearest palette color.
+                  Algorithm used to blend palette colors across the surface. "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "dizzy-corrected" is a randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — produces a blue-noise look with no directional structure on flat areas, at 3× the cost of a single dither pass. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
                 </HelpTip>
               </div>
               <Select.Root type="single" bind:value={dither}>

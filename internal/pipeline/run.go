@@ -753,26 +753,8 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		// onto a single continuous bar -- see ditherPassTracker.
 		ditherMode := r.opts.Dither
 		ditherUnits := len(po.Cells)
-		switch ditherMode {
-		case "dizzy-corrected":
+		if ditherMode == "dizzy-corrected" {
 			ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
-		case "dizzy-rcorrected":
-			ditherUnits = voxel.RegionalCorrectionPasses * len(po.Cells)
-		case "auto":
-			// Worst case: dizzy-corrected runs all 3 passes AND the
-			// FS fallback fires. On the common case (drift below
-			// threshold) the bar fills only to 3/(N+1) of total; we
-			// accept that under-fill rather than dynamically
-			// resizing the stage mid-run.
-			//
-			// TODO: the +len(po.Cells) flood-fill carve-out is a
-			// pre-existing inconsistency (flood-fill emits to its
-			// own "Flood fill" stage name, so this slice of the
-			// budget is never actually filled by anything). The
-			// "Dithering" bar tops out around 60-80% on every
-			// mode. Worth a separate pass to remove the carve-out
-			// once we touch the progress system.
-			ditherUnits = voxel.AutoDitherPassesUpperBound * len(po.Cells)
 		}
 		stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
 		defer stage.Done()
@@ -785,24 +767,12 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "dizzy-corrected":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
-		case "dizzy-rcorrected":
-			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.DitherRegionalCorrected(r.ctx, cells, pal, neighbors, r.tracker)
-		case "dizzy-prop":
-			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.DitherProportional(r.ctx, cells, pal, neighbors, r.tracker)
-		case "dizzy-rprop":
-			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.DitherProportionalRegional(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
 		case "riemersma":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.tracker)
-		case "auto":
-			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.DitherAuto(r.ctx, cells, pal, neighbors, r.tracker)
 		default:
 			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		}
