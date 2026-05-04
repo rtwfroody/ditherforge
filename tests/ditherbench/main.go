@@ -98,6 +98,7 @@ func main() {
 		{"dizzy", wrapDizzy},
 		{"dizzy-corrected", wrapDizzyCorrected},
 		{"floyd-steinberg", wrapFS},
+		{"auto", wrapAuto},
 	}
 	if *onlyMode != "" {
 		var keep []dmode
@@ -292,6 +293,9 @@ func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapAuto(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherAuto(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 
 // ----- metrics -----

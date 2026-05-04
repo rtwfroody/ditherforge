@@ -820,6 +820,143 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 	return assigns, nil
 }
 
+// AutoModeDriftThresholdDE is the global Lab ΔE drift cutoff used by
+// DitherAuto. Below this, dizzy-corrected's chroma cast is below
+// the CIELAB just-noticeable-difference threshold (~1-2 ΔE) and its
+// blue-noise spatial structure is the unambiguous win. At or above
+// this, dizzy-corrected runs FS as well; the result is whichever
+// algorithm achieved meaningfully lower drift, with FS having to
+// beat dizzy-corrected by at least AutoModeTieToleranceDE to win.
+// 1.5 chosen to be conservative: just under JND so any visible
+// cast triggers the comparison, but not so low we run FS
+// unnecessarily on chroma-easy scenes.
+const AutoModeDriftThresholdDE = 1.5
+
+// AutoModeTieToleranceDE is the chroma-fidelity tie-break used by
+// DitherAuto when both algorithms have run. FS must beat dizzy-
+// corrected by at least this much (in Lab ΔE) for FS's exact-
+// chroma output to be worth its directional banding artifact.
+// Below the tolerance the chroma difference is sub-perceptual and
+// dizzy-corrected wins on spatial-structure quality.
+//
+// Without this, near-tied chroma cases (uniform_terracotta: DC
+// 2.15 vs FS 2.14, both bottlenecked by palette quantization, not
+// algorithm bias) would silently pick FS and reintroduce its
+// directional stripes — exactly what we use auto mode to avoid.
+const AutoModeTieToleranceDE = 0.5
+
+// AutoDitherPassesUpperBound is the maximum dither work units
+// DitherAuto can ever emit (in units of len(cells)): 3 for the
+// dizzy-corrected primary attempt, +1 for the FS comparison run
+// that fires whenever dizzy-corrected's drift exceeds the
+// threshold. Exposed so the pipeline can size the progress bar for
+// the worst case.
+const AutoDitherPassesUpperBound = DizzyCorrectionPasses + 1
+
+// DitherAuto runs dizzy-corrected first. If its global Lab drift is
+// below AutoModeDriftThresholdDE, it ships dizzy-corrected unchanged
+// (chroma cast is sub-JND, blue-noise spatial structure wins). If
+// drift exceeds the threshold, it ALSO runs Floyd-Steinberg and
+// returns whichever algorithm produced the lower drift on this
+// particular scene. The choice is logged via tracker.Warn.
+//
+// Rationale: dizzy-corrected gives blue-noise output (no directional
+// banding) but its chroma fidelity has a scene-dependent ceiling
+// driven by how translation-invariant dizzy's bias is on that
+// scene. On most scenes the ceiling is below JND and dizzy-corrected
+// is strictly preferable. On chroma-difficult scenes the ceiling
+// exceeds JND, FS usually does much better, and we want FS's exact-
+// chroma output despite its directional banding. The "pick lower
+// drift" rule guards against pathological cases where FS happens to
+// score worse — we never make the chroma worse than dizzy-corrected
+// already produced.
+//
+// Cost: dizzy-corrected runtime always (3× single dizzy), plus FS
+// runtime (1× single dizzy) only when the threshold trips. Most
+// scenes don't trip it.
+func DitherAuto(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	// DitherCorrected and FloydSteinberg both nil-check tracker
+	// themselves; no need to repeat that here. We only need a
+	// non-nil tracker for the Warn calls below, but those run only
+	// on the interesting branches and tolerate nil.
+	//
+	// Pass 1-3: dizzy-corrected. Reports its own per-pass progress
+	// already (passes [0, 3N) of the outer bar via its internal
+	// ditherPassTracker).
+	dcAssigns, err := DitherCorrected(ctx, cells, pal, neighbors, tracker)
+	if err != nil {
+		return nil, err
+	}
+	if len(cells) == 0 {
+		return dcAssigns, nil
+	}
+
+	dcDriftDE := computeDriftDE(cells, pal, dcAssigns)
+	if dcDriftDE < AutoModeDriftThresholdDE {
+		// Common case — silent. Logging here would produce a Warn
+		// line on every run with default settings, which is noise.
+		return dcAssigns, nil
+	}
+
+	// Drift exceeds threshold — also try FS, then pick whichever
+	// achieved the lower drift. The fsTracker offsets FS's progress
+	// past the already-emitted DC progress so the outer bar advances
+	// continuously rather than rewinding to 0 mid-stage.
+	fsTracker := ditherPassTracker{real: tracker, offset: DizzyCorrectionPasses * len(cells)}
+	fsAssigns, err := FloydSteinberg(ctx, cells, pal, neighbors, fsTracker)
+	if err != nil {
+		return nil, err
+	}
+	fsDriftDE := computeDriftDE(cells, pal, fsAssigns)
+	if fsDriftDE < dcDriftDE-AutoModeTieToleranceDE {
+		tracker.Warn(fmt.Sprintf("auto-dither: Floyd-Steinberg (drift ΔE=%.2f) over dizzy-corrected (drift ΔE=%.2f); FS beats DC by more than %.1f tolerance", fsDriftDE, dcDriftDE, AutoModeTieToleranceDE))
+		return fsAssigns, nil
+	}
+	tracker.Warn(fmt.Sprintf("auto-dither: dizzy-corrected (drift ΔE=%.2f) — exceeds %.1f threshold but FS drift ΔE=%.2f isn't %.1f better, blue-noise structure wins", dcDriftDE, AutoModeDriftThresholdDE, fsDriftDE, AutoModeTieToleranceDE))
+	return dcAssigns, nil
+}
+
+// computeDriftDE returns the Lab ΔE between the average input cell
+// color and the average assigned-palette color — the same global
+// drift metric the bench tool reports as "drift_ΔE". Used by
+// DitherAuto to decide whether dizzy-corrected's chroma fidelity
+// suffices or FS is needed.
+//
+// Inlines the go-colorful conversion (rather than reusing
+// rgbToLab from colorwarp.go) because we need to AVERAGE in RGB
+// space before converting to Lab — averaging Lab values directly
+// gives a perceptually different result on non-linear input
+// distributions. rgbToLab takes a single color and would force
+// per-cell Lab conversion + arithmetic-mean Lab, which isn't what
+// we want here.
+//
+// go-colorful's Lab() returns L in [0, 1] (and a/b on a
+// proportionally-scaled axis). We multiply the differences by 100
+// before squaring to compare against AutoModeDriftThresholdDE in
+// standard CIELAB units.
+func computeDriftDE(cells []ActiveCell, pal [][3]uint8, assigns []int32) float64 {
+	if len(cells) == 0 {
+		return 0
+	}
+	var iR, iG, iB, oR, oG, oB float64
+	for i, c := range cells {
+		iR += float64(c.Color[0])
+		iG += float64(c.Color[1])
+		iB += float64(c.Color[2])
+		a := assigns[i]
+		oR += float64(pal[a][0])
+		oG += float64(pal[a][1])
+		oB += float64(pal[a][2])
+	}
+	n := float64(len(cells))
+	in := colorful.Color{R: iR / n / 255, G: iG / n / 255, B: iB / n / 255}
+	out := colorful.Color{R: oR / n / 255, G: oG / n / 255, B: oB / n / 255}
+	iL, iA, iBl := in.Lab()
+	oL, oA, oBl := out.Lab()
+	dL, dA, dB := (iL-oL)*100, (iA-oA)*100, (iBl-oBl)*100
+	return math.Sqrt(dL*dL + dA*dA + dB*dB)
+}
+
 // ditherPassTracker shifts a child dither pass's incremental
 // progress reports by a fixed offset so a sequence of passes
 // appears to the underlying tracker as one continuous run. The
