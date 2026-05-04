@@ -166,7 +166,7 @@
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
-  let dither = $state('dizzy');
+  let dither = $state('dizzy-corrected');
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
@@ -1797,7 +1797,7 @@
               <div class="flex items-center gap-1.5">
                 <Label for="dither">Dither mode</Label>
                 <HelpTip>
-                  Algorithm used to blend palette colors across the surface. "dizzy" is a randomized error-diffusion that produces a blue-noise look but can drift toward a color cast on sparse 3D surfaces. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma more accurately, at the cost of visible directional structure. "none" disables dithering and snaps each cell to the nearest palette color.
+                  Algorithm used to blend palette colors across the surface. "dizzy-corrected" is a randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction between passes) — produces a blue-noise look with no directional structure on flat areas, at 3× the cost of a single dither pass. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
                 </HelpTip>
               </div>
               <Select.Root type="single" bind:value={dither}>

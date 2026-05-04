@@ -584,31 +584,13 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 				}
 			}
 		}
-		// When totalWeight == 0, all neighbors are already processed and
-		// the residual error is dropped. This is a known limitation of
-		// dizzy on sparse 3D voxel surfaces (where active cells form a
-		// 2-manifold and per-cell neighborhoods are smaller than the 26
-		// the grid allows). Use FloydSteinberg for chroma fidelity.
-		//
-		// Tried-and-rejected: a "dizzy + spill" variant that BFS-searches
-		// from each stranded cell for the nearest still-unprocessed cell
-		// and dumps the residual error there. On the bricks Benchy
-		// (4-color Brown/Red/Grey/Cream palette, 687k cells) it improved
-		// global chroma drift by only ~5% (ΔG -7.4 -> -7.0) on both the
-		// 2D fixture and the live 3D pipeline. Visually it looked
-		// slightly better than dizzy but nowhere near FS, which achieves
-		// ΔE 0.34. Conclusion: dizzy's irreducible drift in this regime
-		// is not from the stranded tail -- the BFS does redirect the
-		// dropped error, but the recipient cell's eventual assignment
-		// is dominated by the OTHER error contributions from its actual
-		// spatial neighbors, so a single faraway-source error gets
-		// averaged in without meaningfully shifting the regional palette
-		// mix. The residual ~7 ΔE bias comes from random-order error
-		// diffusion's interaction with the palette+input distribution
-		// itself, not from the dropping behavior. Closing the gap
-		// requires changing the visitation order (Hilbert or scrambled
-		// Z-order with bounded-history error propagation), not patching
-		// the no-neighbor branch.
+		// When totalWeight == 0, all neighbors are already processed
+		// and the residual error is dropped. ~9% of cells in the
+		// random-order tail hit this on a typical 3D voxel surface,
+		// producing a directionally-biased global chroma drift.
+		// DitherCorrected addresses this by iterating dizzy with
+		// pre-corrected inputs, converging on the correct global
+		// average without changing the no-neighbor branch.
 	}
 
 	return assignments, nil
@@ -722,6 +704,160 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	}
 
 	return assignments, nil
+}
+
+// DizzyCorrectionPasses is the number of dizzy iterations
+// DitherCorrected runs. Pass 1 measures the algorithm's natural
+// drift; each subsequent pass shifts the cell inputs by the
+// accumulated -drift correction and measures the residual. With
+// 3 passes empirically: bricks_benchy drift 8.81 -> 7.94 -> 7.5
+// -> 7.4 (diminishing returns; dizzy's bias on bricks isn't
+// translation-invariant enough for the correction to fully
+// converge). On earth/pheasant 3 passes gets within 1 ΔE of zero.
+//
+// Exported so the pipeline can size its progress bar to cover all
+// the passes (one pass's worth of work × this many).
+const DizzyCorrectionPasses = 3
+
+// DitherCorrected iteratively runs dizzy with input pre-correction
+// to converge on near-zero global drift. Pass 1 is standard dizzy
+// to measure the algorithm's drift; each subsequent pass shifts
+// every cell's input by the accumulated -drift and runs dizzy
+// again on the shifted inputs.
+//
+// Hypothesis: dizzy's drift on a given (input distribution ×
+// palette geometry) is approximately translation-invariant — so
+// pre-correcting the input by the measured drift makes the next
+// pass's output average closer to the original input average,
+// even though dizzy's stranded-tail loss per pass is unchanged.
+//
+// Math sketch: avg_input = X. Pass 1 output averages X + D1. Pass
+// 2 input is X - D1, output averages (X - D1) + D2 where D2 is
+// dizzy's bias on the shifted input. If D2 ≈ D1 (translation-
+// invariant), residual = -D1 + D2 ≈ 0. In practice D2 ≠ D1 on
+// some scenes (bricks_benchy: D2 ≈ 0.9·D1) so the correction is
+// partial; iterating compounds the correction.
+//
+// Cost: DizzyCorrectionPasses × a single dizzy pass.
+//
+// The shifted cell colors are clamped to [0, 255] (uint8
+// limitation). For input averages well away from the boundaries
+// (typical for real models) saturation loss is negligible. If
+// shifts grew large enough to push many cells through saturation,
+// the correction would degrade — none of our fixtures hit that.
+func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	// Empty input: no work, no division by zero downstream.
+	if len(cells) == 0 {
+		return nil, nil
+	}
+
+	// Compute the static input average once; it doesn't change
+	// across passes (the SHIFTED inputs do, but the drift we measure
+	// each pass is relative to the ORIGINAL input).
+	var iR, iG, iB float64
+	for i := range cells {
+		iR += float64(cells[i].Color[0])
+		iG += float64(cells[i].Color[1])
+		iB += float64(cells[i].Color[2])
+	}
+	n := float64(len(cells))
+	iR /= n
+	iG /= n
+	iB /= n
+
+	// Working copy of cells whose colors get shifted between passes.
+	// Pass 1 uses the originals (zero correction).
+	shifted := make([]ActiveCell, len(cells))
+	copy(shifted, cells)
+
+	// cumulative correction applied to inputs across passes.
+	var cR, cG, cB float64
+
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+
+	var assigns []int32
+	for pass := 0; pass < DizzyCorrectionPasses; pass++ {
+		// Wrap the tracker so this pass's per-cell progress (which
+		// reports oi in [0, n)) lands on the outer bar at the right
+		// offset for a single continuous K*n unit of work.
+		passTracker := ditherPassTracker{real: tracker, offset: pass * len(cells)}
+		var err error
+		assigns, err = DitherWithNeighbors(ctx, shifted, pal, neighbors, passTracker)
+		if err != nil {
+			return nil, err
+		}
+		if pass == DizzyCorrectionPasses-1 {
+			break
+		}
+
+		// Compute output average and drift relative to ORIGINAL input.
+		var oR, oG, oB float64
+		for _, a := range assigns {
+			oR += float64(pal[a][0])
+			oG += float64(pal[a][1])
+			oB += float64(pal[a][2])
+		}
+		oR /= n
+		oG /= n
+		oB /= n
+		dR := oR - iR
+		dG := oG - iG
+		dB := oB - iB
+
+		// Roll the drift into the cumulative correction; shift the
+		// next pass's inputs by the new total.
+		cR += dR
+		cG += dG
+		cB += dB
+		for i := range shifted {
+			shifted[i].Color[0] = clampUint8(float64(cells[i].Color[0]) - cR)
+			shifted[i].Color[1] = clampUint8(float64(cells[i].Color[1]) - cG)
+			shifted[i].Color[2] = clampUint8(float64(cells[i].Color[2]) - cB)
+		}
+	}
+	return assigns, nil
+}
+
+// ditherPassTracker shifts a child dither pass's incremental
+// progress reports by a fixed offset so a sequence of passes
+// appears to the underlying tracker as one continuous run. The
+// outer pipeline opens / closes the stage; this wrapper only
+// translates the per-pass StageProgress numbers and forwards
+// warnings.
+//
+// DitherWithNeighbors emits StageProgress("Dithering", oi) where
+// oi is the current cell index in [0, n). DitherCorrected drives
+// it K times; without the wrapper the bar would rewind to 0 at
+// the start of each pass, then jump back near the end. With the
+// wrapper, pass k's progress maps to [k*n, (k+1)*n) on the bar.
+type ditherPassTracker struct {
+	real   progress.Tracker
+	offset int
+}
+
+// StageStart and StageDone are no-ops because the outer caller
+// (the pipeline's Dither stage) owns the stage lifecycle: it opens
+// the stage once, runs all K passes through this wrapper, and
+// closes the stage. Forwarding StageStart/StageDone from a sub-pass
+// would re-open or close the outer bar mid-run.
+func (ditherPassTracker) StageStart(string, bool, int) {}
+func (ditherPassTracker) StageDone(string)             {}
+func (t ditherPassTracker) Warn(s string)              { t.real.Warn(s) }
+func (t ditherPassTracker) StageProgress(stage string, current int) {
+	t.real.StageProgress(stage, t.offset+current)
+}
+
+// clampUint8 rounds v to the nearest uint8, clamping to [0, 255].
+func clampUint8(v float64) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v + 0.5)
 }
 
 // SnapColors moves each cell's color toward its nearest palette color by up

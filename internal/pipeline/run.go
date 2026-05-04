@@ -745,18 +745,28 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, 2*len(po.Cells))
-		defer stage.Done()
+		// Budget: dither work units + flood-fill work units. Most modes
+		// do one dither pass over n cells, so dither = n. dizzy-
+		// corrected runs voxel.DizzyCorrectionPasses passes back-to-
+		// back, so its dither budget scales accordingly. The internal
+		// passes use a tracker wrapper that offsets per-pass progress
+		// onto a single continuous bar -- see ditherPassTracker.
 		ditherMode := r.opts.Dither
+		ditherUnits := len(po.Cells)
+		if ditherMode == "dizzy-corrected" {
+			ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
+		}
+		stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
+		defer stage.Done()
 		cells := po.Cells
 		pal := po.Palette
 		tDither := time.Now()
 		var assignments []int32
 		var derr error
 		switch ditherMode {
-		case "dizzy":
+		case "dizzy-corrected":
 			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
+			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)

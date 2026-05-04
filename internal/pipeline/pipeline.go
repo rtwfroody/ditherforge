@@ -209,9 +209,9 @@ type Result struct {
 func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbacks) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
-	case "none", "dizzy", "floyd-steinberg":
+	case "none", "dizzy-corrected", "floyd-steinberg":
 	default:
-		return nil, fmt.Errorf("invalid --dither %q: must be none, dizzy, or floyd-steinberg", opts.Dither)
+		return nil, fmt.Errorf("invalid --dither %q: must be none, dizzy-corrected, or floyd-steinberg", opts.Dither)
 	}
 
 	// Extract callbacks, using safe defaults for nil.

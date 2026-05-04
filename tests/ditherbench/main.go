@@ -91,7 +91,12 @@ func main() {
 
 	modes := []dmode{
 		{"none", wrapAssign},
+		// dizzy is kept here as a baseline reference: dizzy-corrected
+		// is built from three iterated dizzy passes, and the bench
+		// is the place to verify the corrected variant continues to
+		// strictly improve on its building block.
 		{"dizzy", wrapDizzy},
+		{"dizzy-corrected", wrapDizzyCorrected},
 		{"floyd-steinberg", wrapFS},
 	}
 	if *onlyMode != "" {
@@ -281,6 +286,9 @@ func wrapAssign(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, _
 }
 func wrapDizzy(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherWithNeighbors(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherCorrected(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})

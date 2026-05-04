@@ -1011,6 +1011,19 @@ func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 			sf.Settings.Stickers[i].Mode = "unfold"
 		}
 	}
+	// Migrate retired dither modes. The published "dizzy" algorithm
+	// is now the building block of "dizzy-corrected" (3-pass dizzy
+	// with iterative drift correction); both produce the same
+	// blue-noise spatial structure, so substituting transparently
+	// is honest. "ahmed-wonka" was an experimental third mode that
+	// didn't ship; map it to dizzy-corrected as the closest visual
+	// match. The pipeline validator would otherwise reject these
+	// values with a hard error on file load.
+	switch sf.Settings.Dither {
+	case "dizzy", "dizzy-half", "ahmed-wonka":
+		plog.Printf("Settings: migrating dither mode %q to %q", sf.Settings.Dither, "dizzy-corrected")
+		sf.Settings.Dither = "dizzy-corrected"
+	}
 	return &LoadSettingsResult{
 		Path:     path,
 		Settings: sf.Settings,
