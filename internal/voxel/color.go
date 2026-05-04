@@ -589,6 +589,26 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 		// dizzy on sparse 3D voxel surfaces (where active cells form a
 		// 2-manifold and per-cell neighborhoods are smaller than the 26
 		// the grid allows). Use FloydSteinberg for chroma fidelity.
+		//
+		// Tried-and-rejected: a "dizzy + spill" variant that BFS-searches
+		// from each stranded cell for the nearest still-unprocessed cell
+		// and dumps the residual error there. On the bricks Benchy
+		// (4-color Brown/Red/Grey/Cream palette, 687k cells) it improved
+		// global chroma drift by only ~5% (ΔG -7.4 -> -7.0) on both the
+		// 2D fixture and the live 3D pipeline. Visually it looked
+		// slightly better than dizzy but nowhere near FS, which achieves
+		// ΔE 0.34. Conclusion: dizzy's irreducible drift in this regime
+		// is not from the stranded tail -- the BFS does redirect the
+		// dropped error, but the recipient cell's eventual assignment
+		// is dominated by the OTHER error contributions from its actual
+		// spatial neighbors, so a single faraway-source error gets
+		// averaged in without meaningfully shifting the regional palette
+		// mix. The residual ~7 ΔE bias comes from random-order error
+		// diffusion's interaction with the palette+input distribution
+		// itself, not from the dropping behavior. Closing the gap
+		// requires changing the visitation order (Hilbert or scrambled
+		// Z-order with bounded-history error propagation), not patching
+		// the no-neighbor branch.
 	}
 
 	return assignments, nil
