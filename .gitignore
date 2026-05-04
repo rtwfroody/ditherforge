@@ -25,3 +25,6 @@ tests/cache/
 
 # Local scripts
 devscripts/
+
+# Claude Code harness runtime files
+.claude/scheduled_tasks.lock
