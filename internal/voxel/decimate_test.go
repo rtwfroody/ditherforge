@@ -91,6 +91,76 @@ func TestDecimate_ReducesFaces(t *testing.T) {
 	}
 }
 
+// TestDecimate_NonManifoldEdgePreserved guards against a regression where
+// edges shared by 3+ faces would get collapsed by the cost-budget loop,
+// dropping every face on the edge at once and turning the surviving
+// wing-edges into open boundaries. Real-world STLs (e.g. 3DBenchy) carry
+// hundreds of non-manifold edges; the symptom was holes on the hull
+// where surrounding triangles disappeared.
+//
+// Construction: two tetrahedra glued along edge (v0, v1). Both tets are
+// closed in their own right, so every edge in the mesh has count==2
+// EXCEPT (v0, v1) which has count==4 (two faces from each tet). The
+// pre-fix `count==1` rule would not have locked v0/v1 since none of
+// their other edges are open boundaries — only the new `count!=2` rule
+// catches this.
+func TestDecimate_NonManifoldEdgePreserved(t *testing.T) {
+	verts := [][3]float32{
+		{0, 0, 0},       // v0 — shared edge endpoint
+		{1, 0, 0},       // v1 — shared edge endpoint
+		{0.5, 1, 0.1},   // v2 — Tet A apex
+		{0.5, 0.5, 1},   // v3 — Tet A apex
+		{0.5, -1, -0.1}, // v4 — Tet B apex
+		{0.5, -0.5, 1},  // v5 — Tet B apex
+	}
+	// Tet A: outward normals via right-hand rule.
+	// Tet B: mirror across the y=0 plane (winding flipped).
+	faces := [][3]uint32{
+		// Tet A
+		{0, 1, 2},
+		{0, 2, 3},
+		{0, 3, 1},
+		{1, 3, 2},
+		// Tet B
+		{0, 4, 1},
+		{0, 5, 4},
+		{0, 1, 5},
+		{1, 4, 5},
+	}
+
+	// Sanity: pre-decimation, edge (v0, v1) should be non-manifold (4
+	// faces) and every other edge should be manifold (2 faces).
+	wr := CheckWatertight(faces)
+	if len(wr.BoundaryEdges) != 0 {
+		t.Fatalf("test setup wrong: input has %d boundary edges, want 0", len(wr.BoundaryEdges))
+	}
+	if len(wr.NonManifoldEdges) == 0 {
+		t.Fatalf("test setup wrong: input has no non-manifold edges; expected (v0, v1) to be non-manifold")
+	}
+
+	// Aggressive errorBudget so the cost-budget loop has license to
+	// collapse anything topology allows. Without the non-manifold lock,
+	// the (v0, v1) edge is short and would be popped early; collapsing
+	// it drops all 4 faces touching the edge at once and the wing-edges
+	// become open boundaries.
+	_, outFaces, err := Decimate(context.Background(), verts, faces, 1, 10.0, 100.0, nil)
+	if err != nil {
+		t.Fatalf("Decimate: %v", err)
+	}
+	if len(outFaces) == 0 {
+		// Without the lock, an unconstrained heap walk can chase the
+		// non-manifold collapse and the cascading degeneracies until
+		// every face is gone — also a "no holes" result, but for the
+		// wrong reason. Catch it explicitly.
+		t.Fatal("decimation produced empty mesh; non-manifold collapse cascade likely")
+	}
+	wr = CheckWatertight(outFaces)
+	if len(wr.BoundaryEdges) != 0 {
+		t.Errorf("decimation introduced %d boundary edges (non-manifold edge was collapsed): %s",
+			len(wr.BoundaryEdges), wr)
+	}
+}
+
 func TestDecimate_SingleTriangle(t *testing.T) {
 	verts := [][3]float32{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}
 	faces := [][3]uint32{{0, 1, 2}}

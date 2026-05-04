@@ -129,17 +129,17 @@ func (h *collapseHeap) Pop() any {
 }
 
 type decimator struct {
-	verts        [][3]float32
-	faces        [][3]uint32
-	quadrics     []quadric
-	vertFaces    [][]uint32 // vertex → face indices (may include dead faces)
-	faceAlive    []bool
-	vertAlive    []bool
-	vertBoundary []bool // true if vertex is on a mesh boundary (open edge)
-	vertVersion  []int
-	activeFaces  int
-	cellSize     float64 // used to scale cost by edge length
-	h            collapseHeap
+	verts       [][3]float32
+	faces       [][3]uint32
+	quadrics    []quadric
+	vertFaces   [][]uint32 // vertex → face indices (may include dead faces)
+	faceAlive   []bool
+	vertAlive   []bool
+	vertLocked  []bool // true if vertex is on a non-manifold edge (count != 2): open boundary (count==1) or shared by 3+ faces. Both are frozen from collapse — see canCollapse and the marking loop in Decimate.
+	vertVersion []int
+	activeFaces int
+	cellSize    float64 // used to scale cost by edge length
+	h           collapseHeap
 }
 
 // Decimate reduces mesh face count using QEM edge collapse.
@@ -177,16 +177,16 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 	initialFaces := len(faces)
 
 	d := &decimator{
-		verts:        make([][3]float32, len(verts)),
-		faces:        make([][3]uint32, len(faces)),
-		quadrics:     make([]quadric, len(verts)),
-		vertFaces:    make([][]uint32, len(verts)),
-		faceAlive:    make([]bool, len(faces)),
-		vertAlive:    make([]bool, len(verts)),
-		vertBoundary: make([]bool, len(verts)),
-		vertVersion:  make([]int, len(verts)),
-		activeFaces:  len(faces),
-		cellSize:     cellSize,
+		verts:       make([][3]float32, len(verts)),
+		faces:       make([][3]uint32, len(faces)),
+		quadrics:    make([]quadric, len(verts)),
+		vertFaces:   make([][]uint32, len(verts)),
+		faceAlive:   make([]bool, len(faces)),
+		vertAlive:   make([]bool, len(verts)),
+		vertLocked:  make([]bool, len(verts)),
+		vertVersion: make([]int, len(verts)),
+		activeFaces: len(faces),
+		cellSize:    cellSize,
 	}
 	copy(d.verts, verts)
 	copy(d.faces, faces)
@@ -208,7 +208,13 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 		}
 	}
 
-	// Mark boundary vertices (on edges with only 1 adjacent face).
+	// Mark vertices on non-manifold (count != 2) edges as locked. count==1
+	// is an open boundary; collapsing across it widens the hole. count>=3
+	// is a non-manifold edge (multiple sheets meeting); collapsing it
+	// drops every face on that edge at once and the surviving wing-edges
+	// become boundaries (each had a single source face). Both cases
+	// produce visible holes in the output, so freeze the touching
+	// vertices from any collapse.
 	edgeFaceCount := make(map[decimEdgeKey]int)
 	for _, f := range d.faces {
 		for i := 0; i < 3; i++ {
@@ -217,9 +223,9 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 		}
 	}
 	for ek, count := range edgeFaceCount {
-		if count == 1 {
-			d.vertBoundary[ek.v1] = true
-			d.vertBoundary[ek.v2] = true
+		if count != 2 {
+			d.vertLocked[ek.v1] = true
+			d.vertLocked[ek.v2] = true
 		}
 	}
 
@@ -334,9 +340,11 @@ func (d *decimator) pushEdge(ek decimEdgeKey) {
 func (d *decimator) canCollapse(ek decimEdgeKey, newPos [3]float32) bool {
 	v1, v2 := ek.v1, ek.v2
 
-	// Never collapse edges touching boundary vertices. Moving boundary
-	// vertices creates or widens holes, producing visible seams.
-	if d.vertBoundary[v1] || d.vertBoundary[v2] {
+	// Never collapse edges touching locked vertices: open-boundary
+	// vertices (moving them widens holes) or non-manifold-edge vertices
+	// (collapsing across the multi-sheet junction would leave the
+	// surviving wing-edges as boundaries). Both produce visible seams.
+	if d.vertLocked[v1] || d.vertLocked[v2] {
 		return false
 	}
 
