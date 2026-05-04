@@ -1,0 +1,646 @@
+// Command ditherbench measures dither algorithm quality across the
+// existing PNG fixtures plus a few synthetic uniform-color fixtures
+// designed to surface banding artifacts.
+//
+// Three categories of metric per (fixture, mode):
+//
+//   - drift_ΔE: avg(output_color) - avg(input_color), measured in
+//     Lab ΔE. Small = good; FS-class scores ~0.3, dizzy ~7-8,
+//     no-dither up to ~15. The cost dither pays to fix the
+//     unavoidable quantization bias.
+//
+//   - pcell_p50/p99: per-cell ΔE between cell color and its
+//     assigned palette color (Lab). The local quantization error
+//     each cell contributes; bounded by ~half the palette
+//     quantization step regardless of mode.
+//
+//   - blockvar(S=...): variance of error vector at multiple block
+//     scales, normalized by per-pixel variance. For ideal white
+//     noise this ratio decays as 1/S². For blue noise it decays
+//     faster than 1/S² (high-frequency error cancels in larger
+//     blocks). For banding at scale B the ratio stays close to 1
+//     at S=B. The shape of the curve across scales tells you
+//     where dither structure lives.
+//
+// Synthetic fixtures (all-one-color images) are the cleanest test
+// of banding: there's no input texture to hide structure behind,
+// so any pattern in the output is dither artifact.
+//
+// Output is informational. No pass/fail thresholds; intended for
+// use during algorithm development (e.g., evaluating different
+// scrambling permutation subsets when implementing scrambled
+// Z-order traversal).
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	colorful "github.com/lucasb-eyer/go-colorful"
+	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/voxel"
+	"github.com/rtwfroody/ditherforge/tests/inventories"
+)
+
+// fixture is a 2D set of cells laid out at integer (Col, Row), with
+// the original image dimensions retained so we can reconstruct an
+// output image after dithering and so block-variance can iterate
+// over a known canvas.
+type fixture struct {
+	name   string
+	cells  []voxel.ActiveCell
+	width  int
+	height int
+}
+
+// dmode wraps one dither algorithm in a uniform signature.
+type dmode struct {
+	name string
+	run  func(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error)
+}
+
+func main() {
+	outDir := flag.String("out", "", "directory to write per-(fixture,mode) output PNGs (default: none)")
+	onlyFixture := flag.String("fixture", "", "run only this fixture (substring match); default: all")
+	onlyMode := flag.String("mode", "", "run only this mode (substring match); default: all")
+	flag.Parse()
+
+	if *outDir != "" {
+		if err := os.MkdirAll(*outDir, 0o755); err != nil {
+			fail("mkdir %s: %v", *outDir, err)
+		}
+	}
+
+	fixtures := loadAllFixtures()
+	if *onlyFixture != "" {
+		fixtures = filterFixtures(fixtures, *onlyFixture)
+	}
+	if len(fixtures) == 0 {
+		fail("no fixtures matched")
+	}
+
+	modes := []dmode{
+		{"none", wrapAssign},
+		{"dizzy", wrapDizzy},
+		{"floyd-steinberg", wrapFS},
+	}
+	if *onlyMode != "" {
+		var keep []dmode
+		for _, m := range modes {
+			if strings.Contains(m.name, *onlyMode) {
+				keep = append(keep, m)
+			}
+		}
+		modes = keep
+		if len(modes) == 0 {
+			fail("no modes matched")
+		}
+	}
+
+	blockScales := []int{2, 4, 8, 16, 32}
+
+	inv := inventories.Panchroma()
+
+	for _, fx := range fixtures {
+		fmt.Printf("=== %s (%dx%d, %d opaque cells) ===\n", fx.name, fx.width, fx.height, len(fx.cells))
+		// Use the production scorer with chroma weighting for parity
+		// with the live pipeline. dithering=true matches what real
+		// users get when any dither mode is selected.
+		pcfg := voxel.PaletteConfig{NumColors: 4, Inventory: inv}
+		pal, _, _, err := voxel.ResolvePalette(context.Background(), fx.cells, pcfg, true, progress.NullTracker{})
+		if err != nil {
+			fmt.Printf("  ResolvePalette failed: %v\n\n", err)
+			continue
+		}
+		fmt.Print("  palette:")
+		for _, p := range pal {
+			fmt.Printf(" #%02X%02X%02X", p[0], p[1], p[2])
+		}
+		fmt.Println()
+
+		nbrs := buildNeighbors2D(fx.cells)
+		printHeader(blockScales)
+		for _, m := range modes {
+			assigns, err := m.run(context.Background(), fx.cells, pal, nbrs)
+			if err != nil {
+				fmt.Printf("  %-16s ERROR: %v\n", m.name, err)
+				continue
+			}
+			met := computeMetrics(fx, pal, assigns, blockScales)
+			printRow(m.name, met, blockScales)
+
+			if *outDir != "" {
+				path := filepath.Join(*outDir, fmt.Sprintf("%s.%s.png", fx.name, m.name))
+				if werr := writeOutputPNG(path, fx, pal, assigns); werr != nil {
+					fmt.Printf("    write %s: %v\n", path, werr)
+				}
+			}
+		}
+		fmt.Println()
+	}
+}
+
+// ----- fixture loading -----
+
+func loadAllFixtures() []fixture {
+	var out []fixture
+	matches, _ := filepath.Glob("tests/testdata/color/*.png")
+	sort.Strings(matches)
+	for _, p := range matches {
+		fx, err := loadPNGFixture(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skip %s: %v\n", p, err)
+			continue
+		}
+		out = append(out, fx)
+	}
+	// Synthetic uniform-color fixtures designed to surface banding
+	// without any input texture to hide it. Sized to give multiple
+	// blocks at every scale we measure (32 is the largest, so 512
+	// gives 16x16 = 256 blocks -- enough for a stable variance).
+	out = append(out,
+		// Terracotta sits between palette entries — maximally
+		// diagnostic for ordinary dither structure.
+		makeUniformFixture("uniform_terracotta", 512, 512, [3]uint8{0xB3, 0x7D, 0x67}),
+		// Neutral grey at moderate luminance — same idea, neutral hue.
+		makeUniformFixture("uniform_neutral_grey", 512, 512, [3]uint8{0x80, 0x80, 0x80}),
+		// Saturated magenta sits well outside the chroma any
+		// Panchroma-derived 4-color palette can reach. Tests the
+		// "out-of-gamut input" failure mode: an algorithm that
+		// silently breaks energy conservation will look "blue-noise"
+		// here while drift_ΔE blows up.
+		makeUniformFixture("uniform_saturated_magenta", 512, 512, [3]uint8{0xFF, 0x00, 0xFF}),
+	)
+	return out
+}
+
+func filterFixtures(fxs []fixture, substr string) []fixture {
+	var out []fixture
+	for _, fx := range fxs {
+		if strings.Contains(fx.name, substr) {
+			out = append(out, fx)
+		}
+	}
+	return out
+}
+
+func loadPNGFixture(path string) (fixture, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return fixture{}, err
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return fixture{}, err
+	}
+	b := img.Bounds()
+	nrgba := image.NewNRGBA(b)
+	draw.Draw(nrgba, b, img, b.Min, draw.Src)
+	var cells []voxel.ActiveCell
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			c := nrgba.NRGBAAt(x, y)
+			if c.A < 128 {
+				continue
+			}
+			cells = append(cells, voxel.ActiveCell{
+				Col:   x,
+				Row:   y,
+				Color: [3]uint8{c.R, c.G, c.B},
+			})
+		}
+	}
+	name := strings.TrimSuffix(filepath.Base(path), ".png")
+	return fixture{name: name, cells: cells, width: b.Dx(), height: b.Dy()}, nil
+}
+
+func makeUniformFixture(name string, w, h int, c [3]uint8) fixture {
+	cells := make([]voxel.ActiveCell, 0, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			cells = append(cells, voxel.ActiveCell{
+				Col:   x,
+				Row:   y,
+				Color: c,
+			})
+		}
+	}
+	return fixture{name: name, cells: cells, width: w, height: h}
+}
+
+// buildNeighbors2D gives each cell its 8-connected 2D neighbors via
+// a (Col, Row) lookup. Weights mirror the production
+// voxel.BuildNeighbors policy: face-adjacent = 1.0, diagonal = 0.1.
+// Keep these in sync with voxel.BuildNeighbors -- if the production
+// weight scheme is tuned, the bench will silently disagree until
+// this function is updated to match.
+func buildNeighbors2D(cells []voxel.ActiveCell) [][]voxel.Neighbor {
+	pos := make(map[[2]int]int, len(cells))
+	for i, c := range cells {
+		pos[[2]int{c.Col, c.Row}] = i
+	}
+	out := make([][]voxel.Neighbor, len(cells))
+	for i, c := range cells {
+		var nbs []voxel.Neighbor
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				if dx == 0 && dy == 0 {
+					continue
+				}
+				j, ok := pos[[2]int{c.Col + dx, c.Row + dy}]
+				if !ok {
+					continue
+				}
+				w := float32(1.0)
+				if dx != 0 && dy != 0 {
+					w = 0.1
+				}
+				nbs = append(nbs, voxel.Neighbor{Idx: j, Weight: w})
+			}
+		}
+		out[i] = nbs
+	}
+	return out
+}
+
+// ----- mode wrappers -----
+
+func wrapAssign(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, _ [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.AssignColors(ctx, cells, pal)
+}
+func wrapDizzy(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherWithNeighbors(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+
+// ----- metrics -----
+
+type metrics struct {
+	driftDE    float64
+	pcell      []float64       // sorted per-cell ΔE
+	blockVar   map[int]float64 // scale -> normalized block-mean variance
+	maxDirCorr map[int]float64 // distance -> max |autocorrelation| over 8 directions
+}
+
+func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
+	// Global drift in Lab ΔE.
+	var iR, iG, iB, oR, oG, oB float64
+	for i, c := range fx.cells {
+		iR += float64(c.Color[0])
+		iG += float64(c.Color[1])
+		iB += float64(c.Color[2])
+		a := assigns[i]
+		oR += float64(pal[a][0])
+		oG += float64(pal[a][1])
+		oB += float64(pal[a][2])
+	}
+	n := float64(len(fx.cells))
+	iL, iA, iBl := toLab(iR/n, iG/n, iB/n)
+	oL, oA, oBl := toLab(oR/n, oG/n, oB/n)
+	driftDE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
+
+	// Per-cell ΔE distribution.
+	pcell := make([]float64, len(fx.cells))
+	for i, c := range fx.cells {
+		cL, cA, cB := toLab(float64(c.Color[0]), float64(c.Color[1]), float64(c.Color[2]))
+		p := pal[assigns[i]]
+		pL, pA, pB := toLab(float64(p[0]), float64(p[1]), float64(p[2]))
+		pcell[i] = math.Sqrt((cL-pL)*(cL-pL) + (cA-pA)*(cA-pA) + (cB-pB)*(cB-pB))
+	}
+	sort.Float64s(pcell)
+
+	// Build the per-pixel error grid, then subtract the global mean
+	// error vector before measuring spatial structure. The drift
+	// metrics above already report the mean separately; leaving it
+	// in here would inflate both blockvar and maxdircorr by a
+	// constant proportional to drift_ΔE², making cross-mode
+	// comparison unfair (a high-drift mode would look "bandy" even
+	// with perfectly white residuals because |μ|² leaks into both
+	// the autocorrelation numerator and the per-pixel-variance
+	// denominator).
+	grid := buildErrorGrid(fx, pal, assigns)
+	centerErrorGrid(grid)
+	bv := computeBlockVariance(grid, fx.width, fx.height, blockScales)
+	mdc := computeMaxDirCorr(grid, fx.width, fx.height, []int{1, 4})
+
+	return metrics{
+		driftDE:    driftDE,
+		pcell:      pcell,
+		blockVar:   bv,
+		maxDirCorr: mdc,
+	}
+}
+
+// centerErrorGrid subtracts the mean error vector from every opaque
+// cell, in place. Required before blockvar / maxdircorr — see the
+// caller comment for why.
+func centerErrorGrid(grid []errPixel) {
+	var mR, mG, mB float64
+	var n int
+	for _, e := range grid {
+		if !e.present {
+			continue
+		}
+		mR += e.eR
+		mG += e.eG
+		mB += e.eB
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	mR /= float64(n)
+	mG /= float64(n)
+	mB /= float64(n)
+	for i, e := range grid {
+		if !e.present {
+			continue
+		}
+		grid[i].eR = e.eR - mR
+		grid[i].eG = e.eG - mG
+		grid[i].eB = e.eB - mB
+	}
+}
+
+// errPixel holds the error vector for one cell (output - input). The
+// `present` flag distinguishes unfilled pixels (transparent regions
+// in the multi-view strips) from real cells that happen to have zero
+// error.
+type errPixel struct {
+	present    bool
+	eR, eG, eB float64
+}
+
+// buildErrorGrid materializes the per-pixel error vector field on a
+// w×h canvas for spatial-structure analysis. Transparent cells leave
+// errPixel{present: false}.
+func buildErrorGrid(fx fixture, pal [][3]uint8, assigns []int32) []errPixel {
+	grid := make([]errPixel, fx.width*fx.height)
+	for i, c := range fx.cells {
+		p := pal[assigns[i]]
+		grid[c.Row*fx.width+c.Col] = errPixel{
+			present: true,
+			eR:      float64(p[0]) - float64(c.Color[0]),
+			eG:      float64(p[1]) - float64(c.Color[1]),
+			eB:      float64(p[2]) - float64(c.Color[2]),
+		}
+	}
+	return grid
+}
+
+// perPixelVar returns the average squared error vector magnitude
+// (uncentered variance) and the opaque-cell count. Returns 0,0 when
+// the grid is empty.
+func perPixelVar(grid []errPixel) (float64, int) {
+	var v float64
+	var n int
+	for _, e := range grid {
+		if !e.present {
+			continue
+		}
+		v += e.eR*e.eR + e.eG*e.eG + e.eB*e.eB
+		n++
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return v / float64(n), n
+}
+
+// computeBlockVariance tabulates the multi-scale block-mean variance
+// of the error vector field, normalized by the per-pixel error
+// variance. Returns one ratio per requested block scale.
+//
+// At scale S, the canvas is partitioned into S×S blocks; for each
+// block, the mean error vector is computed over the block's opaque
+// pixels (transparent cells skipped). The variance of those block-
+// mean vectors (across all blocks with at least one opaque pixel) is
+// divided by the per-pixel error variance.
+//
+// White noise gives ratio ≈ 1/S² (variance averages out as 1/N for
+// N independent samples per block). Blue noise gives ratio < 1/S²
+// (high-frequency error cancels). Banding at scale B keeps the ratio
+// close to 1 at S=B, and produces a visible bump in the curve.
+//
+// Caveat: square-block averaging is direction-blind. Diagonal stripe
+// patterns (FS scanline output) average to near-zero per square block
+// at all scales but are obvious to the eye — see computeMaxDirCorr
+// for the directional companion metric.
+func computeBlockVariance(grid []errPixel, w, h int, scales []int) map[int]float64 {
+	perPixVar, _ := perPixelVar(grid)
+	if perPixVar < 1e-9 {
+		out := make(map[int]float64, len(scales))
+		for _, s := range scales {
+			out[s] = 0
+		}
+		return out
+	}
+	out := make(map[int]float64, len(scales))
+	for _, s := range scales {
+		out[s] = blockMeanVar(grid, w, h, s) / perPixVar
+	}
+	return out
+}
+
+// computeMaxDirCorr returns, for each requested distance d, the max
+// absolute autocorrelation of the error vector field over 6
+// directions sampling 30°-spaced angles in the upper half-plane:
+// (d,0), (0,d), (d,d), (d,-d), (d,2d), (2d,d). Each direction's
+// autocorrelation is the dot product of error vectors at offset
+// (dx, dy), normalized by per-pixel variance — so 0 = uncorrelated
+// (good blue-noise signature), 1 = perfectly correlated (banding at
+// that distance and direction), -1 = perfectly anti-correlated.
+//
+// 6 directions instead of 4 because the (1,2)/(2,1) lattice angles
+// catch stripe patterns at ~26.5° / ~63.5° that pure axis+diagonal
+// sampling misses. Z-order scrambling artifacts in particular tend
+// to land at lattice angles other than the cardinal four.
+//
+// This catches the failure mode block-variance misses: directional
+// stripe patterns (e.g., the diagonal stripes FS produces along the
+// scanline). A scrambled-Z-order candidate that's truly blue-noise
+// should drive both this metric and block-variance to near zero.
+func computeMaxDirCorr(grid []errPixel, w, h int, distances []int) map[int]float64 {
+	perPixVar, _ := perPixelVar(grid)
+	if perPixVar < 1e-9 {
+		out := make(map[int]float64, len(distances))
+		for _, d := range distances {
+			out[d] = 0
+		}
+		return out
+	}
+	out := make(map[int]float64, len(distances))
+	for _, d := range distances {
+		dirs := [6][2]int{{d, 0}, {0, d}, {d, d}, {d, -d}, {d, 2 * d}, {2 * d, d}}
+		var maxAbs float64
+		for _, dir := range dirs {
+			c := autocorr(grid, w, h, dir[0], dir[1]) / perPixVar
+			if math.Abs(c) > maxAbs {
+				maxAbs = math.Abs(c)
+			}
+		}
+		out[d] = maxAbs
+	}
+	return out
+}
+
+// autocorr is the average dot product of the error vector at (x, y)
+// with the error vector at (x+dx, y+dy), over all pairs where both
+// are opaque and in bounds.
+func autocorr(grid []errPixel, w, h, dx, dy int) float64 {
+	var sum float64
+	var n int
+	for y := 0; y < h; y++ {
+		ny := y + dy
+		if ny < 0 || ny >= h {
+			continue
+		}
+		for x := 0; x < w; x++ {
+			nx := x + dx
+			if nx < 0 || nx >= w {
+				continue
+			}
+			a := grid[y*w+x]
+			b := grid[ny*w+nx]
+			if !a.present || !b.present {
+				continue
+			}
+			sum += a.eR*b.eR + a.eG*b.eG + a.eB*b.eB
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return sum / float64(n)
+}
+
+// blockMeanVar returns the average squared magnitude of per-block
+// mean error vectors. Blocks with no opaque pixels are skipped.
+//
+// Partial blocks at the right/bottom edge (when w or h isn't a
+// multiple of s) are included with their actual cell count rather
+// than truncated, so we don't silently drop up to s-1 rows/cols on
+// fixtures whose dimensions aren't clean multiples of every scale
+// in the table (the multi-view PNG fixtures are not).
+func blockMeanVar(grid []errPixel, w, h, s int) float64 {
+	var sum float64
+	var blockCount int
+	for by := 0; by < h; by += s {
+		yEnd := by + s
+		if yEnd > h {
+			yEnd = h
+		}
+		for bx := 0; bx < w; bx += s {
+			xEnd := bx + s
+			if xEnd > w {
+				xEnd = w
+			}
+			var mR, mG, mB float64
+			var n int
+			for y := by; y < yEnd; y++ {
+				for x := bx; x < xEnd; x++ {
+					e := grid[y*w+x]
+					if !e.present {
+						continue
+					}
+					mR += e.eR
+					mG += e.eG
+					mB += e.eB
+					n++
+				}
+			}
+			if n == 0 {
+				continue
+			}
+			fn := float64(n)
+			mR /= fn
+			mG /= fn
+			mB /= fn
+			sum += mR*mR + mG*mG + mB*mB
+			blockCount++
+		}
+	}
+	if blockCount == 0 {
+		return 0
+	}
+	return sum / float64(blockCount)
+}
+
+// ----- output -----
+
+func printHeader(scales []int) {
+	parts := make([]string, len(scales))
+	for i, s := range scales {
+		parts[i] = fmt.Sprintf("%5d", s)
+	}
+	fmt.Printf("  %-16s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_ΔE", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+}
+
+func printRow(name string, m metrics, scales []int) {
+	pcellP50 := percentile(m.pcell, 0.50)
+	pcellP99 := percentile(m.pcell, 0.99)
+	bvParts := make([]string, len(scales))
+	for i, s := range scales {
+		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
+	}
+	fmt.Printf("  %-16s %8.2f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftDE, pcellP50, pcellP99, strings.Join(bvParts, " "),
+		m.maxDirCorr[1], m.maxDirCorr[4])
+}
+
+func writeOutputPNG(path string, fx fixture, pal [][3]uint8, assigns []int32) error {
+	img := image.NewRGBA(image.Rect(0, 0, fx.width, fx.height))
+	// Fill with opaque white so transparent regions (multi-view
+	// fixture gaps) render readably in any image viewer instead of
+	// leaving zero-alpha pixels that some viewers display as black.
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{255, 255, 255, 255}}, image.Point{}, draw.Src)
+	for i, c := range fx.cells {
+		p := pal[assigns[i]]
+		img.SetRGBA(c.Col, c.Row, color.RGBA{R: p[0], G: p[1], B: p[2], A: 255})
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+// ----- helpers -----
+
+// percentile uses lower-floor nearest-rank interpolation: pct(0.5)
+// of a 2-element slice returns the first element, not the average.
+// Adequate for diagnostic display; don't rely on this matching any
+// specific statistical convention.
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	return sorted[int(p*float64(len(sorted)-1))]
+}
+
+func toLab(r, g, b float64) (float64, float64, float64) {
+	c := colorful.Color{R: r / 255, G: g / 255, B: b / 255}
+	L, A, B := c.Lab()
+	return L * 100, A * 100, B * 100
+}
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
