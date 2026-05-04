@@ -1147,6 +1147,34 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	return assignments, nil
 }
 
+// RiemersmaInputBias trades chroma fidelity against the algorithm's
+// willingness to use far-from-input palette colors to balance
+// accumulated error. The palette pick scores each candidate by
+//
+//   (1 - RiemersmaInputBias) * dist²(target, palette)
+//   +   RiemersmaInputBias  * dist²(input, palette)
+//
+// where target = input + windowed_error.
+//
+// 0.0: pure Riemersma. DC gain 1 means accumulated error is
+//      perfectly compensated by the next palette pick, but for
+//      input near a palette boundary that compensation can swing
+//      the pick to a far palette ("optimal 50/50 black+white mix
+//      to match grey average" instead of "mostly grey"). Best
+//      possible average chroma; least cell-by-cell fidelity.
+//
+// 1.0: snap to nearest input. No dither. Loses both chroma and
+//      detail.
+//
+// 0.5: neutral blend. The algorithm tolerates moderate windowed
+//      error before switching palette, preferring the locally-
+//      closest color. Visually closer to FS/dizzy: lots of one
+//      palette color with occasional dither cells. Some drift
+//      appears (small) but the look is consistently "mostly the
+//      close color, occasional imperfections" rather than "even
+//      mix of opposites."
+const RiemersmaInputBias = 0.5
+
 // RiemersmaWindowSize is the sliding-window length used by
 // Riemersma — the number of past errors each cell sees, weighted by
 // age. 16 is the value Riemersma's original 1998 description used
@@ -1237,17 +1265,32 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			eB += weights[k] * window[slot][2]
 		}
 
-		r := float32(cells[idx].Color[0]) + eR
-		g := float32(cells[idx].Color[1]) + eG
-		b := float32(cells[idx].Color[2]) + eB
+		iR := float32(cells[idx].Color[0])
+		iG := float32(cells[idx].Color[1])
+		iB := float32(cells[idx].Color[2])
+		r := iR + eR
+		g := iG + eG
+		b := iB + eB
 
+		// Score = (1-α)·dist²(target, palette) + α·dist²(input, palette).
+		// α = RiemersmaInputBias dampens the algorithm's tendency
+		// to swing palette to a far color to compensate for
+		// accumulated windowed error — keeps the pick near input
+		// when the close palette is nearly as good as the far one.
+		const wt = 1.0 - RiemersmaInputBias
+		const wi = RiemersmaInputBias
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
 		for pi, p := range pal {
-			dr := r - float32(p[0])
-			dg := g - float32(p[1])
-			db := b - float32(p[2])
-			d := dr*dr + dg*dg + db*db
+			drT := r - float32(p[0])
+			dgT := g - float32(p[1])
+			dbT := b - float32(p[2])
+			dT := drT*drT + dgT*dgT + dbT*dbT
+			drI := iR - float32(p[0])
+			dgI := iG - float32(p[1])
+			dbI := iB - float32(p[2])
+			dI := drI*drI + dgI*dgI + dbI*dbI
+			d := wt*dT + wi*dI
 			if d < bestDist {
 				bestDist = d
 				bestIdx = pi
