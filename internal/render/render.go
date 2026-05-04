@@ -433,6 +433,232 @@ func RenderColor(
 	return img
 }
 
+// StripView identifies one orthographic camera angle in a multi-view strip.
+type StripView struct {
+	Name      string
+	Azimuth   float64
+	Elevation float64
+}
+
+// RenderColorStrip renders the mesh from each StripView at a uniform
+// world-to-pixel scale (so a square mm of surface contributes the same
+// number of pixels in every view), then concatenates the per-view
+// images horizontally into a single RGBA strip with a transparent
+// background.
+//
+// longestPixels caps the model's longest 3D bounding-box axis at this
+// many pixels; per-view sizes follow from the same scale.
+//
+// The returned image's height is the tallest per-view height; shorter
+// views are top-aligned with transparent fill below. gapPx transparent
+// columns separate adjacent views.
+func RenderColorStrip(
+	vertices [][3]float32, faces [][3]uint32,
+	views []StripView,
+	longestPixels int,
+	gapPx int,
+	colorFn func(faceIdx int, baryU, baryV float64) [3]uint8,
+) *image.RGBA {
+	if len(vertices) == 0 || len(faces) == 0 || len(views) == 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+
+	// 3D bbox sets the world-to-pixel scale. Fix scale once across
+	// views so per-view pixel area is proportional to projected area.
+	var ext [3]float64
+	{
+		var lo, hi [3]float64
+		for i := 0; i < 3; i++ {
+			lo[i] = math.Inf(1)
+			hi[i] = math.Inf(-1)
+		}
+		for _, v := range vertices {
+			for i := 0; i < 3; i++ {
+				f := float64(v[i])
+				if f < lo[i] {
+					lo[i] = f
+				}
+				if f > hi[i] {
+					hi[i] = f
+				}
+			}
+		}
+		for i := 0; i < 3; i++ {
+			ext[i] = hi[i] - lo[i]
+		}
+	}
+	maxExt := math.Max(ext[0], math.Max(ext[1], ext[2]))
+	if maxExt < 1e-12 {
+		maxExt = 1
+	}
+	scale := float64(longestPixels) / maxExt
+
+	type view struct {
+		img *ColorImage
+		w   int
+	}
+	rendered := make([]view, len(views))
+	maxH := 0
+	totalW := 0
+	for i, v := range views {
+		b := ProjectedBounds(vertices, v.Azimuth, v.Elevation)
+		w := int(math.Ceil((b.XMax - b.XMin) * scale))
+		h := int(math.Ceil((b.YMax - b.YMin) * scale))
+		if w < 1 {
+			w = 1
+		}
+		if h < 1 {
+			h = 1
+		}
+		img := renderColorRect(vertices, faces, v.Azimuth, v.Elevation, w, h, b, scale, colorFn)
+		rendered[i] = view{img: img, w: w}
+		totalW += w
+		if h > maxH {
+			maxH = h
+		}
+	}
+	if len(views) > 1 {
+		totalW += gapPx * (len(views) - 1)
+	}
+
+	out := image.NewRGBA(image.Rect(0, 0, totalW, maxH))
+	xOff := 0
+	for i, vi := range rendered {
+		for y := 0; y < vi.img.Height; y++ {
+			for x := 0; x < vi.img.Width; x++ {
+				idx := y*vi.img.Width + x
+				if !vi.img.HasPixel[idx] {
+					continue
+				}
+				out.SetRGBA(xOff+x, y, color.RGBA{
+					R: vi.img.R[idx],
+					G: vi.img.G[idx],
+					B: vi.img.B[idx],
+					A: 255,
+				})
+			}
+		}
+		xOff += vi.w
+		if i < len(rendered)-1 {
+			xOff += gapPx
+		}
+	}
+	return out
+}
+
+// renderColorRect is the rectangular-canvas, fixed-scale variant of
+// RenderColor. The image is sized exactly width×height; the projected
+// bounds are mapped so (XMin, YMax) lands at the top-left pixel center
+// region with no margin (callers that want padding bake it into the
+// width/height they pass). Used by RenderColorStrip to keep view
+// scales consistent.
+func renderColorRect(
+	vertices [][3]float32, faces [][3]uint32,
+	azimuth, elevation float64,
+	width, height int,
+	bounds Bounds, scale float64,
+	colorFn func(faceIdx int, baryU, baryV float64) [3]uint8,
+) *ColorImage {
+	rot := rotationMatrix(azimuth, elevation)
+
+	type pixVert struct {
+		x, y, d float64
+	}
+	pv := make([]pixVert, len(vertices))
+	for i, v := range vertices {
+		t := transform(rot, v)
+		// Map (XMin, YMax) to (0, 0) and (XMax, YMin) to (width, height).
+		pv[i] = pixVert{
+			x: (t[0] - bounds.XMin) * scale,
+			y: (bounds.YMax - t[2]) * scale,
+			d: t[1],
+		}
+	}
+
+	n := width * height
+	img := &ColorImage{
+		Width:    width,
+		Height:   height,
+		R:        make([]uint8, n),
+		G:        make([]uint8, n),
+		B:        make([]uint8, n),
+		HasPixel: make([]bool, n),
+	}
+	zbuf := make([]float64, n)
+	for i := range zbuf {
+		zbuf[i] = math.Inf(1)
+	}
+
+	for fi, f := range faces {
+		v0, v1, v2 := pv[f[0]], pv[f[1]], pv[f[2]]
+
+		minX := math.Floor(math.Min(v0.x, math.Min(v1.x, v2.x)))
+		maxX := math.Ceil(math.Max(v0.x, math.Max(v1.x, v2.x)))
+		minY := math.Floor(math.Min(v0.y, math.Min(v1.y, v2.y)))
+		maxY := math.Ceil(math.Max(v0.y, math.Max(v1.y, v2.y)))
+
+		bx0 := int(minX)
+		bx1 := int(maxX)
+		by0 := int(minY)
+		by1 := int(maxY)
+		if bx0 < 0 {
+			bx0 = 0
+		}
+		if by0 < 0 {
+			by0 = 0
+		}
+		if bx1 >= width {
+			bx1 = width - 1
+		}
+		if by1 >= height {
+			by1 = height - 1
+		}
+		if bx0 > bx1 || by0 > by1 {
+			continue
+		}
+
+		e0x, e0y := v1.x-v0.x, v1.y-v0.y
+		e1x, e1y := v2.x-v0.x, v2.y-v0.y
+		dot00 := e0x*e0x + e0y*e0y
+		dot01 := e0x*e1x + e0y*e1y
+		dot11 := e1x*e1x + e1y*e1y
+		denom := dot00*dot11 - dot01*dot01
+		if math.Abs(denom) < 1e-10 {
+			continue
+		}
+		invDenom := 1.0 / denom
+
+		for py := by0; py <= by1; py++ {
+			for px := bx0; px <= bx1; px++ {
+				qx := float64(px) + 0.5 - v0.x
+				qy := float64(py) + 0.5 - v0.y
+
+				dot02 := e0x*qx + e0y*qy
+				dot12 := e1x*qx + e1y*qy
+
+				u := (dot11*dot02 - dot01*dot12) * invDenom
+				v := (dot00*dot12 - dot01*dot02) * invDenom
+
+				if u < 0 || v < 0 || u+v > 1 {
+					continue
+				}
+
+				d := v0.d + u*(v1.d-v0.d) + v*(v2.d-v0.d)
+				idx := py*width + px
+				if d < zbuf[idx] {
+					zbuf[idx] = d
+					c := colorFn(fi, u, v)
+					img.R[idx] = c[0]
+					img.G[idx] = c[1]
+					img.B[idx] = c[2]
+					img.HasPixel[idx] = true
+				}
+			}
+		}
+	}
+	return img
+}
+
 // DilateMask dilates a boolean mask by radius pixels using a box filter.
 func DilateMask(mask []bool, width, height, radius int) []bool {
 	out := make([]bool, len(mask))

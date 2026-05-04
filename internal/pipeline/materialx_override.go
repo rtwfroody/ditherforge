@@ -160,6 +160,41 @@ func floatToByte(f float64) uint8 {
 	return uint8(v)
 }
 
+// NewMaterialXOverride parses the .mtlx (or .zip containing one) at
+// path and returns a BaseColorOverride that triplanar-projects its
+// default base-color graph. Unlike StageCache.baseColorOverride, this
+// does not memoize — each call re-parses the package. Intended for
+// one-off uses outside the pipeline (e.g. test fixture generators).
+//
+// tileMM scales world-space mm into the procedural's shading frame
+// (values <= 0 are treated as 1 mm). triplanarSharpness only matters
+// for image-backed graphs; <= 0 picks a sensible default of 4.
+func NewMaterialXOverride(path string, tileMM, triplanarSharpness float64) (voxel.BaseColorOverride, error) {
+	doc, err := materialx.ParsePackage(path)
+	if err != nil {
+		return nil, fmt.Errorf("MaterialX %q: %w", path, err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		return nil, fmt.Errorf("MaterialX %q: %w", path, err)
+	}
+	if s == nil {
+		return nil, nil
+	}
+	if tileMM <= 0 {
+		tileMM = 1
+	}
+	if triplanarSharpness <= 0 {
+		triplanarSharpness = 4
+	}
+	return &materialxOverride{
+		sampler:   s,
+		invTileMM: 1 / tileMM,
+		useUV:     s.UsesUV(),
+		sharpness: triplanarSharpness,
+	}, nil
+}
+
 // baseColorOverride wraps the cached materialx.Sampler for the package
 // at path with a per-run tile/triplanar config. tileMM scales
 // world-space mm into the procedural's shading frame (values <= 0 are

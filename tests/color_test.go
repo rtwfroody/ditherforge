@@ -3,13 +3,15 @@ package tests
 import (
 	"context"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/png"
 	"os"
+	"path/filepath"
 	"testing"
 
-	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/progress"
-	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -61,20 +63,23 @@ var panchromaInventory = []palette.InventoryEntry{
 	{Color: [3]uint8{0xEB, 0xF7, 0xFF}, Label: "White"},
 }
 
-// colorTestCase defines a test for inventory palette selection.
+// colorTestCase defines a test for inventory palette selection. Each
+// case names a fixture PNG under testdata/color/<name>.png that the
+// fixturegen tool produces from a real model. The PNG's opaque pixels
+// are fed to ResolvePalette as cell colors; this keeps the test
+// hermetic (no GLB/STL/texture files in the repo) while still
+// exercising the scorer on real-world color distributions.
 type colorTestCase struct {
 	name      string
-	glbPath   string
 	nColors   int
 	inventory []palette.InventoryEntry // nil = use testInventory
-	required  [][3]uint8              // colors that must appear in the selected palette
-	anyOf     [][][3]uint8            // for each group, at least one color must appear
+	required  [][3]uint8               // colors that must appear in the selected palette
+	anyOf     [][][3]uint8             // for each group, at least one color must appear
 }
 
 var colorTests = []colorTestCase{
 	{
 		name:    "delorean",
-		glbPath: "~/Documents/3d_print/objects/1985_delorean_dmc-12_time_machine_bttf.glb",
 		nColors: 4,
 		required: [][3]uint8{
 			{0x7A, 0x7C, 0x7D}, // gray — needed for the car body
@@ -82,7 +87,6 @@ var colorTests = []colorTestCase{
 	},
 	{
 		name:    "golden_pheasant",
-		glbPath: "~/Documents/3d_print/objects/golden_pheasant.glb",
 		nColors: 4,
 		anyOf: [][][3]uint8{
 			// At least one red — visually dominant on the pheasant
@@ -91,7 +95,6 @@ var colorTests = []colorTestCase{
 	},
 	{
 		name:      "earth",
-		glbPath:   "objects/earth.glb",
 		nColors:   4,
 		inventory: panchromaInventory,
 		anyOf: [][][3]uint8{
@@ -113,43 +116,92 @@ var colorTests = []colorTestCase{
 			},
 		},
 	},
+	{
+		name:      "bricks_benchy",
+		nColors:   4,
+		inventory: panchromaInventory,
+		anyOf: [][][3]uint8{
+			// At least one warm chromatic color so the brick texture
+			// reads as terracotta rather than tan-with-cool-flecks.
+			// Without one of these the scorer falls back to a hull-
+			// covering set (Tan + Orange + Blue + White) that
+			// reproduces the cell-color average correctly but reads
+			// perceptually as the wrong color.
+			{
+				{0xE7, 0x2F, 0x1D}, // Red
+				{0xD6, 0x02, 0x12}, // Wine Red
+				{0x55, 0x33, 0x1A}, // Brown
+			},
+		},
+	},
 }
 
-func expandHome(path string) string {
-	if len(path) > 1 && path[:2] == "~/" {
-		home, _ := os.UserHomeDir()
-		return home + path[1:]
+// loadCellsFromPNG reads a fixture PNG and returns one ActiveCell per
+// opaque pixel, with that pixel's RGB as the cell color. Background
+// (alpha < 128) pixels are skipped so transparent regions of the
+// strip don't pollute the histogram. The Lab math downstream cares
+// only about Color, so other ActiveCell fields can stay zero.
+//
+// The fixturegen tool writes via png.Encode of an *image.RGBA, which
+// produces a non-paletted, gamma-encoded sRGB PNG; png.Decode returns
+// either *image.NRGBA or *image.RGBA depending on whether the file
+// has an alpha channel, both with sRGB-encoded straight channels for
+// non-paletted data. Either way the per-pixel color matches what the
+// live pipeline gives the dither stage (8-bit sRGB straight RGB), so
+// no gamma conversion is needed; we just read the channels via
+// image.At which normalizes both representations to the same model.
+func loadCellsFromPNG(t *testing.T, path string) []voxel.ActiveCell {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
 	}
-	return path
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	b := img.Bounds()
+	cells := make([]voxel.ActiveCell, 0, b.Dx()*b.Dy())
+	switch im := img.(type) {
+	case *image.NRGBA:
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				c := im.NRGBAAt(x, y)
+				if c.A < 128 {
+					continue
+				}
+				cells = append(cells, voxel.ActiveCell{Color: [3]uint8{c.R, c.G, c.B}})
+			}
+		}
+	default:
+		// Paletted, RGBA, or any other concrete type: copy through
+		// NRGBA so we never read premultiplied channels.
+		nrgba := image.NewNRGBA(b)
+		draw.Draw(nrgba, b, img, b.Min, draw.Src)
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				c := nrgba.NRGBAAt(x, y)
+				if c.A < 128 {
+					continue
+				}
+				cells = append(cells, voxel.ActiveCell{Color: [3]uint8{c.R, c.G, c.B}})
+			}
+		}
+	}
+	return cells
 }
 
 func TestColorSelection(t *testing.T) {
 	for _, tc := range colorTests {
 		t.Run(tc.name, func(t *testing.T) {
-			glbPath := expandHome(tc.glbPath)
-			if _, err := os.Stat(glbPath); os.IsNotExist(err) {
-				t.Skipf("model not found: %s", glbPath)
+			fixturePath := filepath.Join("testdata", "color", tc.name+".png")
+			if _, err := os.Stat(fixturePath); os.IsNotExist(err) {
+				t.Skipf("fixture not found: %s (regenerate with: go run ./fixturegen --only %s)", fixturePath, tc.name)
 			}
-
-			const unitScale = float32(1000)
-			model, err := loader.LoadGLB(glbPath, -1)
-			if err != nil {
-				t.Fatalf("LoadGLB: %v", err)
-			}
-			loader.ScaleModel(model, unitScale)
-
-			// Scale to 100mm extent.
-			ext := modelExtent(model)
-			if ext != 100 {
-				loader.ScaleModel(model, 100/ext)
-			}
-
-			// Voxelize to get cell colors.
-			cellSize := float32(0.4 * 1.275)
-			layerH := float32(0.2)
-			cells, _, _, err := squarevoxel.Voxelize(context.Background(), model, model, cellSize, layerH, progress.NullTracker{}, nil)
-			if err != nil {
-				t.Fatalf("Voxelize: %v", err)
+			cells := loadCellsFromPNG(t, fixturePath)
+			if len(cells) == 0 {
+				t.Fatalf("fixture %s contained no opaque pixels", fixturePath)
 			}
 
 			inv := testInventory

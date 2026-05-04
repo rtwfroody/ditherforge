@@ -17,6 +17,9 @@ frontend/vite.config.d.ts
 *.ply
 *.png
 
+# Test fixture renders (checked in; see tests/testdata/color/README.md)
+!tests/testdata/color/*.png
+
 # Test cache (remesh outputs keyed by source hash)
 tests/cache/
 
