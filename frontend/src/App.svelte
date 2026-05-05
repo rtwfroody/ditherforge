@@ -169,6 +169,8 @@
   let dither = $state('riemersma');
   let riemersmaBias = $state(0.85);
   let committedRiemersmaBias = $state(0.85);
+  let blueNoiseTol = $state(20);
+  let committedBlueNoiseTol = $state(20);
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
@@ -847,6 +849,7 @@
       })),
       dither,
       riemersmaBias,
+      blueNoiseTol,
       colorSnap,
       noMerge,
       noSimplify,
@@ -994,6 +997,7 @@
 
     dither = pickEnum(s.dither, DITHER_VALUES, D.dither as DitherMode);
     riemersmaBias = pickNumber(s.riemersmaBias, D.riemersmaBias); committedRiemersmaBias = riemersmaBias;
+    blueNoiseTol = pickNumber(s.blueNoiseTol, D.blueNoiseTol); committedBlueNoiseTol = blueNoiseTol;
     colorSnap = pickNumber(s.colorSnap, D.colorSnap); committedColorSnap = colorSnap;
     noMerge = pickBool(s.noMerge, D.noMerge);
     noSimplify = pickBool(s.noSimplify, D.noSimplify);
@@ -1208,6 +1212,7 @@
       Saturation: committedSaturation,
       Dither: dither,
       RiemersmaInputBias: committedRiemersmaBias,
+      BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -1829,6 +1834,21 @@
                   <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>
                 </div>
                 <Slider type="single" min={0} max={1} step={0.05} value={riemersmaBias} onValueChange={(v: number) => riemersmaBias = v} onValueCommit={(v: number) => committedRiemersmaBias = v} />
+              </div>
+            {/if}
+
+            {#if dither === 'blue-noise'}
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Tolerance</Label>
+                    <HelpTip>
+                      Per-cell projection-error tolerance in 8-bit RGB units. Smaller (≈5–10) forces the dither to bracket each input with more palette colors — keeps drift low but can show wider color spread on near-flat regions. Larger (≈20–40) sticks to 2-color pairs — bounds wander tightly (no white/black oscillation around near-grey) at the cost of small per-cell drift. Default 20 is a balance.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-10 text-right">{blueNoiseTol.toFixed(0)}</span>
+                </div>
+                <Slider type="single" min={1} max={50} step={1} value={blueNoiseTol} onValueChange={(v: number) => blueNoiseTol = v} onValueCommit={(v: number) => committedBlueNoiseTol = v} />
               </div>
             {/if}
           </div>

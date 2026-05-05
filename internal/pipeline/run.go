@@ -787,6 +787,20 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "riemersma":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
+		case "blue-noise":
+			// Adaptive simplex blue-noise threshold dither: per-cell
+			// best-K simplex (1..palette_size) selected by per-cell
+			// projection-error tolerance, with LDS-driven choice
+			// among simplex vertices. Trades a small drift for big
+			// reductions in wander on uniform/near-flat regions
+			// (where Riemersma's window accumulator forces visible
+			// far-palette picks).
+			neighbors := vo.getNeighbors()
+			tol := r.opts.BlueNoiseTolerance
+			if tol <= 0 {
+				tol = voxel.BlueNoiseAdaptiveTolDefault
+			}
+			assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, neighbors, tol, r.tracker)
 		default:
 			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		}

@@ -2,12 +2,20 @@
 // existing PNG fixtures plus a few synthetic uniform-color fixtures
 // designed to surface banding artifacts.
 //
-// Three categories of metric per (fixture, mode):
+// Four categories of metric per (fixture, mode):
 //
 //   - drift_ΔE: avg(output_color) - avg(input_color), measured in
 //     Lab ΔE. Small = good; FS-class scores ~0.3, dizzy ~7-8,
 //     no-dither up to ~15. The cost dither pays to fix the
 //     unavoidable quantization bias.
+//
+//   - wander_ΔE: mean Lab ΔE between the chosen palette entry and
+//     the nearest-input palette entry. Captures how often the
+//     algorithm reaches past the closest palette color to a far
+//     one (e.g. white/black to average to grey when a near-grey
+//     entry exists). Pure nearest-color picks score 0; algorithms
+//     that aggressively distribute residual into large-magnitude
+//     swings score high.
 //
 //   - pcell_p50/p99: per-cell ΔE between cell color and its
 //     assigned palette color (Lab). The local quantization error
@@ -43,8 +51,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/progress"
@@ -101,6 +111,29 @@ func main() {
 		{"dizzy-recover", wrapDizzyRecover},
 		{"floyd-steinberg", wrapFS},
 		{"riemersma", wrapRiemersma},
+		{"r-knearest-3", wrapRKNearest3},
+		{"r-clip-60", wrapRClip60},
+		{"r-adaptK-1.5", wrapRAdaptK15},
+		{"r-adaptK-2.0", wrapRAdaptK20},
+		{"r-adaptK-2.5", wrapRAdaptK25},
+		{"r-bounded-60", wrapRBounded60},
+		{"r-mk3-r2.0", wrapRMK3R20},
+		{"r-leak-0.05", wrapRLeak005},
+		{"r-leak-0.1", wrapRLeak01},
+		{"r-leak-0.2", wrapRLeak02},
+		{"bn-pair", wrapBlueNoise},
+		{"bn-tri", wrapBlueNoiseTri},
+		{"bn-simplex", wrapBlueNoiseSimplex},
+		{"bn-adapt-2", wrapBNAdapt2},
+		{"bn-adapt-5", wrapBNAdapt5},
+		{"bn-adapt-10", wrapBNAdapt10},
+		{"bn-adapt-20", wrapBNAdapt20},
+		{"bn-pair-d", wrapBNPairDiffused},
+		{"bn-tri-d", wrapBNTriDiffused},
+		{"dbs-3", wrapDBS3},
+		{"dbs-8", wrapDBS8},
+		{"dbs-2hop-8", wrapDBS2Hop8},
+		{"dbs-bn20-8", wrapDBSFromBN20},
 	}
 	if *onlyMode != "" {
 		var keep []dmode
@@ -147,23 +180,46 @@ func main() {
 			cellCluster[i] = nearestPaletteIdx(c.Color, pal)
 		}
 		printHeader(blockScales)
-		// Retain assignments per mode so we can do cross-mode
-		// diagnostics (palette-assignment distribution, per-cluster
-		// drift) without re-running each algorithm.
+		// Run all modes in parallel; collect results then print/save
+		// in the originally-declared mode order so output is
+		// reproducible. Each mode is pure on (cells, pal, nbrs) so
+		// there's no synchronization needed beyond the final join.
+		type modeResult struct {
+			assigns []int32
+			err     error
+			met     metrics
+		}
+		results := make([]modeResult, len(modes))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, runtime.NumCPU())
+		for i, m := range modes {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int, m dmode) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				assigns, err := m.run(context.Background(), fx.cells, pal, nbrs)
+				if err != nil {
+					results[i] = modeResult{err: err}
+					return
+				}
+				met := computeMetrics(fx, pal, assigns, blockScales)
+				results[i] = modeResult{assigns: assigns, met: met}
+			}(i, m)
+		}
+		wg.Wait()
 		modeAssigns := make(map[string][]int32, len(modes))
-		for _, m := range modes {
-			assigns, err := m.run(context.Background(), fx.cells, pal, nbrs)
-			if err != nil {
-				fmt.Printf("  %-16s ERROR: %v\n", m.name, err)
+		for i, m := range modes {
+			r := results[i]
+			if r.err != nil {
+				fmt.Printf("  %-16s ERROR: %v\n", m.name, r.err)
 				continue
 			}
-			met := computeMetrics(fx, pal, assigns, blockScales)
-			printRow(m.name, met, blockScales)
-			modeAssigns[m.name] = assigns
-
+			printRow(m.name, r.met, blockScales)
+			modeAssigns[m.name] = r.assigns
 			if *outDir != "" {
 				path := filepath.Join(*outDir, fmt.Sprintf("%s.%s.png", fx.name, m.name))
-				if werr := writeOutputPNG(path, fx, pal, assigns); werr != nil {
+				if werr := writeOutputPNG(path, fx, pal, r.assigns); werr != nil {
 					fmt.Printf("    write %s: %v\n", path, werr)
 				}
 			}
@@ -239,6 +295,18 @@ func loadAllFixtures() []fixture {
 		// --out PNGs to compare.
 		makeCheckerboardFixture("checkerboard_orange_teal", 512, 512, 16,
 			[3]uint8{0xE0, 0x88, 0x40}, [3]uint8{0x40, 0xA0, 0xE0}),
+		// Smooth horizontal sRGB gradient between two near-palette
+		// colors. Tests how cleanly an algorithm can render slowly-
+		// varying input — the regime where Riemersma's residual
+		// accumulator can wander far from the local input.
+		makeGradientFixture("gradient_warm", 512, 256,
+			[3]uint8{0x33, 0x22, 0x18}, [3]uint8{0xE8, 0xB8, 0x90}),
+		// Mid-luminance grey with a faint diagonal stripe (~5 RGB
+		// units amplitude). Captures the "near-flat with subtle
+		// texture" regime: an algorithm that snaps too hard kills
+		// the texture; one that dithers too aggressively wanders.
+		makeFaintTextureFixture("faint_texture_grey", 512, 256,
+			[3]uint8{0x80, 0x80, 0x80}, 5),
 	)
 	return out
 }
@@ -320,11 +388,77 @@ func makeUniformFixture(name string, w, h int, c [3]uint8) fixture {
 			cells = append(cells, voxel.ActiveCell{
 				Col:   x,
 				Row:   y,
+				Cx:    float32(x),
+				Cy:    float32(y),
 				Color: c,
 			})
 		}
 	}
 	return fixture{name: name, cells: cells, width: w, height: h}
+}
+
+// makeGradientFixture builds a w×h fixture with a smooth horizontal
+// sRGB-space gradient from c0 (left) to c1 (right). Tests slowly-
+// varying input — regime where Riemersma's window accumulator can
+// produce wander.
+func makeGradientFixture(name string, w, h int, c0, c1 [3]uint8) fixture {
+	cells := make([]voxel.ActiveCell, 0, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			t := float64(x) / float64(w-1)
+			c := [3]uint8{
+				uint8(math.Round(float64(c0[0])*(1-t) + float64(c1[0])*t)),
+				uint8(math.Round(float64(c0[1])*(1-t) + float64(c1[1])*t)),
+				uint8(math.Round(float64(c0[2])*(1-t) + float64(c1[2])*t)),
+			}
+			cells = append(cells, voxel.ActiveCell{
+				Col:   x,
+				Row:   y,
+				Cx:    float32(x),
+				Cy:    float32(y),
+				Color: c,
+			})
+		}
+	}
+	return fixture{name: name, cells: cells, width: w, height: h}
+}
+
+// makeFaintTextureFixture builds a near-flat fixture: a base grey
+// with a low-amplitude diagonal stripe pattern. amplitude is the
+// per-channel ± swing in 8-bit RGB units. Captures the regime where
+// an algorithm must reproduce subtle texture without over-dithering.
+func makeFaintTextureFixture(name string, w, h int, base [3]uint8, amplitude int) fixture {
+	cells := make([]voxel.ActiveCell, 0, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			// Diagonal sinusoid, period 32 cells.
+			phase := math.Sin(2 * math.Pi * float64(x+y) / 32.0)
+			delta := math.Round(float64(amplitude) * phase)
+			c := [3]uint8{
+				clampU8(int(base[0]) + int(delta)),
+				clampU8(int(base[1]) + int(delta)),
+				clampU8(int(base[2]) + int(delta)),
+			}
+			cells = append(cells, voxel.ActiveCell{
+				Col:   x,
+				Row:   y,
+				Cx:    float32(x),
+				Cy:    float32(y),
+				Color: c,
+			})
+		}
+	}
+	return fixture{name: name, cells: cells, width: w, height: h}
+}
+
+func clampU8(v int) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
 }
 
 // buildNeighbors2D gives each cell its 8-connected 2D neighbors via
@@ -385,14 +519,95 @@ func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs 
 func wrapRiemersma(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.Riemersma(ctx, cells, pal, nbrs, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
+func wrapRKNearest3(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaKNearest(ctx, cells, pal, nbrs, 3, progress.NullTracker{})
+}
+func wrapRClip60(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaResidualClipped(ctx, cells, pal, nbrs, 60, progress.NullTracker{})
+}
+func wrapRAdaptK15(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaAdaptiveK(ctx, cells, pal, nbrs, 1.5, progress.NullTracker{})
+}
+func wrapRAdaptK20(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaAdaptiveK(ctx, cells, pal, nbrs, 2.0, progress.NullTracker{})
+}
+func wrapRAdaptK25(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaAdaptiveK(ctx, cells, pal, nbrs, 2.5, progress.NullTracker{})
+}
+func wrapRBounded60(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaBoundedWander(ctx, cells, pal, nbrs, 60, progress.NullTracker{})
+}
+func wrapRMK3R20(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaMinKAdaptive(ctx, cells, pal, nbrs, 3, 2.0, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapRLeak005(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaLeaky(ctx, cells, pal, nbrs, 0.05, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapRLeak01(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaLeaky(ctx, cells, pal, nbrs, 0.1, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapRLeak02(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaLeaky(ctx, cells, pal, nbrs, 0.2, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapBlueNoise(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseThresholdSimplex(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapBlueNoiseSimplex(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseSimplexFull(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapBlueNoiseTri(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseTriangle(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapBNPairDiffused(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoisePairDiffused(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapBNTriDiffused(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseTriangleDiffused(ctx, cells, pal, nbrs, progress.NullTracker{})
+}
+func wrapBNAdapt2(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 2, progress.NullTracker{})
+}
+func wrapBNAdapt5(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 5, progress.NullTracker{})
+}
+func wrapBNAdapt10(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 10, progress.NullTracker{})
+}
+func wrapBNAdapt20(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 20, progress.NullTracker{})
+}
+func wrapDBS3(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DBS(ctx, cells, pal, nbrs, 3, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapDBS8(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DBS(ctx, cells, pal, nbrs, 8, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapDBS2Hop8(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DBS2Hop(ctx, cells, pal, nbrs, 8, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapDBSFromBN20(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DBSFromBN(ctx, cells, pal, nbrs, 20, 8, progress.NullTracker{})
+}
+func wrapRLab(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	// In Lab, RiemersmaInputBiasRange=30 RGB equates roughly to Lab range ~15-20.
+	return voxel.RiemersmaLab(ctx, cells, pal, nbrs, voxel.RiemersmaInputBiasDefault, 15, progress.NullTracker{})
+}
+func wrapRLab100_30(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaLab(ctx, cells, pal, nbrs, 1.0, 30, progress.NullTracker{})
+}
+func wrapRLab100_15(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaLab(ctx, cells, pal, nbrs, 1.0, 15, progress.NullTracker{})
+}
 
 // ----- metrics -----
 
 type metrics struct {
-	driftDE    float64
-	pcell      []float64       // sorted per-cell ΔE
-	blockVar   map[int]float64 // scale -> normalized block-mean variance
-	maxDirCorr map[int]float64 // distance -> max |autocorrelation| over 8 directions
+	driftDE      float64
+	pcell        []float64       // sorted per-cell ΔE
+	wanderDE     float64         // mean ΔE(chosen palette, nearest-input palette)
+	wanderClump  float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
+	blockVar     map[int]float64 // scale -> normalized block-mean variance
+	maxDirCorr   map[int]float64 // distance -> max |autocorrelation| over 8 directions
 }
 
 func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
@@ -412,14 +627,47 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 	oL, oA, oBl := toLab(oR/n, oG/n, oB/n)
 	driftDE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
 
-	// Per-cell ΔE distribution.
+	// Per-cell ΔE distribution and wander_ΔE.
+	//
+	// wander_ΔE = mean ΔE(chosen palette entry, nearest-to-input palette
+	// entry). Captures how often the algorithm reaches past the closest
+	// palette entry to a far one — e.g. picking white/black to average
+	// to grey when a near-grey entry exists. Pure nearest-color picks
+	// score 0; algorithms that aggressively distribute residual into
+	// large-magnitude palette swings score high.
+	palLab := make([][3]float64, len(pal))
+	for k, p := range pal {
+		l, a, b := toLab(float64(p[0]), float64(p[1]), float64(p[2]))
+		palLab[k] = [3]float64{l, a, b}
+	}
 	pcell := make([]float64, len(fx.cells))
+	wanderPerCell := make([]float64, len(fx.cells))
+	var wanderSum float64
 	for i, c := range fx.cells {
 		cL, cA, cB := toLab(float64(c.Color[0]), float64(c.Color[1]), float64(c.Color[2]))
-		p := pal[assigns[i]]
-		pL, pA, pB := toLab(float64(p[0]), float64(p[1]), float64(p[2]))
+		// Nearest-input palette entry, in Lab.
+		nearest := 0
+		var nearestD2 float64 = math.Inf(1)
+		for k, lab := range palLab {
+			dL := cL - lab[0]
+			dA := cA - lab[1]
+			dB := cB - lab[2]
+			d2 := dL*dL + dA*dA + dB*dB
+			if d2 < nearestD2 {
+				nearestD2 = d2
+				nearest = k
+			}
+		}
+		chosen := int(assigns[i])
+		pL, pA, pB := palLab[chosen][0], palLab[chosen][1], palLab[chosen][2]
 		pcell[i] = math.Sqrt((cL-pL)*(cL-pL) + (cA-pA)*(cA-pA) + (cB-pB)*(cB-pB))
+		nL, nA, nB := palLab[nearest][0], palLab[nearest][1], palLab[nearest][2]
+		w := math.Sqrt((pL-nL)*(pL-nL) + (pA-nA)*(pA-nA) + (pB-nB)*(pB-nB))
+		wanderPerCell[i] = w
+		wanderSum += w
 	}
+	wanderDE := wanderSum / float64(len(fx.cells))
+	wanderClump := computeWanderClump(fx, wanderPerCell, 8)
 	sort.Float64s(pcell)
 
 	// Build the per-pixel error grid, then subtract the global mean
@@ -437,11 +685,93 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 	mdc := computeMaxDirCorr(grid, fx.width, fx.height, []int{1, 4})
 
 	return metrics{
-		driftDE:    driftDE,
-		pcell:      pcell,
-		blockVar:   bv,
-		maxDirCorr: mdc,
+		driftDE:     driftDE,
+		pcell:       pcell,
+		wanderDE:    wanderDE,
+		wanderClump: wanderClump,
+		blockVar:    bv,
+		maxDirCorr:  mdc,
 	}
+}
+
+// computeWanderClump returns the ratio of (variance of B×B block-mean
+// wander) / (per-cell variance of wander). For white noise this is
+// 1/B². Higher = clumpy (some regions consistently high-wander, others
+// low). Lower = uniformly distributed wander.
+//
+// Subtle uniform-region clumps that mean wanderDE doesn't surface
+// show up here as a high ratio.
+func computeWanderClump(fx fixture, wander []float64, blockSize int) float64 {
+	var total, mean float64
+	for _, w := range wander {
+		total += w
+	}
+	n := float64(len(wander))
+	if n == 0 {
+		return 0
+	}
+	mean = total / n
+	var perCellVar float64
+	for _, w := range wander {
+		d := w - mean
+		perCellVar += d * d
+	}
+	perCellVar /= n
+	if perCellVar < 1e-12 {
+		return 0
+	}
+	// Build a present-mask grid of wander values.
+	type wcell struct {
+		present bool
+		w       float64
+	}
+	grid := make([]wcell, fx.width*fx.height)
+	for i, c := range fx.cells {
+		grid[c.Row*fx.width+c.Col] = wcell{present: true, w: wander[i]}
+	}
+	bw := (fx.width + blockSize - 1) / blockSize
+	bh := (fx.height + blockSize - 1) / blockSize
+	var blockMeans []float64
+	for by := 0; by < bh; by++ {
+		for bx := 0; bx < bw; bx++ {
+			var sum float64
+			var count int
+			for dy := 0; dy < blockSize; dy++ {
+				y := by*blockSize + dy
+				if y >= fx.height {
+					break
+				}
+				for dx := 0; dx < blockSize; dx++ {
+					x := bx*blockSize + dx
+					if x >= fx.width {
+						break
+					}
+					if g := grid[y*fx.width+x]; g.present {
+						sum += g.w
+						count++
+					}
+				}
+			}
+			if count > 0 {
+				blockMeans = append(blockMeans, sum/float64(count))
+			}
+		}
+	}
+	if len(blockMeans) == 0 {
+		return 0
+	}
+	var bSum float64
+	for _, m := range blockMeans {
+		bSum += m
+	}
+	bMean := bSum / float64(len(blockMeans))
+	var bVar float64
+	for _, m := range blockMeans {
+		d := m - bMean
+		bVar += d * d
+	}
+	bVar /= float64(len(blockMeans))
+	return bVar / perCellVar
 }
 
 // centerErrorGrid subtracts the mean error vector from every opaque
@@ -687,8 +1017,8 @@ func printHeader(scales []int) {
 	for i, s := range scales {
 		parts[i] = fmt.Sprintf("%5d", s)
 	}
-	fmt.Printf("  %-16s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
-		"mode", "drift_ΔE", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+	fmt.Printf("  %-16s %8s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_ΔE", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
 }
 
 func printRow(name string, m metrics, scales []int) {
@@ -698,8 +1028,8 @@ func printRow(name string, m metrics, scales []int) {
 	for i, s := range scales {
 		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
 	}
-	fmt.Printf("  %-16s %8.2f %8.1f %8.1f   %s        %5.3f %5.3f\n",
-		name, m.driftDE, pcellP50, pcellP99, strings.Join(bvParts, " "),
+	fmt.Printf("  %-16s %8.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
 		m.maxDirCorr[1], m.maxDirCorr[4])
 }
 

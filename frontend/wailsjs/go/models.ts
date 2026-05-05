@@ -407,6 +407,7 @@ export namespace pipeline {
 	    Saturation: number;
 	    Dither: string;
 	    RiemersmaInputBias: number;
+	    BlueNoiseTolerance: number;
 	    NoMerge: boolean;
 	    NoSimplify: boolean;
 	    Size?: number;
@@ -448,6 +449,7 @@ export namespace pipeline {
 	        this.Saturation = source["Saturation"];
 	        this.Dither = source["Dither"];
 	        this.RiemersmaInputBias = source["RiemersmaInputBias"];
+	        this.BlueNoiseTolerance = source["BlueNoiseTolerance"];
 	        this.NoMerge = source["NoMerge"];
 	        this.NoSimplify = source["NoSimplify"];
 	        this.Size = source["Size"];
