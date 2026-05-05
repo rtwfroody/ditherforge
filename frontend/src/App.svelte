@@ -779,14 +779,22 @@
     pendingInputPath = '';
   }
 
-  function proceedWithInput(path: string) {
+  // Clears the cached viewport mesh URLs and bbox. Used when the
+  // current model is being replaced (File > Open a model directly,
+  // File > New, loading a settings JSON for a different model) — the
+  // prior values would otherwise render the old mesh until the
+  // pipeline regenerates everything. Kept as a helper so applySettings
+  // and proceedWithInput stay in lockstep.
+  function clearViewportMesh() {
     inputMeshUrl = undefined;
     inputOverlayMeshUrl = undefined;
     outputMeshUrl = undefined;
-    // Bbox is per-model; clear so the Split UI doesn't briefly show
-    // the prior model's range while the new mesh is loading.
     modelBBoxMin = null;
     modelBBoxMax = null;
+  }
+
+  function proceedWithInput(path: string) {
+    clearViewportMesh();
     inputFile = path;
     // Stickers are tied to the previous model's geometry; clear them.
     // Warp pins reference colors sampled from the previous model; clear too.
@@ -909,74 +917,44 @@
     }
   }
 
-  function applySettings(s: any) {
-    const D = FACTORY_DEFAULTS;
-    // Saved sticker coords match the saved size/scale settings. Clear
-    // calibration so the next prediction/event is adopted without rescaling.
-    // Also clear the cached extent: if this settings file points at a
-    // different input model, the old extent would produce a bogus prediction
-    // before the backend replies with the true extent.
-    calibratedPreviewScale = null;
-    nativeExtentMM = null;
-
-    inputFile = pickString(s.inputFile, D.inputFile);
-    objectIndex = pickNumber(s.objectIndex, D.objectIndex);
-    sizeMode = pickEnum(s.sizeMode, SIZE_MODE_VALUES, D.sizeMode as SizeMode);
-    sizeValue = pickString(s.sizeValue, D.sizeValue);
-    scaleValue = pickString(s.scaleValue, D.scaleValue);
-    printerId = pickString(s.printer, D.printer);
-    // Legacy settings files used "nozzle"; newer ones use "nozzleDiameter".
-    nozzleDiameter = pickString(s.nozzleDiameter ?? s.nozzle, D.nozzleDiameter);
-    layerHeight = pickString(s.layerHeight, D.layerHeight);
-    reconcilePrinterSelection();
-
-    baseColor = s.baseColor && typeof s.baseColor === 'object'
-      ? { hex: pickString(s.baseColor.hex, ''), label: pickString(s.baseColor.label, ''), collection: pickString(s.baseColor.collection, '') }
-      : D.baseColor;
-    baseMaterialXPath = pickString(s.baseMaterialXPath, D.baseMaterialXPath);
-    baseMaterialXTileMM = pickNumber(s.baseMaterialXTileMM, D.baseMaterialXTileMM);
-    baseMaterialXTriplanarSharpness = pickNumber(s.baseMaterialXTriplanarSharpness, D.baseMaterialXTriplanarSharpness);
-    // baseColorMode falls back to "texture" when only the path is
-    // present (older settings files predate the explicit mode field).
-    // Routed through pickEnum with an empty-string sentinel so the
-    // BASE_COLOR_MODE_VALUES array remains the single source of truth;
-    // the `||` filters the sentinel and applies the path-derived
-    // fallback for any unrecognised input.
-    const explicitMode = pickEnum(s.baseColorMode, BASE_COLOR_MODE_VALUES, '' as BaseColorMode);
-    baseColorMode = explicitMode || (baseMaterialXPath ? 'texture' : 'solid');
-    // Best-effort check: when a settings file is loaded on a different
-    // machine than where it was saved, the .mtlx path may not resolve,
-    // or the file may use unsupported nodes. Surface a warning
-    // immediately so the user knows before they first click Generate.
-    if (baseMaterialXPath) {
-      validateMaterialXFile(baseMaterialXPath);
+  // Compound-value validators used by SETTINGS_SCHEMA below. Each takes
+  // the raw JSON value plus the FACTORY_DEFAULTS value for that field
+  // and returns a typed, sanitised result; if the raw value is missing
+  // or shaped wrong, the default is returned (deep-cloned for arrays
+  // and objects so the in-memory $state never aliases FACTORY_DEFAULTS).
+  function vColor(raw: unknown, def: any): ColorInfo | null {
+    if (raw && typeof raw === 'object') {
+      const o = raw as any;
+      return { hex: pickString(o.hex, ''), label: pickString(o.label, ''), collection: pickString(o.collection, '') };
     }
-
-    colorSlots = Array.isArray(s.colorSlots)
-      ? s.colorSlots.map((c: any) => c && typeof c === 'object'
-          ? { hex: pickString(c.hex, ''), label: pickString(c.label, ''), collection: pickString(c.collection, '') }
-          : null)
-      : structuredClone(D.colorSlots);
-    inventoryCollection = pickString(s.inventoryCollection, D.inventoryCollection);
-    loadInventoryCollectionColors(inventoryCollection);
-
-    brightness = pickNumber(s.brightness, D.brightness); committedBrightness = brightness;
-    contrast = pickNumber(s.contrast, D.contrast); committedContrast = contrast;
-    saturation = pickNumber(s.saturation, D.saturation); committedSaturation = saturation;
-
-    warpPins = Array.isArray(s.warpPins)
-      ? s.warpPins.map((p: any) => ({
-          sourceHex: pickString(p?.sourceHex, ''),
-          targetHex: pickString(p?.targetHex, ''),
-          targetLabel: pickString(p?.targetLabel, ''),
-          sigma: pickNumber(p?.sigma, 0),
-        }))
-      : [];
-
-    stickers = Array.isArray(s.stickers)
-      ? s.stickers.map((st: any) => ({
-          imagePath: pickString(st?.imagePath, ''),
-          fileName: (pickString(st?.imagePath, '')).split(/[/\\]/).pop() || pickString(st?.imagePath, ''),
+    return def ? structuredClone(def) : null;
+  }
+  function vColorSlots(raw: unknown, def: any): ColorSlot[] {
+    if (Array.isArray(raw)) {
+      return raw.map((c: any) => c && typeof c === 'object'
+        ? { hex: pickString(c.hex, ''), label: pickString(c.label, ''), collection: pickString(c.collection, '') }
+        : null);
+    }
+    return structuredClone(def);
+  }
+  function vWarpPins(raw: unknown, def: any): WarpPinUI[] {
+    if (Array.isArray(raw)) {
+      return raw.map((p: any) => ({
+        sourceHex: pickString(p?.sourceHex, ''),
+        targetHex: pickString(p?.targetHex, ''),
+        targetLabel: pickString(p?.targetLabel, ''),
+        sigma: pickNumber(p?.sigma, 0),
+      }));
+    }
+    return structuredClone(def);
+  }
+  function vStickers(raw: unknown, def: any): StickerUI[] {
+    if (Array.isArray(raw)) {
+      return raw.map((st: any) => {
+        const imagePath = pickString(st?.imagePath, '');
+        return {
+          imagePath,
+          fileName: imagePath.split(/[/\\]/).pop() || imagePath,
           thumbnail: '',
           center: st?.center,
           normal: st?.normal,
@@ -985,37 +963,137 @@
           rotation: pickNumber(st?.rotation, 0),
           maxAngle: pickNumber(st?.maxAngle, 0),
           mode: pickEnum(st?.mode, STICKER_MODE_VALUES, 'unfold'),
-        }))
-      : [];
-    // Load thumbnails asynchronously.
+        };
+      });
+    }
+    return structuredClone(def);
+  }
+
+  // Single source of truth for loading a settings file: one entry per
+  // persisted field, declaring how to validate the raw JSON value and
+  // where to store it. applySettings() iterates this list, so:
+  //   * Missing-→-default is automatic — applySettings doesn't know
+  //     about individual fields, and any field absent from rawIn falls
+  //     back to its FACTORY_DEFAULTS value.
+  //   * Adding a new persisted setting only takes three steps: declare
+  //     the $state, add the field to serializeSettings (so it appears
+  //     in FACTORY_DEFAULTS), and add one entry here.
+  // The exhaustiveness check after FACTORY_DEFAULTS is captured will
+  // warn if serializeSettings ever has a key that's missing here.
+  type SettingSpec = {
+    key: string;
+    validate: (raw: unknown, def: any) => any;
+    apply: (v: any) => void;
+  };
+  const SETTINGS_SCHEMA: SettingSpec[] = [
+    { key: 'inputFile',                       validate: pickString,                                        apply: (v) => { inputFile = v; } },
+    { key: 'objectIndex',                     validate: pickNumber,                                        apply: (v) => { objectIndex = v; } },
+    { key: 'sizeMode',                        validate: (v, d) => pickEnum(v, SIZE_MODE_VALUES, d),        apply: (v) => { sizeMode = v; } },
+    { key: 'sizeValue',                       validate: pickString,                                        apply: (v) => { sizeValue = v; } },
+    { key: 'scaleValue',                      validate: pickString,                                        apply: (v) => { scaleValue = v; } },
+    { key: 'printer',                         validate: pickString,                                        apply: (v) => { printerId = v; } },
+    { key: 'nozzleDiameter',                  validate: pickString,                                        apply: (v) => { nozzleDiameter = v; } },
+    { key: 'layerHeight',                     validate: pickString,                                        apply: (v) => { layerHeight = v; } },
+    { key: 'baseColor',                       validate: vColor,                                            apply: (v) => { baseColor = v; } },
+    { key: 'baseMaterialXPath',               validate: pickString,                                        apply: (v) => { baseMaterialXPath = v; } },
+    { key: 'baseMaterialXTileMM',             validate: pickNumber,                                        apply: (v) => { baseMaterialXTileMM = v; } },
+    { key: 'baseMaterialXTriplanarSharpness', validate: pickNumber,                                        apply: (v) => { baseMaterialXTriplanarSharpness = v; } },
+    { key: 'baseColorMode',                   validate: (v, d) => pickEnum(v, BASE_COLOR_MODE_VALUES, d),  apply: (v) => { baseColorMode = v; } },
+    { key: 'colorSlots',                      validate: vColorSlots,                                       apply: (v) => { colorSlots = v; } },
+    { key: 'inventoryCollection',             validate: pickString,                                        apply: (v) => { inventoryCollection = v; } },
+    { key: 'brightness',                      validate: pickNumber,                                        apply: (v) => { brightness = v; committedBrightness = v; } },
+    { key: 'contrast',                        validate: pickNumber,                                        apply: (v) => { contrast = v; committedContrast = v; } },
+    { key: 'saturation',                      validate: pickNumber,                                        apply: (v) => { saturation = v; committedSaturation = v; } },
+    { key: 'warpPins',                        validate: vWarpPins,                                         apply: (v) => { warpPins = v; } },
+    { key: 'stickers',                        validate: vStickers,                                         apply: (v) => { stickers = v; } },
+    { key: 'dither',                          validate: (v, d) => pickEnum(v, DITHER_VALUES, d),           apply: (v) => { dither = v; } },
+    { key: 'riemersmaBias',                   validate: pickNumber,                                        apply: (v) => { riemersmaBias = v; committedRiemersmaBias = v; } },
+    { key: 'blueNoiseTol',                    validate: pickNumber,                                        apply: (v) => { blueNoiseTol = v; committedBlueNoiseTol = v; } },
+    { key: 'colorSnap',                       validate: pickNumber,                                        apply: (v) => { colorSnap = v; committedColorSnap = v; } },
+    { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
+    { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
+    { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
+    { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
+    { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
+    { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
+    { key: 'splitEnabled',                    validate: pickBool,                                          apply: (v) => { splitEnabled = v; } },
+    { key: 'splitAxis',                       validate: (v, d) => pickIntEnum(v, SPLIT_AXIS_VALUES, d),    apply: (v) => { splitAxis = v; } },
+    { key: 'splitOffset',                     validate: pickNumber,                                        apply: (v) => { splitOffset = v; } },
+    { key: 'splitConnectorStyle',             validate: (v, d) => pickEnum(v, SPLIT_CONNECTOR_VALUES, d),  apply: (v) => { splitConnectorStyle = v; } },
+    { key: 'splitConnectorCount',             validate: pickNumber,                                        apply: (v) => { splitConnectorCount = v; } },
+    { key: 'splitConnectorDiamMM',            validate: pickNumber,                                        apply: (v) => { splitConnectorDiamMM = v; } },
+    { key: 'splitConnectorDepthMM',           validate: pickNumber,                                        apply: (v) => { splitConnectorDepthMM = v; } },
+    { key: 'splitClearanceMM',                validate: pickNumber,                                        apply: (v) => { splitClearanceMM = v; } },
+    { key: 'splitOrientationA',               validate: (v, d) => pickEnum(v, SPLIT_ORIENTATION_VALUES, d), apply: (v) => { splitOrientationA = v; } },
+    { key: 'splitOrientationB',               validate: (v, d) => pickEnum(v, SPLIT_ORIENTATION_VALUES, d), apply: (v) => { splitOrientationB = v; } },
+  ];
+
+  function applySettings(rawIn: any) {
+    const D: any = FACTORY_DEFAULTS;
+    const s: any = rawIn ?? {};
+
+    // Saved sticker coords match the saved size/scale settings. Clear
+    // calibration so the next prediction/event is adopted without rescaling.
+    // Also clear the cached extent: if this settings file points at a
+    // different input model, the old extent would produce a bogus prediction
+    // before the backend replies with the true extent.
+    calibratedPreviewScale = null;
+    nativeExtentMM = null;
+
+    // Snapshot inputFile before the schema overwrites it, so we can
+    // detect when the load points at a different model and clear the
+    // now-stale viewport mesh URLs below. (Local name avoids shadowing
+    // the module-level prevInputFile used by the camera-reset effect.)
+    const priorInputFile = inputFile;
+
+    // Drive every persisted field off SETTINGS_SCHEMA. Anything missing
+    // from `s` automatically falls back to the FACTORY_DEFAULTS value
+    // captured at script init, so loading a partial settings file
+    // never leaves a previous load's value behind.
+    for (const spec of SETTINGS_SCHEMA) {
+      spec.apply(spec.validate(s[spec.key], D[spec.key]));
+    }
+
+    // If the inputFile changed (different model, or reset to empty via
+    // File > New), the previous model's cached mesh URLs and bbox no
+    // longer match — clear them so the user doesn't see the old
+    // textured mesh briefly while the auto-pipeline regenerates them.
+    if (inputFile !== priorInputFile) {
+      clearViewportMesh();
+    }
+
+    // Legacy: settings files saved before nozzleDiameter was renamed
+    // used "nozzle". Honour the alias only when the new key is absent
+    // (otherwise the schema entry above already handled it).
+    if (s.nozzleDiameter === undefined && typeof s.nozzle === 'string') {
+      nozzleDiameter = s.nozzle;
+    }
+
+    // Legacy: settings files predating baseColorMode lack the explicit
+    // mode field. If the path is set but no mode was specified, default
+    // to "texture" so the load matches what the user saved.
+    if (s.baseColorMode === undefined && baseMaterialXPath) {
+      baseColorMode = 'texture';
+    }
+
+    reconcilePrinterSelection();
+    loadInventoryCollectionColors(inventoryCollection);
+
+    // Best-effort check: when a settings file is loaded on a different
+    // machine than where it was saved, the .mtlx path may not resolve,
+    // or the file may use unsupported nodes. Surface a warning
+    // immediately so the user knows before they first click Generate.
+    if (baseMaterialXPath) {
+      validateMaterialXFile(baseMaterialXPath);
+    }
+
+    // Sticker thumbnails are loaded from disk asynchronously.
     stickers.forEach((st, i) => {
       ReadStickerThumbnail(st.imagePath).then(thumb => {
         stickers[i] = { ...stickers[i], thumbnail: thumb };
         stickers = stickers;
       }).catch(() => {});
     });
-
-    dither = pickEnum(s.dither, DITHER_VALUES, D.dither as DitherMode);
-    riemersmaBias = pickNumber(s.riemersmaBias, D.riemersmaBias); committedRiemersmaBias = riemersmaBias;
-    blueNoiseTol = pickNumber(s.blueNoiseTol, D.blueNoiseTol); committedBlueNoiseTol = blueNoiseTol;
-    colorSnap = pickNumber(s.colorSnap, D.colorSnap); committedColorSnap = colorSnap;
-    noMerge = pickBool(s.noMerge, D.noMerge);
-    noSimplify = pickBool(s.noSimplify, D.noSimplify);
-    stats = pickBool(s.stats, D.stats);
-    alphaWrap = pickBool(s.alphaWrap, D.alphaWrap);
-    alphaWrapAlpha = pickString(s.alphaWrapAlpha, D.alphaWrapAlpha);
-    alphaWrapOffset = pickString(s.alphaWrapOffset, D.alphaWrapOffset);
-
-    splitEnabled = pickBool(s.splitEnabled, D.splitEnabled);
-    splitAxis = pickIntEnum(s.splitAxis, SPLIT_AXIS_VALUES, D.splitAxis);
-    splitOffset = pickNumber(s.splitOffset, D.splitOffset);
-    splitConnectorStyle = pickEnum(s.splitConnectorStyle, SPLIT_CONNECTOR_VALUES, D.splitConnectorStyle as SplitConnectorStyle);
-    splitConnectorCount = pickNumber(s.splitConnectorCount, D.splitConnectorCount);
-    splitConnectorDiamMM = pickNumber(s.splitConnectorDiamMM, D.splitConnectorDiamMM);
-    splitConnectorDepthMM = pickNumber(s.splitConnectorDepthMM, D.splitConnectorDepthMM);
-    splitClearanceMM = pickNumber(s.splitClearanceMM, D.splitClearanceMM);
-    splitOrientationA = pickEnum(s.splitOrientationA, SPLIT_ORIENTATION_VALUES, D.splitOrientationA as SplitOrientation);
-    splitOrientationB = pickEnum(s.splitOrientationB, SPLIT_ORIENTATION_VALUES, D.splitOrientationB as SplitOrientation);
   }
 
   async function handleSave() {
@@ -1088,16 +1166,29 @@
   // reusing this snapshot across resets is safe.
   const FACTORY_DEFAULTS = serializeSettings();
 
+  // Correctness check: every persisted field MUST have a matching
+  // entry in SETTINGS_SCHEMA, otherwise it would silently retain its
+  // previous value across loads. Failing hard at module init means a
+  // missing entry can't ship — the app refuses to boot until it's
+  // fixed. Caveat: this only catches "in serializeSettings, missing
+  // from schema." A new $state field that was never added to
+  // serializeSettings won't appear in FACTORY_DEFAULTS at all and so
+  // can't be checked here; that case is "just non-persistent" and
+  // surfaces the moment the user tries to save and reload.
+  {
+    const handled = new Set(SETTINGS_SCHEMA.map(s => s.key));
+    const missing = Object.keys(FACTORY_DEFAULTS).filter(k => !handled.has(k));
+    if (missing.length > 0) {
+      throw new Error(`SETTINGS_SCHEMA missing entries for: ${missing.join(', ')} — applySettings would not reset these on load`);
+    }
+  }
+
   function handleNew() {
     applySettings(FACTORY_DEFAULTS);
-    // Clear per-model viewport state — applySettings only resets
-    // the persisted settings, so without this the previously loaded
-    // mesh and its bbox would linger after "New".
-    inputMeshUrl = undefined;
-    inputOverlayMeshUrl = undefined;
-    outputMeshUrl = undefined;
-    modelBBoxMin = null;
-    modelBBoxMax = null;
+    // applySettings clears the viewport mesh + bbox automatically when
+    // inputFile changes. Reset the rest of the transient UI state that
+    // doesn't ride on persisted settings: in-progress sticker/pin
+    // placement, the saved-as path, and any stale status message.
     placingStickerIndex = -1;
     pickingPinIndex = -1;
     settingsPath = '';
