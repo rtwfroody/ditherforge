@@ -98,6 +98,7 @@ func main() {
 		{"dizzy", wrapDizzy},
 		{"dizzy-corrected", wrapDizzyCorrected},
 		{"dizzy-2hop", wrapDizzy2Hop},
+		{"dizzy-recover", wrapDizzyRecover},
 		{"floyd-steinberg", wrapFS},
 		{"riemersma", wrapRiemersma},
 	}
@@ -374,6 +375,9 @@ func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]
 }
 func wrapDizzy2Hop(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, _ [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherWithNeighbors(ctx, cells, pal, voxel.BuildNeighbors2Hop(cells), progress.NullTracker{})
+}
+func wrapDizzyRecover(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherWithRecover(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})

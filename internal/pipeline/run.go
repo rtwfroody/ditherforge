@@ -774,6 +774,13 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			// neighbors instead of dropping it.
 			neighbors := voxel.BuildNeighbors2Hop(cells)
 			assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
+		case "dizzy-recover":
+			// Single-pass dizzy with a local-solve recovery on
+			// stranded cells: instead of dropping the residual,
+			// search neighbor palette swaps for one that absorbs
+			// it in the global-drift sense.
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
