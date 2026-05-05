@@ -895,30 +895,25 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 
 // buildRiemersmaTour produces a Hamiltonian-path-ish ordering of
 // cells suitable for Riemersma. Starts at cell 0; at each step
-// picks an unvisited neighbor weighted toward "most-surrounded-by-
-// visited-cells", with random tie-break among the maxima. On a
-// dead end (no unvisited neighbors), jumps to the nearest
-// unvisited cell via the bucket-grid spatial index.
+// picks an unvisited neighbor uniformly at random (reservoir
+// sampling, fixed seed). On a dead end (no unvisited neighbors),
+// jumps to the nearest unvisited cell via the bucket-grid spatial
+// index.
 //
-// The visited-count bias keeps the walk inside the local region
-// it's currently filling. Without it (uniform-random pick), on
-// closed surfaces with multiple connected regions sharing edges
-// (e.g., a cube's 4 side faces forming a cycle through corner
-// edges), the walk re-enters each region many times. Cells in
-// such a region then have visit-times spread over a wide range,
-// some pairs within the L=16 window and some not — producing a
-// visible spatial-temporal correlation pattern. Biasing toward
-// "inner frontier" cells (whose own neighbors are mostly
-// already visited) keeps the walk packing densely until forced
-// out, so each region is filled in one contiguous stretch.
+// Earlier revisions added a visited-count bias here (each
+// unvisited neighbor's weight = 1 + (count of its own already-
+// visited neighbors)) to fix a uniform-input cube test case where
+// the 4 mutually-connected side faces showed a visible spatial-
+// temporal correlation pattern. The bias kept the walk filling
+// pockets densely. On real textured 3D models that produced a
+// worse artifact: each densely-filled pocket got ~L=16 cells of
+// window-correlated palette choices in a small spatial blob —
+// visible clumps. Layer height interacted because it changes
+// pocket sizes through cell connectivity.
 //
-// The pick is weighted-random: each unvisited neighbor's weight is
-// 1 + (number of its own already-visited neighbors). Cells whose
-// neighborhood is mostly already-visited are preferred but not
-// strictly required; cells in fresh territory still get sampled
-// at probability proportional to their (small) weight. This is a
-// soft bias toward staying inside the current region, with random
-// flat-face directions preserved.
+// Reverting to uniform-random walk: the cube edge case may show
+// minor structure on uniform input, but real-world textured
+// inputs hide that and don't exhibit the dense-pocket clumping.
 //
 // The bucket-grid dead-end fallback stays nearest-by-distance —
 // when jumping between disconnected regions we want the next
@@ -937,43 +932,19 @@ func buildRiemersmaTour(cells []ActiveCell, neighbors [][]Neighbor) []int {
 	tour = append(tour, cur)
 	grid.markVisited(cur)
 	for len(tour) < n {
-		// Two-pass weighted reservoir sample: each unvisited
-		// neighbor's weight is (1 + visited-count-of-neighbor).
-		// A_l = max(0, target - cumWeight) trick replaced by a
-		// straight cumulative-weight scan — fine since the
-		// candidate count is small (8-26 typical).
-		var totalWeight int
+		// Reservoir-sample one unvisited neighbor uniformly at
+		// random in a single pass: each candidate replaces the
+		// current pick with probability 1/k where k is the count
+		// of candidates seen so far.
+		pick := -1
+		count := 0
 		for _, nb := range neighbors[cur] {
 			if visited[nb.Idx] {
 				continue
 			}
-			vis := 0
-			for _, nb2 := range neighbors[nb.Idx] {
-				if visited[nb2.Idx] {
-					vis++
-				}
-			}
-			totalWeight += 1 + vis
-		}
-		pick := -1
-		if totalWeight > 0 {
-			target := rng.Intn(totalWeight)
-			cum := 0
-			for _, nb := range neighbors[cur] {
-				if visited[nb.Idx] {
-					continue
-				}
-				vis := 0
-				for _, nb2 := range neighbors[nb.Idx] {
-					if visited[nb2.Idx] {
-						vis++
-					}
-				}
-				cum += 1 + vis
-				if cum > target {
-					pick = nb.Idx
-					break
-				}
+			count++
+			if rng.Intn(count) == 0 {
+				pick = nb.Idx
 			}
 		}
 		if pick >= 0 {
