@@ -675,26 +675,49 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	return assignments, nil
 }
 
+// recoverQualityWeight balances per-cell quality against global drift
+// in the local-solve objective:
+//
+//   combined = (2·X·s + |s|²) + λ · (2·r_N·s + |s|²)
+//
+// where s = palette[old_p_N] - palette[p_N'], X is running global
+// drift, and r_N is N's rendered error against its target T_N.
+//
+// λ = 0: pure drift minimization (any quality cost at N is
+//        accepted to reduce drift).
+// λ → ∞: pure per-cell quality (never accept any quality loss at
+//        N, drift recovery is incidental).
+// λ = 1: equal weight; swaps that hurt N's quality by the same
+//        amount they help global drift are rejected.
+//
+// Empirically λ around 1 gives a useful balance: drift recovery is
+// significant but we don't trash a neighbor's individual fidelity.
+const recoverQualityWeight = 1.0
+
 // DitherWithRecover is DitherWithNeighbors with a local-solve
 // recovery pass when a cell is stranded (all 1-hop neighbors already
 // processed). Instead of dropping the residual e_C, search across
-// (neighbor N, candidate palette p_N') swaps and apply the swap
-// whose shift s = palette[old_p_N] - palette[p_N'] best absorbs e_C
-// in the global-drift sense.
+// (neighbor N, candidate palette p_N') swaps for one that reduces
+// global drift while preserving each neighbor's individual quality.
 //
-// Math: total drift contains e_C unconditionally (C's rendered
-// error). After swap, N's contribution changes by s. So total drift
-// changes by s. Magnitude change: |drift + s|² - |drift|² =
-// 2·drift·s + |s|². Approximating drift ≈ e_C (we don't know full
-// global drift, but e_C is the new contribution we're trying to
-// absorb), the swap that best reduces drift minimizes
-// 2·e_C·s + |s|² — i.e., s should anti-align with e_C.
+// Tracks two extra pieces of state during the main pass:
+//
+//   - targets[i]: each cell's target color T_i = input + accumulated
+//     diffused error at processing time. Needed so the swap
+//     evaluator knows N's "ideal" color, hence the quality cost of
+//     changing N's palette.
+//
+//   - running X: global drift = sum of dropped residuals so far. The
+//     swap direction depends on X, not on just the current stranded
+//     cell's e_C — on fixtures with many earlier-aligned drifts
+//     (e.g., warm-tone surfaces with grey palette) X >> e_C and
+//     using the approximation X ≈ e_C produced wrong swap
+//     directions in the prior version.
 //
 // Approximation caveats:
 //
 //   - We change assignments[N] but the residual N pushed to its own
-//     neighbors at processing time was based on its OLD palette. The
-//     downstream cells already incorporated that diffused error.
+//     neighbors at processing time was based on its OLD palette.
 //     Changing N retroactively introduces a small ripple equal to
 //     |Δ| × diffusion_weights, distributed across N's processed
 //     neighbors. Bounded by |Δ| total, second-order.
@@ -703,10 +726,6 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 //     cell. A multi-cell joint optimization would do better but
 //     scales as |palette|^k for k-cell regions; single-swap is the
 //     cheap heuristic.
-//
-// Net: empirically ~10-20% of cells are stranded, and recovering
-// most of their residuals typically halves dizzy's chroma drift
-// without the iteration cost of dizzy-corrected.
 func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -719,6 +738,8 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	assignments := make([]int32, n)
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
+	targets := make([][3]float32, n)
+	var driftR, driftG, driftB float64 // running global drift
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -730,6 +751,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
 		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
 		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+		targets[idx] = [3]float32{r, g, b}
 
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
@@ -769,15 +791,23 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			}
 			continue
 		}
-		// Stranded. Search for the swap (N, p_N') that most reduces
-		// drift, applying it iff drift_change < 0.
+		// Stranded. Add e_C to running drift first; then search for
+		// a swap that reduces (drift² + λ × neighbor_quality²).
+		driftR += float64(eR)
+		driftG += float64(eG)
+		driftB += float64(eB)
+
 		bestSwapNb := -1
 		bestSwapP := int32(-1)
-		bestDriftChange := float32(0) // strictly negative to apply
+		bestCombined := float32(0) // strictly negative to apply
 		for _, nb := range neighbors[idx] {
 			nIdx := nb.Idx
 			currentP := assignments[nIdx]
 			currentColor := pal[currentP]
+			tN := targets[nIdx]
+			rNR := tN[0] - float32(currentColor[0])
+			rNG := tN[1] - float32(currentColor[1])
+			rNB := tN[2] - float32(currentColor[2])
 			for newP, newColor := range pal {
 				if int32(newP) == currentP {
 					continue
@@ -785,17 +815,26 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 				sR := float32(currentColor[0]) - float32(newColor[0])
 				sG := float32(currentColor[1]) - float32(newColor[1])
 				sB := float32(currentColor[2]) - float32(newColor[2])
-				sDotE := eR*sR + eG*sG + eB*sB
 				sMagSq := sR*sR + sG*sG + sB*sB
-				driftChange := 2*sDotE + sMagSq
-				if driftChange < bestDriftChange {
-					bestDriftChange = driftChange
+				xDotS := float32(driftR)*sR + float32(driftG)*sG + float32(driftB)*sB
+				driftChange := 2*xDotS + sMagSq
+				rDotS := rNR*sR + rNG*sG + rNB*sB
+				qualityChange := 2*rDotS + sMagSq
+				combined := driftChange + recoverQualityWeight*qualityChange
+				if combined < bestCombined {
+					bestCombined = combined
 					bestSwapNb = nIdx
 					bestSwapP = int32(newP)
 				}
 			}
 		}
 		if bestSwapNb >= 0 {
+			// Apply swap and update running drift by s.
+			oldColor := pal[assignments[bestSwapNb]]
+			newColor := pal[bestSwapP]
+			driftR += float64(oldColor[0]) - float64(newColor[0])
+			driftG += float64(oldColor[1]) - float64(newColor[1])
+			driftB += float64(oldColor[2]) - float64(newColor[2])
 			assignments[bestSwapNb] = bestSwapP
 		}
 	}
