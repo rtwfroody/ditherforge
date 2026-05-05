@@ -194,6 +194,10 @@ func main() {
 		sem := make(chan struct{}, runtime.NumCPU())
 		for i, m := range modes {
 			wg.Add(1)
+			// Acquire the semaphore on the parent goroutine so the
+			// loop blocks rather than fan-out launching N goroutines
+			// up front; each worker holds its slot for its lifetime
+			// and releases via defer.
 			sem <- struct{}{}
 			go func(i int, m dmode) {
 				defer wg.Done()

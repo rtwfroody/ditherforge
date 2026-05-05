@@ -43,9 +43,9 @@ type Args struct {
 	Brightness                      float32  `arg:"--brightness" default:"0" help:"Brightness adjustment (-100 to +100)"`
 	Contrast                        float32  `arg:"--contrast" default:"0" help:"Contrast adjustment (-100 to +100)"`
 	Saturation                      float32  `arg:"--saturation" default:"0" help:"Saturation adjustment (-100 to +100)"`
-	Dither                          string   `arg:"--dither" default:"riemersma" help:"Dithering mode: riemersma, blue-noise, dizzy-corrected, dizzy-2hop, dizzy-recover, floyd-steinberg, none"`
+	Dither                          string   `arg:"--dither" default:"riemersma" help:"Dithering mode: riemersma, blue-noise, dizzy-corrected, floyd-steinberg, none (also accepted: dizzy-2hop, dizzy-recover)"`
 	RiemersmaInputBias              float64  `arg:"--riemersma-bias" default:"0.85" help:"Riemersma input-bias maximum (0..1). 0 = pure dither; higher pulls toward nearest-input palette in near-palette regions"`
-	BlueNoiseTolerance              float64  `arg:"--blue-noise-tol" default:"20" help:"Blue-noise dither per-cell projection-error tolerance (RGB units). Smaller = lower wander but more drift; larger = more wander but less drift"`
+	BlueNoiseTolerance              float64  `arg:"--blue-noise-tol" help:"Blue-noise dither per-cell projection-error tolerance (RGB units). Smaller = lower wander but more drift; larger = more wander but less drift. 0 = use built-in default (currently 20)"`
 	NoMerge                         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`

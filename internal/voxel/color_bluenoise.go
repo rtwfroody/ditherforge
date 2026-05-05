@@ -110,7 +110,7 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		f := float64(tourPos[idx]) * golden
 		theta := f - math.Floor(f)
 
-		if nearestD2 <= tol2 {
+		if nearestD2 <= tol2 || K < 2 {
 			assigns[idx] = int32(nearest)
 			continue
 		}
@@ -151,7 +151,7 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 				bestPairAlpha = clipped
 			}
 		}
-		if bestPairErr <= tol2 {
+		if bestPairErr <= tol2 || K < 3 {
 			var pick int
 			if theta < bestPairAlpha {
 				pick = bestPair.j
@@ -214,6 +214,9 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 				bestTriW = w
 			}
 		}
+		// Accept the triangle if it's tight enough, OR if there's no
+		// K=4 step to escalate to (palette has <4 colors, so the
+		// triangle search above already covered the whole palette).
 		if bestTriErr <= tol2 || K < 4 {
 			var pick int
 			switch {
@@ -230,29 +233,31 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 
 		// K=4: full simplex (4 palettes spanning 3D RGB exactly).
 		w := make([]float64, K)
-		blueNoiseSimplexBarycentric(pal, iR, iG, iB, w)
-		blueNoiseClipAndRenormalize(w)
+		simplexBarycentric(pal, iR, iG, iB, w)
+		clipAndRenormalize(w)
+		// LDS-driven cumulative pick. Weights sum to ≈1 after
+		// renormalize, but float drift can leave theta past every
+		// cum threshold; the trailing assignment to K-1 catches that.
+		pick := K - 1
 		var cum float64
-		pick := 0
 		for j := 0; j < K; j++ {
 			cum += w[j]
 			if theta < cum {
 				pick = j
 				break
 			}
-			pick = j
 		}
 		assigns[idx] = int32(pick)
 	}
 	return assigns, nil
 }
 
-// blueNoiseSimplexBarycentric computes the min-norm weights w such that
+// simplexBarycentric computes the min-norm weights w such that
 // Σ w_i p_i = (target_R, target_G, target_B) and Σ w_i = 1. For K=4 in
 // 3D this is the exact barycentric (4 unknowns, 3 equations + sum=1).
 // For other K, it's a min-norm least-squares solution; weights may be
 // negative for inputs outside the palette convex hull.
-func blueNoiseSimplexBarycentric(pal [][3]uint8, tR, tG, tB float64, w []float64) {
+func simplexBarycentric(pal [][3]uint8, tR, tG, tB float64, w []float64) {
 	K := len(pal)
 	if K == 4 {
 		var M [4][4]float64
@@ -267,7 +272,7 @@ func blueNoiseSimplexBarycentric(pal [][3]uint8, tR, tG, tB float64, w []float64
 		rhs[1] = tG
 		rhs[2] = tB
 		rhs[3] = 1
-		blueNoiseSolve4x4(M, rhs, w)
+		solve4x4(M, rhs, w)
 		return
 	}
 	last := K - 1
@@ -292,7 +297,7 @@ func blueNoiseSimplexBarycentric(pal [][3]uint8, tR, tG, tB float64, w []float64
 		rhs[i] = M[i][0]*b[0] + M[i][1]*b[1] + M[i][2]*b[2]
 	}
 	wprime := make([]float64, last)
-	blueNoiseGaussSolve(AAt, rhs, wprime)
+	gaussSolve(AAt, rhs, wprime)
 	for i := 0; i < last; i++ {
 		w[i] = wprime[i]
 	}
@@ -302,7 +307,7 @@ func blueNoiseSimplexBarycentric(pal [][3]uint8, tR, tG, tB float64, w []float64
 	}
 }
 
-func blueNoiseClipAndRenormalize(w []float64) {
+func clipAndRenormalize(w []float64) {
 	var sum float64
 	for i := range w {
 		if w[i] < 0 {
@@ -323,7 +328,7 @@ func blueNoiseClipAndRenormalize(w []float64) {
 	}
 }
 
-func blueNoiseSolve4x4(M [4][4]float64, rhs [4]float64, out []float64) {
+func solve4x4(M [4][4]float64, rhs [4]float64, out []float64) {
 	A := M
 	b := rhs
 	for col := 0; col < 4; col++ {
@@ -356,7 +361,7 @@ func blueNoiseSolve4x4(M [4][4]float64, rhs [4]float64, out []float64) {
 	}
 }
 
-func blueNoiseGaussSolve(M [][]float64, b []float64, out []float64) {
+func gaussSolve(M [][]float64, b []float64, out []float64) {
 	n := len(b)
 	A := make([][]float64, n)
 	rhs := make([]float64, n)
