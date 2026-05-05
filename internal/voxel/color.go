@@ -675,57 +675,71 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	return assignments, nil
 }
 
-// recoverQualityWeight balances per-cell quality against global drift
-// in the local-solve objective:
+// regionObjective evaluates the local-solve objective for a candidate
+// palette assignment over a region: Σ|r_i|² + λ · |Σ r_i|². The
+// first term is per-cell quality (each cell wants its palette close
+// to its target), the second is regional residual (the region's net
+// rendered error wants to be small). λ = recoverQualityWeight.
+func regionObjective(region []int, combo []int32, targets [][3]float32, pal [][3]uint8) float32 {
+	var sumQ float32
+	var sumR, sumG, sumB float32
+	for i, ci := range region {
+		T := targets[ci]
+		p := pal[combo[i]]
+		rR := T[0] - float32(p[0])
+		rG := T[1] - float32(p[1])
+		rB := T[2] - float32(p[2])
+		sumQ += rR*rR + rG*rG + rB*rB
+		sumR += rR
+		sumG += rG
+		sumB += rB
+	}
+	residSq := sumR*sumR + sumG*sumG + sumB*sumB
+	return sumQ + recoverQualityWeight*residSq
+}
+
+// recoverQualityWeight balances per-cell quality against local
+// regional residual in the local-solve objective:
 //
-//   combined = (2·X·s + |s|²) + λ · (2·r_N·s + |s|²)
+//   combined = (2·L·s + |s|²) + λ · (2·r_N·s + |s|²)
 //
-// where s = palette[old_p_N] - palette[p_N'], X is running global
-// drift, and r_N is N's rendered error against its target T_N.
+// where:
+//   - s = palette[old_p_N] - palette[p_N'] (the swap shift)
+//   - L = e_C + Σ r_N: net rendered error of the local region
+//     {stranded cell, all its neighbors}
+//   - r_N = T_N - palette[old_p_N]: N's individual quality residual
 //
-// λ = 0: pure drift minimization (any quality cost at N is
-//        accepted to reduce drift).
-// λ → ∞: pure per-cell quality (never accept any quality loss at
-//        N, drift recovery is incidental).
+// λ = 0: pure regional balance. Any quality cost at N is accepted
+//        to reduce local residual.
+// λ → ∞: pure per-cell quality. Swaps never hurt N's individual
+//        fidelity even if it would help the regional balance.
 // λ = 1: equal weight; swaps that hurt N's quality by the same
-//        amount they help global drift are rejected.
-//
-// Empirically λ around 1 gives a useful balance: drift recovery is
-// significant but we don't trash a neighbor's individual fidelity.
-const recoverQualityWeight = 1.0
+//        amount they help regional balance are rejected.
+const recoverQualityWeight = 0.1
 
 // DitherWithRecover is DitherWithNeighbors with a local-solve
 // recovery pass when a cell is stranded (all 1-hop neighbors already
 // processed). Instead of dropping the residual e_C, search across
 // (neighbor N, candidate palette p_N') swaps for one that reduces
-// global drift while preserving each neighbor's individual quality.
+// the *local region's* net residual — purely local, no global state.
 //
-// Tracks two extra pieces of state during the main pass:
-//
-//   - targets[i]: each cell's target color T_i = input + accumulated
-//     diffused error at processing time. Needed so the swap
-//     evaluator knows N's "ideal" color, hence the quality cost of
-//     changing N's palette.
-//
-//   - running X: global drift = sum of dropped residuals so far. The
-//     swap direction depends on X, not on just the current stranded
-//     cell's e_C — on fixtures with many earlier-aligned drifts
-//     (e.g., warm-tone surfaces with grey palette) X >> e_C and
-//     using the approximation X ≈ e_C produced wrong swap
-//     directions in the prior version.
+// Tracks per-cell target T_i = input + accumulated diffused error at
+// processing time, so the swap evaluator knows each neighbor's
+// individual quality residual r_N = T_N - palette[old_p_N]. The
+// regional residual L = e_C + Σ r_N (over neighbors) is what the
+// swap aims to reduce; r_N alone is the per-neighbor quality cost.
 //
 // Approximation caveats:
 //
 //   - We change assignments[N] but the residual N pushed to its own
 //     neighbors at processing time was based on its OLD palette.
 //     Changing N retroactively introduces a small ripple equal to
-//     |Δ| × diffusion_weights, distributed across N's processed
-//     neighbors. Bounded by |Δ| total, second-order.
+//     |s| × diffusion_weights, distributed across N's processed
+//     neighbors. Bounded, second-order.
 //
-//   - We only consider swapping ONE neighbor's palette per stranded
-//     cell. A multi-cell joint optimization would do better but
-//     scales as |palette|^k for k-cell regions; single-swap is the
-//     cheap heuristic.
+//   - Single-swap per stranded cell. A multi-cell joint optimization
+//     would do better but scales as |palette|^k for k-cell regions;
+//     single-swap is the cheap heuristic.
 func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -739,7 +753,6 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
 	targets := make([][3]float32, n)
-	var driftR, driftG, driftB float64 // running global drift
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -791,51 +804,58 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			}
 			continue
 		}
-		// Stranded. Add e_C to running drift first; then search for
-		// a swap that reduces (drift² + λ × neighbor_quality²).
-		driftR += float64(eR)
-		driftG += float64(eG)
-		driftB += float64(eB)
-
-		bestSwapNb := -1
-		bestSwapP := int32(-1)
-		bestCombined := float32(0) // strictly negative to apply
+		// Stranded. Joint optimization over the region {C, k
+		// nearest neighbors}: enumerate ALL palette combinations
+		// for the region and pick the one minimizing
+		//
+		//   Σ|r_i|² + λ · |Σ r_i|²
+		//
+		// where r_i = T_i - palette[p_i] (per-cell residual). This
+		// is the actual local solve — finds the joint minimum, not
+		// a greedy descent that gets stuck. Crucially, joint search
+		// can use combinations of small swaps in different
+		// directions to absorb a residual that no single swap can
+		// (each swap shift |s| is one palette gap, so single-swap
+		// floors at |s|/2; joint can do better by combining shifts).
+		//
+		// Region size capped at recoverRegionSize to keep
+		// enumeration tractable: |palette|^region per stranded
+		// cell. With palette=4 and region=5 that's 1024 evals;
+		// negligible total cost.
+		const recoverRegionSize = 5
+		region := make([]int, 0, recoverRegionSize)
+		region = append(region, idx)
 		for _, nb := range neighbors[idx] {
-			nIdx := nb.Idx
-			currentP := assignments[nIdx]
-			currentColor := pal[currentP]
-			tN := targets[nIdx]
-			rNR := tN[0] - float32(currentColor[0])
-			rNG := tN[1] - float32(currentColor[1])
-			rNB := tN[2] - float32(currentColor[2])
-			for newP, newColor := range pal {
-				if int32(newP) == currentP {
-					continue
+			if len(region) >= recoverRegionSize {
+				break
+			}
+			region = append(region, nb.Idx)
+		}
+		regionLen := len(region)
+		bestCombo := make([]int32, regionLen)
+		for i, ci := range region {
+			bestCombo[i] = assignments[ci]
+		}
+		bestObj := regionObjective(region, bestCombo, targets, pal)
+		combo := make([]int32, regionLen)
+		var search func(depth int)
+		search = func(depth int) {
+			if depth == regionLen {
+				obj := regionObjective(region, combo, targets, pal)
+				if obj < bestObj {
+					bestObj = obj
+					copy(bestCombo, combo)
 				}
-				sR := float32(currentColor[0]) - float32(newColor[0])
-				sG := float32(currentColor[1]) - float32(newColor[1])
-				sB := float32(currentColor[2]) - float32(newColor[2])
-				sMagSq := sR*sR + sG*sG + sB*sB
-				xDotS := float32(driftR)*sR + float32(driftG)*sG + float32(driftB)*sB
-				driftChange := 2*xDotS + sMagSq
-				rDotS := rNR*sR + rNG*sG + rNB*sB
-				qualityChange := 2*rDotS + sMagSq
-				combined := driftChange + recoverQualityWeight*qualityChange
-				if combined < bestCombined {
-					bestCombined = combined
-					bestSwapNb = nIdx
-					bestSwapP = int32(newP)
-				}
+				return
+			}
+			for p := range pal {
+				combo[depth] = int32(p)
+				search(depth + 1)
 			}
 		}
-		if bestSwapNb >= 0 {
-			// Apply swap and update running drift by s.
-			oldColor := pal[assignments[bestSwapNb]]
-			newColor := pal[bestSwapP]
-			driftR += float64(oldColor[0]) - float64(newColor[0])
-			driftG += float64(oldColor[1]) - float64(newColor[1])
-			driftB += float64(oldColor[2]) - float64(newColor[2])
-			assignments[bestSwapNb] = bestSwapP
+		search(0)
+		for i, ci := range region {
+			assignments[ci] = bestCombo[i]
 		}
 	}
 
