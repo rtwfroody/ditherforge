@@ -505,6 +505,86 @@ func BuildNeighbors(cells []ActiveCell) [][]Neighbor {
 	return neighbors
 }
 
+// BuildNeighbors2Hop is BuildNeighbors with the offset range extended
+// from {-1,0,+1} to {-2,-1,0,+1,+2}. It exists to give random-order
+// error-diffusion (dizzy) somewhere to dump residual error when all
+// 1-hop neighbors are already processed (the "stranded tail" that
+// causes dizzy's chroma drift).
+//
+// 1-hop weights (chebyshev=1) match BuildNeighbors exactly:
+//   axes=1 → 1.0, axes=2 → 0.1, axes=3 → 0.01.
+// 2-hop weights (chebyshev=2) are 100× smaller for the same axes
+// count, continuing the same 10×-per-step falloff pattern:
+//   axes=1 → 0.01, axes=2 → 0.001, axes=3 → 0.0001.
+//
+// The 100× gap means 1-hop neighbors dominate when any are
+// unprocessed; 2-hop only matters as a fallback. Surface cells
+// typically have 4-8 1-hop neighbors and another 8-16 2-hop
+// neighbors, so the per-cell list grows ~3× — memory cost is real
+// (~160-240 MB for a million-cell mesh) but manageable for an
+// experimental mode.
+func BuildNeighbors2Hop(cells []ActiveCell) [][]Neighbor {
+	n := len(cells)
+	cellMap := make(map[CellKey]int, n)
+	for i, c := range cells {
+		cellMap[CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}] = i
+	}
+
+	baseWeight := [4]float32{0, 1.0, 0.1, 0.01} // by axes count
+
+	neighbors := make([][]Neighbor, n)
+	for i, c := range cells {
+		var nbrs []Neighbor
+		for dc := -2; dc <= 2; dc++ {
+			for dr := -2; dr <= 2; dr++ {
+				for dl := -2; dl <= 2; dl++ {
+					if dc == 0 && dr == 0 && dl == 0 {
+						continue
+					}
+					j, ok := cellMap[CellKey{Grid: c.Grid, Col: c.Col + dc, Row: c.Row + dr, Layer: c.Layer + dl}]
+					if !ok {
+						continue
+					}
+					axes := 0
+					if dc != 0 {
+						axes++
+					}
+					if dr != 0 {
+						axes++
+					}
+					if dl != 0 {
+						axes++
+					}
+					adc, adr, adl := dc, dr, dl
+					if adc < 0 {
+						adc = -adc
+					}
+					if adr < 0 {
+						adr = -adr
+					}
+					if adl < 0 {
+						adl = -adl
+					}
+					cheb := adc
+					if adr > cheb {
+						cheb = adr
+					}
+					if adl > cheb {
+						cheb = adl
+					}
+					w := baseWeight[axes]
+					if cheb == 2 {
+						w /= 100
+					}
+					nbrs = append(nbrs, Neighbor{Idx: j, Weight: w})
+				}
+			}
+		}
+		neighbors[i] = nbrs
+	}
+	return neighbors
+}
+
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.

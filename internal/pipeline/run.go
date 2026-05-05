@@ -767,6 +767,13 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "dizzy-corrected":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
+		case "dizzy-2hop":
+			// Single-pass dizzy with an expanded 2-hop neighbor
+			// stencil so stranded cells (no unprocessed 1-hop
+			// neighbors) can still distribute error to 2-hop
+			// neighbors instead of dropping it.
+			neighbors := voxel.BuildNeighbors2Hop(cells)
+			assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
