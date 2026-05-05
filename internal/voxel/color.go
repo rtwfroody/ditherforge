@@ -705,8 +705,8 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	return assignments, nil
 }
 
-// RiemersmaInputBiasMax is the maximum α (input-bias weight) used
-// in the per-cell adaptive blend
+// RiemersmaInputBiasDefault is the default value for the per-cell
+// adaptive input-bias maximum used in the Riemersma palette pick:
 //
 //   score = (1 - α) · dist²(target, palette) + α · dist²(input, palette)
 //
@@ -714,12 +714,12 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 // palette color (see RiemersmaInputBiasRange). The fundamental
 // trade-off the bias resolves:
 //
-//   - Pure Riemersma (α = 0): zero average drift, chroma-balanced
+//   - α = 0: pure Riemersma, zero average drift, chroma-balanced
 //     by swinging palette to cancel accumulated error. Looks bad
 //     on flat near-palette regions (grey hood: black/white
 //     oscillation around grey instead of just picking grey).
 //
-//   - Pure snap (α = 1): each cell goes to nearest-input palette.
+//   - α = 1: pure snap, each cell goes to nearest-input palette.
 //     Looks bad on textured surfaces (all bricks snap to the same
 //     palette → posterized patches).
 //
@@ -727,9 +727,13 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 // kills oscillation), low α when input is between palettes (dither
 // dominates, smooths gradients). One pass through the palette
 // finds the cell's nearest-input distance; α is a linear ramp
-// down from RiemersmaInputBiasMax at distance 0 to 0 at distance
+// down from biasMax at distance 0 to 0 at distance
 // RiemersmaInputBiasRange.
-const RiemersmaInputBiasMax = 0.85
+//
+// 0.85 default is empirically the strongest snap-tendency that
+// doesn't visibly posterize. The actual value used is configurable
+// per Riemersma call (--riemersma-bias / Settings → Dither slider).
+const RiemersmaInputBiasDefault = 0.85
 
 // RiemersmaInputBiasRange is the input-distance (in 8-bit RGB
 // units, Euclidean) at which α drops to 0. Inputs farther than
@@ -782,7 +786,7 @@ const RiemersmaDecayRatio = 1.0 / 16.0
 //
 // Cost: O(N · L) for the dither, plus O(N · avg_degree) for the
 // tour with O(N) extra work per dead end.
-func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, biasMax float64, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -859,7 +863,7 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			}
 		}
 		nearDist := float32(math.Sqrt(float64(minDI)))
-		alpha := RiemersmaInputBiasMax * (1 - nearDist/RiemersmaInputBiasRange)
+		alpha := float32(biasMax) * (1 - nearDist/RiemersmaInputBiasRange)
 		if alpha < 0 {
 			alpha = 0
 		}

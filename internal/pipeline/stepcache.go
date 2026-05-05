@@ -685,7 +685,8 @@ type paletteSettings struct {
 }
 
 type ditherSettings struct {
-	Dither string
+	Dither             string
+	RiemersmaInputBias float64
 }
 
 // clipSettings has no fields: clip is invalidated only by dependency cascade.
@@ -799,7 +800,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			ColorSnap:         opts.ColorSnap,
 		}
 	case StageDither:
-		return ditherSettings{Dither: opts.Dither}
+		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias}
 	case StageClip:
 		return clipSettings{}
 	case StageMerge:
@@ -958,6 +959,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat64(h, v.ColorSnap)
 	case ditherSettings:
 		writeString(h, v.Dither)
+		writeFloat64(h, v.RiemersmaInputBias)
 	case clipSettings:
 		// No independent settings.
 	case mergeSettings:

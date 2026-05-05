@@ -44,6 +44,7 @@ type Args struct {
 	Contrast                        float32  `arg:"--contrast" default:"0" help:"Contrast adjustment (-100 to +100)"`
 	Saturation                      float32  `arg:"--saturation" default:"0" help:"Saturation adjustment (-100 to +100)"`
 	Dither                          string   `arg:"--dither" default:"riemersma" help:"Dithering mode: riemersma, dizzy-corrected, floyd-steinberg, none"`
+	RiemersmaInputBias              float64  `arg:"--riemersma-bias" default:"0.85" help:"Riemersma input-bias maximum (0..1). 0 = pure dither; higher pulls toward nearest-input palette in near-palette regions"`
 	NoMerge                         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
@@ -96,6 +97,7 @@ func main() {
 		Contrast:                             args.Contrast,
 		Saturation:                           args.Saturation,
 		Dither:                               args.Dither,
+		RiemersmaInputBias:                   args.RiemersmaInputBias,
 		NoMerge:                              args.NoMerge,
 		NoSimplify:                           args.NoSimplify,
 		Size:                                 args.Size,

@@ -167,6 +167,8 @@
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
   let dither = $state('riemersma');
+  let riemersmaBias = $state(0.85);
+  let committedRiemersmaBias = $state(0.85);
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
@@ -591,7 +593,7 @@
           committedBrightness, committedContrast, committedSaturation,
           JSON.stringify(warpPins),
           JSON.stringify(stickers),
-          dither, committedColorSnap, noMerge, noSimplify, stats,
+          dither, committedRiemersmaBias, committedColorSnap, noMerge, noSimplify, stats,
           alphaWrap, alphaWrapAlpha, alphaWrapOffset,
           splitEnabled, splitAxis, splitOffset,
           splitConnectorStyle, splitConnectorCount,
@@ -844,6 +846,7 @@
         mode: s.mode,
       })),
       dither,
+      riemersmaBias,
       colorSnap,
       noMerge,
       noSimplify,
@@ -990,6 +993,7 @@
     });
 
     dither = pickEnum(s.dither, DITHER_VALUES, D.dither as DitherMode);
+    riemersmaBias = pickNumber(s.riemersmaBias, D.riemersmaBias); committedRiemersmaBias = riemersmaBias;
     colorSnap = pickNumber(s.colorSnap, D.colorSnap); committedColorSnap = colorSnap;
     noMerge = pickBool(s.noMerge, D.noMerge);
     noSimplify = pickBool(s.noSimplify, D.noSimplify);
@@ -1203,6 +1207,7 @@
       Contrast: committedContrast,
       Saturation: committedSaturation,
       Dither: dither,
+      RiemersmaInputBias: committedRiemersmaBias,
       NoMerge: noMerge,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -1786,18 +1791,18 @@
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Advanced" open={false}>
+        <SettingsSection title="Dither">
           {#snippet tip()}
             <HelpTip>
-              Dither algorithm and diagnostic toggles. Most users can ignore these.
+              Algorithm that blends palette colors across the surface, and per-algorithm tuning.
             </HelpTip>
           {/snippet}
           <div class="space-y-4">
             <div class="space-y-2">
               <div class="flex items-center gap-1.5">
-                <Label for="dither">Dither mode</Label>
+                <Label for="dither">Mode</Label>
                 <HelpTip>
-                  Algorithm used to blend palette colors across the surface. "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "dizzy-corrected" is a randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — produces a blue-noise look with no directional structure on flat areas, at 3× the cost of a single dither pass. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
+                  "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "dizzy-corrected" is a randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — produces a blue-noise look with no directional structure on flat areas, at 3× the cost of a single dither pass. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
                 </HelpTip>
               </div>
               <Select.Root type="single" bind:value={dither}>
@@ -1812,6 +1817,30 @@
               </Select.Root>
             </div>
 
+            {#if dither === 'riemersma'}
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Alpha</Label>
+                    <HelpTip>
+                      Per-cell input-bias maximum (0..1). Pulls each cell's palette pick toward its nearest-input palette when the cell's input is close to a palette color. 0 = pure Riemersma (zero average drift but black/white oscillation around near-grey input). Higher values suppress that oscillation by preferring the close-input palette; too high (≥0.9) starts to posterize textured surfaces. 0.85 is the default.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>
+                </div>
+                <Slider type="single" min={0} max={1} step={0.05} value={riemersmaBias} onValueChange={(v: number) => riemersmaBias = v} onValueCommit={(v: number) => committedRiemersmaBias = v} />
+              </div>
+            {/if}
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="Advanced" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Diagnostic toggles. Most users can ignore these.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-4">
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noMerge} />

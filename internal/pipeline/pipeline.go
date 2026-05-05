@@ -65,6 +65,14 @@ type Options struct {
 	Contrast       float32
 	Saturation     float32
 	Dither         string
+	// RiemersmaInputBias is the per-cell input-bias maximum used by
+	// the Riemersma dither (only consulted when Dither == "riemersma").
+	// 0..1; higher = stronger pull toward nearest-input palette,
+	// suppressing chroma-balancing oscillation in flat near-palette
+	// regions at the cost of more posterization in textured regions.
+	// 0 = pure Riemersma (no bias). Pipeline default is
+	// voxel.RiemersmaInputBiasDefault.
+	RiemersmaInputBias float64
 	NoMerge        bool
 	NoSimplify     bool
 	Size           *float32

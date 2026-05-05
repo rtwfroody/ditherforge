@@ -772,7 +772,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
 		case "riemersma":
 			neighbors := vo.getNeighbors()
-			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.tracker)
+			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
 		default:
 			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		}

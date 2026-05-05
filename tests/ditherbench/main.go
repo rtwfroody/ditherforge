@@ -375,7 +375,7 @@ func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs 
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapRiemersma(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.Riemersma(ctx, cells, pal, nbrs, progress.NullTracker{})
+	return voxel.Riemersma(ctx, cells, pal, nbrs, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
 
 // ----- metrics -----
