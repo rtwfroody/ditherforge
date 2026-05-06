@@ -1898,7 +1898,7 @@
               <div class="flex items-center gap-1.5">
                 <Label for="dither">Mode</Label>
                 <HelpTip>
-                  "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
+                  "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
                 </HelpTip>
               </div>
               <Select.Root type="single" bind:value={dither}>
@@ -1913,13 +1913,13 @@
               </Select.Root>
             </div>
 
-            {#if dither === 'riemersma'}
+            {#if dither === 'riemersma' || dither === 'riemersma-pair'}
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
                     <Label>Alpha</Label>
                     <HelpTip>
-                      Per-cell input-bias maximum (0..1). Pulls each cell's palette pick toward its nearest-input palette when the cell's input is close to a palette color. 0 = pure Riemersma (zero average drift but black/white oscillation around near-grey input). Higher values suppress that oscillation by preferring the close-input palette; too high (≥0.9) starts to posterize textured surfaces. 0.85 is the default.
+                      Per-cell input-bias maximum (0..1). Pulls each cell's palette pick toward its nearest-input palette when the cell's input is close to a palette color. 0 = pure Riemersma (zero average drift but black/white oscillation around near-grey input). Higher values suppress that oscillation by preferring the close-input palette; too high (≥0.9) starts to posterize textured surfaces. 0.85 is the default. Applies to both Riemersma and Riemersma pair (they share the same input-bias formula).
                     </HelpTip>
                   </div>
                   <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>

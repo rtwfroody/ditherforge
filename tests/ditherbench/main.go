@@ -121,6 +121,12 @@ func main() {
 		{"r-leak-0.05", wrapRLeak005},
 		{"r-leak-0.1", wrapRLeak01},
 		{"r-leak-0.2", wrapRLeak02},
+		// riemersma-pair: shipped sliding 2-cell Riemersma at the
+		// production cancellation default. r-pair-disj: research
+		// disjoint variant at the same λ, kept for A/B comparison
+		// against the sliding choice.
+		{"riemersma-pair", wrapRiemersmaPair},
+		{"r-pair-disj", wrapRPairDisjointDefault},
 		{"bn-pair", wrapBlueNoise},
 		{"bn-tri", wrapBlueNoiseTri},
 		{"bn-simplex", wrapBlueNoiseSimplex},
@@ -136,10 +142,17 @@ func main() {
 		{"dbs-bn20-8", wrapDBSFromBN20},
 	}
 	if *onlyMode != "" {
+		// Comma-separated list of substring patterns; a mode is kept
+		// if any of the patterns is a substring of its name.
+		patterns := strings.Split(*onlyMode, ",")
 		var keep []dmode
 		for _, m := range modes {
-			if strings.Contains(m.name, *onlyMode) {
-				keep = append(keep, m)
+			for _, pat := range patterns {
+				pat = strings.TrimSpace(pat)
+				if pat != "" && strings.Contains(m.name, pat) {
+					keep = append(keep, m)
+					break
+				}
 			}
 		}
 		modes = keep
@@ -552,6 +565,12 @@ func wrapRLeak01(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, 
 }
 func wrapRLeak02(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.RiemersmaLeaky(ctx, cells, pal, nbrs, 0.2, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapRiemersmaPair(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaPair(ctx, cells, pal, nbrs, voxel.RiemersmaPairCancellationDefault, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+}
+func wrapRPairDisjointDefault(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.RiemersmaPairDisjoint(ctx, cells, pal, nbrs, voxel.RiemersmaPairCancellationDefault, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
 func wrapBlueNoise(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.BlueNoiseThresholdSimplex(ctx, cells, pal, nbrs, progress.NullTracker{})

@@ -1160,6 +1160,261 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 	return assigns, nil
 }
 
+// RiemersmaPairCancellationDefault is the residual-cancellation
+// coupling used by RiemersmaPair. λ ≈ 0.1 sits at the inflection of
+// the wander-vs-fidelity curve in the bench: large enough to break
+// up the same-direction-residual pattern that single-cell Riemersma
+// produces on flat regions (see RiemersmaPair docs), small enough to
+// barely move wander on near-palette images. Higher values (0.2–1.0)
+// give larger wander wins on textured fixtures but visibly degrade
+// fidelity on detailed near-palette images like the delorean fixture.
+const RiemersmaPairCancellationDefault = 0.1
+
+// RiemersmaPair is the *sliding* 2-cell variant of Riemersma — the
+// production pick after benching disjoint vs sliding (sliding wins on
+// drift on flat fixtures: 0.00 vs ≈0.16 dE at the same λ). The user-
+// facing dither name "riemersma-pair" intentionally hides this detail.
+// The disjoint variant lives in color_research.go as
+// RiemersmaPairDisjoint, kept only as a bench-time A/B comparison.
+//
+// At every position along the tour the joint pair (cell i, cell i+1)
+// is scored together, but only cell i's choice is committed; cell i+1
+// is re-decided on the next iteration jointly with cell i+2. The joint
+// score adds a residual-cancellation coupling
+//
+//	λ · ||(r0 - pal[a]) + (r1 - pal[b])||²
+//
+// to the per-cell biased-distance score, which penalises pairs whose
+// two cells push residual in the same direction. With λ > 0 the solver
+// prefers (black, white) over (black, black) for a flat-gray input,
+// breaking the long-tour kick a same-direction pick would otherwise
+// inject into the window.
+//
+// Versus single-cell Riemersma:
+//   - Drift stays at single-cell levels on every tested fixture
+//     (cancellation only redistributes residual within pairs; it
+//     doesn't bias DC).
+//   - Wander improves on textured/flat fixtures (≈2.7 dE drop on
+//     bricks-style images at λ=0.1).
+//   - On detailed near-palette images (e.g. delorean) wander
+//     marginally regresses; that's the trade-off the λ knob picks.
+//
+// Cost: ≈2× single-cell Riemersma per cell (each cell is scored twice,
+// once as left-of-pair and once as right-of-pair) plus a |pal|² inner
+// loop for the joint search. With |pal| ≤ 16 the joint search adds
+// constant overhead.
+//
+// Pass biasMax = RiemersmaInputBiasDefault to inherit the same near-
+// palette input bias Riemersma uses.
+func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+	return riemersmaPairImpl(ctx, cells, pal, neighbors, biasMax, lambda, true, tracker)
+}
+
+// riemersmaPairImpl is the shared body for RiemersmaPair (production,
+// slide=true) and RiemersmaPairDisjoint (research, slide=false).
+//
+//   - lambda: residual-cancellation coupling. 0 = pure separable score
+//     (joint search degenerates to per-cell nearest); higher values
+//     favour pairs whose residuals cancel.
+//   - slide=false: tour advances by 2 per step (disjoint pairs); both
+//     cells in the pair are committed together.
+//   - slide=true: tour advances by 1 per step (sliding pair); only the
+//     left cell is committed each step, so each cell is scored as both
+//     the right of one pair and the left of the next.
+func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, biasMax float64, lambda float32, slide bool, tracker progress.Tracker) ([]int32, error) {
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+	n := len(cells)
+	if n == 0 {
+		return nil, nil
+	}
+
+	L := RiemersmaWindowSize
+	weights := make([]float32, L)
+	var total float32
+	for k := 0; k < L; k++ {
+		weights[k] = float32(math.Pow(RiemersmaDecayRatio, float64(k)/float64(L-1)))
+		total += weights[k]
+	}
+	for k := range weights {
+		weights[k] /= total
+	}
+
+	tour := buildRiemersmaTour(cells, neighbors)
+	window := make([][3]float32, L)
+	head := 0
+
+	assigns := make([]int32, n)
+	dI0 := make([]float32, len(pal))
+	dI1 := make([]float32, len(pal))
+	s0 := make([]float32, len(pal))
+	s1 := make([]float32, len(pal))
+	res0 := make([][3]float32, len(pal))
+	res1 := make([][3]float32, len(pal))
+
+	step := 2
+	if slide {
+		step = 1
+	}
+
+	for ti := 0; ti < len(tour); ti += step {
+		if ti%1000 == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			tracker.StageProgress("Dithering", ti)
+		}
+
+		// Diffused error from window — same for both cells in the pair.
+		var eR, eG, eB float32
+		for k := 0; k < L; k++ {
+			slot := (head + L - 1 - k) % L
+			eR += weights[k] * window[slot][0]
+			eG += weights[k] * window[slot][1]
+			eB += weights[k] * window[slot][2]
+		}
+
+		idx0 := tour[ti]
+		hasPartner := ti+1 < len(tour)
+		var idx1 int
+		if hasPartner {
+			idx1 = tour[ti+1]
+		}
+
+		i0R := float32(cells[idx0].Color[0])
+		i0G := float32(cells[idx0].Color[1])
+		i0B := float32(cells[idx0].Color[2])
+		r0R := i0R + eR
+		r0G := i0G + eG
+		r0B := i0B + eB
+
+		var minDI0 float32 = math.MaxFloat32
+		for pi, p := range pal {
+			drI := i0R - float32(p[0])
+			dgI := i0G - float32(p[1])
+			dbI := i0B - float32(p[2])
+			d := drI*drI + dgI*dgI + dbI*dbI
+			dI0[pi] = d
+			if d < minDI0 {
+				minDI0 = d
+			}
+		}
+		nearDist0 := float32(math.Sqrt(float64(minDI0)))
+		alpha0 := float32(biasMax) * (1 - nearDist0/RiemersmaInputBiasRange)
+		if alpha0 < 0 {
+			alpha0 = 0
+		}
+		wt0 := 1 - alpha0
+		wi0 := alpha0
+
+		for a, p := range pal {
+			drT := r0R - float32(p[0])
+			dgT := r0G - float32(p[1])
+			dbT := r0B - float32(p[2])
+			dT := drT*drT + dgT*dgT + dbT*dbT
+			s0[a] = wt0*dT + wi0*dI0[a]
+			res0[a][0] = drT
+			res0[a][1] = dgT
+			res0[a][2] = dbT
+		}
+
+		if !hasPartner {
+			// Single-cell tail: pick cell 0 alone, push residual.
+			bestA := 0
+			bestScore := s0[0]
+			for a := 1; a < len(pal); a++ {
+				if s0[a] < bestScore {
+					bestScore = s0[a]
+					bestA = a
+				}
+			}
+			assigns[idx0] = int32(bestA)
+			window[head][0] = res0[bestA][0]
+			window[head][1] = res0[bestA][1]
+			window[head][2] = res0[bestA][2]
+			head = (head + 1) % L
+			break
+		}
+
+		i1R := float32(cells[idx1].Color[0])
+		i1G := float32(cells[idx1].Color[1])
+		i1B := float32(cells[idx1].Color[2])
+		r1R := i1R + eR
+		r1G := i1G + eG
+		r1B := i1B + eB
+
+		var minDI1 float32 = math.MaxFloat32
+		for pi, p := range pal {
+			drI := i1R - float32(p[0])
+			dgI := i1G - float32(p[1])
+			dbI := i1B - float32(p[2])
+			d := drI*drI + dgI*dgI + dbI*dbI
+			dI1[pi] = d
+			if d < minDI1 {
+				minDI1 = d
+			}
+		}
+		nearDist1 := float32(math.Sqrt(float64(minDI1)))
+		alpha1 := float32(biasMax) * (1 - nearDist1/RiemersmaInputBiasRange)
+		if alpha1 < 0 {
+			alpha1 = 0
+		}
+		wt1 := 1 - alpha1
+		wi1 := alpha1
+
+		for b, p := range pal {
+			drT := r1R - float32(p[0])
+			dgT := r1G - float32(p[1])
+			dbT := r1B - float32(p[2])
+			dT := drT*drT + dgT*dgT + dbT*dbT
+			s1[b] = wt1*dT + wi1*dI1[b]
+			res1[b][0] = drT
+			res1[b][1] = dgT
+			res1[b][2] = dbT
+		}
+
+		// Joint search: minimize s0[a] + s1[b] [+ λ·||r0_resid + r1_resid||²].
+		// |pal| ≤ 16 in practice so |pal|² ≤ 256 — cheap.
+		bestA, bestB := 0, 0
+		bestScore := float32(math.MaxFloat32)
+		for a := range pal {
+			for b := range pal {
+				ss := s0[a] + s1[b]
+				if lambda > 0 {
+					sr := res0[a][0] + res1[b][0]
+					sg := res0[a][1] + res1[b][1]
+					sb := res0[a][2] + res1[b][2]
+					ss += lambda * (sr*sr + sg*sg + sb*sb)
+				}
+				if ss < bestScore {
+					bestScore = ss
+					bestA = a
+					bestB = b
+				}
+			}
+		}
+
+		assigns[idx0] = int32(bestA)
+		window[head][0] = res0[bestA][0]
+		window[head][1] = res0[bestA][1]
+		window[head][2] = res0[bestA][2]
+		head = (head + 1) % L
+
+		if !slide {
+			// Disjoint-pair mode: also commit cell 1 and push its
+			// residual. Sliding mode skips this — cell 1 will be
+			// re-evaluated jointly with cell 2 on the next iteration.
+			assigns[idx1] = int32(bestB)
+			window[head][0] = res1[bestB][0]
+			window[head][1] = res1[bestB][1]
+			window[head][2] = res1[bestB][2]
+			head = (head + 1) % L
+		}
+	}
+	return assigns, nil
+}
+
 // buildRiemersmaTour produces a Hamiltonian-path-ish ordering of
 // cells suitable for Riemersma. Starts at cell 0; at each step
 // picks an unvisited neighbor uniformly at random (reservoir

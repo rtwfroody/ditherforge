@@ -787,6 +787,12 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		case "riemersma":
 			neighbors := vo.getNeighbors()
 			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
+		case "riemersma-pair":
+			// Sliding 2-cell Riemersma with residual-cancellation
+			// coupling. Same drift as base Riemersma; lower wander on
+			// flat/textured fixtures at ≈2× the per-cell cost.
+			neighbors := vo.getNeighbors()
+			assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
 		case "blue-noise":
 			// Adaptive simplex blue-noise threshold dither: per-cell
 			// best-K simplex (1..palette_size) selected by per-cell

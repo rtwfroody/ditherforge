@@ -2954,3 +2954,16 @@ func RiemersmaKNearestRefined(ctx context.Context, cells []ActiveCell, pal [][3]
 	_ = residual
 	return assigns, nil
 }
+
+// RiemersmaPairDisjoint processes the tour in disjoint pairs (advance
+// by 2 each step) with the residual-cancellation coupling λ. Kept for
+// bench A/B comparisons against the production sliding variant
+// (RiemersmaPair in color.go); the two share riemersmaPairImpl. With
+// λ = 0 this degenerates to single-cell Riemersma at the pair scale.
+func RiemersmaPairDisjoint(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+	return riemersmaPairImpl(ctx, cells, pal, neighbors, biasMax, lambda, false, tracker)
+}
+
+// riemersmaPairImpl moved to color.go now that the sliding variant is
+// a shipped algorithm. The disjoint wrapper above lives here only for
+// bench comparisons.
