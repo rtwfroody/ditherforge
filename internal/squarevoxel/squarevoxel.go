@@ -43,6 +43,14 @@ const (
 	UpperCellScale  = 1.05  // standard cells for upper layers
 )
 
+// Layer0AdhesionXYScale enlarges layer-0 voxel cells in XY beyond the
+// slicer's first-layer line width so that heavily dithered first
+// layers print as larger plastic blobs that actually stick to the
+// bed. Tiny single-cell features at the slicer's native first-layer
+// width often peel; multiplying gives each layer-0 color patch a
+// bigger footprint.
+const Layer0AdhesionXYScale = 2.0
+
 // regionParams holds parameters for voxelizing a Z-range of the model on a
 // specific XY grid.
 //

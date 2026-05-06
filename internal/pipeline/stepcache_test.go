@@ -269,3 +269,46 @@ func TestLoadAndDecimateStageKeysIndependentOfMaterialX(t *testing.T) {
 		t.Error("StageDecimate key changed on MaterialX change; decimate cache should survive")
 	}
 }
+
+// TestVoxelizeStageKeyDependsOnResolvedCellSizes pins the contract that
+// the voxelize cache key tracks the resolved voxel cell sizes — not
+// the inputs that feed voxelCellSizes. Switching printer between two
+// registry profiles with different line widths (snapmaker_u1's 0.42 vs
+// prusa_xl's 0.45 at 0.4mm / 0.20mm) must invalidate even though
+// NozzleDiameter and LayerHeight are equal. NozzleDiameter and
+// LayerHeight changes also still invalidate via the same resolved-size
+// path.
+func TestVoxelizeStageKeyDependsOnResolvedCellSizes(t *testing.T) {
+	c := NewStageCache()
+	base := Options{
+		Input:          "model.glb",
+		Printer:        "snapmaker_u1",
+		NozzleDiameter: 0.4,
+		LayerHeight:    0.20,
+	}
+	printerSwap := base
+	printerSwap.Printer = "prusa_xl"
+	// Precondition: the test relies on the two profiles resolving to
+	// different cell sizes (0.42 vs 0.45 line width on 0.4mm/0.20mm).
+	// If upstream OrcaSlicer ships profile updates that converge the
+	// two, fail here loudly rather than letting the contract assertion
+	// below silently pass for the wrong reason.
+	baseCells := voxelCellSizes(base)
+	swapCells := voxelCellSizes(printerSwap)
+	if baseCells == swapCells {
+		t.Fatalf("test precondition broken: snapmaker_u1 and prusa_xl now resolve to identical cell sizes %+v — pick a different profile pair", baseCells)
+	}
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, printerSwap) {
+		t.Error("StageVoxelize key did not change when Printer swap altered the resolved line width")
+	}
+	nozzleChange := base
+	nozzleChange.NozzleDiameter = 0.6
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, nozzleChange) {
+		t.Error("StageVoxelize key did not change when NozzleDiameter changed the resolved cell sizes")
+	}
+	layerChange := base
+	layerChange.LayerHeight = 0.30
+	if c.stageFnv(StageVoxelize, base) == c.stageFnv(StageVoxelize, layerChange) {
+		t.Error("StageVoxelize key did not change when LayerHeight changed the resolved cell sizes")
+	}
+}

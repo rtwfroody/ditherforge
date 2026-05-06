@@ -619,19 +619,21 @@ type loadSettings struct {
 // because the Sticker stage body deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
-	// Printer is included alongside NozzleDiameter and LayerHeight
-	// because the resolved voxel cell sizes (line widths and the
-	// first-layer Z height) come from the matched OrcaSlicer
-	// process profile. Switching printers can change layer0H /
-	// upperXY at the same nominal LayerHeight (Snapmaker U1's
-	// 0.20mm process ships a 0.25mm first layer; Prusa XL's 0.20mm
-	// process ships a 0.45mm line width vs the Bambu/Snapmaker
-	// 0.42mm). Without Printer in the key, switching printer would
-	// silently reuse a stale Voxelize cache entry built against the
-	// previous printer's grid sizes.
-	Printer                              string
-	NozzleDiameter                       float32
-	LayerHeight                          float32
+	// Layer0XY/UpperXY/Layer0Z/UpperZ are the resolved voxel cell
+	// dimensions from voxelCellSizes (= the actual grid the stage
+	// builds against; that helper is the canonical computation —
+	// future readers wondering "where does Layer0XY come from?"
+	// should start there). Hashing the resolved sizes — rather than
+	// the inputs that produce them (Printer, NozzleDiameter,
+	// LayerHeight, the OrcaSlicer process registry, the
+	// Layer0CellScale / Layer0AdhesionXYScale constants, …) — means
+	// any future change to cell-size derivation automatically
+	// invalidates the cache without anyone having to remember to add
+	// a field here.
+	Layer0XY                             float32
+	UpperXY                              float32
+	Layer0Z                              float32
+	UpperZ                               float32
 	BaseColor                            string
 	BaseColorMaterialX                   string  // path
 	BaseColorMaterialXMTime              int64   // ns; 0 if file is missing/inaccessible
@@ -762,10 +764,12 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		return s
 	case StageVoxelize:
 		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
+		cells := voxelCellSizes(opts)
 		return voxelizeSettings{
-			Printer:                              opts.Printer,
-			NozzleDiameter:                       opts.NozzleDiameter,
-			LayerHeight:                          opts.LayerHeight,
+			Layer0XY:                             cells.Layer0XY,
+			UpperXY:                              cells.UpperXY,
+			Layer0Z:                              cells.Layer0Z,
+			UpperZ:                               cells.UpperZ,
 			BaseColor:                            opts.BaseColor,
 			BaseColorMaterialX:                   opts.BaseColorMaterialX,
 			BaseColorMaterialXMTime:              mtime,
@@ -895,8 +899,10 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.NozzleDiameter)
 		writeBool(h, v.NoSimplify)
 	case voxelizeSettings:
-		writeFloat32(h, v.NozzleDiameter)
-		writeFloat32(h, v.LayerHeight)
+		writeFloat32(h, v.Layer0XY)
+		writeFloat32(h, v.UpperXY)
+		writeFloat32(h, v.Layer0Z)
+		writeFloat32(h, v.UpperZ)
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)
 		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -506,6 +507,16 @@ type voxelCells struct {
 	UpperZ   float32
 }
 
+// offGridWarnKey dedups the "no exact process for this layer height"
+// warning across the many cache-key derivations stageFnv runs.
+type offGridWarnKey struct {
+	printerID   string
+	nozzle      float32
+	layerHeight float32
+}
+
+var offGridWarned sync.Map
+
 // voxelCellSizes resolves the voxel grid dimensions for a pipeline
 // run. Reads them from the matched OrcaSlicer process profile
 // (printer × nozzle × layer-height) so the voxel grid lines up with
@@ -535,13 +546,19 @@ type voxelCells struct {
 // In fallback mode Layer0Z = UpperZ = opts.LayerHeight so the grid
 // stays uniform — there's no slicer setting available to derive a
 // taller first-layer height from.
-func voxelCellSizes(opts Options) voxelCells {
-	cells := voxelCells{
+func voxelCellSizes(opts Options) (cells voxelCells) {
+	cells = voxelCells{
 		Layer0XY: opts.NozzleDiameter * squarevoxel.Layer0CellScale,
 		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
 		Layer0Z:  opts.LayerHeight,
 		UpperZ:   opts.LayerHeight,
 	}
+	// Apply the layer-0 adhesion safety multiplier at the very end so
+	// it stacks on top of whichever Layer0XY source wins below. The
+	// named return lets the defer mutate the value the caller sees.
+	defer func() {
+		cells.Layer0XY *= squarevoxel.Layer0AdhesionXYScale
+	}()
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
 	// voxel grid agrees with what the emitted 3MF claims to be.
@@ -565,9 +582,20 @@ func voxelCellSizes(opts Options) voxelCells {
 	}
 	const layerHeightEpsilon = 0.001
 	if math.Abs(float64(proc.LayerHeight-opts.LayerHeight)) > layerHeightEpsilon {
-		plog.Printf("voxelCellSizes: %s nozzle %.2f has no exact process for layer height %.3f mm "+
-			"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
-			printerID, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
+		// stageFnv calls voxelCellSizes once per stage cache-key
+		// derivation, which can fire many times per pipeline run.
+		// Dedup the warning per (printer, nozzle, layer height) tuple
+		// so a single off-grid layer height doesn't spam the log.
+		warnKey := offGridWarnKey{
+			printerID:   printerID,
+			nozzle:      opts.NozzleDiameter,
+			layerHeight: opts.LayerHeight,
+		}
+		if _, alreadyWarned := offGridWarned.LoadOrStore(warnKey, struct{}{}); !alreadyWarned {
+			plog.Printf("voxelCellSizes: %s nozzle %.2f has no exact process for layer height %.3f mm "+
+				"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
+				printerID, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
+		}
 		return cells
 	}
 	if proc.InitialLayerLineWidth > 0 {

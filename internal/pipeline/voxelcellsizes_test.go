@@ -81,8 +81,12 @@ func TestVoxelCellSizesFromProfile(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := voxelCellSizes(tc.opts)
-			if math.Abs(float64(got.Layer0XY-tc.wantLayer0XY)) > 1e-4 {
-				t.Errorf("Layer0XY: got %v, want %v", got.Layer0XY, tc.wantLayer0XY)
+			// wantLayer0XY in the table is the slicer's raw first-
+			// layer line width; the helper layers
+			// Layer0AdhesionXYScale on top for bed adhesion.
+			wantLayer0XY := tc.wantLayer0XY * squarevoxel.Layer0AdhesionXYScale
+			if math.Abs(float64(got.Layer0XY-wantLayer0XY)) > 1e-4 {
+				t.Errorf("Layer0XY: got %v, want %v", got.Layer0XY, wantLayer0XY)
 			}
 			if math.Abs(float64(got.UpperXY-tc.wantUpperXY)) > 1e-4 {
 				t.Errorf("UpperXY: got %v, want %v", got.UpperXY, tc.wantUpperXY)
@@ -123,7 +127,7 @@ func TestVoxelCellSizesFallback(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			wantLayer0XY := tc.opts.NozzleDiameter * squarevoxel.Layer0CellScale
+			wantLayer0XY := tc.opts.NozzleDiameter * squarevoxel.Layer0CellScale * squarevoxel.Layer0AdhesionXYScale
 			wantUpperXY := tc.opts.NozzleDiameter * squarevoxel.UpperCellScale
 			wantZ := tc.opts.LayerHeight // both Layer0Z and UpperZ collapse to LayerHeight in fallback
 			got := voxelCellSizes(tc.opts)
