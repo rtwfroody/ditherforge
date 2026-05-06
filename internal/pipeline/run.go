@@ -561,13 +561,10 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			return nil, err
 		}
 		cells := voxelCellSizes(r.opts)
-		layer0Size, upperSize, layerH := cells.Layer0XY, cells.UpperXY, cells.LayerZ
-		// Each grid has its own XY×Z cell dimensions. Z is the same
-		// for both grids today (the voxelizer assumes uniform Z
-		// spacing across all layers); the slicer's separate first-
-		// layer print height isn't honored yet.
+		layer0Size, upperSize := cells.Layer0XY, cells.UpperXY
+		layer0H, upperH := cells.Layer0Z, cells.UpperZ
 		plog.Printf("  Voxel cell (XY × Z mm): layer 0 = %.3f × %.3f, upper = %.3f × %.3f",
-			layer0Size, layerH, upperSize, layerH)
+			layer0Size, layer0H, upperSize, upperH)
 
 		sampleModel := lo.SampleModel
 		var stickerModel *loader.LoadedModel
@@ -600,7 +597,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		)
 		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
 			stickerModel, stickerSI,
-			layer0Size, upperSize, layerH, r.tracker, so.Decals, splitInfo,
+			layer0Size, upperSize, layer0H, upperH, r.tracker, so.Decals, splitInfo,
 			baseColorOverride)
 		if verr != nil {
 			return nil, fmt.Errorf("voxelize: %w", verr)
@@ -611,7 +608,8 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			MinV:          result.MinV,
 			Layer0Size:    layer0Size,
 			UpperSize:     upperSize,
-			LayerH:        layerH,
+			Layer0H:       layer0H,
+			UpperH:        upperH,
 		}, nil
 	})
 }
@@ -877,8 +875,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			MinV:       vo.MinV,
 			Layer0Size: vo.Layer0Size,
 			UpperSize:  vo.UpperSize,
-			LayerH:     vo.LayerH,
-			SeamZ:      vo.MinV[2] + 0.5*vo.LayerH,
+			Layer0H:    vo.Layer0H,
+			UpperH:     vo.UpperH,
+			SeamZ:      vo.MinV[2] + vo.Layer0H,
 		}
 
 		if spo.Enabled {

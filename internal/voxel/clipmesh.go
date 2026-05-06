@@ -332,25 +332,39 @@ func CentroidToCell(p [3]float32, minV [3]float32, cellSize, layerH float32) Cel
 }
 
 // TwoGridConfig holds parameters for two-grid clipping.
+//
+// Layer0H and UpperH are the per-grid Z heights — equal in the
+// common case but distinct on printers like Snapmaker U1 that run a
+// taller first layer. The layer stack sits on the print bed: layer
+// 0 occupies [MinV[2], MinV[2]+Layer0H] (cell center at
+// MinV[2]+Layer0H/2); layer N (N≥1) occupies
+// [MinV[2]+Layer0H+(N-1)*UpperH, MinV[2]+Layer0H+N*UpperH]. SeamZ is
+// the Z boundary between layer 0 and layer 1 (= MinV[2] + Layer0H).
 type TwoGridConfig struct {
 	MinV       [3]float32
 	Layer0Size float32
 	UpperSize  float32
-	LayerH     float32
-	SeamZ      float32 // Z boundary between layer 0 and layer 1
+	Layer0H    float32
+	UpperH     float32
+	SeamZ      float32 // Z boundary between layer 0 and layer 1 (= MinV[2] + Layer0H)
 }
 
 // CentroidToCellTwoGrid maps a 3D point to the correct grid cell.
 func CentroidToCellTwoGrid(p [3]float32, cfg TwoGridConfig) CellKey {
 	if p[2] < cfg.SeamZ {
+		// Grid 0: a single layer (index 0). Layer 0's cell center
+		// sits at MinV[2] + Layer0H/2; rounding (p.z - MinV[2]) /
+		// Layer0H gives 0 anywhere inside the layer.
 		col := int(math.Round(float64(p[0]-cfg.MinV[0]) / float64(cfg.Layer0Size)))
 		row := int(math.Round(float64(p[1]-cfg.MinV[1]) / float64(cfg.Layer0Size)))
-		layer := int(math.Round(float64(p[2]-cfg.MinV[2]) / float64(cfg.LayerH)))
+		layer := int(math.Round(float64(p[2]-cfg.MinV[2])/float64(cfg.Layer0H) - 0.5))
 		return CellKey{Grid: 0, Col: col, Row: row, Layer: layer}
 	}
+	// Grid 1: layer N (N≥1) center at SeamZ + (N-0.5)*UpperH.
+	// Solving for N: N = (p.z - SeamZ)/UpperH + 0.5 (round to int).
 	col := int(math.Round(float64(p[0]-cfg.MinV[0]) / float64(cfg.UpperSize)))
 	row := int(math.Round(float64(p[1]-cfg.MinV[1]) / float64(cfg.UpperSize)))
-	layer := int(math.Round(float64(p[2]-cfg.MinV[2]) / float64(cfg.LayerH)))
+	layer := int(math.Round(float64(p[2]-cfg.SeamZ)/float64(cfg.UpperH) + 0.5))
 	return CellKey{Grid: 1, Col: col, Row: row, Layer: layer}
 }
 
@@ -403,10 +417,27 @@ func ClipMeshByPatchesTwoGrid(
 			}
 			xyPlaneSets[ck.Grid][1][val] = struct{}{}
 		}
-		// Z neighbor (within same grid)
+		// Z neighbor (within same grid). Z-plane position is the top
+		// of layer ck.Layer in this grid's coordinate scheme: layer 0
+		// (grid 0) tops out at SeamZ; layer N in grid 1 tops out at
+		// SeamZ + N*UpperH. The grid-0 branch is in practice
+		// unreachable (grid 0 only has layer 0, so there's no
+		// (Layer+1) neighbor inside grid 0), but kept correct so
+		// future grid 0 layer counts > 1 wouldn't silently
+		// mis-register.
 		nk = CellKey{Grid: ck.Grid, Col: ck.Col, Row: ck.Row, Layer: ck.Layer + 1}
 		if ni, ok := patchMap[nk]; ok && patchAssignment[ni] != myAssign {
-			val := cfg.MinV[2] + (float32(ck.Layer)+0.5)*cfg.LayerH
+			var val float32
+			if ck.Grid == 0 {
+				// Grid 0: layer N occupies [N*Layer0H, (N+1)*Layer0H]
+				// from MinV[2]; top of layer N is at the (N+1) mark.
+				val = cfg.MinV[2] + float32(ck.Layer+1)*cfg.Layer0H
+			} else {
+				// Grid 1: layer N occupies [SeamZ+(N-1)*UpperH,
+				// SeamZ+N*UpperH]; top of layer N is at the N mark
+				// from SeamZ.
+				val = cfg.SeamZ + float32(ck.Layer)*cfg.UpperH
+			}
 			zPlaneSet[val] = struct{}{}
 		}
 	}

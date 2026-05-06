@@ -45,15 +45,38 @@ const (
 
 // regionParams holds parameters for voxelizing a Z-range of the model on a
 // specific XY grid.
+//
+// LayerH is this grid's per-layer Z height. Two-grid mode uses
+// layer0H for grid 0 and upperH for grid 1; single-grid mode uses one
+// height across all layers.
+//
+// ZOrigin is the absolute Z position of the CENTER of this grid's
+// lowest layer (the layer indexed by LayerLo). Layer N's center is
+// `ZOrigin + (N - LayerLo)*LayerH`. In two-grid mode the layer
+// stack sits ON the print bed (model bottom at MinV[2]): grid 0's
+// layer 0 occupies [MinV[2], MinV[2]+Layer0H] (center at
+// MinV[2]+Layer0H/2); grid 1's layer N (N≥1) occupies
+// [MinV[2]+Layer0H+(N-1)*UpperH, MinV[2]+Layer0H+N*UpperH] (center at
+// MinV[2]+Layer0H+(N-0.5)*UpperH). The cell volume thus matches the
+// slicer's actual extruded slab.
+//
+// Single-grid mode keeps the legacy "layer 0 centered on MinV[2]"
+// convention (ZOrigin = MinV[2]); it isn't used by the production
+// pipeline.
+//
+// LayerLo / LayerHi remain absolute layer indices (matching
+// CellKey.Layer), which is what downstream consumers like seam.go
+// already expect.
 type regionParams struct {
 	Grid     uint8
 	CellSize float32
 	LayerH   float32
 	MinV     [3]float32
+	ZOrigin  float32
 	NCols    int
 	NRows    int
-	LayerLo  int // inclusive
-	LayerHi  int // inclusive
+	LayerLo  int // inclusive, absolute
+	LayerHi  int // inclusive, absolute
 }
 
 // voxelizeRegion finds cell keys that overlap the model in the given Z-range.
@@ -95,7 +118,15 @@ func voxelizeRegion(
 			max(v0[1], max(v1[1], v2[1])),
 			max(v0[2], max(v1[2], v2[2])),
 		}
-		colMin, colMax, rowMin, rowMax, layerMin, layerMax := voxel.AABBCellRange(tMin, tMax, p.MinV, p.CellSize, p.LayerH)
+		// AABBCellRange wants a minV whose Z corresponds to layer 0
+		// of THIS grid's indexing scheme. For grid 0 that's just
+		// p.MinV[2]; for grid 1 we shift so layer-LayerLo aligns with
+		// AABBCellRange's "layer 0" reference. The returned
+		// layerMin/layerMax are absolute (because of the shift) and
+		// can be clamped against absolute LayerLo/LayerHi directly.
+		gridMinV := p.MinV
+		gridMinV[2] = p.ZOrigin - float32(p.LayerLo)*p.LayerH
+		colMin, colMax, rowMin, rowMax, layerMin, layerMax := voxel.AABBCellRange(tMin, tMax, gridMinV, p.CellSize, p.LayerH)
 		colMin = max(colMin, 0)
 		colMax = min(colMax, p.NCols-1)
 		rowMin = max(rowMin, 0)
@@ -107,7 +138,7 @@ func voxelizeRegion(
 			for row := rowMin; row <= rowMax; row++ {
 				cy := p.MinV[1] + float32(row)*p.CellSize
 				for layer := layerMin; layer <= layerMax; layer++ {
-					cz := p.MinV[2] + float32(layer)*p.LayerH
+					cz := p.ZOrigin + float32(layer-p.LayerLo)*p.LayerH
 					center := [3]float32{cx, cy, cz}
 					if voxel.TriangleAABBOverlap(v0, v1, v2, center, halfExtent) {
 						cellSet[voxel.CellKey{Grid: p.Grid, Col: col, Row: row, Layer: layer}] = struct{}{}
@@ -193,7 +224,7 @@ func colorCells(
 				// transform — colorModel/stickerModel are unmoved.
 				cx := p.MinV[0] + float32(k.Col)*p.CellSize
 				cy := p.MinV[1] + float32(k.Row)*p.CellSize
-				cz := p.MinV[2] + float32(k.Layer)*p.LayerH
+				cz := p.ZOrigin + float32(k.Layer-p.LayerLo)*p.LayerH
 				samplePos := invXform.ApplyInverse([3]float32{cx, cy, cz})
 				var rgba [4]uint8
 				if separateSticker {
@@ -235,19 +266,30 @@ func colorCells(
 }
 
 // TwoGridResult holds the output from VoxelizeTwoGrids.
+//
+// Layer0H and UpperH are the per-grid Z heights (slicer's first-
+// layer print height vs. upper layer height); they're equal in the
+// common case but diverge for printers like Snapmaker U1 that ship a
+// taller first layer for adhesion. Layer 0's center sits at
+// MinV[2]; layer N (N≥1)'s center sits at MinV[2] + Layer0H/2 +
+// (N-0.5)*UpperH. Downstream consumers (clipmesh, neighbor builders)
+// need both heights to compute absolute Z positions correctly.
 type TwoGridResult struct {
 	Cells         []voxel.ActiveCell
 	CellAssignMap map[voxel.CellKey]int
 	MinV          [3]float32
 	Layer0Size    float32
 	UpperSize     float32
-	LayerH        float32
+	Layer0H       float32
+	UpperH        float32
 }
 
-// VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size for
-// layer 0 and upperSize for layers 1+. Geometry cells are marked using
-// model; base colors are sampled from colorModel. Pass the same model twice
-// if the caller has no separate color mesh.
+// VoxelizeTwoGrids voxelizes the model with two XY cell sizes: layer0Size
+// for layer 0 and upperSize for layers 1+. layer0H and upperH are the
+// per-grid Z heights (typically equal, but Snapmaker-style profiles
+// run a taller first layer for adhesion). Geometry cells are marked
+// using model; base colors are sampled from colorModel. Pass the same
+// model twice if the caller has no separate color mesh.
 //
 // stickerModel/stickerSI carry decal UVs when stickers live on a different
 // mesh than the color sampler — typically the alpha-wrap mesh while
@@ -262,7 +304,7 @@ func VoxelizeTwoGrids(
 	ctx context.Context,
 	model, colorModel *loader.LoadedModel,
 	stickerModel *loader.LoadedModel, stickerSI *voxel.SpatialIndex,
-	layer0Size, upperSize, layerH float32,
+	layer0Size, upperSize, layer0H, upperH float32,
 	tracker progress.Tracker,
 	decals []*voxel.StickerDecal,
 	splitInfo *SplitInfo,
@@ -328,18 +370,29 @@ func VoxelizeTwoGrids(
 	}
 	maxCellSize := max(layer0Size, upperSize)
 	xyPad := maxCellSize * 2
-	zPad := layerH * 2
+	maxLayerH := max(layer0H, upperH)
+	zPad := maxLayerH * 2
 	minV[0] -= xyPad
 	minV[1] -= xyPad
 	// Minimal downward Z padding — normalizeZ places the model bottom at
 	// z=0 so layer 0 covers the first layer, but a tiny epsilon guards
 	// against floating-point geometry slightly below z=0.
-	minV[2] -= layerH * 0.01
+	minV[2] -= maxLayerH * 0.01
 	maxV[0] += xyPad
 	maxV[1] += xyPad
 	maxV[2] += zPad
 
-	nLayers := int(math.Ceil(float64(maxV[2]-minV[2])/float64(layerH))) + 1
+	// Total layer count for grid 1: enough upper layers to cover
+	// [layer 0's top, maxV[2]]. Layer 0 occupies a full slab of
+	// thickness layer0H sitting directly on minV[2]; upper layers
+	// stack on top of that. The +1 mirrors the legacy single-height
+	// formula's safety pad. nUpper is the number of grid-1 layers;
+	// absolute layer indices for grid 1 run [1, nUpper].
+	nUpper := 0
+	if remaining := float64(maxV[2]-minV[2]) - float64(layer0H); remaining > 0 {
+		nUpper = int(math.Ceil(remaining/float64(upperH))) + 1
+	}
+	nLayers := 1 + nUpper
 	si := voxel.NewSpatialIndex(colorModel, maxCellSize*2)
 
 	// "Voxelizing" covers just the geometry-traversal phase here. The
@@ -362,16 +415,25 @@ func VoxelizeTwoGrids(
 
 	nCols0 := int(math.Ceil(float64(maxV[0]-minV[0])/float64(layer0Size))) + 1
 	nRows0 := int(math.Ceil(float64(maxV[1]-minV[1])/float64(layer0Size))) + 1
+	// Grid 0's layer 0 occupies [minV[2], minV[2]+layer0H], so its
+	// center sits at layer0H/2 above minV[2]. Aligning the cell with
+	// the bed (rather than centering on z=0) keeps the cell volume
+	// in step with what the slicer extrudes for the first layer.
 	p0 := regionParams{
-		Grid: 0, CellSize: layer0Size, LayerH: layerH,
-		MinV: minV, NCols: nCols0, NRows: nRows0,
+		Grid: 0, CellSize: layer0Size, LayerH: layer0H,
+		MinV: minV, ZOrigin: minV[2] + layer0H/2,
+		NCols: nCols0, NRows: nRows0,
 		LayerLo: 0, LayerHi: 0,
 	}
 	nCols1 := int(math.Ceil(float64(maxV[0]-minV[0])/float64(upperSize))) + 1
 	nRows1 := int(math.Ceil(float64(maxV[1]-minV[1])/float64(upperSize))) + 1
+	// Grid 1's layer 1 sits directly on top of layer 0: occupies
+	// [minV[2]+layer0H, minV[2]+layer0H+upperH], centered at
+	// minV[2]+layer0H+upperH/2.
 	p1 := regionParams{
-		Grid: 1, CellSize: upperSize, LayerH: layerH,
-		MinV: minV, NCols: nCols1, NRows: nRows1,
+		Grid: 1, CellSize: upperSize, LayerH: upperH,
+		MinV: minV, ZOrigin: minV[2] + layer0H + upperH/2,
+		NCols: nCols1, NRows: nRows1,
 		LayerLo: 1, LayerHi: nLayers - 1,
 	}
 
@@ -441,7 +503,8 @@ func VoxelizeTwoGrids(
 		MinV:          minV,
 		Layer0Size:    layer0Size,
 		UpperSize:     upperSize,
-		LayerH:        layerH,
+		Layer0H:       layer0H,
+		UpperH:        upperH,
 	}, nil
 }
 
@@ -481,7 +544,8 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 	tVoxelize := time.Now()
 	p := regionParams{
 		Grid: 0, CellSize: cellSize, LayerH: layerH,
-		MinV: minV, NCols: nCols, NRows: nRows,
+		MinV: minV, ZOrigin: minV[2],
+		NCols: nCols, NRows: nRows,
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
 	cellSet := voxelizeRegion(ctx, model, p, tracker, &voxCounter)

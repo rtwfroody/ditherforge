@@ -19,25 +19,24 @@ var profilesFS embed.FS
 
 // ProcessProfile is a single layer-height slicing profile for a nozzle.
 //
-// LineWidth and InitialLayerLineWidth are the actual extrusion-width
-// settings the slicer will use, copied from the OrcaSlicer process
-// JSON by scripts/flatten_orca_profiles.py. ditherforge consumes
-// them to size the voxel grid (so a Prusa XL at 0.45mm wide doesn't
-// get voxelized at the previously-hardcoded 0.42mm). A zero value
-// means the source profile didn't carry that setting and the
-// consumer should fall back to the nozzle×scale approximation.
-//
-// initial_layer_print_height (the first-layer Z height) is also in
-// the manifest JSON but intentionally not declared on this struct —
-// the voxelizer currently assumes uniform Z spacing across all
-// layers, and a Go field with no reader bit-rots. Add the field back
-// in the same commit that introduces non-uniform Z.
+// LineWidth, InitialLayerLineWidth, and InitialLayerPrintHeight are
+// the actual extrusion-width and first-layer-height settings the
+// slicer will use, copied from the OrcaSlicer process JSON by
+// scripts/flatten_orca_profiles.py. ditherforge consumes them to
+// size the voxel grid: a Prusa XL at 0.45mm wide voxelizes at
+// 0.45mm rather than the legacy nozzle×1.05 approximation, and a
+// Snapmaker U1 with a 0.25mm first-layer-height voxelizes layer 0
+// at 0.25mm even when upper layers are 0.20mm. A zero value means
+// the source profile didn't carry that setting and the consumer
+// should fall back to the nozzle×scale (XY) or LayerHeight (Z)
+// approximation.
 type ProcessProfile struct {
-	LayerHeight           float32 `json:"layer_height"`
-	Name                  string  `json:"name"`
-	File                  string  `json:"file"`
-	LineWidth             float32 `json:"line_width,omitempty"`
-	InitialLayerLineWidth float32 `json:"initial_layer_line_width,omitempty"`
+	LayerHeight             float32 `json:"layer_height"`
+	Name                    string  `json:"name"`
+	File                    string  `json:"file"`
+	LineWidth               float32 `json:"line_width,omitempty"`
+	InitialLayerLineWidth   float32 `json:"initial_layer_line_width,omitempty"`
+	InitialLayerPrintHeight float32 `json:"initial_layer_print_height,omitempty"`
 }
 
 // Nozzle is a single nozzle variant of a printer.

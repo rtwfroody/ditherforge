@@ -424,7 +424,13 @@ type voxelizeOutput struct {
 	MinV          [3]float32
 	Layer0Size    float32
 	UpperSize     float32
-	LayerH        float32
+	// Per-grid Z heights. Layer0H == UpperH for printers that don't
+	// differentiate; Snapmaker-style profiles run a taller first
+	// layer for adhesion (e.g. 0.25 vs 0.20). Layer 0's center sits
+	// at MinV[2]; layer N (N≥1)'s center sits at MinV[2] +
+	// Layer0H/2 + (N-0.5)*UpperH.
+	Layer0H float32
+	UpperH  float32
 
 	// neighbors caches the two-grid neighbor table. Voxel topology only
 	// changes on StageVoxelize, so dither re-runs (same cells, different
@@ -613,6 +619,17 @@ type loadSettings struct {
 // because the Sticker stage body deep-clones ColorModel into so.Model and the per-run
 // reapply step does not patch that scratch copy.
 type voxelizeSettings struct {
+	// Printer is included alongside NozzleDiameter and LayerHeight
+	// because the resolved voxel cell sizes (line widths and the
+	// first-layer Z height) come from the matched OrcaSlicer
+	// process profile. Switching printers can change layer0H /
+	// upperXY at the same nominal LayerHeight (Snapmaker U1's
+	// 0.20mm process ships a 0.25mm first layer; Prusa XL's 0.20mm
+	// process ships a 0.45mm line width vs the Bambu/Snapmaker
+	// 0.42mm). Without Printer in the key, switching printer would
+	// silently reuse a stale Voxelize cache entry built against the
+	// previous printer's grid sizes.
+	Printer                              string
 	NozzleDiameter                       float32
 	LayerHeight                          float32
 	BaseColor                            string
@@ -746,6 +763,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageVoxelize:
 		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 		return voxelizeSettings{
+			Printer:                              opts.Printer,
 			NozzleDiameter:                       opts.NozzleDiameter,
 			LayerHeight:                          opts.LayerHeight,
 			BaseColor:                            opts.BaseColor,

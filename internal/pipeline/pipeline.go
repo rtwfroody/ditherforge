@@ -494,14 +494,16 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 	return out
 }
 
-// voxelCells captures the XY widths and Z height that drive the
+// voxelCells captures the XY widths and Z heights that drive the
 // voxel grid and downstream decimation budgets. Returned by
-// voxelCellSizes; use Layer0XY for layer 0 cell width, UpperXY for
-// upper-layer cell width, LayerZ for per-layer Z height.
+// voxelCellSizes. Each grid has its own XY width (Layer0XY /
+// UpperXY) and Z height (Layer0Z / UpperZ); for printers without a
+// separate first-layer height the two Z values are equal.
 type voxelCells struct {
 	Layer0XY float32
 	UpperXY  float32
-	LayerZ   float32
+	Layer0Z  float32
+	UpperZ   float32
 }
 
 // voxelCellSizes resolves the voxel grid dimensions for a pipeline
@@ -513,7 +515,10 @@ type voxelCells struct {
 //     0.4 nozzle on Snapmaker / Prusa / Bambu profiles).
 //   - UpperXY  = process.LineWidth             (e.g. 0.42mm on most;
 //     0.45mm on Prusa XL).
-//   - LayerZ   = opts.LayerHeight (also matches process.LayerHeight
+//   - Layer0Z  = process.InitialLayerPrintHeight (e.g. 0.25mm on
+//     Snapmaker U1 with a 0.20mm nominal layer; 0.20mm everywhere
+//     else).
+//   - UpperZ   = opts.LayerHeight (also matches process.LayerHeight
 //     when the user picks one of the dropdown values).
 //
 // Falls back to the legacy nozzle×constant approximations from
@@ -527,16 +532,15 @@ type voxelCells struct {
 // would silently pick 0.20's line_width. Falling back to
 // nozzle×constant in that case is more honest than a stale slot's
 // settings, and a plog warning makes the divergence diagnosable.
-//
-// The first-layer Z height (initial_layer_print_height) is captured
-// in the manifest JSON but not consumed here — the voxelizer's grid
-// currently assumes uniform Z spacing across all layers, so layer-
-// 0-taller-than-upper handling is a future change.
+// In fallback mode Layer0Z = UpperZ = opts.LayerHeight so the grid
+// stays uniform — there's no slicer setting available to derive a
+// taller first-layer height from.
 func voxelCellSizes(opts Options) voxelCells {
 	cells := voxelCells{
 		Layer0XY: opts.NozzleDiameter * squarevoxel.Layer0CellScale,
 		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
-		LayerZ:   opts.LayerHeight,
+		Layer0Z:  opts.LayerHeight,
+		UpperZ:   opts.LayerHeight,
 	}
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
@@ -572,6 +576,12 @@ func voxelCellSizes(opts Options) voxelCells {
 	if proc.LineWidth > 0 {
 		cells.UpperXY = proc.LineWidth
 	}
+	if proc.InitialLayerPrintHeight > 0 {
+		cells.Layer0Z = proc.InitialLayerPrintHeight
+	}
+	// UpperZ stays at opts.LayerHeight — that's the user-facing
+	// "layer height" knob, identical to proc.LayerHeight after the
+	// 0.001mm exactness check above.
 	return cells
 }
 
