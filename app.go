@@ -424,15 +424,22 @@ func (t *guiTracker) StageDone(stage string) {
 }
 
 type warnEvent struct {
-	Gen     int64  `json:"gen"`
+	Gen int64 `json:"gen"`
+	// Kind is a stable identifier (e.g. "materialx-base-color") that
+	// lets the frontend route the warning structurally — see the
+	// constants in package progress. Empty kind = generic status-bar
+	// warning with no specific UI home.
+	Kind    string `json:"kind"`
 	Message string `json:"message"`
 }
 
-func (t *guiTracker) Warn(message string) {
+func (t *guiTracker) Warn(kind, message string) {
 	// Reuses the existing "pipeline-warning" event listener in
-	// App.svelte; the frontend updates the status banner.
+	// App.svelte; the frontend updates the status banner and routes
+	// kind-specific warnings (e.g. MaterialX base-color failures) to
+	// their adjacent inline banners.
 	wailsRuntime.EventsEmit(t.appCtx, "pipeline-warning", warnEvent{
-		Gen: t.gen, Message: message,
+		Gen: t.gen, Kind: kind, Message: message,
 	})
 }
 
@@ -504,9 +511,10 @@ func (a *App) processOne(req pipelineRequest) {
 				"colors": colors,
 			})
 		},
-		OnWarning: func(msg string) {
+		OnWarning: func(kind, msg string) {
 			wailsRuntime.EventsEmit(a.ctx, "pipeline-warning", map[string]any{
 				"gen":     req.gen,
+				"kind":    kind,
 				"message": msg,
 			})
 		},

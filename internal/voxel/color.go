@@ -1856,7 +1856,7 @@ type ditherPassTracker struct {
 // would re-open or close the outer bar mid-run.
 func (ditherPassTracker) StageStart(string, bool, int) {}
 func (ditherPassTracker) StageDone(string)             {}
-func (t ditherPassTracker) Warn(s string)              { t.real.Warn(s) }
+func (t ditherPassTracker) Warn(kind, s string)        { t.real.Warn(kind, s) }
 func (t ditherPassTracker) StageProgress(stage string, current int) {
 	t.real.StageProgress(stage, t.offset+current)
 }

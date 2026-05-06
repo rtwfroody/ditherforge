@@ -20,12 +20,39 @@ type Tracker interface {
 	// StageDone signals that a stage has completed.
 	StageDone(stage string)
 
-	// Warn surfaces a non-fatal warning to the user (e.g. malformed
+	// Warn surfaces a non-fatal user-facing notice (e.g. malformed
 	// MaterialX file, missing inventory entry). The pipeline continues
 	// after the warning is logged. Implementations route this to
-	// stderr (CLI), the GUI's toast/notification panel, or both.
-	Warn(message string)
+	// stderr (CLI), the GUI's toast/notification panel, or — when the
+	// kind matches a known input — a persistent banner adjacent to
+	// the offending control.
+	//
+	// kind is a stable identifier like "materialx-base-color" that
+	// lets UI consumers route the message structurally (no
+	// substring-matching the message body, which is fragile to
+	// rewording). Pass "" for a generic status-bar warning with no
+	// specific home — string-matching the message is then explicitly
+	// not supported, callers that need to be routed should declare a
+	// kind constant.
+	Warn(kind, message string)
 }
+
+// Common Tracker.Warn kinds. Defined here so producers and consumers
+// (Go-side pipeline + Wails event listeners + the frontend banner)
+// agree on the same vocabulary without literal-string drift.
+const (
+	// WarnKindGeneric is the empty kind — surfaced as a generic
+	// status-bar warning with no specific UI home. Used for things
+	// like "missing inventory entry" that don't tie back to a single
+	// input control.
+	WarnKindGeneric = ""
+
+	// WarnKindMaterialXBaseColor signals a failure compiling or
+	// applying the MaterialX file selected for the base color of
+	// untextured faces. UI surfaces this on the persistent banner
+	// adjacent to the texture-file picker.
+	WarnKindMaterialXBaseColor = "materialx-base-color"
+)
 
 // NullTracker is a no-op Tracker for use when progress reporting is not needed.
 type NullTracker struct{}
@@ -33,7 +60,7 @@ type NullTracker struct{}
 func (NullTracker) StageStart(string, bool, int) {}
 func (NullTracker) StageProgress(string, int)    {}
 func (NullTracker) StageDone(string)             {}
-func (NullTracker) Warn(string)                  {}
+func (NullTracker) Warn(string, string)          {}
 
 // Stage is a handle returned by BeginStage. Its Done method ends the stage
 // and is idempotent — safe to call from defer plus explicitly when you want
@@ -113,6 +140,10 @@ func (t *CLITracker) StageDone(stage string) {
 	}
 }
 
-func (t *CLITracker) Warn(message string) {
-	log.Printf("Warning: %s", message)
+func (t *CLITracker) Warn(kind, message string) {
+	if kind != "" {
+		log.Printf("Warning [%s]: %s", kind, message)
+	} else {
+		log.Printf("Warning: %s", message)
+	}
 }

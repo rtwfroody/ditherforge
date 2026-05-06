@@ -508,27 +508,21 @@
     statusMessage = `Error: ${event.message}`;
     statusType = 'error';
   });
-  EventsOn('pipeline-warning', (event: { gen: number; message: string }) => {
+  EventsOn('pipeline-warning', (event: { gen: number; kind: string; message: string }) => {
     if (event.gen < latestGen) return;
     if (statusType !== 'error') {
       statusMessage = event.message;
       statusType = 'warning';
     }
-    // MaterialX base-color failures during a pipeline run also need
-    // to reach the inline banner — file-pick validation only runs at
-    // pick time, so a failure that surfaces only at run time (e.g. an
-    // asset that's missing on this machine but was present when the
-    // settings file was saved) would otherwise silently lose the
-    // texture without updating the pick-time error.
-    //
-    // Match the exact prefix emitted by StageCache.baseColorOverride
-    // ("ignoring MaterialX base color: …") rather than a loose
-    // substring on "materialx" — the loose form would hijack the
-    // banner for any unrelated future warning that happened to
-    // mention MaterialX. The prefix is the contract; if it ever
-    // changes, the corresponding test in app_test.go (or a future
-    // contract test) should be updated alongside.
-    if (event.message.startsWith('ignoring MaterialX base color:')) {
+    // Route kind-tagged warnings to their inline UI homes. The kind
+    // string is the structured contract between the Go pipeline
+    // (progress.WarnKind* constants) and this listener — no
+    // substring-matching the message body, which is fragile to
+    // rewording. File-pick validation only runs at pick time, so a
+    // failure that surfaces only at run time (e.g. an asset that's
+    // missing on this machine but was present when the settings file
+    // was saved) reaches the right banner via the kind tag.
+    if (event.kind === 'materialx-base-color') {
       baseMaterialXError = event.message;
     }
   });

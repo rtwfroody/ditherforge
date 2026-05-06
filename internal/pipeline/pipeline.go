@@ -155,9 +155,11 @@ type Callbacks struct {
 	OnStickerOverlay func(*MeshData, float32)
 	OnPalette        func([][3]uint8, []string)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
-	// LSCM solve that didn't converge cleanly). The frontend should
-	// surface these via a non-blocking toast or status line.
-	OnWarning func(string)
+	// LSCM solve that didn't converge cleanly). kind is a stable
+	// identifier (see progress package constants) that lets the
+	// frontend route specific warnings to inline banners adjacent to
+	// the offending input; "" routes to the generic status line.
+	OnWarning func(kind, message string)
 	Progress  progress.Tracker
 }
 
@@ -234,7 +236,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
-	var onWarning func(string)
+	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
 		onInputMesh = cb.OnInputMesh

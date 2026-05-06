@@ -219,7 +219,7 @@ func (c *StageCache) baseColorOverride(path string, tileMM, triplanarSharpness f
 	if err != nil {
 		err = fmt.Errorf("MaterialX %q: %w", path, err)
 		if c.mtlxWarnedPath != path {
-			tracker.Warn(fmt.Sprintf("ignoring MaterialX base color: %v", err))
+			tracker.Warn(progress.WarnKindMaterialXBaseColor, fmt.Sprintf("ignoring MaterialX base color: %v", err))
 			c.mtlxWarnedPath = path
 		}
 		return nil, err

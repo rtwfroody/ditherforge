@@ -40,7 +40,7 @@ type pipelineRun struct {
 	cache     *StageCache
 	opts      Options
 	tracker   progress.Tracker
-	onWarning func(string)
+	onWarning func(kind, message string)
 
 	// Per-Run memos: once a stage has been resolved, subsequent
 	// consumers within the same Run skip the cache lookup.
@@ -529,7 +529,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 		}
 		plog.Printf("  Sticker %s: %d triangles covered", s.ImagePath, len(decal.TriUVs))
 		if decal.LSCMResidual > 1e-5 && r.onWarning != nil {
-			r.onWarning(fmt.Sprintf(
+			r.onWarning(progress.WarnKindGeneric, fmt.Sprintf(
 				"Sticker %q didn't unfold cleanly (residual %.1e). The mesh in this region has very-poor-quality triangles; the sticker may look distorted. Try alpha-wrap or a different placement.",
 				filepath.Base(s.ImagePath), decal.LSCMResidual))
 		}
