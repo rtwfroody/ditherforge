@@ -219,6 +219,49 @@ regions that are nearly a single solid color.
 Set the value with the **Color snap (delta E)** slider (0 to 50, default 5).
 Set to 0 to disable.
 
+## How to Choose a Dither Mode
+
+The **Dither** panel selects how each voxel's pre-dither color is mapped onto
+a palette color. Different modes trade global accuracy ("drift": does the
+average output color match the average input?) against local pattern
+("wander": how far from the nearest-input palette do picks reach?).
+
+The dropdown offers:
+
+- **Riemersma** (default) — walks voxels along a locally-coherent tour and
+  diffuses each cell's quantization error into a sliding window of recent
+  cells. Preserves average color exactly (zero drift) and avoids the
+  scanline directionality of Floyd-Steinberg. Best general-purpose pick.
+- **Riemersma pair** — like Riemersma but scores each voxel jointly with its
+  tour-neighbour and prefers picks whose residuals cancel. On a flat-gray
+  area with a black/white palette this prefers `(black, white)` instead of
+  the long `(black, black, white, white, …)` kick the single-cell version
+  produces. Same drift as Riemersma; lower wander on flat/textured regions;
+  slightly noisier on detailed near-palette images.
+- **Blue noise** — picks the smallest palette simplex (pair, triangle, or
+  full) that brackets each cell's input within a tolerance, then chooses
+  among its vertices via a low-discrepancy sequence. Bounds wander tightly
+  on uniform regions at the cost of a small global drift.
+- **Dizzy** — randomized error-diffusion (Liam Appelbe's blue-noise dizzy,
+  iterated three times with drift correction). Blue-noise look with no
+  directional structure on flat areas.
+- **Floyd-Steinberg** — deterministic scanline order. Preserves average
+  chroma exactly, but produces visible directional structure on flat areas.
+- **none** — no dithering; each cell snaps to the nearest palette color.
+
+When **Riemersma** or **Riemersma pair** is selected, an **Alpha** slider
+appears (0..1, default 0.85). It's the per-cell input-bias maximum: pulls
+each cell's pick toward its nearest-input palette when the cell is close to
+a palette color. 0 = pure error-diffusion (zero drift but black/white
+oscillation around near-grey input). Higher values suppress that
+oscillation; ≥0.9 starts to posterize textured surfaces.
+
+When **Blue noise** is selected, a **Tolerance** slider appears (default 20,
+in 8-bit RGB units). Smaller (≈5–10) forces the dither to bracket each
+input with more palette colors (lower drift, wider color spread on near-
+flat regions). Larger (≈20–40) sticks to 2-color pairs (tighter wander
+bounds, small per-cell drift).
+
 ## How to Split a Model into Two Halves
 
 The **Split** panel cuts the model along an axis-aligned plane into two halves
@@ -258,6 +301,13 @@ If you turn off **Alpha-wrap** while Split is enabled, Split is automatically
 disabled as well. A toast explains the dependency.
 
 ## How to Save and Load Settings
+
+Use **File > New** to reset every setting to its factory default — palette,
+color pins, adjustments, dither mode, split, the lot. Useful when starting
+fresh on a new model without manually undoing the previous session's
+configuration. Anything missing from a settings file you load is treated
+the same way: it falls back to its factory default rather than carrying over
+from the previously loaded settings.
 
 Use **File > Save JSON** to save all current settings — palette, color pins,
 adjustments, size, and nozzle settings — to a JSON file.
@@ -309,9 +359,12 @@ compatible with OrcaSlicer and BambuStudio.
 8. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
 9. **Dither** — assigns a palette color to each cell to approximate the original
-   texture. The default `dizzy` mode uses random traversal with error diffusion
-   to spatial neighbors, producing blue-noise-like patterns. `none` assigns the
-   nearest palette color with no dithering.
+   texture. The default `riemersma` mode walks the cells along a locally-
+   coherent tour and diffuses each cell's quantization error into a sliding
+   window of recent cells. Five other modes are available — `riemersma-pair`,
+   `blue-noise`, `dizzy-corrected`, `floyd-steinberg`, and `none` — each with
+   different drift/wander/structure trade-offs. See [How to Choose a Dither
+   Mode](#how-to-choose-a-dither-mode).
 10. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
     each fragment a palette color.
 11. **Merge** — merges coplanar triangles to reduce face count.
@@ -367,7 +420,9 @@ settings file.
 | `--brightness` | `0` | Brightness adjustment (-100 to +100) |
 | `--contrast` | `0` | Contrast adjustment (-100 to +100) |
 | `--saturation` | `0` | Saturation adjustment (-100 to +100) |
-| `--dither` | `dizzy` | Dithering mode: `none` or `dizzy` |
+| `--dither` | `riemersma` | Dithering mode: `riemersma`, `riemersma-pair`, `blue-noise`, `dizzy-corrected`, `floyd-steinberg`, or `none`. See [How to Choose a Dither Mode](#how-to-choose-a-dither-mode). |
+| `--riemersma-bias` | `0.85` | Alpha for `riemersma` and `riemersma-pair` (0..1). 0 = pure error-diffusion; higher pulls toward the nearest-input palette in near-palette regions. |
+| `--blue-noise-tol` | built-in (20) | Per-cell projection-error tolerance (8-bit RGB units) for the `blue-noise` mode. Smaller = lower wander but more drift. 0 = use the built-in default. |
 | `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
 | `--layer-height` | `0.2` | Layer height in mm |
 | `--printer` | `snapmaker_u1` | Target printer profile id (`snapmaker_u1`, `snapmaker_j1`, `prusa_xl`, `prusa_xl_5t`, `bambu_h2d`, `bambu_h2d_pro`) |
@@ -566,7 +621,6 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| Dither mode | `dizzy` | `dizzy`: random traversal with error diffusion, blue-noise-like output. `none`: nearest palette color, no dithering. |
 | No merge | off | Disables coplanar triangle merging in the final mesh |
 | No simplify | off | Disables QEM mesh decimation before clipping |
 | Alpha-wrap | off | Wraps the input mesh with a watertight shell (CGAL Alpha-wrap) to fix self-intersections, thin walls, and other geometry that slicers choke on. Can be slow on large models. |
