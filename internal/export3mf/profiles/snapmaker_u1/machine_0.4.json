@@ -21,9 +21,9 @@
     "35"
   ],
   "enable_filament_ramming": "0",
-  "extruder_clearance_height_to_lid": "140",
-  "extruder_clearance_height_to_rod": "27.5",
-  "extruder_clearance_radius": "72.5",
+  "extruder_clearance_height_to_lid": "130",
+  "extruder_clearance_height_to_rod": "60",
+  "extruder_clearance_radius": "80",
   "extruder_colour": [
     "#FCE94F",
     "#FCE94F",
@@ -52,24 +52,24 @@
     "5000"
   ],
   "machine_max_acceleration_extruding": [
-    "20000",
-    "20000"
+    "25000",
+    "25000"
   ],
   "machine_max_acceleration_retracting": [
     "5000",
     "5000"
   ],
   "machine_max_acceleration_travel": [
-    "20000",
-    "20000"
+    "25000",
+    "25000"
   ],
   "machine_max_acceleration_x": [
-    "20000",
-    "20000"
+    "25000",
+    "25000"
   ],
   "machine_max_acceleration_y": [
-    "20000",
-    "20000"
+    "25000",
+    "25000"
   ],
   "machine_max_acceleration_z": [
     "500",
@@ -96,11 +96,11 @@
     "25"
   ],
   "machine_max_speed_x": [
-    "500",
+    "1000",
     "200"
   ],
   "machine_max_speed_y": [
-    "500",
+    "1000",
     "200"
   ],
   "machine_max_speed_z": [
@@ -125,12 +125,14 @@
     "0.32",
     "0.32"
   ],
+  "max_resonance_avoidance_speed": "90",
   "min_layer_height": [
     "0.08",
     "0.08",
     "0.08",
     "0.08"
   ],
+  "min_resonance_avoidance_speed": "40",
   "name": "Snapmaker U1 (0.4 nozzle)",
   "nozzle_diameter": [
     "0.4",
@@ -155,6 +157,7 @@
   "printer_variant": "0.4",
   "purge_in_prime_tower": "0",
   "ramming_pressure_advance_value": "0.02",
+  "resonance_avoidance": "1",
   "retract_before_wipe": [
     "0%",
     "0%",

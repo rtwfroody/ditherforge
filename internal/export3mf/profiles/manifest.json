@@ -12,32 +12,79 @@
             {
               "layer_height": 0.08,
               "name": "0.08 Extra Fine @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.08.json"
+              "file": "process_0.4_0.08.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.12,
               "name": "0.12 Fine @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.12.json"
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16 Optimal @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.16.json"
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20 Standard @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
             },
             {
               "layer_height": 0.24,
               "name": "0.24 Draft @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.24.json"
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.28,
               "name": "0.28 Extra Draft @Snapmaker U1 (0.4 nozzle)",
-              "file": "process_0.4_0.28.json"
+              "file": "process_0.4_0.28.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Snapmaker U1 (0.6 nozzle)",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.2,
+              "name": "0.20 Standard @Snapmaker U1 (0.4+0.6 nozzle)",
+              "file": "process_0.6_0.20.json",
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30 Draft @Snapmaker U1 (0.6 nozzle)",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.72,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40 Extra Draft @Snapmaker U1 (0.6 nozzle)",
+              "file": "process_0.6_0.40.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.72,
+              "initial_layer_print_height": 0.35
             }
           ]
         }
@@ -55,17 +102,26 @@
             {
               "layer_height": 0.06,
               "name": "0.06 Standard @Snapmaker J1 (0.2 nozzle)",
-              "file": "process_0.2_0.06.json"
+              "file": "process_0.2_0.06.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.1,
               "name": "0.10 Standard @Snapmaker J1 (0.2 nozzle)",
-              "file": "process_0.2_0.10.json"
+              "file": "process_0.2_0.10.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.14,
               "name": "0.14 Standard @Snapmaker J1 (0.2 nozzle)",
-              "file": "process_0.2_0.14.json"
+              "file": "process_0.2_0.14.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -77,32 +133,50 @@
             {
               "layer_height": 0.08,
               "name": "0.08 Extra Fine @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.08.json"
+              "file": "process_0.4_0.08.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.12,
               "name": "0.12 Fine @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.12.json"
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16 Optimal @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.16.json"
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20 Standard @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.24,
               "name": "0.24 Draft @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.24.json"
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.28,
               "name": "0.28 Extra Draft @Snapmaker J1 (0.4 nozzle)",
-              "file": "process_0.4_0.28.json"
+              "file": "process_0.4_0.28.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -114,32 +188,50 @@
             {
               "layer_height": 0.18,
               "name": "0.18 Standard @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.18.json"
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.24,
               "name": "0.24 Standard @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.24.json"
+              "file": "process_0.6_0.24.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.3,
               "name": "0.30 Standard @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.30.json"
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.34,
               "name": "0.34 Standard @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.34.json"
+              "file": "process_0.6_0.34.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.38,
               "name": "0.38 Standard @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.38.json"
+              "file": "process_0.6_0.38.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.42,
               "name": "0.42 Draft @Snapmaker J1 (0.6 nozzle)",
-              "file": "process_0.6_0.42.json"
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -151,27 +243,42 @@
             {
               "layer_height": 0.24,
               "name": "0.24 Standard @Snapmaker J1 (0.8 nozzle)",
-              "file": "process_0.8_0.24.json"
+              "file": "process_0.8_0.24.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.3
             },
             {
               "layer_height": 0.32,
               "name": "0.32 Standard @Snapmaker J1 (0.8 nozzle)",
-              "file": "process_0.8_0.32.json"
+              "file": "process_0.8_0.32.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.36,
               "name": "0.36 Standard @Snapmaker J1 (0.8 nozzle)",
-              "file": "process_0.8_0.36.json"
+              "file": "process_0.8_0.36.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.4,
               "name": "0.40 Standard @Snapmaker J1 (0.8 nozzle)",
-              "file": "process_0.8_0.40.json"
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.48,
               "name": "0.48 Draft @Snapmaker J1 (0.8 nozzle)",
-              "file": "process_0.8_0.48.json"
+              "file": "process_0.8_0.48.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             }
           ]
         }
@@ -189,22 +296,34 @@
             {
               "layer_height": 0.05,
               "name": "0.05mm Detail @Prusa XL 0.25",
-              "file": "process_0.25_0.05.json"
+              "file": "process_0.25_0.05.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.07,
               "name": "0.07mm Detail @Prusa XL 0.25",
-              "file": "process_0.25_0.07.json"
+              "file": "process_0.25_0.07.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Speed @Prusa XL 0.25",
-              "file": "process_0.25_0.12.json"
+              "file": "process_0.25_0.12.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Speed @Prusa XL 0.25",
-              "file": "process_0.25_0.15.json"
+              "file": "process_0.25_0.15.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -216,17 +335,26 @@
             {
               "layer_height": 0.12,
               "name": "0.12mm Structural @Prusa XL 0.3",
-              "file": "process_0.3_0.12.json"
+              "file": "process_0.3_0.12.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16mm Speed @Prusa XL 0.3",
-              "file": "process_0.3_0.16.json"
+              "file": "process_0.3_0.16.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 0.3",
-              "file": "process_0.3_0.20.json"
+              "file": "process_0.3_0.20.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -238,22 +366,34 @@
             {
               "layer_height": 0.1,
               "name": "0.10mm FastDetail @Prusa XL 0.4",
-              "file": "process_0.4_0.10.json"
+              "file": "process_0.4_0.10.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Speed @Prusa XL 0.4",
-              "file": "process_0.4_0.15.json"
+              "file": "process_0.4_0.15.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 0.4",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Structural @Prusa XL 0.4",
-              "file": "process_0.4_0.25.json"
+              "file": "process_0.4_0.25.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -265,22 +405,34 @@
             {
               "layer_height": 0.1,
               "name": "0.10mm Structural @Prusa XL 0.5",
-              "file": "process_0.5_0.10.json"
+              "file": "process_0.5_0.10.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Structural @Prusa XL 0.5",
-              "file": "process_0.5_0.15.json"
+              "file": "process_0.5_0.15.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 0.5",
-              "file": "process_0.5_0.20.json"
+              "file": "process_0.5_0.20.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Speed @Prusa XL 0.5",
-              "file": "process_0.5_0.25.json"
+              "file": "process_0.5_0.25.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -292,22 +444,34 @@
             {
               "layer_height": 0.15,
               "name": "0.15mm Structural @Prusa XL 0.6",
-              "file": "process_0.6_0.15.json"
+              "file": "process_0.6_0.15.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 0.6",
-              "file": "process_0.6_0.20.json"
+              "file": "process_0.6_0.20.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Speed @Prusa XL 0.6",
-              "file": "process_0.6_0.25.json"
+              "file": "process_0.6_0.25.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.32,
               "name": "0.32mm Speed @Prusa XL 0.6",
-              "file": "process_0.6_0.32.json"
+              "file": "process_0.6_0.32.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -319,17 +483,26 @@
             {
               "layer_height": 0.3,
               "name": "0.30mm Detail @Prusa XL 0.8",
-              "file": "process_0.8_0.30.json"
+              "file": "process_0.8_0.30.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.4,
               "name": "0.40mm Quality @Prusa XL 0.8",
-              "file": "process_0.8_0.40.json"
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.55,
               "name": "0.55mm Draft @Prusa XL 0.8",
-              "file": "process_0.8_0.55.json"
+              "file": "process_0.8_0.55.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             }
           ]
         }
@@ -347,22 +520,34 @@
             {
               "layer_height": 0.05,
               "name": "0.05mm Detail @Prusa XL 5T 0.25",
-              "file": "process_0.25_0.05.json"
+              "file": "process_0.25_0.05.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.07,
               "name": "0.07mm Detail @Prusa XL 5T 0.25",
-              "file": "process_0.25_0.07.json"
+              "file": "process_0.25_0.07.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Speed @Prusa XL 5T 0.25",
-              "file": "process_0.25_0.12.json"
+              "file": "process_0.25_0.12.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Speed @Prusa XL 5T 0.25",
-              "file": "process_0.25_0.15.json"
+              "file": "process_0.25_0.15.json",
+              "line_width": 0.27,
+              "initial_layer_line_width": 0.32,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -374,17 +559,26 @@
             {
               "layer_height": 0.12,
               "name": "0.12mm Structural @Prusa XL 5T 0.3",
-              "file": "process_0.3_0.12.json"
+              "file": "process_0.3_0.12.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16mm Speed @Prusa XL 5T 0.3",
-              "file": "process_0.3_0.16.json"
+              "file": "process_0.3_0.16.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 5T 0.3",
-              "file": "process_0.3_0.20.json"
+              "file": "process_0.3_0.20.json",
+              "line_width": 0.34,
+              "initial_layer_line_width": 0.4,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -396,22 +590,34 @@
             {
               "layer_height": 0.1,
               "name": "0.10mm FastDetail @Prusa XL 5T 0.4",
-              "file": "process_0.4_0.10.json"
+              "file": "process_0.4_0.10.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Speed @Prusa XL 5T 0.4",
-              "file": "process_0.4_0.15.json"
+              "file": "process_0.4_0.15.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 5T 0.4",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Structural @Prusa XL 5T 0.4",
-              "file": "process_0.4_0.25.json"
+              "file": "process_0.4_0.25.json",
+              "line_width": 0.45,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -423,22 +629,34 @@
             {
               "layer_height": 0.1,
               "name": "0.10mm Structural @Prusa XL 5T 0.5",
-              "file": "process_0.5_0.10.json"
+              "file": "process_0.5_0.10.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.15,
               "name": "0.15mm Structural @Prusa XL 5T 0.5",
-              "file": "process_0.5_0.15.json"
+              "file": "process_0.5_0.15.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 5T 0.5",
-              "file": "process_0.5_0.20.json"
+              "file": "process_0.5_0.20.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Speed @Prusa XL 5T 0.5",
-              "file": "process_0.5_0.25.json"
+              "file": "process_0.5_0.25.json",
+              "line_width": 0.55,
+              "initial_layer_line_width": 0.55,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -450,22 +668,34 @@
             {
               "layer_height": 0.15,
               "name": "0.15mm Structural @Prusa XL 5T 0.6",
-              "file": "process_0.6_0.15.json"
+              "file": "process_0.6_0.15.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Speed @Prusa XL 5T 0.6",
-              "file": "process_0.6_0.20.json"
+              "file": "process_0.6_0.20.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.25,
               "name": "0.25mm Speed @Prusa XL 5T 0.6",
-              "file": "process_0.6_0.25.json"
+              "file": "process_0.6_0.25.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.32,
               "name": "0.32mm Speed @Prusa XL 5T 0.6",
-              "file": "process_0.6_0.32.json"
+              "file": "process_0.6_0.32.json",
+              "line_width": 0.68,
+              "initial_layer_line_width": 0.68,
+              "initial_layer_print_height": 0.2
             }
           ]
         },
@@ -477,17 +707,26 @@
             {
               "layer_height": 0.3,
               "name": "0.30mm Detail @Prusa XL 5T 0.8",
-              "file": "process_0.8_0.30.json"
+              "file": "process_0.8_0.30.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.4,
               "name": "0.40mm Quality @Prusa XL 5T 0.8",
-              "file": "process_0.8_0.40.json"
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.55,
               "name": "0.55mm Draft @Prusa XL 5T 0.8",
-              "file": "process_0.8_0.55.json"
+              "file": "process_0.8_0.55.json",
+              "line_width": 0.9,
+              "initial_layer_line_width": 1.0,
+              "initial_layer_print_height": 0.2
             }
           ]
         }
@@ -505,17 +744,26 @@
             {
               "layer_height": 0.08,
               "name": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
-              "file": "process_0.2_0.08.json"
+              "file": "process_0.2_0.08.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.1,
               "name": "0.10mm Standard @BBL H2D 0.2 nozzle",
-              "file": "process_0.2_0.10.json"
+              "file": "process_0.2_0.10.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
-              "file": "process_0.2_0.12.json"
+              "file": "process_0.2_0.12.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             }
           ],
           "filament_file": "filament_0.2.json",
@@ -529,27 +777,42 @@
             {
               "layer_height": 0.08,
               "name": "0.08mm Extra Fine @BBL H2D",
-              "file": "process_0.4_0.08.json"
+              "file": "process_0.4_0.08.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Fine @BBL H2D",
-              "file": "process_0.4_0.12.json"
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16mm Standard @BBL H2D",
-              "file": "process_0.4_0.16.json"
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Standard @BBL H2D",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.24,
               "name": "0.24mm Standard @BBL H2D",
-              "file": "process_0.4_0.24.json"
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             }
           ],
           "filament_file": "filament_0.4.json",
@@ -563,17 +826,26 @@
             {
               "layer_height": 0.18,
               "name": "0.18mm Balanced Quality @BBL H2D 0.6 nozzle",
-              "file": "process_0.6_0.18.json"
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             },
             {
               "layer_height": 0.24,
               "name": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
-              "file": "process_0.6_0.24.json"
+              "file": "process_0.6_0.24.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             },
             {
               "layer_height": 0.3,
               "name": "0.30mm Standard @BBL H2D 0.6 nozzle",
-              "file": "process_0.6_0.30.json"
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             }
           ],
           "filament_file": "filament_0.6.json",
@@ -587,17 +859,26 @@
             {
               "layer_height": 0.24,
               "name": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
-              "file": "process_0.8_0.24.json"
+              "file": "process_0.8_0.24.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             },
             {
               "layer_height": 0.32,
               "name": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
-              "file": "process_0.8_0.32.json"
+              "file": "process_0.8_0.32.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             },
             {
               "layer_height": 0.4,
               "name": "0.40mm Standard @BBL H2D 0.8 nozzle",
-              "file": "process_0.8_0.40.json"
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             }
           ],
           "filament_file": "filament_0.8.json",
@@ -618,17 +899,26 @@
             {
               "layer_height": 0.08,
               "name": "0.08mm Extra Fine @BBL H2DP 0.2 nozzle",
-              "file": "process_0.2_0.08.json"
+              "file": "process_0.2_0.08.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.1,
               "name": "0.10mm Standard @BBL H2DP 0.2 nozzle",
-              "file": "process_0.2_0.10.json"
+              "file": "process_0.2_0.10.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Balanced Quality @BBL H2DP 0.2 nozzle",
-              "file": "process_0.2_0.12.json"
+              "file": "process_0.2_0.12.json",
+              "line_width": 0.22,
+              "initial_layer_line_width": 0.25,
+              "initial_layer_print_height": 0.1
             }
           ],
           "filament_file": "filament_0.2.json",
@@ -642,27 +932,42 @@
             {
               "layer_height": 0.08,
               "name": "0.08mm Extra Fine @BBL H2DP",
-              "file": "process_0.4_0.08.json"
+              "file": "process_0.4_0.08.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.12,
               "name": "0.12mm Fine @BBL H2DP",
-              "file": "process_0.4_0.12.json"
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.16,
               "name": "0.16mm Standard @BBL H2DP",
-              "file": "process_0.4_0.16.json"
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.2,
               "name": "0.20mm Standard @BBL H2DP",
-              "file": "process_0.4_0.20.json"
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             },
             {
               "layer_height": 0.24,
               "name": "0.24mm Standard @BBL H2DP",
-              "file": "process_0.4_0.24.json"
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
             }
           ],
           "filament_file": "filament_0.4.json",
@@ -676,17 +981,26 @@
             {
               "layer_height": 0.18,
               "name": "0.18mm Balanced Quality @BBL H2DP 0.6 nozzle",
-              "file": "process_0.6_0.18.json"
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             },
             {
               "layer_height": 0.24,
               "name": "0.24mm Balanced Strength @BBL H2DP 0.6 nozzle",
-              "file": "process_0.6_0.24.json"
+              "file": "process_0.6_0.24.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             },
             {
               "layer_height": 0.3,
               "name": "0.30mm Standard @BBL H2DP 0.6 nozzle",
-              "file": "process_0.6_0.30.json"
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
             }
           ],
           "filament_file": "filament_0.6.json",
@@ -700,17 +1014,26 @@
             {
               "layer_height": 0.24,
               "name": "0.24mm Balanced Quality @BBL H2DP 0.8 nozzle",
-              "file": "process_0.8_0.24.json"
+              "file": "process_0.8_0.24.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             },
             {
               "layer_height": 0.32,
               "name": "0.32mm Balanced Strength @BBL H2DP 0.8 nozzle",
-              "file": "process_0.8_0.32.json"
+              "file": "process_0.8_0.32.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             },
             {
               "layer_height": 0.4,
               "name": "0.40mm Standard @BBL H2DP 0.8 nozzle",
-              "file": "process_0.8_0.40.json"
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
             }
           ],
           "filament_file": "filament_0.8.json",

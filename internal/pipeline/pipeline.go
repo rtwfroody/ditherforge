@@ -10,6 +10,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -490,6 +492,78 @@ func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.Loa
 		out.NumMeshes = 2
 	}
 	return out
+}
+
+// voxelCells captures the XY widths and Z height that drive the
+// voxel grid and downstream decimation budgets. Returned by
+// voxelCellSizes; use Layer0XY for layer 0 cell width, UpperXY for
+// upper-layer cell width, LayerZ for per-layer Z height.
+type voxelCells struct {
+	Layer0XY float32
+	UpperXY  float32
+	LayerZ   float32
+}
+
+// voxelCellSizes resolves the voxel grid dimensions for a pipeline
+// run. Reads them from the matched OrcaSlicer process profile
+// (printer × nozzle × layer-height) so the voxel grid lines up with
+// what the slicer will actually extrude:
+//
+//   - Layer0XY = process.InitialLayerLineWidth (e.g. 0.5mm for a
+//     0.4 nozzle on Snapmaker / Prusa / Bambu profiles).
+//   - UpperXY  = process.LineWidth             (e.g. 0.42mm on most;
+//     0.45mm on Prusa XL).
+//   - LayerZ   = opts.LayerHeight (also matches process.LayerHeight
+//     when the user picks one of the dropdown values).
+//
+// Falls back to the legacy nozzle×constant approximations from
+// squarevoxel (Layer0CellScale / UpperCellScale) when the printer ID
+// is empty, the registry doesn't recognize it, the nozzle isn't
+// listed, the process entry is missing the field, or the requested
+// LayerHeight isn't one of the registry's process slots (within
+// 0.001mm). That last guard matters: ClosestProcess always returns
+// *something* for a non-empty list, so without an exactness check
+// requesting LayerHeight=0.15 on a printer with only 0.20/0.30 slots
+// would silently pick 0.20's line_width. Falling back to
+// nozzle×constant in that case is more honest than a stale slot's
+// settings, and a plog warning makes the divergence diagnosable.
+//
+// The first-layer Z height (initial_layer_print_height) is captured
+// in the manifest JSON but not consumed here — the voxelizer's grid
+// currently assumes uniform Z spacing across all layers, so layer-
+// 0-taller-than-upper handling is a future change.
+func voxelCellSizes(opts Options) voxelCells {
+	cells := voxelCells{
+		Layer0XY: opts.NozzleDiameter * squarevoxel.Layer0CellScale,
+		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
+		LayerZ:   opts.LayerHeight,
+	}
+	p := export3mf.FindPrinter(opts.Printer)
+	if p == nil {
+		return cells
+	}
+	n := p.FindNozzleByDiameter(opts.NozzleDiameter)
+	if n == nil {
+		return cells
+	}
+	proc := n.ClosestProcess(opts.LayerHeight)
+	if proc == nil {
+		return cells
+	}
+	const layerHeightEpsilon = 0.001
+	if math.Abs(float64(proc.LayerHeight-opts.LayerHeight)) > layerHeightEpsilon {
+		plog.Printf("voxelCellSizes: %s nozzle %.2f has no exact process for layer height %.3f mm "+
+			"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
+			opts.Printer, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
+		return cells
+	}
+	if proc.InitialLayerLineWidth > 0 {
+		cells.Layer0XY = proc.InitialLayerLineWidth
+	}
+	if proc.LineWidth > 0 {
+		cells.UpperXY = proc.LineWidth
+	}
+	return cells
 }
 
 // applyBaseColorOverride sets the base color for all untextured faces to the

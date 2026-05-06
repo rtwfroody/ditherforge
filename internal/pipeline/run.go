@@ -220,7 +220,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			// for ColorModel / SampleModel below.
 			wrapInput := model
 			if !r.opts.NoSimplify {
-				cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+				cellSize := voxelCellSizes(r.opts).UpperXY
 				budget := decimateErrorBudget(cellSize)
 				preDec, derr := squarevoxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
@@ -269,7 +269,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			// what voxelization can resolve. NullTracker avoids
 			// colliding with the dedicated StageDecimate event later.
 			if !r.opts.NoSimplify {
-				cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+				cellSize := voxelCellSizes(r.opts).UpperXY
 				budget := decimateErrorBudget(cellSize)
 				postDec, derr := squarevoxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
@@ -414,7 +414,7 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		cellSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
+		cellSize := voxelCellSizes(r.opts).UpperXY
 		budget := decimateErrorBudget(cellSize)
 
 		if so.Enabled {
@@ -560,9 +560,8 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		layer0Size := r.opts.NozzleDiameter * squarevoxel.Layer0CellScale
-		upperSize := r.opts.NozzleDiameter * squarevoxel.UpperCellScale
-		layerH := r.opts.LayerHeight
+		cells := voxelCellSizes(r.opts)
+		layer0Size, upperSize, layerH := cells.Layer0XY, cells.UpperXY, cells.LayerZ
 
 		sampleModel := lo.SampleModel
 		var stickerModel *loader.LoadedModel
