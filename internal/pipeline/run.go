@@ -562,6 +562,8 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}
 		cells := voxelCellSizes(r.opts)
 		layer0Size, upperSize, layerH := cells.Layer0XY, cells.UpperXY, cells.LayerZ
+		plog.Printf("  Voxel cell: %.3f mm (layer 0) / %.3f mm (upper), layer height %.3f mm",
+			layer0Size, upperSize, layerH)
 
 		sampleModel := lo.SampleModel
 		var stickerModel *loader.LoadedModel

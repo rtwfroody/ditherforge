@@ -538,7 +538,16 @@ func voxelCellSizes(opts Options) voxelCells {
 		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
 		LayerZ:   opts.LayerHeight,
 	}
-	p := export3mf.FindPrinter(opts.Printer)
+	// Match the export side's printer-default behavior (export3mf.go
+	// substitutes DefaultPrinterID for an empty PrinterID), so the
+	// voxel grid agrees with what the emitted 3MF claims to be.
+	// Without this, a CLI run without --printer voxelizes against
+	// nozzle×constant but exports as snapmaker_u1.
+	printerID := opts.Printer
+	if printerID == "" {
+		printerID = export3mf.DefaultPrinterID
+	}
+	p := export3mf.FindPrinter(printerID)
 	if p == nil {
 		return cells
 	}
@@ -554,7 +563,7 @@ func voxelCellSizes(opts Options) voxelCells {
 	if math.Abs(float64(proc.LayerHeight-opts.LayerHeight)) > layerHeightEpsilon {
 		plog.Printf("voxelCellSizes: %s nozzle %.2f has no exact process for layer height %.3f mm "+
 			"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
-			opts.Printer, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
+			printerID, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
 		return cells
 	}
 	if proc.InitialLayerLineWidth > 0 {

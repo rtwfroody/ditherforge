@@ -41,6 +41,21 @@ func TestVoxelCellSizesFromProfile(t *testing.T) {
 			wantLayerZ: 0.20,
 		},
 		{
+			// Empty Printer must resolve to export3mf.DefaultPrinterID
+			// (snapmaker_u1) so the voxel grid agrees with what the
+			// exported 3MF claims to be — rather than silently
+			// diverging via the nozzle×constant fallback.
+			name: "empty printer falls back to snapmaker_u1 default",
+			opts: Options{
+				Printer:        "",
+				NozzleDiameter: 0.4,
+				LayerHeight:    0.20,
+			},
+			wantLayer0: 0.5,
+			wantUpper:  0.42,
+			wantLayerZ: 0.20,
+		},
+		{
 			// prusa_xl/process_0.4_0.20.json:
 			// initial_layer_line_width=0.5, line_width=0.45.
 			// Nozzle×UpperCellScale = 0.4 * 1.05 = 0.42 (≠ 0.45) —
@@ -73,20 +88,22 @@ func TestVoxelCellSizesFromProfile(t *testing.T) {
 	}
 }
 
-// TestVoxelCellSizesFallback covers the four "no profile match"
-// branches — empty printer, unknown printer, a known printer with an
-// unknown nozzle, and a known (printer, nozzle) with an off-grid
-// layer height that ClosestProcess can't match exactly. All four
-// must return the legacy nozzle×constant approximations so existing
-// callers (tests, unprofiled CLI runs, and users picking a layer
-// height outside the registry's process slots) get deterministic
-// behaviour rather than a stale slot's settings.
+// TestVoxelCellSizesFallback covers the three "no profile match"
+// branches — unknown printer, a known printer with an unknown
+// nozzle, and a known (printer, nozzle) with an off-grid layer
+// height that ClosestProcess can't match exactly. All three must
+// return the legacy nozzle×constant approximations so users picking
+// a layer height outside the registry's process slots get
+// deterministic behaviour rather than a stale slot's settings.
+//
+// Empty Printer is NOT a fallback case — it resolves to
+// export3mf.DefaultPrinterID (snapmaker_u1), tested above in
+// TestVoxelCellSizesFromProfile.
 func TestVoxelCellSizesFallback(t *testing.T) {
 	cases := []struct {
 		name string
 		opts Options
 	}{
-		{"empty printer", Options{NozzleDiameter: 0.4, LayerHeight: 0.20}},
 		{"unknown printer", Options{Printer: "no_such_printer", NozzleDiameter: 0.4, LayerHeight: 0.20}},
 		{"unknown nozzle", Options{Printer: "snapmaker_u1", NozzleDiameter: 0.99, LayerHeight: 0.20}},
 		// snapmaker_u1's 0.4mm nozzle has 0.08/0.12/0.16/0.20/0.24/0.28
