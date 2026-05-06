@@ -924,3 +924,192 @@ func TestPolyhavenStyleGraphCompiles(t *testing.T) {
 		t.Errorf("got leak color %v, expected hsvadjust output (mask gate should be 0)", got)
 	}
 }
+
+// TestZipResolverCaseInsensitiveFallback verifies that a .zip whose
+// .mtlx graph references a texture by a different-case name from the
+// actual zip entry resolves successfully via the case-insensitive
+// fallback. Real-world packs (Polyhaven, GPUOpen MatLib, …) are
+// authored on case-insensitive filesystems and routinely ship with
+// these mismatches; on Linux without the fallback the texture would
+// silently fail to load and the user would see no obvious error
+// despite the pipeline producing output.
+func TestZipResolverCaseInsensitiveFallback(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "pack.zip")
+
+	// Graph references "Stripe.png" (capital S).
+	graph := strings.Replace(imageGraphMtlx, "stripe.png", "Stripe.png", 1)
+	stripeBytes := stripePNG(t)
+
+	// Build a zip containing graph.mtlx and a lowercase-named
+	// stripe.png — i.e. the .mtlx asks for a name the zip doesn't
+	// have *exactly*, only as a case-insensitive match.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range []struct {
+		name string
+		data []byte
+	}{
+		{"graph.mtlx", []byte(graph)},
+		{"stripe.png", stripeBytes},
+	} {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", e.name, err)
+		}
+		if _, err := w.Write(e.data); err != nil {
+			t.Fatalf("zip write %s: %v", e.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+
+	doc, err := materialx.ParsePackage(zipPath)
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("DefaultBaseColorSampler: %v", err)
+	}
+	// First pixel is solid red; sampling the leftmost pixel center
+	// (u=0.125 for a 4-wide image) confirms the image actually
+	// loaded via the case-insensitive lookup, not just that compile
+	// passed by luck.
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.125, 0.5}})
+	if got[0] < 0.99 || got[1] > 0.01 || got[2] > 0.01 {
+		t.Errorf("expected red sample (red row), got %v", got)
+	}
+}
+
+// TestZipResolverExactMatchPreferred guards the "case-sensitive miss
+// before case-insensitive fallback" ordering: when the zip contains
+// both the exactly-cased file and a different-cased one, the exact
+// match wins. Stops a future refactor from accidentally swapping the
+// order and silently picking the wrong file when both exist.
+func TestZipResolverExactMatchPreferred(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "pack.zip")
+
+	// Two PNGs with the same name modulo case but different content.
+	// The .mtlx asks for the lowercase one; the lowercase one in the
+	// zip is the red-row stripe and the uppercase one is a 1×1 blue
+	// PNG. If the case-insensitive fallback ran before the exact
+	// match, the sampler might pick the blue file and the red
+	// expectation below would fail.
+	graph := imageGraphMtlx // references "stripe.png"
+	stripeBytes := stripePNG(t)
+
+	blueImg := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	blueImg.Set(0, 0, color.NRGBA{B: 255, A: 255})
+	var blueBuf bytes.Buffer
+	if err := png.Encode(&blueBuf, blueImg); err != nil {
+		t.Fatalf("encode blue png: %v", err)
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range []struct {
+		name string
+		data []byte
+	}{
+		{"graph.mtlx", []byte(graph)},
+		{"stripe.png", stripeBytes},        // exact match for the .mtlx
+		{"STRIPE.PNG", blueBuf.Bytes()},    // case-insensitive impostor
+	} {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", e.name, err)
+		}
+		if _, err := w.Write(e.data); err != nil {
+			t.Fatalf("zip write %s: %v", e.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+
+	doc, err := materialx.ParsePackage(zipPath)
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("DefaultBaseColorSampler: %v", err)
+	}
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.125, 0.5}})
+	if got[0] < 0.99 || got[1] > 0.01 || got[2] > 0.01 {
+		t.Errorf("expected red sample from exact-match stripe.png (lowercase), got %v — case-insensitive fallback may have shadowed the exact match", got)
+	}
+}
+
+// TestDirResolverCaseInsensitiveFallback mirrors the zip-resolver
+// fallback test for the on-disk-directory case. A user who extracts a
+// pack from Polyhaven / GPUOpen MatLib / AmbientCG and points
+// DitherForge at the .mtlx hits the same case-mismatch failure as
+// loading the .zip directly; the dirResolver fallback keeps the two
+// load paths in sync.
+func TestDirResolverCaseInsensitiveFallback(t *testing.T) {
+	dir := t.TempDir()
+
+	// Graph references "Stripe.png" (capital S). The on-disk file
+	// is lowercase stripe.png — i.e. the .mtlx asks for a name the
+	// directory doesn't have *exactly*, only as a case-insensitive
+	// match.
+	graph := strings.Replace(imageGraphMtlx, "stripe.png", "Stripe.png", 1)
+	if err := os.WriteFile(filepath.Join(dir, "graph.mtlx"), []byte(graph), 0o644); err != nil {
+		t.Fatalf("write graph: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stripe.png"), stripePNG(t), 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+
+	doc, err := materialx.ParsePackage(filepath.Join(dir, "graph.mtlx"))
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("DefaultBaseColorSampler: %v", err)
+	}
+	got := s.SampleAt(materialx.SampleContext{UV: [2]float64{0.125, 0.5}})
+	if got[0] < 0.99 || got[1] > 0.01 || got[2] > 0.01 {
+		t.Errorf("expected red sample (red row), got %v", got)
+	}
+}
+
+// TestZipResolverMissingTextureStillErrors confirms the
+// case-insensitive fallback isn't so loose it makes genuinely-missing
+// textures resolve to the wrong file. A .zip with the right .mtlx but
+// no texture at all (under any case) must still surface a clear
+// "not found in zip" error — that's the failure path the inline-
+// banner UX in App.svelte depends on.
+func TestZipResolverMissingTextureStillErrors(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "pack.zip")
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("graph.mtlx")
+	w.Write([]byte(imageGraphMtlx))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write zip: %v", err)
+	}
+
+	doc, err := materialx.ParsePackage(zipPath)
+	if err != nil {
+		t.Fatalf("ParsePackage: %v", err)
+	}
+	if _, err := doc.DefaultBaseColorSampler(); err == nil {
+		t.Fatal("expected error compiling sampler with missing texture, got nil")
+	} else if !strings.Contains(err.Error(), "not found in zip") {
+		t.Errorf("expected 'not found in zip' in error, got: %v", err)
+	}
+}

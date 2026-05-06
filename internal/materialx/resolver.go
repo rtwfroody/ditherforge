@@ -69,7 +69,40 @@ func (d *dirResolver) Open(relpath string) (io.ReadCloser, error) {
 	if slices.Contains(strings.Split(clean, string(filepath.Separator)), "..") {
 		return nil, fmt.Errorf("materialx: refusing to resolve %q outside %q", relpath, d.base)
 	}
-	return os.Open(filepath.Join(d.base, clean))
+	full := filepath.Join(d.base, clean)
+	if f, err := os.Open(full); err == nil {
+		return f, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		// Permission denied, IO error, etc. — surface as-is rather
+		// than masking it with a (potentially-incorrect) "not found".
+		return nil, err
+	}
+	// Case-insensitive fallback for the same reason as the zip
+	// resolver: real-world packs authored on macOS/Windows ship with
+	// case mismatches between the .mtlx graph's filename inputs and
+	// the on-disk texture filenames. Walk each path component, taking
+	// the first case-insensitive match per directory; this stays
+	// inside d.base and never escapes via "..".
+	parts := strings.Split(clean, string(filepath.Separator))
+	cur := d.base
+	for _, part := range parts {
+		entries, err := os.ReadDir(cur)
+		if err != nil {
+			return nil, err
+		}
+		match := ""
+		for _, e := range entries {
+			if strings.EqualFold(e.Name(), part) {
+				match = e.Name()
+				break
+			}
+		}
+		if match == "" {
+			return nil, fmt.Errorf("materialx: %q not found in %q", relpath, d.base)
+		}
+		cur = filepath.Join(cur, match)
+	}
+	return os.Open(cur)
 }
 
 // zipResolver resolves paths against an opened *zip.Reader. Holds the
@@ -86,9 +119,27 @@ func (z *zipResolver) Open(relpath string) (io.ReadCloser, error) {
 	if strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "..") {
 		return nil, fmt.Errorf("materialx: refusing to resolve %q outside zip", relpath)
 	}
-	for _, key := range []string{clean, path.Join(z.prefix, clean)} {
+	keys := []string{clean, path.Join(z.prefix, clean)}
+	// Case-sensitive lookup first — exact matches always win.
+	for _, key := range keys {
 		if f, ok := z.entries[key]; ok {
 			return f.Open()
+		}
+	}
+	// Fallback: case-insensitive scan. Many real-world MaterialX
+	// packs (Polyhaven, GPUOpen MatLib, AmbientCG, …) are authored on
+	// macOS/Windows where the filesystem is case-insensitive by
+	// default, so the .mtlx graph references e.g.
+	// "textures/Foo_baseColor.png" while the zip happens to contain
+	// "textures/Foo_basecolor.png". Linux users hit a hard miss
+	// without this fallback. We do this only after the case-sensitive
+	// pass so a pack that genuinely contains two same-named-different-
+	// case files still resolves the exact one.
+	for _, key := range keys {
+		for entryName, f := range z.entries {
+			if strings.EqualFold(entryName, key) {
+				return f.Open()
+			}
 		}
 	}
 	return nil, fmt.Errorf("materialx: %q not found in zip", relpath)

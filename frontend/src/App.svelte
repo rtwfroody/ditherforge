@@ -140,6 +140,14 @@
   let baseMaterialXPath = $state<string>('');
   let baseMaterialXTileMM = $state<number>(10);
   let baseMaterialXTriplanarSharpness = $state<number>(4);
+  // Persistent inline error for the currently-selected MaterialX file.
+  // Set by validateMaterialXFile (file-pick / settings-load) and by the
+  // pipeline-warning event handler when the running pipeline reports a
+  // MaterialX failure. Cleared whenever baseMaterialXPath changes.
+  // Surfaced as a red banner directly under the file display so the
+  // user can't miss "this texture isn't actually being applied" — the
+  // status-bar warning by itself was easy to overlook.
+  let baseMaterialXError = $state<string>('');
   // baseColorMode picks which of the two pickers (and the
   // corresponding pipeline option) is in effect. Backend only ever
   // gets one — the other is suppressed.
@@ -506,6 +514,23 @@
       statusMessage = event.message;
       statusType = 'warning';
     }
+    // MaterialX base-color failures during a pipeline run also need
+    // to reach the inline banner — file-pick validation only runs at
+    // pick time, so a failure that surfaces only at run time (e.g. an
+    // asset that's missing on this machine but was present when the
+    // settings file was saved) would otherwise silently lose the
+    // texture without updating the pick-time error.
+    //
+    // Match the exact prefix emitted by StageCache.baseColorOverride
+    // ("ignoring MaterialX base color: …") rather than a loose
+    // substring on "materialx" — the loose form would hijack the
+    // banner for any unrelated future warning that happened to
+    // mention MaterialX. The prefix is the contract; if it ever
+    // changes, the corresponding test in app_test.go (or a future
+    // contract test) should be updated alongside.
+    if (event.message.startsWith('ignoring MaterialX base color:')) {
+      baseMaterialXError = event.message;
+    }
   });
   EventsOn('pipeline-needs-force', (event: { gen: number; extentMM: number }) => {
     if (event.gen < latestGen) return;
@@ -824,6 +849,19 @@
     }
   });
 
+  // Clear baseMaterialXError on any path change so the previous file's
+  // error doesn't briefly linger while validateMaterialXFile is still
+  // in flight on the new pick. validateMaterialXFile and the
+  // pipeline-warning handler are the only setters; both run after
+  // this clear, so the error stays in sync.
+  let prevMtlxPath = '';
+  $effect(() => {
+    if (baseMaterialXPath !== prevMtlxPath) {
+      prevMtlxPath = baseMaterialXPath;
+      baseMaterialXError = '';
+    }
+  });
+
   function serializeSettings() {
     return {
       inputFile,
@@ -899,9 +937,16 @@
   }
 
   // Validates a MaterialX file (existence + parse + base-color sampler
-  // compile) and surfaces any problem as a status warning right away,
-  // so users learn at file-pick time about missing files or unsupported
-  // graphs instead of after a full pipeline run.
+  // compile) and surfaces any problem at file-pick time — both as a
+  // status-bar warning and as a persistent inline banner adjacent to
+  // the file display (baseMaterialXError). The inline banner is the
+  // load-bearing one: the user-reported failure mode that motivated it
+  // was "I selected a .zip, the UI shows the file is loaded, the
+  // pipeline produced output, I didn't notice the texture wasn't
+  // applied" — i.e. the status-bar warning got missed.
+  //
+  // Validation success clears baseMaterialXError so a fresh pick can
+  // recover from an earlier broken pick without an extra interaction.
   //
   // The result race-guards against concurrent picks: if the user
   // selects file B while validation of file A is in flight, A's late
@@ -911,6 +956,7 @@
     if (!path) return;
     const warning = await ValidateMaterialX(path);
     if (path !== baseMaterialXPath) return;
+    baseMaterialXError = warning;
     if (warning) {
       statusMessage = warning;
       statusType = 'warning';
@@ -1634,6 +1680,20 @@
                 {/if}
               {/if}
             </div>
+
+            <!-- Persistent error banner for an unloadable / unsupported
+                 MaterialX file. Spans the row (col-span-2 in the
+                 surrounding grid-cols-2 base-color block) and uses the
+                 destructive theme tokens so it reads as "the texture
+                 you picked is NOT being applied" — the failure mode
+                 the user reported was missing the status-bar warning
+                 entirely and assuming the texture was working. -->
+            {#if baseColorMode === 'texture' && baseMaterialXPath && baseMaterialXError}
+              <div class="rounded border border-destructive bg-destructive/10 text-destructive text-xs px-3 py-2">
+                <div class="font-medium">MaterialX texture not applied</div>
+                <div class="mt-1 break-words">{baseMaterialXError}</div>
+              </div>
+            {/if}
 
             {#if baseColorMode === 'solid' && baseColorPickerOpen}
               <div>
