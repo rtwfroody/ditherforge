@@ -1469,16 +1469,40 @@
               Target hardware. Sets the smallest detail the output can reproduce.
             </HelpTip>
           {/snippet}
-          <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
-            <div class="col-span-2 flex items-center gap-1.5">
+          <!-- Printer / Nozzle / Layer share one row. Three explicit
+               columns: printer flexes (minmax(0, 1fr) so it can shrink
+               below the longest printer name's intrinsic min-content),
+               nozzle is a fixed 6.5em (clears "0.4mm" + chevron),
+               layer is 7.5em so it ends up exactly 1em wider than
+               nozzle (clears "0.20mm" + chevron with a hair of
+               breathing room). Em-sized rather than fr-sized so the
+               layer-minus-nozzle delta stays at 1em regardless of
+               sidebar width, and so widening one doesn't steal from
+               the others. -->
+          <div class="grid grid-cols-[minmax(0,1fr)_6.5em_7.5em] gap-x-3 gap-y-2 items-end">
+            <div class="flex items-center gap-1.5">
               <span class="text-sm font-medium">Printer</span>
               <HelpTip>
                 Target printer for the exported 3MF. Nozzle and layer height
                 options adapt to what the selected printer supports.
               </HelpTip>
             </div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-sm font-medium">Nozzle</span>
+              <HelpTip>
+                Nozzle diameter variant for the selected printer. Also sets the
+                finest horizontal detail the output can represent.
+              </HelpTip>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-sm font-medium">Layer</span>
+              <HelpTip>
+                Layer height for the print. Must match the layer height used
+                when slicing.
+              </HelpTip>
+            </div>
             <select
-              class="col-span-2 h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
               bind:value={printerId}
               onchange={() => reconcilePrinterSelection()}
             >
@@ -1489,21 +1513,10 @@
                 <option value={printerId}>{printerId}</option>
               {/if}
             </select>
-
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium">Nozzle (mm)</span>
-              <HelpTip>
-                Nozzle diameter variant for the selected printer. Also sets the
-                finest horizontal detail the output can represent.
-              </HelpTip>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium">Layer height (mm)</span>
-              <HelpTip>
-                Vertical resolution of the print. Must match the layer height
-                used when slicing.
-              </HelpTip>
-            </div>
+            <!-- Option labels carry the "mm" unit so the column header
+                 doesn't have to. value= stays the bare numeric string
+                 because nozzleDiameter/layerHeight in state are bare
+                 numbers (and round-trip through the settings JSON). -->
             <select
               class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
               bind:value={nozzleDiameter}
@@ -1511,10 +1524,10 @@
             >
               {#if currentPrinter}
                 {#each currentPrinter.nozzles as n (n.diameter)}
-                  <option value={n.diameter}>{n.diameter}</option>
+                  <option value={n.diameter}>{n.diameter}mm</option>
                 {/each}
               {:else}
-                <option value={nozzleDiameter}>{nozzleDiameter}</option>
+                <option value={nozzleDiameter}>{nozzleDiameter}mm</option>
               {/if}
             </select>
             <select
@@ -1523,10 +1536,10 @@
             >
               {#if currentNozzle}
                 {#each currentNozzle.layerHeights as lh (lh)}
-                  <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}</option>
+                  <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}mm</option>
                 {/each}
               {:else}
-                <option value={layerHeight}>{layerHeight}</option>
+                <option value={layerHeight}>{layerHeight}mm</option>
               {/if}
             </select>
           </div>
