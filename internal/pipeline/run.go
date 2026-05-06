@@ -562,8 +562,12 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}
 		cells := voxelCellSizes(r.opts)
 		layer0Size, upperSize, layerH := cells.Layer0XY, cells.UpperXY, cells.LayerZ
-		plog.Printf("  Voxel cell: %.3f mm (layer 0) / %.3f mm (upper), layer height %.3f mm",
-			layer0Size, upperSize, layerH)
+		// Each grid has its own XY×Z cell dimensions. Z is the same
+		// for both grids today (the voxelizer assumes uniform Z
+		// spacing across all layers); the slicer's separate first-
+		// layer print height isn't honored yet.
+		plog.Printf("  Voxel cell (XY × Z mm): layer 0 = %.3f × %.3f, upper = %.3f × %.3f",
+			layer0Size, layerH, upperSize, layerH)
 
 		sampleModel := lo.SampleModel
 		var stickerModel *loader.LoadedModel
