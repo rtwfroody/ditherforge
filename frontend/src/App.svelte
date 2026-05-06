@@ -510,6 +510,10 @@
   });
   EventsOn('pipeline-warning', (event: { gen: number; kind: string; message: string }) => {
     if (event.gen < latestGen) return;
+    // Every warning updates the status bar (chronological event log).
+    // Kind-tagged warnings ALSO pin to their inline home (persistent
+    // state-of-the-input) — the two surfaces answer different
+    // questions and aren't mutually exclusive.
     if (statusType !== 'error') {
       statusMessage = event.message;
       statusType = 'warning';

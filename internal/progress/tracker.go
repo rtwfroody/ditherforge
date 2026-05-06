@@ -44,7 +44,8 @@ const (
 	// WarnKindGeneric is the empty kind — surfaced as a generic
 	// status-bar warning with no specific UI home. Used for things
 	// like "missing inventory entry" that don't tie back to a single
-	// input control.
+	// input control. Prefer this constant over a literal "" at call
+	// sites so a grep for "WarnKind" finds every routing decision.
 	WarnKindGeneric = ""
 
 	// WarnKindMaterialXBaseColor signals a failure compiling or
