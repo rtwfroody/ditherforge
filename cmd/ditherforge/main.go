@@ -55,6 +55,7 @@ type Args struct {
 	AlphaWrap                       bool     `arg:"--alpha-wrap" help:"Clean up the loaded mesh with CGAL Alpha_wrap_3 (requires uv on PATH)"`
 	AlphaWrapAlpha                  float32  `arg:"--alpha-wrap-alpha" help:"Alpha-wrap probe radius in mm (default: nozzle diameter)"`
 	AlphaWrapOffset                 float32  `arg:"--alpha-wrap-offset" help:"Alpha-wrap offset distance in mm (default: alpha/30)"`
+	Layer0AdhesionXYScale           float32  `arg:"--layer0-adhesion-xy-scale" default:"2" help:"Multiplier on layer-0 voxel cell XY size for bed adhesion (1 = no enlargement, higher = bigger first-layer color blobs)"`
 }
 
 func (Args) Description() string {
@@ -110,6 +111,7 @@ func main() {
 		AlphaWrap:                            args.AlphaWrap,
 		AlphaWrapAlpha:                       args.AlphaWrapAlpha,
 		AlphaWrapOffset:                      args.AlphaWrapOffset,
+		Layer0AdhesionXYScale:                args.Layer0AdhesionXYScale,
 	}
 
 	prepResult, _, err := pipeline.Run(context.Background(), opts)

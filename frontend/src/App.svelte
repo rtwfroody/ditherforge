@@ -187,6 +187,11 @@
   let alphaWrap = $state(false);
   let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
+  // Layer-0 voxel-XY multiplier for bed adhesion. 1 = no enlargement;
+  // higher = bigger first-layer color blobs that stick better.
+  // Backend treats 0/negative as "use built-in default".
+  let layer0AdhesionXYScale = $state(2);
+  let committedLayer0AdhesionXYScale = $state(2);
   // Split (cut model into two halves with peg/pocket connectors).
   // See docs/SPLIT.md. Defaults match the design doc's "what most
   // users want" baseline.
@@ -608,24 +613,18 @@
     }
   }
 
-  // Watch all form values and auto-trigger processing.
+  // Auto-trigger the pipeline whenever any input that affects the
+  // backend changes. We derive the dependency set from buildOpts()
+  // itself: Svelte 5 registers $state reads inside the effect, and
+  // buildOpts reads exactly the values that flow to the backend.
+  // Adding a new pipeline-relevant setting requires wiring it into
+  // buildOpts anyway (so the backend receives it); doing so makes
+  // this effect track it automatically. JSON.stringify produces a
+  // stable deep read for arrays/objects so element mutations don't
+  // slip past granular reactivity.
   let initialized = false;
   $effect(() => {
-    // Read all form values to establish tracking.
-    void [inputFile, sizeMode, sizeValue, scaleValue, printerId, nozzleDiameter,
-          layerHeight, baseColor, baseColorMode, baseMaterialXPath, baseMaterialXTileMM, baseMaterialXTriplanarSharpness, ...colorSlots,
-          inventoryCollectionColors,
-          committedBrightness, committedContrast, committedSaturation,
-          JSON.stringify(warpPins),
-          JSON.stringify(stickers),
-          dither, committedRiemersmaBias, committedColorSnap, noMerge, noSimplify, stats,
-          alphaWrap, alphaWrapAlpha, alphaWrapOffset,
-          splitEnabled, splitAxis, splitOffset,
-          splitConnectorStyle, splitConnectorCount,
-          splitConnectorDiamMM, splitConnectorDepthMM,
-          splitClearanceMM,
-          splitOrientationA, splitOrientationB,
-          reloadSeq];
+    void JSON.stringify(buildOpts(false));
     if (!initialized) {
       initialized = true;
       return;
@@ -901,6 +900,7 @@
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
+      layer0AdhesionXYScale,
       splitEnabled,
       splitAxis,
       splitOffset,
@@ -1060,6 +1060,7 @@
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
+    { key: 'layer0AdhesionXYScale',           validate: pickNumber,                                        apply: (v) => { layer0AdhesionXYScale = v; committedLayer0AdhesionXYScale = v; } },
     { key: 'splitEnabled',                    validate: pickBool,                                          apply: (v) => { splitEnabled = v; } },
     { key: 'splitAxis',                       validate: (v, d) => pickIntEnum(v, SPLIT_AXIS_VALUES, d),    apply: (v) => { splitAxis = v; } },
     { key: 'splitOffset',                     validate: pickNumber,                                        apply: (v) => { splitOffset = v; } },
@@ -1353,6 +1354,7 @@
       AlphaWrap: alphaWrap,
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
       AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
+      Layer0AdhesionXYScale: committedLayer0AdhesionXYScale,
       Split: {
         Enabled: splitEnabled,
         Axis: splitAxis,
@@ -2023,6 +2025,18 @@
             </HelpTip>
           {/snippet}
           <div class="space-y-4">
+            <div class="space-y-1">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-1.5">
+                  <Label>Layer-0 adhesion XY scale</Label>
+                  <HelpTip>
+                    Multiplier on layer-0 voxel cell XY size for bed adhesion. 1 = no enlargement; higher values produce bigger first-layer color blobs that stick to the bed but coarsen the first layer's color resolution.
+                  </HelpTip>
+                </div>
+                <span class="text-xs text-muted-foreground w-10 text-right">{layer0AdhesionXYScale.toFixed(1)}</span>
+              </div>
+              <Slider type="single" min={1} max={15} step={0.5} value={layer0AdhesionXYScale} onValueChange={(v: number) => layer0AdhesionXYScale = v} onValueCommit={(v: number) => committedLayer0AdhesionXYScale = v} />
+            </div>
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noMerge} />

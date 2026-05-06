@@ -29,12 +29,12 @@ import (
 
 // Options controls the pipeline behavior. Mirrors CLI flags.
 type Options struct {
-	Input          string
-	NumColors      int
-	LockedColors   []string
-	Scale          float32
-	Output         string
-	BaseColor      string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
+	Input        string
+	NumColors    int
+	LockedColors []string
+	Scale        float32
+	Output       string
+	BaseColor    string // hex color for untextured faces (e.g. "#FF0000"); empty = use model default
 	// BaseColorMaterialX is the path to a .mtlx file or a .zip archive
 	// containing one (with adjacent textures) applied to untextured
 	// faces as a procedural or image-backed base color. When non-empty
@@ -55,19 +55,19 @@ type Options struct {
 	// back to a sensible default (4). Ignored by purely position-
 	// driven graphs (marble, brick).
 	BaseColorMaterialXTriplanarSharpness float64
-	NozzleDiameter float32
-	LayerHeight    float32
+	NozzleDiameter                       float32
+	LayerHeight                          float32
 	// Printer is the printer profile ID (e.g. "snapmaker_u1") used when
 	// writing the 3MF project settings. Empty = export3mf.DefaultPrinterID.
 	// NozzleDiameter selects the matching nozzle variant within that printer.
-	Printer string
-	InventoryFile    string
-	InventoryColors  [][3]uint8 `json:"InventoryColors,omitempty"`
-	InventoryLabels  []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
-	Brightness     float32
-	Contrast       float32
-	Saturation     float32
-	Dither         string
+	Printer         string
+	InventoryFile   string
+	InventoryColors [][3]uint8 `json:"InventoryColors,omitempty"`
+	InventoryLabels []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
+	Brightness      float32
+	Contrast        float32
+	Saturation      float32
+	Dither          string
 	// RiemersmaInputBias is the per-cell input-bias maximum used by
 	// the Riemersma dither (only consulted when Dither == "riemersma").
 	// 0..1; higher = stronger pull toward nearest-input palette,
@@ -84,20 +84,26 @@ type Options struct {
 	// but per-cell drift accumulates). Pipeline default is
 	// voxel.BlueNoiseAdaptiveTolDefault.
 	BlueNoiseTolerance float64
-	NoMerge        bool
-	NoSimplify     bool
-	Size           *float32
-	Force          bool
-	ReloadSeq      int64 // bumped to force re-read of the same input file
-	Stats          bool
-	ColorSnap      float64
-	WarpPins       []WarpPin `json:"WarpPins,omitempty"`
-	Stickers       []Sticker `json:"Stickers,omitempty"`
-	ObjectIndex    int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
-	AlphaWrap       bool    // enable CGAL Alpha_wrap_3 post-load mesh cleanup
-	AlphaWrapAlpha  float32 // mm; 0 = auto (5 × NozzleDiameter)
-	AlphaWrapOffset float32 // mm; 0 = auto (alpha / 30)
-	Split           SplitSettings `json:"Split,omitempty"`
+	NoMerge            bool
+	NoSimplify         bool
+	Size               *float32
+	Force              bool
+	ReloadSeq          int64 // bumped to force re-read of the same input file
+	Stats              bool
+	ColorSnap          float64
+	WarpPins           []WarpPin `json:"WarpPins,omitempty"`
+	Stickers           []Sticker `json:"Stickers,omitempty"`
+	ObjectIndex        int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
+	AlphaWrap          bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
+	AlphaWrapAlpha     float32   // mm; 0 = auto (5 × NozzleDiameter)
+	AlphaWrapOffset    float32   // mm; 0 = auto (alpha / 30)
+	// Layer0AdhesionXYScale enlarges layer-0 voxel cells in XY beyond
+	// the slicer's first-layer line width so heavily dithered first
+	// layers print as larger plastic blobs that stick to the bed.
+	// 0 (zero value) or negative falls back to
+	// squarevoxel.Layer0AdhesionXYScale; 1 = no enlargement.
+	Layer0AdhesionXYScale float32
+	Split                 SplitSettings `json:"Split,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -106,11 +112,11 @@ type Options struct {
 // pipeline runs bit-identically to the pre-Split path. See
 // docs/SPLIT.md for the architecture.
 type SplitSettings struct {
-	Enabled         bool
-	Axis            int     // 0=X, 1=Y, 2=Z
-	Offset          float64 // model-space, along Axis
-	ConnectorStyle  string  // "none", "pegs", "dowels"
-	ConnectorCount  int     // 0 = auto, 1..3 explicit
+	Enabled          bool
+	Axis             int     // 0=X, 1=Y, 2=Z
+	Offset           float64 // model-space, along Axis
+	ConnectorStyle   string  // "none", "pegs", "dowels"
+	ConnectorCount   int     // 0 = auto, 1..3 explicit
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
@@ -123,13 +129,13 @@ type SplitSettings struct {
 // Sticker defines a PNG image to apply onto the voxelized mesh surface.
 type Sticker struct {
 	ImagePath string     `json:"ImagePath"`
-	Center    [3]float64 `json:"Center"`    // world-space placement point
-	Normal    [3]float64 `json:"Normal"`    // surface normal at placement
-	Up        [3]float64 `json:"Up"`        // camera up vector at placement time
-	Scale    float64 `json:"Scale"`    // world-unit width of sticker
-	Rotation float64 `json:"Rotation"` // degrees, around surface normal
-	MaxAngle float64 `json:"MaxAngle"` // max inter-triangle angle (degrees) for flood-fill; 0 = no limit
-	Mode     string  `json:"Mode"`     // "projection" (default) or "unfold"
+	Center    [3]float64 `json:"Center"`   // world-space placement point
+	Normal    [3]float64 `json:"Normal"`   // surface normal at placement
+	Up        [3]float64 `json:"Up"`       // camera up vector at placement time
+	Scale     float64    `json:"Scale"`    // world-unit width of sticker
+	Rotation  float64    `json:"Rotation"` // degrees, around surface normal
+	MaxAngle  float64    `json:"MaxAngle"` // max inter-triangle angle (degrees) for flood-fill; 0 = no limit
+	Mode      string     `json:"Mode"`     // "projection" (default) or "unfold"
 }
 
 // WarpPin maps a source image color to a target filament color for RBF warping.
@@ -195,7 +201,7 @@ type MeshData struct {
 	StickerUVs      []float32 `json:"StickerUVs,omitempty"`      // flat [u,v, u,v, ...] per face-vertex (nFaces*6), nil if no stickers
 	StickerFaceMask []uint8   `json:"StickerFaceMask,omitempty"` // 1 per face: 1=has sticker, 0=none, nil if no stickers
 	StickerBounds   []float32 `json:"StickerBounds,omitempty"`   // flat [minU,maxU,minV,maxV, ...] per face (nFaces*4), atlas sub-region for shader clamping
-	StickerAtlas    string    `json:"StickerAtlas,omitempty"`     // base64 encoded atlas image, empty if no stickers
+	StickerAtlas    string    `json:"StickerAtlas,omitempty"`    // base64 encoded atlas image, empty if no stickers
 }
 
 // ProcessResult summarizes a completed pipeline run (stages 0–6, no file export).
@@ -556,8 +562,17 @@ func voxelCellSizes(opts Options) (cells voxelCells) {
 	// Apply the layer-0 adhesion safety multiplier at the very end so
 	// it stacks on top of whichever Layer0XY source wins below. The
 	// named return lets the defer mutate the value the caller sees.
+	// Zero/negative falls back to the package default so library
+	// callers using Options{} (and tests) see the same behavior they
+	// did before the field existed; the CLI sets a default of 2 via
+	// flag tag, and the GUI's slider min is 1, so 0 is unreachable
+	// from those paths.
+	adhesionScale := opts.Layer0AdhesionXYScale
+	if adhesionScale <= 0 {
+		adhesionScale = squarevoxel.Layer0AdhesionXYScale
+	}
 	defer func() {
-		cells.Layer0XY *= squarevoxel.Layer0AdhesionXYScale
+		cells.Layer0XY *= adhesionScale
 	}()
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
@@ -799,7 +814,6 @@ func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignment
 	}
 	return merged, totalPatches, nil
 }
-
 
 func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 	var pcfg voxel.PaletteConfig

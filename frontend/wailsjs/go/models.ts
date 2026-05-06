@@ -421,6 +421,7 @@ export namespace pipeline {
 	    AlphaWrap: boolean;
 	    AlphaWrapAlpha: number;
 	    AlphaWrapOffset: number;
+	    Layer0AdhesionXYScale: number;
 	    Split?: SplitSettings;
 	
 	    static createFrom(source: any = {}) {
@@ -463,6 +464,7 @@ export namespace pipeline {
 	        this.AlphaWrap = source["AlphaWrap"];
 	        this.AlphaWrapAlpha = source["AlphaWrapAlpha"];
 	        this.AlphaWrapOffset = source["AlphaWrapOffset"];
+	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	    }
 	
