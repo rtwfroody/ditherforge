@@ -914,9 +914,107 @@ type Settings struct {
 	SplitOrientationB     string  `json:"splitOrientationB"`
 }
 
+// pathForSaving converts an in-memory absolute path into the form
+// stored in a settings JSON file at jsonPath. Returns a relative path
+// when the asset is in the same directory, a subdirectory, or one
+// directory up from the JSON file; otherwise returns the absolute path
+// unchanged so that distantly-stored assets keep working without
+// implying a portable project layout that doesn't actually exist.
+//
+// Empty or already-relative inputs pass through unchanged — the former
+// because there's no path to rewrite, the latter because a path that
+// was already relative came from a previous load and we'd just be
+// re-relativizing it (and we'd need to know the *previous* JSON path
+// to do that correctly, which we don't).
+func pathForSaving(jsonPath, p string) string {
+	if p == "" {
+		return p
+	}
+	if !filepath.IsAbs(p) {
+		return p
+	}
+	absJSON, err := filepath.Abs(jsonPath)
+	if err != nil {
+		return p
+	}
+	jsonDir := filepath.Dir(absJSON)
+	// filepath.Rel errors on cross-volume Windows paths (C:\ vs D:\).
+	// Falling back to absolute is the correct behaviour there — there
+	// is no relative form between volumes.
+	//
+	// Note: we deliberately do NOT EvalSymlinks here. Relativising
+	// through evaluated symlinks would produce paths that surprise
+	// users who structured their project around the symlink names.
+	rel, err := filepath.Rel(jsonDir, p)
+	if err != nil {
+		return p
+	}
+	// Cap the "up" depth at one. Anything deeper would imply a
+	// project layout (../../../foo) that we don't want to bake into
+	// settings files — fall back to absolute. Counting only the
+	// leading ".." components is sufficient because filepath.Rel
+	// returns a Clean'd path.
+	upCount := 0
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part != ".." {
+			break
+		}
+		upCount++
+	}
+	if upCount > 1 {
+		return p
+	}
+	return rel
+}
+
+// pathForLoading resolves a path from a settings JSON file at jsonPath
+// back to the absolute form the in-memory state and pipeline use.
+// Absolute or empty paths pass through unchanged.
+func pathForLoading(jsonPath, p string) string {
+	if p == "" {
+		return p
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	absJSON, err := filepath.Abs(jsonPath)
+	if err != nil {
+		return p
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(absJSON), p))
+}
+
+// transformSettingsPaths applies fn to every on-disk-asset path in
+// the Settings struct. Centralized so adding a new path-typed field
+// requires updating one place — both save (relativise) and load
+// (resolve) routes through here.
+//
+// In-memory contract: each path field is expected to be ABSOLUTE
+// while held in Settings. The frontend produces absolute paths from
+// file dialogs, LoadSettingsFile resolves stored relative paths back
+// to absolute on its way out, and the pipeline expects absolute
+// paths. Callers handing pre-existing relative paths to SaveSettings
+// will see them passed through unchanged (interpreted by the next
+// loader as relative to the new JSON file's directory, which is
+// usually not what they meant).
+func transformSettingsPaths(s *Settings, fn func(string) string) {
+	s.InputFile = fn(s.InputFile)
+	s.BaseMaterialXPath = fn(s.BaseMaterialXPath)
+	for i := range s.Stickers {
+		s.Stickers[i].ImagePath = fn(s.Stickers[i].ImagePath)
+	}
+}
+
 // SaveSettings writes settings to the given path.
 // If the file already exists and is not a DitherForge settings file, it refuses
 // to overwrite it.
+//
+// On-disk asset paths (input model, MaterialX file, sticker images) are
+// rewritten to be relative to the JSON file's directory when the asset
+// lives in the same directory, a subdirectory, or one directory up.
+// More distantly-stored assets are saved as absolute paths. The
+// caller's Settings is not mutated — paths are rewritten on a local
+// copy.
 func (a *App) SaveSettings(path string, settings Settings) error {
 	if data, err := os.ReadFile(path); err == nil {
 		var existing SettingsFile
@@ -924,6 +1022,11 @@ func (a *App) SaveSettings(path string, settings Settings) error {
 			return fmt.Errorf("refusing to overwrite %s: not a DitherForge settings file", filepath.Base(path))
 		}
 	}
+	// Copy stickers so transformSettingsPaths doesn't mutate the
+	// caller's slice. Other path fields are scalars, naturally copied
+	// by the struct value receive.
+	settings.Stickers = append([]StickerSetting(nil), settings.Stickers...)
+	transformSettingsPaths(&settings, func(p string) string { return pathForSaving(path, p) })
 	sf := SettingsFile{
 		DitherForge: SettingsMeta{
 			URL:     "https://github.com/rtwfroody/ditherforge",
@@ -991,6 +1094,12 @@ func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
 }
 
 // LoadSettingsFile reads settings from the given path.
+//
+// Asset paths (input model, MaterialX file, sticker images) are
+// resolved against the JSON file's directory if stored relative — the
+// inverse of SaveSettings's relativisation. Absolute paths in the
+// JSON pass through unchanged, so settings files that pre-date the
+// relative-path feature still load correctly.
 func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	plog.Printf("Opening settings file: %s", path)
 	data, err := os.ReadFile(path)
@@ -1011,6 +1120,7 @@ func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 			sf.Settings.Stickers[i].Mode = "unfold"
 		}
 	}
+	transformSettingsPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
 	return &LoadSettingsResult{
 		Path:     path,
 		Settings: sf.Settings,
