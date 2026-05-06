@@ -111,10 +111,11 @@ The **Base color** section of the settings panel offers two modes:
     texture coordinates.
 
   Try the official [`standard_surface_marble_solid.mtlx`](https://github.com/AcademySoftwareFoundation/MaterialX/blob/main/resources/Materials/Examples/StandardSurface/standard_surface_marble_solid.mtlx)
-  for a procedural example, or any [AmbientCG](https://ambientcg.com/) pack
-  exported as a `.zip`. Only the graph's `base_color` output is consumed —
-  normal maps, roughness, etc. are ignored, and only RGB is baked into the
-  print.
+  for a procedural example, or grab a free image-backed pack from
+  [GPUOpen MatLib](https://matlib.gpuopen.com/main/materials/all) or
+  [AmbientCG](https://ambientcg.com/) and feed in its `.zip` directly.
+  Only the graph's `base_color` output is consumed — normal maps,
+  roughness, etc. are ignored, and only RGB is baked into the print.
 
 ## How to Configure the Color Palette
 
