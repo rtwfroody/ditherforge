@@ -1,7 +1,8 @@
 # Build output
+build/bin/
+/ditherbench
 /ditherforge
 /ditherforge-cli
-build/bin/
 
 # Frontend
 frontend/node_modules/
