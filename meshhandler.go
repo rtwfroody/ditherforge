@@ -44,6 +44,15 @@ import (
 //	    float32[nStickerBounds] (per-face [minU,maxU,minV,maxV] atlas clamp bounds)
 //	    uint32 atlasLen
 //	    []byte base64-encoded PNG atlas
+//	MaterialX preview atlas (optional, appended after sticker section):
+//	  uint32 hasBaseColorAtlas  (0 or 1)
+//	  If 1:
+//	    uint32 width
+//	    uint32 height
+//	    uint32 nUVs                  (= nFaces*6, [u,v] per face-vertex)
+//	    float32[nUVs]                normalized [0,1]
+//	    uint32 imageLen
+//	    []byte base64-encoded PNG    (with "png:" prefix)
 func float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
@@ -180,6 +189,28 @@ func (h *meshHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(atlasBytes)
 	} else {
 		binary.LittleEndian.PutUint32(tmp[:], 0) // no sticker data
+		w.Write(tmp[:])
+	}
+
+	// MaterialX preview atlas (optional). Image as base64 PNG/JPEG
+	// (matches sticker atlas convention); per-face-vertex UVs
+	// indexed alongside the unpacked face buffer the frontend builds.
+	if atl := mesh.BaseColorAtlas; atl != nil && atl.Image != "" && len(atl.FaceVertexUVs) > 0 {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasBaseColorAtlas
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(atl.Width))
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(atl.Height))
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(atl.FaceVertexUVs)))
+		w.Write(tmp[:])
+		w.Write(float32SliceToBytes(atl.FaceVertexUVs))
+		imgBytes := []byte(atl.Image)
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(imgBytes)))
+		w.Write(tmp[:])
+		w.Write(imgBytes)
+	} else {
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no atlas
 		w.Write(tmp[:])
 	}
 }

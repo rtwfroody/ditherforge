@@ -216,6 +216,8 @@ func scalePreviewMesh(mesh *MeshData, scale float32) *MeshData {
 	for i := range scaled.Vertices {
 		scaled.Vertices[i] *= scale
 	}
+	// FaceVertexColors are positionless — no scaling needed; they
+	// just ride along on the shared scaled struct.
 	return &scaled
 }
 

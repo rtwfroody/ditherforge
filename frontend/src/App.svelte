@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
@@ -1299,8 +1299,11 @@
     inventoryCollectionColors = colors.map(c => ({ hex: c.hex, label: c.label }));
   }
 
-  // Load initial inventory collection colors.
-  loadInventoryCollectionColors(inventoryCollection);
+  // Load initial inventory collection colors. Wrapped in untrack
+  // because we explicitly want a one-shot read of the initial state
+  // value at script init — subsequent changes are handled by
+  // applySettings (load/reset paths) and the dropdown's onchange.
+  untrack(() => loadInventoryCollectionColors(inventoryCollection));
 
   // Load printer registry from Go. Fallback: leave printers empty and the
   // UI will show a minimal select rather than crashing.

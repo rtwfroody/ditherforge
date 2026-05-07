@@ -406,6 +406,12 @@ type loadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
+	// BaseColorAtlas is the packed atlas of per-triangle MaterialX
+	// bake patches used by the input preview when MaterialX is
+	// active. Recomputed in-place by applyBaseColor whenever the
+	// appliedBaseColor* tuple changes. Nil when no MaterialX
+	// override is active.
+	BaseColorAtlas *BaseColorAtlas
 	// appliedBaseColor / appliedBaseColorMaterialX{,TileMM,TriplanarSharpness}
 	// track the base-color override currently baked into ColorModel /
 	// SampleModel FaceBaseColor. The tuple is the cache key for the

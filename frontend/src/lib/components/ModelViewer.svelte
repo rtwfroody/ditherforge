@@ -396,6 +396,18 @@
     stickerFaceMask: Uint8Array | null;
     stickerBounds: Float32Array | null; // per-face [minU,maxU,minV,maxV] atlas sub-region
     stickerAtlas: string | null;
+    // baseColorAtlas: packed PNG atlas of per-triangle MaterialX
+    // bake patches plus per-face-vertex UVs into the atlas. When
+    // present, the input mesh renders textured (mapped through this
+    // atlas) instead of via per-face flat colors.
+    baseColorAtlas: BaseColorAtlas | null;
+  }
+
+  interface BaseColorAtlas {
+    image: string; // base64 with "png:" or "jpeg:" prefix, like Textures
+    width: number;
+    height: number;
+    faceVertexUVs: Float32Array; // nFaces*6, [u,v] per face-vertex, [0,1]
   }
 
   // Fetch binary mesh data from the backend and parse directly into typed arrays.
@@ -471,11 +483,43 @@
       }
     }
 
-    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas };
+    // MaterialX preview atlas (optional).
+    let baseColorAtlas: BaseColorAtlas | null = null;
+    if (offset < buf.byteLength) {
+      const hasAtlas = view.getUint32(offset, true); offset += 4;
+      if (hasAtlas === 1) {
+        const width = view.getUint32(offset, true); offset += 4;
+        const height = view.getUint32(offset, true); offset += 4;
+        const nUVs = view.getUint32(offset, true); offset += 4;
+        const faceVertexUVs = new Float32Array(buf.slice(offset, offset + nUVs * 4));
+        offset += nUVs * 4;
+        const imgLen = view.getUint32(offset, true); offset += 4;
+        const decoder = new TextDecoder();
+        const image = decoder.decode(new Uint8Array(buf, offset, imgLen));
+        offset += imgLen;
+        baseColorAtlas = { image, width, height, faceVertexUVs };
+      }
+    }
+
+    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas };
   }
 
   function hasTextures(td: TypedMeshData): boolean {
     return !!(td.textures && td.uvs && td.faceTextureIdx);
+  }
+
+  // Load the MaterialX preview atlas with nearest-neighbor filtering
+  // so each fragment reads exactly one baked texel — no bilinear
+  // smoothing between adjacent samples. Each per-triangle patch's
+  // discrete colors stay crisp, which makes the preview match the
+  // dithered output's discrete-cell look more closely.
+  async function loadAtlasTexture(encoded: string): Promise<THREE.Texture> {
+    const tex = await loadTexture(encoded);
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
   }
 
   async function loadTexture(encoded: string): Promise<THREE.Texture> {
@@ -541,6 +585,19 @@
       colors[o + 6] = r; colors[o + 7] = g; colors[o + 8] = b;
     }
     return colors;
+  }
+
+  // Unpack per-face-vertex UVs into a non-indexed per-vertex UV
+  // array (Three.js BufferGeometry 'uv' attribute layout).
+  function unpackFaceVertexUVs(faceVertexUVs: Float32Array, faceIndices: Uint32Array): Float32Array {
+    const out = new Float32Array(faceIndices.length * 6);
+    for (let i = 0; i < faceIndices.length; i++) {
+      const f = faceIndices[i];
+      const src = f * 6;
+      const o = i * 6;
+      for (let c = 0; c < 6; c++) out[o + c] = faceVertexUVs[src + c];
+    }
+    return out;
   }
 
   // Unpack per-face sticker UVs, mask, and atlas bounds for a subset of faces.
@@ -692,17 +749,27 @@
         const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex);
         meshes.push({ geometry: geo, material: mat });
       } else {
-        // Untextured group: use face colors.
-        const colors = unpackFaceColors(td, faceIndices);
-
+        // Untextured group: prefer the MaterialX atlas when present
+        // (each face has its own bake patch), else fall back to the
+        // per-face flat color path.
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         applyStickerAttributes(geo, td, faceIndices);
         geo.computeVertexNormals();
 
-        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
-        meshes.push({ geometry: geo, material: mat });
+        if (td.baseColorAtlas) {
+          const atlas = td.baseColorAtlas;
+          const uv = unpackFaceVertexUVs(atlas.faceVertexUVs, faceIndices);
+          geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+          const tex = await loadAtlasTexture(atlas.image);
+          const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex);
+          meshes.push({ geometry: geo, material: mat });
+        } else {
+          const colors = unpackFaceColors(td, faceIndices);
+          geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
+          meshes.push({ geometry: geo, material: mat });
+        }
       }
     }
 
@@ -713,16 +780,27 @@
     const nFaces = td.faces.length / 3;
     const faceIndices = allFaceIndices(nFaces);
     const positions = unpackPositions(td, faceIndices);
-    const colors = unpackFaceColors(td, faceIndices);
-
     const stickerAtlasTex = await loadStickerAtlas(td);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     applyStickerAttributes(geo, td, faceIndices);
     geo.computeVertexNormals();
 
+    if (td.baseColorAtlas) {
+      // Atlas preview: per-face-vertex UVs into a single packed
+      // texture replace the per-face flat color.
+      const atlas = td.baseColorAtlas;
+      const uv = unpackFaceVertexUVs(atlas.faceVertexUVs, faceIndices);
+      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      const tex = await loadAtlasTexture(atlas.image);
+      const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex, stickerOnly);
+      return { meshes: [{ geometry: geo, material: mat }] };
+    }
+
+    // Legacy flat per-face color path (no MaterialX override).
+    const colors = unpackFaceColors(td, faceIndices);
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly);
     return { meshes: [{ geometry: geo, material: mat }] };
   }

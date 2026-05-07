@@ -202,6 +202,42 @@ type MeshData struct {
 	StickerFaceMask []uint8   `json:"StickerFaceMask,omitempty"` // 1 per face: 1=has sticker, 0=none, nil if no stickers
 	StickerBounds   []float32 `json:"StickerBounds,omitempty"`   // flat [minU,maxU,minV,maxV, ...] per face (nFaces*4), atlas sub-region for shader clamping
 	StickerAtlas    string    `json:"StickerAtlas,omitempty"`    // base64 encoded atlas image, empty if no stickers
+	// BaseColorAtlas carries a packed image of per-triangle MaterialX
+	// patches plus per-face-vertex UVs into the atlas. When non-nil
+	// the frontend renders the input mesh with this atlas mapped via
+	// the per-face-vertex UVs, replacing the flat per-face colors.
+	// Nil when no MaterialX override is active.
+	BaseColorAtlas *BaseColorAtlas `json:"BaseColorAtlas,omitempty"`
+}
+
+// BaseColorAtlas is a packed atlas of per-triangle MaterialX bake
+// patches. Each triangle gets a rectangular patch sized to its bbox
+// in a frame aligned with its longest edge: width tier from the
+// bbox's extent along that edge, height tier from the third
+// vertex's perpendicular distance from it. Long thin triangles thus
+// get wide-but-short patches; equilateral ones get square patches.
+// Patch sizes come from a small set of tiers (powers of 2);
+// (Wt, Ht) buckets are grid-packed and stacked vertically into one
+// atlas image.
+//
+// Per-face-vertex UVs (FaceVertexUVs) put each vertex at the texel
+// center it was baked at, so GPU sampling at any in-triangle UV
+// reads the correct pre-baked value. Vertex order follows the
+// original face's vertices (the bake's internal A/B/C reorder
+// chosen by longest-edge selection is undone before writing).
+type BaseColorAtlas struct {
+	// Image is a base64-encoded PNG of the atlas (with a "png:" or
+	// "jpeg:" prefix matching the existing convention used by
+	// MeshData.Textures and StickerAtlas).
+	Image string `json:"Image"`
+	// Width / Height are the atlas dimensions in pixels.
+	Width  int32 `json:"Width"`
+	Height int32 `json:"Height"`
+	// FaceVertexUVs holds nFaces*6 floats — [u, v] per face-vertex
+	// (3 vertices × 2 coords). Non-indexed: each face has its own 3
+	// UVs even when faces share vertices in the geometry, since the
+	// atlas patch is per-triangle. Values are normalized to [0, 1].
+	FaceVertexUVs []float32 `json:"FaceVertexUVs"`
 }
 
 // ProcessResult summarizes a completed pipeline run (stages 0–6, no file export).
@@ -311,6 +347,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			bakedDecals = so.Decals
 		}
 		mesh := buildInputMeshData(previewModel)
+		mesh.BaseColorAtlas = lo.BaseColorAtlas
 		if len(bakedDecals) > 0 {
 			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
@@ -676,10 +713,16 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // cache.getParse — but only when an override was previously applied do we
 // actually fetch it (the pristine case skips the parse cache lookup).
 func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
-	if lo.appliedBaseColor == opts.BaseColor &&
+	tupleMatches := lo.appliedBaseColor == opts.BaseColor &&
 		lo.appliedBaseColorMaterialX == opts.BaseColorMaterialX &&
 		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM &&
-		lo.appliedBaseColorMaterialXTriplanarSharpness == opts.BaseColorMaterialXTriplanarSharpness {
+		lo.appliedBaseColorMaterialXTriplanarSharpness == opts.BaseColorMaterialXTriplanarSharpness
+	// Also invalidate when the atlas bake is missing but should be
+	// present — e.g. a disk-cached loadOutput from a prior version
+	// that pre-dates this field. Without this, the tuple matches and
+	// we'd silently keep serving a nil atlas.
+	bakeMissing := opts.BaseColorMaterialX != "" && lo.BaseColorAtlas == nil
+	if tupleMatches && !bakeMissing {
 		return
 	}
 	pristine := lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
@@ -693,6 +736,7 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 			copy(lo.SampleModel.FaceBaseColor, raw.FaceBaseColor)
 		}
 	}
+	lo.BaseColorAtlas = nil
 	switch {
 	case opts.BaseColorMaterialX != "":
 		// Build the override once and reuse it across both models.
@@ -711,6 +755,26 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 			if lo.SampleModel != lo.ColorModel {
 				bakeMaterialXBaseColor(lo.SampleModel, override)
 			}
+			// Per-triangle atlas bake for the input preview. Each
+			// face's patch dims (W × H) come from a 2D tier
+			// classification (longest-edge bbox extent × third-
+			// vertex perpendicular distance), so the total sample
+			// count varies with mesh shape. Pre-classify once for
+			// an accurate progress total — the work is negligible
+			// (< 50 ms even for 226k faces) compared to the bake.
+			totalSamples := 0
+			for fi := range lo.ColorModel.Faces {
+				lay := computeFaceLayout(lo.ColorModel, fi)
+				totalSamples += baseColorAtlasTierSizes[lay.WT] * baseColorAtlasTierSizes[lay.HT]
+			}
+			stage := progress.BeginStage(tracker, "Baking MaterialX preview", true, totalSamples)
+			atlas, atlasErr := bakeMaterialXAtlas(lo.ColorModel, override, stage.Progress)
+			stage.Done()
+			if atlasErr != nil {
+				tracker.Warn(progress.WarnKindMaterialXBaseColor, fmt.Sprintf("MaterialX preview atlas: %v", atlasErr))
+			} else {
+				lo.BaseColorAtlas = atlas
+			}
 		}
 		_ = err // baseColorOverride already routed the warning through tracker.
 	case opts.BaseColor != "":
@@ -720,6 +784,7 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 		}
 	}
 	lo.InputMesh = buildInputMeshData(lo.ColorModel)
+	lo.InputMesh.BaseColorAtlas = lo.BaseColorAtlas
 	lo.appliedBaseColor = opts.BaseColor
 	lo.appliedBaseColorMaterialX = opts.BaseColorMaterialX
 	lo.appliedBaseColorMaterialXTileMM = opts.BaseColorMaterialXTileMM
