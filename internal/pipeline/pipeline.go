@@ -206,6 +206,28 @@ type MeshData struct {
 	StickerFaceMask []uint8   `json:"StickerFaceMask,omitempty"` // 1 per face: 1=has sticker, 0=none, nil if no stickers
 	StickerBounds   []float32 `json:"StickerBounds,omitempty"`   // flat [minU,maxU,minV,maxV, ...] per face (nFaces*4), atlas sub-region for shader clamping
 	StickerAtlas    string    `json:"StickerAtlas,omitempty"`    // base64 encoded atlas image, empty if no stickers
+
+	// FaceAlpha (one byte per face, 0..255) carries per-face alpha for
+	// the input preview so it can render translucent faces faithfully
+	// instead of collapsing them to a binary visibility decision.
+	// Combines material alpha, base-color alpha, and (for vertex-
+	// colored faces) the face's average vertex alpha. Texture alpha is
+	// NOT folded in — the texture path handles that per-pixel via
+	// alpha-blended materials. Nil when every face is fully opaque so
+	// opaque models carry no extra payload.
+	FaceAlpha []uint8 `json:"FaceAlpha,omitempty"`
+
+	// FaceTranslucent (one byte per face, 1 = needs alpha-blend
+	// pipeline, 0 = render opaque) tells the renderer which faces
+	// have any non-opaque contribution at all (per-face alpha OR a
+	// translucent texture sample). Computed from voxel.FaceAlpha so
+	// it matches the output model's translucency criterion. The
+	// renderer needs this to put opaque and translucent faces in
+	// separate draw calls — keeping the opaque ones writing depth
+	// avoids the back-of-mesh depth-sort artifacts that show up when
+	// everything is drawn through the alpha-blend pipeline. Nil when
+	// every face is fully opaque.
+	FaceTranslucent []uint8 `json:"FaceTranslucent,omitempty"`
 	// BaseColorAtlas carries a packed image of per-triangle MaterialX
 	// patches plus per-face-vertex UVs into the atlas. When non-nil
 	// the frontend renders the input mesh with this atlas mapped via

@@ -53,6 +53,16 @@ import (
 //	    float32[nUVs]                normalized [0,1]
 //	    uint32 imageLen
 //	    []byte base64-encoded PNG    (with "png:" prefix)
+//	Face alpha (optional, appended after MaterialX section):
+//	  uint32 hasFaceAlpha          (0 or 1)
+//	  If 1:
+//	    uint32 nFaceAlpha          (= face count, one byte per face, 0..255)
+//	    uint8[nFaceAlpha]
+//	Face translucent flag (optional, appended after face alpha):
+//	  uint32 hasFaceTranslucent    (0 or 1)
+//	  If 1:
+//	    uint32 nFaceTranslucent    (= face count, one byte per face, 0 or 1)
+//	    uint8[nFaceTranslucent]
 func float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
@@ -211,6 +221,35 @@ func (h *meshHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(imgBytes)
 	} else {
 		binary.LittleEndian.PutUint32(tmp[:], 0) // no atlas
+		w.Write(tmp[:])
+	}
+
+	// Per-face alpha (optional). Carries continuous per-face alpha
+	// for the input preview so the renderer can blend translucent
+	// faces; texture alpha is handled per-pixel via the texture
+	// itself.
+	if len(mesh.FaceAlpha) > 0 {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasFaceAlpha
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.FaceAlpha)))
+		w.Write(tmp[:])
+		w.Write(mesh.FaceAlpha)
+	} else {
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no per-face alpha
+		w.Write(tmp[:])
+	}
+
+	// Per-face translucency flag (optional). Lets the renderer split
+	// opaque from translucent faces into separate draw calls so
+	// depth writes from opaque geometry are not lost.
+	if len(mesh.FaceTranslucent) > 0 {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasFaceTranslucent
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.FaceTranslucent)))
+		w.Write(tmp[:])
+		w.Write(mesh.FaceTranslucent)
+	} else {
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no translucency flag
 		w.Write(tmp[:])
 	}
 }

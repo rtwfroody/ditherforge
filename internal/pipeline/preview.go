@@ -136,7 +136,104 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 		}
 	}
 
+	// Per-face alpha for the preview — material alpha × base-color
+	// alpha × (vertex-color alpha for untextured vertex-painted
+	// faces). Texture alpha is left out so the renderer can blend it
+	// per-pixel through the texture's own alpha channel.
+	//
+	// FaceTranslucent is the centroid-aware companion that also
+	// includes texture alpha; the renderer uses it to put any face
+	// with non-opaque output into a separate alpha-blend draw call so
+	// opaque faces keep writing depth.
+	//
+	// Both arrays are skipped entirely when every face ends up fully
+	// opaque so opaque models carry no extra payload.
+	nFaces := len(model.Faces)
+	faceAlpha := make([]uint8, nFaces)
+	faceTranslucent := make([]uint8, nFaces)
+	anyTranslucent := false
+	for fi := 0; fi < nFaces; fi++ {
+		faceAlpha[fi] = previewFaceAlpha(model, fi)
+		if previewFaceTranslucent(model, fi, faceAlpha[fi]) {
+			faceTranslucent[fi] = 1
+			anyTranslucent = true
+		}
+	}
+	if anyTranslucent {
+		md.FaceAlpha = faceAlpha
+		md.FaceTranslucent = faceTranslucent
+	}
+
 	return md
+}
+
+// faceIsTextured reports whether the renderer will treat this face as
+// textured. Mirrors the FaceTextureIdx remap above: NoTextureMask
+// faces are rendered with vertex/base colors even when their
+// FaceTextureIdx still points at a texture.
+func faceIsTextured(model *loader.LoadedModel, fi int) bool {
+	if model.FaceTextureIdx == nil {
+		return false
+	}
+	if model.NoTextureMask != nil && model.NoTextureMask[fi] {
+		return false
+	}
+	idx := model.FaceTextureIdx[fi]
+	return idx >= 0 && int(idx) < len(model.Textures) && model.Textures[idx] != nil
+}
+
+// previewFaceAlpha returns the per-face alpha to show in the input
+// preview: material alpha × base-color alpha × (average vertex alpha
+// for faces rendered without a texture), all in [0,255]. Texture
+// alpha is intentionally excluded; it's blended per-pixel by the
+// renderer.
+func previewFaceAlpha(model *loader.LoadedModel, fi int) uint8 {
+	matAlpha := float32(1)
+	if model.FaceAlpha != nil {
+		matAlpha = model.FaceAlpha[fi]
+	}
+	bcAlpha := float32(255)
+	if model.FaceBaseColor != nil {
+		bcAlpha = float32(model.FaceBaseColor[fi][3])
+	}
+	a := matAlpha * bcAlpha
+	if !faceIsTextured(model, fi) && model.VertexColors != nil {
+		f := model.Faces[fi]
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		avgA := (float32(c0[3]) + float32(c1[3]) + float32(c2[3])) / 3
+		a *= avgA / 255
+	}
+	if a < 0 {
+		a = 0
+	} else if a > 255 {
+		a = 255
+	}
+	return uint8(a + 0.5)
+}
+
+// previewFaceTranslucent reports whether a face has any non-opaque
+// contribution in the rendered preview — either non-255 per-face
+// alpha or a translucent texture sample at the centroid (when the
+// face is actually textured in the rendered output, i.e. not masked
+// out). Used to route the face to the alpha-blend draw call.
+func previewFaceTranslucent(model *loader.LoadedModel, fi int, faceAlpha uint8) bool {
+	if faceAlpha < 255 {
+		return true
+	}
+	if !faceIsTextured(model, fi) {
+		return false
+	}
+	idx := model.FaceTextureIdx[fi]
+	f := model.Faces[fi]
+	uv0 := model.UVs[f[0]]
+	uv1 := model.UVs[f[1]]
+	uv2 := model.UVs[f[2]]
+	u := (uv0[0] + uv1[0] + uv2[0]) / 3
+	v := (uv0[1] + uv1[1] + uv2[1]) / 3
+	rgba := voxel.BilinearSample(model.Textures[idx], u, v)
+	return rgba[3] < 255
 }
 
 // sampleFaceColor returns an RGB color for a face using vertex colors, base

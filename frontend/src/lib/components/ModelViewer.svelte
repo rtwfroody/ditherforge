@@ -329,7 +329,7 @@
   // (out of bounds, mask=0, or fully transparent atlas pixel) are
   // discarded, so the underlying base mesh shows through. Used for the
   // alpha-wrap overlay layer.
-  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null, stickerOnly: boolean = false): THREE.MeshStandardMaterial {
+  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null, stickerOnly: boolean = false, alphaBlend: boolean = false): THREE.MeshStandardMaterial {
     // Defaults tuned to match Orca's Phong look: roughness ~0.55 gives a
     // subtle specular lobe (Orca uses shininess=20), metalness=0 keeps colors
     // true-to-hue. Caller opts win on conflict.
@@ -337,6 +337,17 @@
     if (stickerOnly) {
       mat.transparent = true;
       mat.alphaTest = 0.001;
+    } else if (alphaBlend) {
+      // Translucent batch of the input preview — blend per-pixel
+      // texture alpha and per-face vertex alpha. Disable depth
+      // writes so back-facing translucent fragments don't occlude
+      // each other (the opaque batch in the same scene already
+      // wrote depth, which is what gates them against opaque
+      // geometry). alphaTest still drops fully-transparent pixels
+      // so they don't enter the blend.
+      mat.transparent = true;
+      mat.alphaTest = 0.01;
+      mat.depthWrite = false;
     }
     const hasSticker = !!stickerTex;
     mat.onBeforeCompile = (shader) => {
@@ -401,6 +412,17 @@
     // present, the input mesh renders textured (mapped through this
     // atlas) instead of via per-face flat colors.
     baseColorAtlas: BaseColorAtlas | null;
+    // faceAlpha: per-face alpha (1 byte each, 0..255) for the input
+    // preview. Combines material/base/vertex alpha but excludes
+    // texture alpha (which the textured path blends per-pixel). Null
+    // when every face is fully opaque.
+    faceAlpha: Uint8Array | null;
+    // faceTranslucent: per-face flag (1 = needs alpha-blend pipeline,
+    // 0 = render opaque). Centroid-aware, includes texture alpha.
+    // Drives the opaque/translucent split so opaque faces keep
+    // writing depth instead of getting depth-sort artifacts. Null
+    // when every face is fully opaque.
+    faceTranslucent: Uint8Array | null;
   }
 
   interface BaseColorAtlas {
@@ -501,7 +523,27 @@
       }
     }
 
-    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas };
+    // Per-face alpha (optional).
+    let faceAlpha: Uint8Array | null = null;
+    if (offset < buf.byteLength) {
+      const hasAlpha = view.getUint32(offset, true); offset += 4;
+      if (hasAlpha === 1) {
+        const nAlpha = view.getUint32(offset, true); offset += 4;
+        faceAlpha = new Uint8Array(buf.slice(offset, offset + nAlpha)); offset += nAlpha;
+      }
+    }
+
+    // Per-face translucency flag (optional).
+    let faceTranslucent: Uint8Array | null = null;
+    if (offset < buf.byteLength) {
+      const hasTrans = view.getUint32(offset, true); offset += 4;
+      if (hasTrans === 1) {
+        const nTrans = view.getUint32(offset, true); offset += 4;
+        faceTranslucent = new Uint8Array(buf.slice(offset, offset + nTrans)); offset += nTrans;
+      }
+    }
+
+    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas, faceAlpha, faceTranslucent };
   }
 
   function hasTextures(td: TypedMeshData): boolean {
@@ -570,9 +612,27 @@
     return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
   }
 
-  // Unpack per-face colors into a per-vertex color array (linear space).
-  function unpackFaceColors(td: TypedMeshData, faceIndices: Uint32Array): Float32Array {
-    const { faceColors } = td;
+  // Unpack per-face colors into a per-vertex color array (linear
+  // space). Returns 3 floats per vertex when faceAlpha is absent; 4
+  // floats per vertex (RGBA) when present, so alpha-blended materials
+  // can use the per-face alpha straight from the buffer.
+  function unpackFaceColors(td: TypedMeshData, faceIndices: Uint32Array): { array: Float32Array; itemSize: 3 | 4 } {
+    const { faceColors, faceAlpha } = td;
+    if (faceAlpha) {
+      const colors = new Float32Array(faceIndices.length * 12);
+      for (let i = 0; i < faceIndices.length; i++) {
+        const f = faceIndices[i];
+        const r = srgbToLinear(faceColors[f * 3] / 255);
+        const g = srgbToLinear(faceColors[f * 3 + 1] / 255);
+        const b = srgbToLinear(faceColors[f * 3 + 2] / 255);
+        const a = faceAlpha[f] / 255;
+        const o = i * 12;
+        colors[o]      = r; colors[o + 1]  = g; colors[o + 2]  = b; colors[o + 3]  = a;
+        colors[o + 4]  = r; colors[o + 5]  = g; colors[o + 6]  = b; colors[o + 7]  = a;
+        colors[o + 8]  = r; colors[o + 9]  = g; colors[o + 10] = b; colors[o + 11] = a;
+      }
+      return { array: colors, itemSize: 4 };
+    }
     const colors = new Float32Array(faceIndices.length * 9);
     for (let i = 0; i < faceIndices.length; i++) {
       const f = faceIndices[i];
@@ -584,7 +644,23 @@
       colors[o + 3] = r; colors[o + 4] = g; colors[o + 5] = b;
       colors[o + 6] = r; colors[o + 7] = g; colors[o + 8] = b;
     }
-    return colors;
+    return { array: colors, itemSize: 3 };
+  }
+
+  // Build a 4-component RGBA vertex color where RGB is white and A
+  // carries per-face alpha. Used by textured / atlas batches in the
+  // alpha-blend pipeline so the texture color passes through
+  // unchanged while per-face alpha multiplies the texture's alpha.
+  function unpackFaceAlphaWhiteRGBA(faceAlpha: Uint8Array, faceIndices: Uint32Array): Float32Array {
+    const out = new Float32Array(faceIndices.length * 12);
+    for (let i = 0; i < faceIndices.length; i++) {
+      const a = faceAlpha[faceIndices[i]] / 255;
+      const o = i * 12;
+      out[o]     = 1; out[o + 1]  = 1; out[o + 2]  = 1; out[o + 3]  = a;
+      out[o + 4] = 1; out[o + 5]  = 1; out[o + 6]  = 1; out[o + 7]  = a;
+      out[o + 8] = 1; out[o + 9]  = 1; out[o + 10] = 1; out[o + 11] = a;
+    }
+    return out;
   }
 
   // Unpack per-face-vertex UVs into a non-indexed per-vertex UV
@@ -703,21 +779,29 @@
     const faceTexIdx = td.faceTextureIdx!;
     const faces = td.faces;
     const nFaces = faces.length / 3;
+    const ft = td.faceTranslucent;
 
     const stickerAtlasTex = await loadStickerAtlas(td);
 
-    // Group faces by texture index (-1 = untextured).
-    const groups = new Map<number, number[]>();
+    // Group faces by (texture index, translucency). Translucent faces
+    // need a separate draw call so they can disable depth writes
+    // without sacrificing the opaque faces' depth buffer — otherwise
+    // back-facing geometry shows through (or disappears) as the
+    // camera rotates and triangle draw order flips.
+    type Group = { texId: number; isTranslucent: boolean; faces: number[] };
+    const groups = new Map<string, Group>();
     for (let f = 0; f < nFaces; f++) {
       const texId = faceTexIdx[f];
-      let arr = groups.get(texId);
-      if (!arr) { arr = []; groups.set(texId, arr); }
-      arr.push(f);
+      const isTranslucent = !!(ft && ft[f]);
+      const key = `${texId}|${isTranslucent ? 1 : 0}`;
+      let g = groups.get(key);
+      if (!g) { g = { texId, isTranslucent, faces: [] }; groups.set(key, g); }
+      g.faces.push(f);
     }
 
     const meshes: SceneData['meshes'] = [];
 
-    for (const [texId, faceList] of groups) {
+    for (const { texId, isTranslucent, faces: faceList } of groups.values()) {
       const faceIndices = new Uint32Array(faceList);
       const positions = unpackPositions(td, faceIndices);
 
@@ -746,7 +830,15 @@
         geo.computeVertexNormals();
 
         const tex = await loadTexture(textures[texId]);
-        const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex);
+        const opts: THREE.MeshStandardMaterialParameters = { map: tex };
+        if (isTranslucent && td.faceAlpha) {
+          // Multiply texture alpha by per-face alpha via white-RGB
+          // vertex color so the texture color passes through.
+          const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
+          geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
+          opts.vertexColors = true;
+        }
+        const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, isTranslucent);
         meshes.push({ geometry: geo, material: mat });
       } else {
         // Untextured group: prefer the MaterialX atlas when present
@@ -762,12 +854,18 @@
           const uv = unpackFaceVertexUVs(atlas.faceVertexUVs, faceIndices);
           geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
           const tex = await loadAtlasTexture(atlas.image);
-          const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex);
+          const opts: THREE.MeshStandardMaterialParameters = { map: tex };
+          if (isTranslucent && td.faceAlpha) {
+            const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
+            geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
+            opts.vertexColors = true;
+          }
+          const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, isTranslucent);
           meshes.push({ geometry: geo, material: mat });
         } else {
-          const colors = unpackFaceColors(td, faceIndices);
-          geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-          const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex);
+          const { array, itemSize } = unpackFaceColors(td, faceIndices);
+          geo.setAttribute('color', new THREE.BufferAttribute(array, itemSize));
+          const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, false, isTranslucent);
           meshes.push({ geometry: geo, material: mat });
         }
       }
@@ -778,31 +876,55 @@
 
   async function buildFaceColorScene(td: TypedMeshData, stickerOnly: boolean = false): Promise<SceneData> {
     const nFaces = td.faces.length / 3;
-    const faceIndices = allFaceIndices(nFaces);
-    const positions = unpackPositions(td, faceIndices);
     const stickerAtlasTex = await loadStickerAtlas(td);
+    const ft = td.faceTranslucent;
 
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    applyStickerAttributes(geo, td, faceIndices);
-    geo.computeVertexNormals();
-
-    if (td.baseColorAtlas) {
-      // Atlas preview: per-face-vertex UVs into a single packed
-      // texture replace the per-face flat color.
-      const atlas = td.baseColorAtlas;
-      const uv = unpackFaceVertexUVs(atlas.faceVertexUVs, faceIndices);
-      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-      const tex = await loadAtlasTexture(atlas.image);
-      const mat = createAdjustedMaterial({ map: tex }, stickerAtlasTex, stickerOnly);
-      return { meshes: [{ geometry: geo, material: mat }] };
+    // Split opaque vs translucent so opaque faces keep writing depth
+    // and translucent faces draw in their own depthWrite=false pass.
+    // When no translucency info is present (output mesh, or fully
+    // opaque input), everything goes through the single opaque pass.
+    const opaqueList: number[] = [];
+    const translucentList: number[] = [];
+    for (let f = 0; f < nFaces; f++) {
+      if (ft && ft[f]) translucentList.push(f);
+      else opaqueList.push(f);
     }
 
-    // Legacy flat per-face color path (no MaterialX override).
-    const colors = unpackFaceColors(td, faceIndices);
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly);
-    return { meshes: [{ geometry: geo, material: mat }] };
+    const meshes: SceneData['meshes'] = [];
+    for (const { faceList, isTranslucent } of [
+      { faceList: opaqueList, isTranslucent: false },
+      { faceList: translucentList, isTranslucent: true },
+    ]) {
+      if (faceList.length === 0) continue;
+      const faceIndices = new Uint32Array(faceList);
+      const positions = unpackPositions(td, faceIndices);
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      applyStickerAttributes(geo, td, faceIndices);
+      geo.computeVertexNormals();
+
+      if (td.baseColorAtlas) {
+        const atlas = td.baseColorAtlas;
+        const uv = unpackFaceVertexUVs(atlas.faceVertexUVs, faceIndices);
+        geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        const tex = await loadAtlasTexture(atlas.image);
+        const opts: THREE.MeshStandardMaterialParameters = { map: tex };
+        if (isTranslucent && td.faceAlpha) {
+          const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
+          geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
+          opts.vertexColors = true;
+        }
+        const mat = createAdjustedMaterial(opts, stickerAtlasTex, stickerOnly, isTranslucent);
+        meshes.push({ geometry: geo, material: mat });
+      } else {
+        const { array, itemSize } = unpackFaceColors(td, faceIndices);
+        geo.setAttribute('color', new THREE.BufferAttribute(array, itemSize));
+        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly, isTranslucent);
+        meshes.push({ geometry: geo, material: mat });
+      }
+    }
+    return { meshes };
   }
 
   function computeModelBounds(td: TypedMeshData) {
