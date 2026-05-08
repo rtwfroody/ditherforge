@@ -56,7 +56,7 @@ type Args struct {
 	AlphaWrapAlpha                  float32  `arg:"--alpha-wrap-alpha" help:"Alpha-wrap probe radius in mm (default: nozzle diameter)"`
 	AlphaWrapOffset                 float32  `arg:"--alpha-wrap-offset" help:"Alpha-wrap offset distance in mm (default: alpha/30)"`
 	Layer0AdhesionXYScale           float32  `arg:"--layer0-adhesion-xy-scale" default:"2" help:"Multiplier on layer-0 voxel cell XY size for bed adhesion (1 = no enlargement, higher = bigger first-layer color blobs)"`
-	UpperLayerXYScale               float32  `arg:"--upper-layer-xy-scale" default:"1" help:"Multiplier on upper-layer voxel cell XY size relative to the slicer line width (1 = unchanged, <1 = finer detail, >1 = coarser)"`
+	UpperLayerXYScale               float32  `arg:"--upper-layer-xy-scale" default:"1.25" help:"Multiplier on upper-layer voxel cell XY size relative to the slicer line width (1 = at line width, higher = coarser color detail with fewer primitives)"`
 }
 
 func (Args) Description() string {

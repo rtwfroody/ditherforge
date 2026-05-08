@@ -1021,7 +1021,7 @@ func defaultSettings() Settings {
 		AlphaWrapAlpha:        "",
 		AlphaWrapOffset:       "",
 		Layer0AdhesionXYScale: 2,
-		UpperLayerXYScale:     1,
+		UpperLayerXYScale:     1.25,
 		SplitEnabled:          false,
 		SplitAxis:             2,
 		SplitOffset:           0,

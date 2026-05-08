@@ -196,8 +196,8 @@
   // 1 = unchanged; <1 = finer color detail at the cost of more
   // primitives; >1 = coarser. Backend treats 0/negative as "use
   // built-in default" (1).
-  let upperLayerXYScale = $state(1);
-  let committedUpperLayerXYScale = $state(1);
+  let upperLayerXYScale = $state(1.25);
+  let committedUpperLayerXYScale = $state(1.25);
   // Split (cut model into two halves with peg/pocket connectors).
   // See docs/SPLIT.md. Defaults match the design doc's "what most
   // users want" baseline.
@@ -2084,12 +2084,12 @@
                 <div class="flex items-center gap-1.5">
                   <Label>Upper-layer XY scale</Label>
                   <HelpTip>
-                    Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. 1 = unchanged; below 1 yields finer color detail at the cost of more primitives; above 1 coarsens.
+                    Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. Lower values pack more color detail into each layer; higher values coarsen the grid in exchange for fewer primitives. Below ~1.20 the slicer visibly drops detail on vertical walls (and sometimes elsewhere), so values below that often don't make it onto the print.
                   </HelpTip>
                 </div>
                 <span class="text-xs text-muted-foreground w-10 text-right">{upperLayerXYScale.toFixed(2)}</span>
               </div>
-              <Slider type="single" min={0.5} max={2} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
+              <Slider type="single" min={1} max={4} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
             </div>
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">

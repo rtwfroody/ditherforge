@@ -156,7 +156,7 @@ export namespace main {
 	    splitClearanceMM: number;
 	    splitOrientationA: string;
 	    splitOrientationB: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
 	    }
