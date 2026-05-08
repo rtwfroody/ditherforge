@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
@@ -179,5 +181,150 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(original.Stickers) != 1 || original.Stickers[0].ImagePath != near {
 		t.Errorf("SaveSettings mutated caller's Stickers: got %+v", original.Stickers)
+	}
+}
+
+// nonDefaultSettings returns a Settings populated with non-zero,
+// distinctive values for every field. Used by the round-trip
+// preservation test below to detect Go-side data drops.
+//
+// MAINTENANCE CONTRACT: when adding a field to Settings, extend
+// nonDefaultSettings to set it to a non-zero value. (It does NOT
+// need to differ from defaultSettings() — the round-trip test
+// unmarshals into a zero-valued SettingsFile, so a marshal-side
+// drop always surfaces as zero on the load side regardless of the
+// chosen value.) The reflection guard at the head of
+// TestSaveLoadRoundTripPreservesAllFields refuses to run unless
+// every exported top-level field is populated.
+func nonDefaultSettings() Settings {
+	idx := 7
+	return Settings{
+		InputFile:                       "/in.glb",
+		ObjectIndex:                     &idx,
+		SizeMode:                        "scale",
+		SizeValue:                       "123",
+		ScaleValue:                      "2.5",
+		Printer:                         "prusa_xl",
+		NozzleDiameter:                  "0.6",
+		LayerHeight:                     "0.30",
+		BaseColor:                       &ColorSlotSetting{Hex: "#abcdef", Label: "blu", Collection: "C"},
+		BaseMaterialXPath:               "/mat.mtlx",
+		BaseMaterialXTileMM:             7.5,
+		BaseMaterialXTriplanarSharpness: 9,
+		BaseColorMode:                   "texture",
+		ColorSlots: []*ColorSlotSetting{
+			{Hex: "#111111", Label: "a", Collection: "X"},
+			nil,
+			{Hex: "#222222", Label: "b", Collection: "Y"},
+		},
+		InventoryCollection: "Custom",
+		Brightness:          11,
+		Contrast:            -22,
+		Saturation:          33,
+		WarpPins: []WarpPinSetting{
+			{SourceHex: "#aabbcc", TargetHex: "#ddeeff", TargetLabel: "lbl", Sigma: 1.5},
+		},
+		Stickers: []StickerSetting{
+			{
+				ImagePath: "/img.png",
+				Center:    [3]float64{1, 2, 3}, Normal: [3]float64{0, 0, 1}, Up: [3]float64{0, 1, 0},
+				Scale: 2.0, Rotation: 0.5, MaxAngle: 45, Mode: "projection",
+			},
+		},
+		Dither:                "floyd-steinberg",
+		RiemersmaBias:         0.42,
+		BlueNoiseTol:          15,
+		ColorSnap:             3,
+		NoMerge:               true,
+		NoSimplify:            true,
+		Stats:                 true,
+		AlphaWrap:             true,
+		AlphaWrapAlpha:        "0.8",
+		AlphaWrapOffset:       "0.04",
+		Layer0AdhesionXYScale: 3.5,
+		UpperLayerXYScale:     0.7,
+		SplitEnabled:          true,
+		SplitAxis:             1,
+		SplitOffset:           1.5,
+		SplitConnectorStyle:   "dovetail",
+		SplitConnectorCount:   4,
+		SplitConnectorDiamMM:  5,
+		SplitConnectorDepthMM: 4,
+		SplitClearanceMM:      0.25,
+		SplitOrientationA:     "rotated",
+		SplitOrientationB:     "mirrored",
+	}
+}
+
+// TestSaveLoadRoundTripPreservesAllFields walks every exported field
+// of Settings via reflection and asserts that nonDefaultSettings sets
+// it to a non-zero value, then round-trips through (*App).SaveSettings
+// and (*App).LoadSettingsFile and asserts every field returns
+// identical via DeepEqual.
+//
+// This is the structural guarantee that no Settings field can be
+// silently dropped: if a field doesn't appear in JSON output
+// (missing/typo'd json tag, unexported, …) or is missed by the
+// path-transform stage, the unmarshal restores it as the Go zero
+// value (or a transformed-and-not-restored path), which differs
+// from the distinctive non-default value, and the test fails.
+//
+// nonDefaultSettings's path-typed values are rooted at "/" so they
+// are always more than one directory above the test's temp JSON
+// path, which keeps pathForSaving in the absolute-pass-through
+// branch and lets DeepEqual round-trip them verbatim. The relative-
+// path branches are exercised separately by TestSaveLoadRoundTrip.
+func TestSaveLoadRoundTripPreservesAllFields(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("nonDefaultSettings uses POSIX-rooted paths")
+	}
+	original := nonDefaultSettings()
+	rv := reflect.ValueOf(original)
+	for i := 0; i < rv.NumField(); i++ {
+		field := rv.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if rv.Field(i).IsZero() {
+			t.Fatalf("nonDefaultSettings.%s is the Go zero value — extend nonDefaultSettings to give it a non-zero value so the round-trip test can detect drops", field.Name)
+		}
+	}
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "settings.json")
+	app := &App{}
+	if err := app.SaveSettings(path, original); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	res, err := app.LoadSettingsFile(path)
+	if err != nil {
+		t.Fatalf("LoadSettingsFile: %v", err)
+	}
+	if !reflect.DeepEqual(original, res.Settings) {
+		t.Errorf("round-trip lost data:\n  original: %+v\n  loaded:   %+v", original, res.Settings)
+	}
+}
+
+// TestLoadSettingsFillsMissingKeysWithDefaults verifies the
+// pre-populate-then-unmarshal contract: a settings file containing
+// only the DitherForge metadata (no settings keys at all) must load
+// as defaultSettings() rather than the Go zero value. This is the
+// structural guarantee that legacy files predating any field never
+// silently observe Go zeros.
+func TestLoadSettingsFillsMissingKeysWithDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "minimal.json")
+	minimal := []byte(`{"_ditherforge":{"url":"https://github.com/rtwfroody/ditherforge","version":"old"},"settings":{}}`)
+	if err := os.WriteFile(path, minimal, 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	res, err := app.LoadSettingsFile(path)
+	if err != nil {
+		t.Fatalf("LoadSettingsFile: %v", err)
+	}
+	want := defaultSettings()
+	if !reflect.DeepEqual(res.Settings, want) {
+		t.Errorf("missing-keys file should load as defaults:\n  got:  %+v\n  want: %+v", res.Settings, want)
 	}
 }

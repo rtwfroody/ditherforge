@@ -135,6 +135,8 @@ export namespace main {
 	    warpPins: WarpPinSetting[];
 	    stickers?: StickerSetting[];
 	    dither: string;
+	    riemersmaBias: number;
+	    blueNoiseTol: number;
 	    colorSnap: number;
 	    noMerge: boolean;
 	    noSimplify: boolean;
@@ -142,6 +144,8 @@ export namespace main {
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
+	    layer0AdhesionXYScale: number;
+	    upperLayerXYScale: number;
 	    splitEnabled: boolean;
 	    splitAxis: number;
 	    splitOffset: number;
@@ -152,7 +156,7 @@ export namespace main {
 	    splitClearanceMM: number;
 	    splitOrientationA: string;
 	    splitOrientationB: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
 	    }
@@ -180,6 +184,8 @@ export namespace main {
 	        this.warpPins = this.convertValues(source["warpPins"], WarpPinSetting);
 	        this.stickers = this.convertValues(source["stickers"], StickerSetting);
 	        this.dither = source["dither"];
+	        this.riemersmaBias = source["riemersmaBias"];
+	        this.blueNoiseTol = source["blueNoiseTol"];
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
 	        this.noSimplify = source["noSimplify"];
@@ -187,6 +193,8 @@ export namespace main {
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
+	        this.layer0AdhesionXYScale = source["layer0AdhesionXYScale"];
+	        this.upperLayerXYScale = source["upperLayerXYScale"];
 	        this.splitEnabled = source["splitEnabled"];
 	        this.splitAxis = source["splitAxis"];
 	        this.splitOffset = source["splitOffset"];
@@ -422,6 +430,7 @@ export namespace pipeline {
 	    AlphaWrapAlpha: number;
 	    AlphaWrapOffset: number;
 	    Layer0AdhesionXYScale: number;
+	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
 	
 	    static createFrom(source: any = {}) {
@@ -465,6 +474,7 @@ export namespace pipeline {
 	        this.AlphaWrapAlpha = source["AlphaWrapAlpha"];
 	        this.AlphaWrapOffset = source["AlphaWrapOffset"];
 	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
+	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	    }
 	

@@ -860,6 +860,43 @@ type ColorSlotSetting struct {
 }
 
 // Settings contains all user-configurable settings.
+//
+// The save/load round-trip is defended in three layers, each
+// addressing a distinct failure mode that would otherwise cause
+// silent data loss:
+//
+//  1. Frontend → Go field-name drift is caught at TypeScript
+//     compile time by a guard in App.svelte that asserts
+//     `keyof serializeSettings ⊆ keyof main.Settings`. A frontend-
+//     only key never reaches save without failing svelte-check.
+//
+//  2. Go-internal field drops (unexported field, missing/typo'd
+//     json tag, ...) are caught by TestSaveLoadRoundTripPreservesAllFields,
+//     which marshals a fully-populated Settings, unmarshals into
+//     a zero SettingsFile, and asserts DeepEqual: any field whose
+//     JSON encoding doesn't round-trip surfaces as zero post-
+//     unmarshal and the DeepEqual fails. A reflection pre-flight
+//     refuses to run unless every exported top-level field of
+//     Settings is non-zero in nonDefaultSettings — covering scalars
+//     directly, and nested structs as long as they are at least
+//     non-nil/non-empty. (Fully populating leaf scalars inside a
+//     non-zero struct/slice is on the maintainer; the test catches
+//     the dangerous case — a missing tag — even when leaves are
+//     under-populated, because the leaf goes from non-zero to zero
+//     across the round-trip.)
+//
+//  3. Legacy files predating a field would otherwise unmarshal that
+//     field as the Go zero value, which the frontend can't
+//     distinguish from "user set it to zero". LoadSettingsFile pre-
+//     populates with defaultSettings() before unmarshalling, so a
+//     missing key keeps its application default. This makes the
+//     omitempty decision irrelevant to migration semantics — adding
+//     a field needs no thought about omitempty.
+//
+// Together: a maintainer cannot accidentally add a field that
+// silently round-trips as zero. They can still set a wrong default
+// in defaultSettings, but that's a visible "wrong initial value"
+// failure on legacy files, not silent data loss.
 type Settings struct {
 	InputFile           string              `json:"inputFile,omitempty"`
 	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
@@ -896,6 +933,8 @@ type Settings struct {
 	WarpPins            []WarpPinSetting    `json:"warpPins"`
 	Stickers            []StickerSetting    `json:"stickers,omitempty"`
 	Dither              string              `json:"dither"`
+	RiemersmaBias       float64             `json:"riemersmaBias"`
+	BlueNoiseTol        float64             `json:"blueNoiseTol"`
 	ColorSnap           float64             `json:"colorSnap"`
 	NoMerge             bool                `json:"noMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
@@ -903,6 +942,13 @@ type Settings struct {
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
 	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
+	// Voxel-grid XY multipliers. Layer0AdhesionXYScale enlarges
+	// layer-0 cells beyond the slicer line width for bed adhesion;
+	// UpperLayerXYScale tunes upper-layer cell width relative to the
+	// slicer line width. See defaultSettings for the default values
+	// missing-from-JSON keys are filled with on load.
+	Layer0AdhesionXYScale float64             `json:"layer0AdhesionXYScale"`
+	UpperLayerXYScale     float64             `json:"upperLayerXYScale"`
 	// Split panel state. Plain values matching the rest of the struct.
 	// Files saved before these fields existed lack the keys, which
 	// decode as zero in Go and serialise back as the explicit zero
@@ -920,6 +966,73 @@ type Settings struct {
 	SplitClearanceMM      float64 `json:"splitClearanceMM"`
 	SplitOrientationA     string  `json:"splitOrientationA"`
 	SplitOrientationB     string  `json:"splitOrientationB"`
+}
+
+// defaultSettings returns the application-wide default Settings.
+//
+// LoadSettingsFile pre-populates a Settings value with these defaults
+// before unmarshalling the on-disk JSON. Go's encoding/json only
+// overwrites fields the JSON explicitly contains, so any key missing
+// from the file (e.g. an older settings file that pre-dates a feature)
+// retains its default value here rather than collapsing to the Go
+// zero value. This makes the omitempty decision irrelevant for
+// migration correctness: a zero-on-disk always means "user set zero",
+// an absent-on-disk always means "use this default", and a maintainer
+// adding a new field can never accidentally introduce silent data
+// loss by forgetting omitempty.
+//
+// Drift between these values and the frontend's $state initializers
+// is bounded — the frontend's $state values are what a fresh user
+// sees with no settings file at all, while these are what fills in
+// missing keys when an older file is loaded. They should match for
+// consistency, and TestDefaultSettingsRoundTrip catches the most
+// damaging form of drift (Go-side fields that don't round-trip
+// through JSON cleanly).
+func defaultSettings() Settings {
+	allObjects := -1
+	return Settings{
+		ObjectIndex:                     &allObjects,
+		SizeMode:                        "size",
+		SizeValue:                       "100",
+		ScaleValue:                      "1.0",
+		Printer:                         "snapmaker_u1",
+		NozzleDiameter:                  "0.4",
+		LayerHeight:                     "0.20",
+		BaseMaterialXTileMM:             10,
+		BaseMaterialXTriplanarSharpness: 4,
+		BaseColorMode:                   "solid",
+		ColorSlots: []*ColorSlotSetting{
+			nil, nil, nil, nil,
+		},
+		InventoryCollection:   "Inventory",
+		Brightness:            0,
+		Contrast:              0,
+		Saturation:            0,
+		WarpPins:              []WarpPinSetting{},
+		Stickers:              []StickerSetting{},
+		Dither:                "riemersma",
+		RiemersmaBias:         0.85,
+		BlueNoiseTol:          20,
+		ColorSnap:             5,
+		NoMerge:               false,
+		NoSimplify:            false,
+		Stats:                 false,
+		AlphaWrap:             false,
+		AlphaWrapAlpha:        "",
+		AlphaWrapOffset:       "",
+		Layer0AdhesionXYScale: 2,
+		UpperLayerXYScale:     1,
+		SplitEnabled:          false,
+		SplitAxis:             2,
+		SplitOffset:           0,
+		SplitConnectorStyle:   "pegs",
+		SplitConnectorCount:   0,
+		SplitConnectorDiamMM:  3,
+		SplitConnectorDepthMM: 2,
+		SplitClearanceMM:      0.15,
+		SplitOrientationA:     "original",
+		SplitOrientationB:     "original",
+	}
 }
 
 // pathForSaving converts an in-memory absolute path into the form
@@ -1114,7 +1227,11 @@ func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)
 	}
-	var sf SettingsFile
+	// Pre-populate with defaults so JSON keys absent from the file
+	// (older settings predating a field) retain the application
+	// default rather than collapsing to the Go zero value. See
+	// defaultSettings for the rationale.
+	sf := SettingsFile{Settings: defaultSettings()}
 	if err := json.Unmarshal(data, &sf); err != nil {
 		return nil, fmt.Errorf("parse settings: %w", err)
 	}

@@ -192,6 +192,12 @@
   // Backend treats 0/negative as "use built-in default".
   let layer0AdhesionXYScale = $state(2);
   let committedLayer0AdhesionXYScale = $state(2);
+  // Upper-layer voxel-XY multiplier relative to the slicer line width.
+  // 1 = unchanged; <1 = finer color detail at the cost of more
+  // primitives; >1 = coarser. Backend treats 0/negative as "use
+  // built-in default" (1).
+  let upperLayerXYScale = $state(1);
+  let committedUpperLayerXYScale = $state(1);
   // Split (cut model into two halves with peg/pocket connectors).
   // See docs/SPLIT.md. Defaults match the design doc's "what most
   // users want" baseline.
@@ -901,6 +907,7 @@
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
       layer0AdhesionXYScale,
+      upperLayerXYScale,
       splitEnabled,
       splitAxis,
       splitOffset,
@@ -913,6 +920,36 @@
       splitOrientationB,
     };
   }
+
+  // Compile-time guard: serializeSettings() and Go's Settings struct
+  // (reflected via the Wails-generated main.Settings TS class) must
+  // have IDENTICAL key sets. Two failure modes are covered:
+  //
+  //   • Frontend → Go: a key in serializeSettings missing from the
+  //     Go struct is silently dropped by the Wails marshaller and
+  //     disappears on the next load.
+  //
+  //   • Go → frontend: a Go field that serializeSettings forgets to
+  //     emit is never saved at all — looks like the user can change
+  //     the setting but its value never reaches disk. This is the
+  //     direction that originally hid riemersmaBias / blueNoiseTol /
+  //     layer0AdhesionXYScale / upperLayerXYScale and is what the
+  //     symmetric `extends` below catches.
+  //
+  // We compare keys only (not value types) to sidestep Wails
+  // generator quirks around []*T (drops null) and [N]T (widens to
+  // T[]). When this guard fires it resolves the type to `never`,
+  // and `const _: never = true` fails compilation.
+  type _GoSettingsKeys = keyof Omit<main.Settings, 'convertValues'>;
+  type _FrontendSettingsKeys = keyof ReturnType<typeof serializeSettings>;
+  type _SettingsKeysMatchGo =
+    _FrontendSettingsKeys extends _GoSettingsKeys
+      ? _GoSettingsKeys extends _FrontendSettingsKeys
+        ? true
+        : never
+      : never;
+  const _settingsKeysMatchGo: _SettingsKeysMatchGo = true;
+  void _settingsKeysMatchGo;
 
   // Validation helpers for applySettings. Every field should fall back
   // to its FACTORY_DEFAULTS value when missing from the JSON or set to
@@ -1061,6 +1098,7 @@
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
     { key: 'layer0AdhesionXYScale',           validate: pickNumber,                                        apply: (v) => { layer0AdhesionXYScale = v; committedLayer0AdhesionXYScale = v; } },
+    { key: 'upperLayerXYScale',               validate: pickNumber,                                        apply: (v) => { upperLayerXYScale = v; committedUpperLayerXYScale = v; } },
     { key: 'splitEnabled',                    validate: pickBool,                                          apply: (v) => { splitEnabled = v; } },
     { key: 'splitAxis',                       validate: (v, d) => pickIntEnum(v, SPLIT_AXIS_VALUES, d),    apply: (v) => { splitAxis = v; } },
     { key: 'splitOffset',                     validate: pickNumber,                                        apply: (v) => { splitOffset = v; } },
@@ -1358,6 +1396,7 @@
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
       AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
       Layer0AdhesionXYScale: committedLayer0AdhesionXYScale,
+      UpperLayerXYScale: committedUpperLayerXYScale,
       Split: {
         Enabled: splitEnabled,
         Axis: splitAxis,
@@ -2039,6 +2078,18 @@
                 <span class="text-xs text-muted-foreground w-10 text-right">{layer0AdhesionXYScale.toFixed(1)}</span>
               </div>
               <Slider type="single" min={1} max={15} step={0.5} value={layer0AdhesionXYScale} onValueChange={(v: number) => layer0AdhesionXYScale = v} onValueCommit={(v: number) => committedLayer0AdhesionXYScale = v} />
+            </div>
+            <div class="space-y-1">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-1.5">
+                  <Label>Upper-layer XY scale</Label>
+                  <HelpTip>
+                    Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. 1 = unchanged; below 1 yields finer color detail at the cost of more primitives; above 1 coarsens.
+                  </HelpTip>
+                </div>
+                <span class="text-xs text-muted-foreground w-10 text-right">{upperLayerXYScale.toFixed(2)}</span>
+              </div>
+              <Slider type="single" min={0.5} max={2} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
             </div>
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">

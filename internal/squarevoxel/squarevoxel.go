@@ -51,6 +51,12 @@ const (
 // bigger footprint.
 const Layer0AdhesionXYScale = 2.0
 
+// UpperLayerXYScale multiplies upper-layer voxel cell XY size relative
+// to the slicer's line width. 1.0 keeps cells at the slicer's native
+// width; <1 yields finer color detail at the cost of more primitives,
+// >1 coarsens.
+const UpperLayerXYScale = 1.0
+
 // regionParams holds parameters for voxelizing a Z-range of the model on a
 // specific XY grid.
 //

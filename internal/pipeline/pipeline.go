@@ -103,7 +103,11 @@ type Options struct {
 	// 0 (zero value) or negative falls back to
 	// squarevoxel.Layer0AdhesionXYScale; 1 = no enlargement.
 	Layer0AdhesionXYScale float32
-	Split                 SplitSettings `json:"Split,omitempty"`
+	// UpperLayerXYScale multiplies upper-layer voxel cell XY size
+	// relative to the slicer's line width. 0 (zero value) or negative
+	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
+	UpperLayerXYScale float32
+	Split             SplitSettings `json:"Split,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -596,20 +600,25 @@ func voxelCellSizes(opts Options) (cells voxelCells) {
 		Layer0Z:  opts.LayerHeight,
 		UpperZ:   opts.LayerHeight,
 	}
-	// Apply the layer-0 adhesion safety multiplier at the very end so
-	// it stacks on top of whichever Layer0XY source wins below. The
+	// Apply Layer0AdhesionXYScale and UpperLayerXYScale at the very
+	// end so they stack on top of whichever Layer0XY/UpperXY source
+	// wins below (slicer profile or nozzle×constant fallback). The
 	// named return lets the defer mutate the value the caller sees.
-	// Zero/negative falls back to the package default so library
-	// callers using Options{} (and tests) see the same behavior they
-	// did before the field existed; the CLI sets a default of 2 via
-	// flag tag, and the GUI's slider min is 1, so 0 is unreachable
-	// from those paths.
+	// Zero/negative on either field falls back to the squarevoxel
+	// package default so library callers using Options{} (and tests)
+	// see the same behavior they did before the field existed; the
+	// CLI defaults and GUI slider mins both keep 0 unreachable.
 	adhesionScale := opts.Layer0AdhesionXYScale
 	if adhesionScale <= 0 {
 		adhesionScale = squarevoxel.Layer0AdhesionXYScale
 	}
+	upperScale := opts.UpperLayerXYScale
+	if upperScale <= 0 {
+		upperScale = squarevoxel.UpperLayerXYScale
+	}
 	defer func() {
 		cells.Layer0XY *= adhesionScale
+		cells.UpperXY *= upperScale
 	}()
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
