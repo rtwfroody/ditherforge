@@ -695,6 +695,95 @@ func TestImageGraphRequiresResolver(t *testing.T) {
 	}
 }
 
+// TestTiledImageNode covers the MaterialX tiledimage node: same texture
+// sampling as image but with uvtiling/uvoffset applied to the UV before
+// lookup, and periodic addressing implicit. Polyhaven 2k_8b packs use
+// this so the test verifies (a) the tiling multiplier wraps correctly,
+// (b) no inputs at all still works (defaults to uvtiling=1, offset=0),
+// and (c) realworldimagesize/realworldtilesize scale by their ratio.
+func TestTiledImageNode(t *testing.T) {
+	const tmpl = `<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <texcoord name="uv" type="vector2">
+      <input name="index" type="integer" value="0"/>
+    </texcoord>
+    <tiledimage name="img" type="color3">
+      <input name="texcoord" type="vector2" nodename="uv"/>
+      <input name="file" type="filename" value="stripe.png"/>
+      <input name="filtertype" type="string" value="closest"/>
+EXTRA
+    </tiledimage>
+    <output name="out" type="color3" nodename="img"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>`
+	pngBytes := stripePNG(t)
+	// Spec UV transform (1.39 stdlib NG_tiledimage_*):
+	//   uv = ((texcoord*uvtiling) - uvoffset) * realworldtilesize/realworldimagesize
+	// Note offset is *subtracted* and the realworld ratio is rwTile/rwImg —
+	// pin both directions explicitly so a future regression flips loudly.
+	cases := []struct {
+		name  string
+		extra string
+		uv    [2]float64
+		want  [3]float64
+	}{
+		// No extra inputs: identity; u=0.125 → red pixel (centre of pixel 0).
+		{"defaults", "", [2]float64{0.125, 0.5}, [3]float64{1, 0, 0}},
+		// uvtiling=2,1 doubles U; u=0.5625 → 1.125 → wraps periodically to 0.125 → red.
+		{"uvtiling-wraps",
+			`      <input name="uvtiling" type="vector2" value="2.0, 1.0"/>`,
+			[2]float64{0.5625, 0.5}, [3]float64{1, 0, 0}},
+		// uvoffset=0.25,0 *subtracts* 0.25 from U; u=0.625 → 0.375 → green.
+		{"uvoffset-subtracts",
+			`      <input name="uvoffset" type="vector2" value="0.25, 0.0"/>`,
+			[2]float64{0.625, 0.5}, [3]float64{0, 1, 0}},
+		// realworldtilesize=2 with rwImg=1 doubles U (rwTile/rwImg);
+		// u=0.0625 → 0.125 → red. Pins direction of the ratio.
+		{"realworld-ratio-tile-over-image",
+			`      <input name="realworldimagesize" type="vector2" value="1.0, 1.0"/>
+      <input name="realworldtilesize" type="vector2" value="2.0, 1.0"/>`,
+			[2]float64{0.0625, 0.5}, [3]float64{1, 0, 0}},
+		// Only realworldtilesize wired — realworldimagesize must default
+		// to (1,1) independently per spec; equivalent to the previous case.
+		{"realworld-tile-only-defaults-image-to-1",
+			`      <input name="realworldtilesize" type="vector2" value="2.0, 1.0"/>`,
+			[2]float64{0.0625, 0.5}, [3]float64{1, 0, 0}},
+		// Only realworldimagesize wired — rwTile defaults to 1, so a
+		// 2× image compresses to half (UV halves). u=0.25 → 0.125 → red.
+		{"realworld-image-only-defaults-tile-to-1",
+			`      <input name="realworldimagesize" type="vector2" value="2.0, 1.0"/>`,
+			[2]float64{0.25, 0.5}, [3]float64{1, 0, 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mtlx := strings.Replace(tmpl, "EXTRA", tc.extra, 1)
+			doc, err := materialx.ParseBytes([]byte(mtlx))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			doc.Resolver = materialx.NewMapResolver(map[string][]byte{"stripe.png": pngBytes})
+			s, err := doc.DefaultBaseColorSampler()
+			if err != nil {
+				t.Fatalf("sampler: %v", err)
+			}
+			got := s.SampleAt(materialx.SampleContext{UV: tc.uv})
+			for i := range 3 {
+				if math.Abs(got[i]-tc.want[i]) > 1e-9 {
+					t.Errorf("Sample(uv=%v): got %v, want %v", tc.uv, got, tc.want)
+					break
+				}
+			}
+		})
+	}
+}
+
 // TestHSVAdjustShiftsHueAndScalesSV exercises the hsvadjust node added
 // for Polyhaven-style PBR packs (Bricks_2k_8b et al.). Round-trip
 // through HSV with no shift should leave color unchanged; a 1/3-cycle

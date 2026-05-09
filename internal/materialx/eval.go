@@ -337,6 +337,7 @@ func init() {
 		"floor":      buildUnary(math.Floor),
 		"mix":        buildMix,
 		"image":      buildImage,
+		"tiledimage": buildTiledImage,
 		"extract":    buildExtract,
 		"hsvadjust":  buildHSVAdjust,
 	}
@@ -639,6 +640,93 @@ func buildImage(c *compiler, n *node) (evalFn, error) {
 	}, nil
 }
 
+// buildTiledImage implements MaterialX tiledimage. Per the 1.39 stdlib
+// nodegraph (NG_tiledimage_*), the UV transform is
+//
+//	uv = ((texcoord * uvtiling) - uvoffset) * realworldtilesize / realworldimagesize
+//
+// Note that uvoffset is *subtracted* (not added) and realworld scaling
+// uses rwTile/rwImg (not the inverse). Each input defaults to (1,1)
+// independently, so wiring just one of the realworld pair still
+// applies. Address mode is hardcoded periodic — tiling is the node's
+// purpose. Channel/output handling matches buildImage.
+func buildTiledImage(c *compiler, n *node) (evalFn, error) {
+	c.usesUV = true
+	fileIn, ok := n.inputsByName["file"]
+	if !ok {
+		return nil, fmt.Errorf("tiledimage node: missing required %q input", "file")
+	}
+	if fileIn.RawString == "" {
+		return nil, fmt.Errorf("tiledimage node: %q input has no path", "file")
+	}
+	tex, err := c.images.load(c.resolver, fileIn.RawString, fileIn.Colorspace)
+	if err != nil {
+		return nil, fmt.Errorf("tiledimage node: %w", err)
+	}
+	filter := parseFilterType(stringInputOrDefault(n, "filtertype", "linear"))
+
+	uvFn, err := c.compileOptional(n, "texcoord")
+	if err != nil {
+		return nil, err
+	}
+	tilingFn, err := c.compileOptional(n, "uvtiling")
+	if err != nil {
+		return nil, err
+	}
+	offsetFn, err := c.compileOptional(n, "uvoffset")
+	if err != nil {
+		return nil, err
+	}
+	rwImgFn, err := c.compileOptional(n, "realworldimagesize")
+	if err != nil {
+		return nil, err
+	}
+	rwTileFn, err := c.compileOptional(n, "realworldtilesize")
+	if err != nil {
+		return nil, err
+	}
+
+	out := n.OutputType
+	arity := vecArity(out)
+
+	return func(ctx *SampleContext, scratch []Value) Value {
+		var uv [2]float64
+		if uvFn != nil {
+			v := uvFn(ctx, scratch)
+			uv = [2]float64{v.Vec[0], v.Vec[1]}
+		} else {
+			uv = ctx.UV
+		}
+		tiling := vec2OrDefault(tilingFn, ctx, scratch, [2]float64{1, 1})
+		offset := vec2OrDefault(offsetFn, ctx, scratch, [2]float64{0, 0})
+		rwImg := vec2OrDefault(rwImgFn, ctx, scratch, [2]float64{1, 1})
+		rwTile := vec2OrDefault(rwTileFn, ctx, scratch, [2]float64{1, 1})
+		uv[0] = (uv[0]*tiling[0] - offset[0]) * rwTile[0] / rwImg[0]
+		uv[1] = (uv[1]*tiling[1] - offset[1]) * rwTile[1] / rwImg[1]
+		rgba := tex.sample(uv, AddressPeriodic, AddressPeriodic, filter)
+		v := Value{Type: out}
+		switch arity {
+		case 0:
+			v.Type = TypeFloat
+			v.F = rgba[0]
+			return v
+		case 2:
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
+		case 3:
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
+			v.Vec[2] = rgba[2]
+		case 4:
+			v.Vec[0] = rgba[0]
+			v.Vec[1] = rgba[1]
+			v.Vec[2] = rgba[2]
+			v.Vec[3] = rgba[3]
+		}
+		return v
+	}, nil
+}
+
 // buildHSVAdjust implements MaterialX hsvadjust: convert RGB to HSV,
 // add amount.x to hue (cycles, wraps into [0, 1)), multiply S by
 // amount.y, multiply V by amount.z, convert back.
@@ -808,6 +896,14 @@ func floatOrDefault(fn evalFn, ctx *SampleContext, scratch []Value, def float64)
 		return def
 	}
 	return fn(ctx, scratch).AsFloat()
+}
+
+func vec2OrDefault(fn evalFn, ctx *SampleContext, scratch []Value, def [2]float64) [2]float64 {
+	if fn == nil {
+		return def
+	}
+	b := broadcast(fn(ctx, scratch))
+	return [2]float64{b[0], b[1]}
 }
 
 func clampF(v, lo, hi float64) float64 {
