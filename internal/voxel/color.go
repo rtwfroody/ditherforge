@@ -38,13 +38,34 @@ func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig,
 	for i, c := range cells {
 		cellColors[i] = c.Color
 	}
+	// All-or-nothing: production voxelization populates Area on every
+	// cell, so cellWeights gets the per-cell areas. Synthetic/test
+	// cell slices that don't populate Area on any cell get nil
+	// (legacy uniform weighting). Mixed input — some Area populated,
+	// some not — falls back to nil; CellColorHistogram and the dither
+	// kernels use the same all-or-nothing rule via effectiveAreas, so
+	// the palette and dither stages stay consistent.
+	var cellWeights []float32
+	allHaveAreas := true
+	for _, c := range cells {
+		if c.Area <= 0 {
+			allHaveAreas = false
+			break
+		}
+	}
+	if allHaveAreas {
+		cellWeights = make([]float32, len(cells))
+		for i, c := range cells {
+			cellWeights[i] = c.Area
+		}
+	}
 
 	if len(pcfg.Inventory) > 0 {
 		filtered := filterInventory(pcfg.Inventory, pcfg.Locked)
 		if len(filtered) == 0 {
 			return nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
-		selected, err := palette.SelectFromInventory(ctx, cellColors, filtered, remaining, lockedColors, dithering, tracker)
+		selected, err := palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, remaining, lockedColors, dithering, tracker)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -456,6 +477,27 @@ type Neighbor struct {
 	Weight float32
 }
 
+// effectiveAreas returns a per-cell area slice for use by area-weighted
+// dithering. All-or-nothing: if every cell has Area > 0 (production
+// path), returns those areas verbatim. If any cell has Area <= 0
+// (synthetic / test slices), returns a uniform-1 slice so the dither
+// kernel reduces to the legacy unweighted form. Mixed inputs would
+// silently overweight the zero-area cells, so we fall back rather than
+// guess. Always returns a slice of len(cells); never nil.
+func effectiveAreas(cells []ActiveCell) []float32 {
+	areas := make([]float32, len(cells))
+	for i, c := range cells {
+		if c.Area <= 0 {
+			for j := range areas {
+				areas[j] = 1
+			}
+			return areas
+		}
+		areas[i] = c.Area
+	}
+	return areas
+}
+
 // BuildNeighbors computes the neighbor list for each cell using within-grid
 // CellKey adjacency (26-connected). Face-adjacent weight 1.0, edge 0.1,
 // corner 0.01.
@@ -614,6 +656,7 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	assignments := make([]int32, n)
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
+	areas := effectiveAreas(cells)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -646,6 +689,12 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 		eG := g - float32(chosen[1])
 		eB := b - float32(chosen[2])
 
+		// Area-weighted error diffusion: outgoing mass is eR*aSender;
+		// each neighbor's color-domain shift = mass * adjacency_fraction
+		// / aReceiver. Mass-preserving across the diffusion step (modulo
+		// the documented stranded-cell drop). With uniform areas the
+		// aSender/aReceiver factor reduces to 1.
+		aSender := areas[idx]
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -656,7 +705,7 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -753,6 +802,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
 	targets := make([][3]float32, n)
+	areas := effectiveAreas(cells)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -786,6 +836,8 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		eG := g - float32(chosen[1])
 		eB := b - float32(chosen[2])
 
+		// Area-weighted diffusion (see DitherWithNeighbors).
+		aSender := areas[idx]
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -796,7 +848,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -915,6 +967,7 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	assignments := make([]int32, n)
 	errBuf := make([][3]float32, n)
 	processed := make([]bool, n)
+	areas := effectiveAreas(cells)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -950,6 +1003,9 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 		// Forward neighbors: same predicate as dizzy. The only
 		// algorithmic difference between the two functions is the
 		// traversal order — random vs. (Grid, Layer, Row, Col).
+		// Area weighting is identical to DitherWithNeighbors — see
+		// that function for the mass-conservation rationale.
+		aSender := areas[idx]
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -960,7 +1016,7 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -1062,11 +1118,13 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		return nil, nil
 	}
 
-	// Weights indexed by age (0 = newest, L-1 = oldest).
-	// Normalized so steady-state DC gain is 1 — i.e., a constant
-	// error e replicated through the window contributes exactly e
-	// of corrected target back to each subsequent cell, preserving
-	// chroma in expectation.
+	// Weights indexed by age (0 = newest, L-1 = oldest). Normalized
+	// so a same-area window holds DC gain 1 (a constant residual e
+	// replicated through the window returns e back through the
+	// weighted average). With non-uniform per-cell areas the
+	// consumption uses a mass-weighted average (Σ w·r·a / Σ w·a),
+	// which preserves DC gain regardless of the area distribution
+	// across slots.
 	L := RiemersmaWindowSize
 	weights := make([]float32, L)
 	var total float32
@@ -1080,13 +1138,21 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 
 	tour := buildRiemersmaTour(cells, neighbors)
 
-	// Circular buffer of error vectors. head points at the slot
-	// that will be overwritten next (i.e., currently the oldest).
-	window := make([][3]float32, L)
+	// Circular buffer storing per-slot (residual, sender_area).
+	// head points at the slot that will be overwritten next (i.e.,
+	// currently the oldest). Empty slots at start-up have area 0
+	// and contribute nothing to either numerator or denominator of
+	// the mass-weighted average.
+	type slot struct {
+		residual [3]float32
+		area     float32
+	}
+	window := make([]slot, L)
 	head := 0
 
 	assigns := make([]int32, n)
 	dI := make([]float32, len(pal))
+	areas := effectiveAreas(cells)
 	for ti, idx := range tour {
 		if ti%1000 == 0 {
 			if ctx.Err() != nil {
@@ -1095,15 +1161,24 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			tracker.StageProgress("Dithering", ti)
 		}
 
-		// Weighted sum of in-window errors. Slot indexed by age:
-		// age 0 (newest) lives at (head - 1 + L) % L, age k at
-		// (head - 1 - k + L) % L.
-		var eR, eG, eB float32
+		// Mass-weighted average of in-window residuals: each slot
+		// contributes (weight × area) of vote toward that slot's
+		// residual color. Slot indexed by age: age 0 (newest) lives
+		// at (head - 1 + L) % L, age k at (head - 1 - k + L) % L.
+		var numR, numG, numB, den float32
 		for k := 0; k < L; k++ {
-			slot := (head + L - 1 - k) % L
-			eR += weights[k] * window[slot][0]
-			eG += weights[k] * window[slot][1]
-			eB += weights[k] * window[slot][2]
+			s := &window[(head+L-1-k)%L]
+			wa := weights[k] * s.area
+			numR += wa * s.residual[0]
+			numG += wa * s.residual[1]
+			numB += wa * s.residual[2]
+			den += wa
+		}
+		var eR, eG, eB float32
+		if den > 0 {
+			eR = numR / den
+			eG = numG / den
+			eB = numB / den
 		}
 
 		iR := float32(cells[idx].Color[0])
@@ -1152,9 +1227,10 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		assigns[idx] = int32(bestIdx)
 
 		chosen := pal[bestIdx]
-		window[head][0] = r - float32(chosen[0])
-		window[head][1] = g - float32(chosen[1])
-		window[head][2] = b - float32(chosen[2])
+		window[head].residual[0] = r - float32(chosen[0])
+		window[head].residual[1] = g - float32(chosen[1])
+		window[head].residual[2] = b - float32(chosen[2])
+		window[head].area = areas[idx]
 		head = (head + 1) % L
 	}
 	return assigns, nil
@@ -1242,7 +1318,11 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	}
 
 	tour := buildRiemersmaTour(cells, neighbors)
-	window := make([][3]float32, L)
+	type slot struct {
+		residual [3]float32
+		area     float32
+	}
+	window := make([]slot, L)
 	head := 0
 
 	assigns := make([]int32, n)
@@ -1252,6 +1332,7 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	s1 := make([]float32, len(pal))
 	res0 := make([][3]float32, len(pal))
 	res1 := make([][3]float32, len(pal))
+	areas := effectiveAreas(cells)
 
 	step := 2
 	if slide {
@@ -1266,13 +1347,24 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			tracker.StageProgress("Dithering", ti)
 		}
 
-		// Diffused error from window — same for both cells in the pair.
-		var eR, eG, eB float32
+		// Mass-weighted average of past residuals — the same
+		// correction is applied to both cells of the joint pair (the
+		// diffused error reflects past work, not the current cells'
+		// areas). See Riemersma for the DC-gain rationale.
+		var numR, numG, numB, den float32
 		for k := 0; k < L; k++ {
-			slot := (head + L - 1 - k) % L
-			eR += weights[k] * window[slot][0]
-			eG += weights[k] * window[slot][1]
-			eB += weights[k] * window[slot][2]
+			s := &window[(head+L-1-k)%L]
+			wa := weights[k] * s.area
+			numR += wa * s.residual[0]
+			numG += wa * s.residual[1]
+			numB += wa * s.residual[2]
+			den += wa
+		}
+		var eR, eG, eB float32
+		if den > 0 {
+			eR = numR / den
+			eG = numG / den
+			eB = numB / den
 		}
 
 		idx0 := tour[ti]
@@ -1282,6 +1374,7 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			idx1 = tour[ti+1]
 		}
 
+		a0 := areas[idx0]
 		i0R := float32(cells[idx0].Color[0])
 		i0G := float32(cells[idx0].Color[1])
 		i0B := float32(cells[idx0].Color[2])
@@ -1320,7 +1413,7 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		}
 
 		if !hasPartner {
-			// Single-cell tail: pick cell 0 alone, push residual.
+			// Single-cell tail: pick cell 0 alone, push (residual, area).
 			bestA := 0
 			bestScore := s0[0]
 			for a := 1; a < len(pal); a++ {
@@ -1330,13 +1423,15 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 				}
 			}
 			assigns[idx0] = int32(bestA)
-			window[head][0] = res0[bestA][0]
-			window[head][1] = res0[bestA][1]
-			window[head][2] = res0[bestA][2]
+			window[head].residual[0] = res0[bestA][0]
+			window[head].residual[1] = res0[bestA][1]
+			window[head].residual[2] = res0[bestA][2]
+			window[head].area = a0
 			head = (head + 1) % L
 			break
 		}
 
+		a1 := areas[idx1]
 		i1R := float32(cells[idx1].Color[0])
 		i1G := float32(cells[idx1].Color[1])
 		i1B := float32(cells[idx1].Color[2])
@@ -1396,9 +1491,10 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		}
 
 		assigns[idx0] = int32(bestA)
-		window[head][0] = res0[bestA][0]
-		window[head][1] = res0[bestA][1]
-		window[head][2] = res0[bestA][2]
+		window[head].residual[0] = res0[bestA][0]
+		window[head].residual[1] = res0[bestA][1]
+		window[head].residual[2] = res0[bestA][2]
+		window[head].area = a0
 		head = (head + 1) % L
 
 		if !slide {
@@ -1406,9 +1502,10 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			// residual. Sliding mode skips this — cell 1 will be
 			// re-evaluated jointly with cell 2 on the next iteration.
 			assigns[idx1] = int32(bestB)
-			window[head][0] = res1[bestB][0]
-			window[head][1] = res1[bestB][1]
-			window[head][2] = res1[bestB][2]
+			window[head].residual[0] = res1[bestB][0]
+			window[head].residual[1] = res1[bestB][1]
+			window[head].residual[2] = res1[bestB][2]
+			window[head].area = a1
 			head = (head + 1) % L
 		}
 	}

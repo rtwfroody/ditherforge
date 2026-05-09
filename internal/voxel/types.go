@@ -28,12 +28,20 @@ type Config struct {
 // 1 in the split path. Downstream stages (Merge, export3mf) use this
 // to partition cells per half so the 3MF output emits one
 // `<object>` entry per half.
+//
+// Area is the total clipped surface area (in mesh units²) of all
+// triangles that pass through this voxel cell. Used to weight the
+// cell's vote in palette selection and to scale its error mass in
+// dithering, so sliver voxels don't overwhelm full-coverage voxels.
+// Zero means "unknown" — palette and dither code treat zero as unit
+// weight so test/synthetic ActiveCell constructions need not set it.
 type ActiveCell struct {
 	Grid            uint8
 	Col, Row, Layer int
 	Cx, Cy, Cz      float32
 	Color           [3]uint8
 	HalfIdx         uint8
+	Area            float32
 }
 
 // CellKey is a canonical grid cell identifier.

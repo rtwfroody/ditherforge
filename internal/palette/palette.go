@@ -127,15 +127,37 @@ type WeightedLabSample struct {
 // CellColorHistogram builds a deduplicated, weighted Lab sample set from cell
 // RGB colors. Many cells share the same color, so this is much smaller than
 // the full cell list.
-func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
-	hist := make(map[[3]uint8]int, len(colors)/10)
-	for _, c := range colors {
-		// Quantize to 7 bits per channel to merge near-identical colors.
+//
+// If weights is nil, every cell contributes Weight=1 (legacy behavior:
+// each voxel votes equally). If weights is non-nil it must be parallel
+// to colors; per-cell area is summed into the bucket's Weight so sliver
+// voxels don't outvote full-coverage voxels in palette selection. Count
+// always tracks raw cell count (used by topSamples for diversity
+// trimming; that is independent of physical area).
+func CellColorHistogram(colors [][3]uint8, weights []float32) []WeightedLabSample {
+	type bucket struct {
+		count  int
+		weight float64
+	}
+	hist := make(map[[3]uint8]bucket, len(colors)/10)
+	useWeights := weights != nil
+	for i, c := range colors {
 		q := [3]uint8{c[0] &^ 1, c[1] &^ 1, c[2] &^ 1}
-		hist[q]++
+		b := hist[q]
+		b.count++
+		if useWeights {
+			w := float64(weights[i])
+			if w <= 0 {
+				w = 1
+			}
+			b.weight += w
+		} else {
+			b.weight += 1
+		}
+		hist[q] = b
 	}
 	samples := make([]WeightedLabSample, 0, len(hist))
-	for rgb, count := range hist {
+	for rgb, b := range hist {
 		cf := colorful.Color{
 			R: float64(rgb[0]) / 255.0,
 			G: float64(rgb[1]) / 255.0,
@@ -143,8 +165,8 @@ func CellColorHistogram(colors [][3]uint8) []WeightedLabSample {
 		}
 		var s WeightedLabSample
 		s.Lab[0], s.Lab[1], s.Lab[2] = cf.Lab()
-		s.Count = count
-		s.Weight = float64(count)
+		s.Count = b.count
+		s.Weight = b.weight
 		samples = append(samples, s)
 	}
 	return samples
@@ -357,12 +379,16 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 // When dithering is true, uses hull-based scoring that accounts for
 // dithering's ability to mix colors. When false, uses nearest-color scoring
 // that minimizes the error when each cell gets exactly one color.
-func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool, tracker progress.Tracker) ([]InventoryEntry, error) {
+//
+// cellWeights, if non-nil, must be parallel to cellColors and gives each
+// cell's voting weight (typically the cell's clipped triangle surface
+// area). When nil, every cell votes equally.
+func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights []float32, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool, tracker progress.Tracker) ([]InventoryEntry, error) {
 	if n >= len(inventory) {
 		return inventory, nil
 	}
 
-	samples := CellColorHistogram(cellColors)
+	samples := CellColorHistogram(cellColors, cellWeights)
 	ApplyChromaWeighting(samples)
 	samples = topSamples(samples, 5000)
 

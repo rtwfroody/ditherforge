@@ -95,25 +95,31 @@ type regionParams struct {
 	LayerHi  int // inclusive, absolute
 }
 
-// voxelizeRegion finds cell keys that overlap the model in the given Z-range.
-// Increments counter and emits StageProgress("Voxelizing", current) once per
-// 1000-face chunk. Pass progress.NullTracker{} and a discard counter to
-// silence reporting.
+// voxelizeRegion finds cell keys that overlap the model in the given Z-range
+// and accumulates per-cell triangle surface area (Sutherland-Hodgman clip
+// against each cell's AABB). Increments counter and emits
+// StageProgress("Voxelizing", current) once per 1000-face chunk. Pass
+// progress.NullTracker{} and a discard counter to silence reporting.
+//
+// Cell membership is gated by TriangleAABBOverlap (half-open boundaries) so a
+// triangle exactly on a cell-cell boundary is counted in exactly one cell —
+// matching the legacy behavior. Within an included cell, area is the clipped
+// polygon area, which is a stricter quantity than mere overlap.
 func voxelizeRegion(
 	ctx context.Context,
 	model *loader.LoadedModel,
 	p regionParams,
 	tracker progress.Tracker,
 	counter *atomic.Int64,
-) map[voxel.CellKey]struct{} {
+) map[voxel.CellKey]float32 {
 	halfExtent := [3]float32{p.CellSize / 2, p.CellSize / 2, p.LayerH / 2}
-	cellSet := make(map[voxel.CellKey]struct{})
+	cellAreas := make(map[voxel.CellKey]float32)
 	chunk := int64(0)
 	for fi := range model.Faces {
 		if fi%1000 == 0 {
 			if ctx.Err() != nil {
 				counter.Add(chunk)
-				return cellSet
+				return cellAreas
 			}
 			counter.Add(chunk)
 			chunk = 0
@@ -156,18 +162,33 @@ func voxelizeRegion(
 				for layer := layerMin; layer <= layerMax; layer++ {
 					cz := p.ZOrigin + float32(layer-p.LayerLo)*p.LayerH
 					center := [3]float32{cx, cy, cz}
-					if voxel.TriangleAABBOverlap(v0, v1, v2, center, halfExtent) {
-						cellSet[voxel.CellKey{Grid: p.Grid, Col: col, Row: row, Layer: layer}] = struct{}{}
+					if !voxel.TriangleAABBOverlap(v0, v1, v2, center, halfExtent) {
+						continue
 					}
+					area := voxel.TriangleAABBClippedArea(v0, v1, v2, center, halfExtent)
+					if area <= 0 {
+						// Overlap reported "yes" but clip degenerated to
+						// a point/line (e.g. a triangle vertex grazing
+						// the cell). Fall back to a tiny non-zero area —
+						// roughly at float32's noise floor for the cell's
+						// area scale — so the cell still participates in
+						// palette / dither weighting. Weighting code
+						// treats zero as "unknown / use unit weight,"
+						// which would over-represent the sliver.
+						area = 1e-7 * p.CellSize * p.CellSize
+					}
+					cellAreas[voxel.CellKey{Grid: p.Grid, Col: col, Row: row, Layer: layer}] += area
 				}
 			}
 		}
 	}
 	counter.Add(chunk)
-	return cellSet
+	return cellAreas
 }
 
-// colorCells samples colors for all keys in cellSet and returns ActiveCells.
+// colorCells samples colors for all keys in cellAreas and returns ActiveCells.
+// Each emitted cell carries its accumulated triangle surface area for use by
+// downstream area-weighted palette selection and dithering.
 //
 // stickerModel/stickerSI may be nil; when non-nil and distinct from
 // colorModel, decal lookups go against that mesh (alpha-wrap mode).
@@ -182,7 +203,7 @@ func colorCells(
 	si *voxel.SpatialIndex,
 	stickerModel *loader.LoadedModel,
 	stickerSI *voxel.SpatialIndex,
-	cellSet map[voxel.CellKey]struct{},
+	cellAreas map[voxel.CellKey]float32,
 	p regionParams,
 	tracker progress.Tracker,
 	counter *atomic.Int64,
@@ -192,8 +213,8 @@ func colorCells(
 	baseColorOverride voxel.BaseColorOverride,
 ) ([]voxel.ActiveCell, error) {
 	colorRadius := p.CellSize * 3
-	cellKeys := make([]voxel.CellKey, 0, len(cellSet))
-	for k := range cellSet {
+	cellKeys := make([]voxel.CellKey, 0, len(cellAreas))
+	for k := range cellAreas {
 		cellKeys = append(cellKeys, k)
 	}
 
@@ -263,6 +284,7 @@ func colorCells(
 					Cx: cx, Cy: cy, Cz: cz,
 					Color:   [3]uint8{rgba[0], rgba[1], rgba[2]},
 					HalfIdx: halfIdx,
+					Area:    cellAreas[k],
 				})
 			}
 			workerCells[workerIdx] = local
@@ -455,8 +477,8 @@ func VoxelizeTwoGrids(
 
 	// Voxelize each geometry mesh into per-mesh region cell sets.
 	type meshCells struct {
-		layer0 map[voxel.CellKey]struct{}
-		upper  map[voxel.CellKey]struct{}
+		layer0 map[voxel.CellKey]float32
+		upper  map[voxel.CellKey]float32
 	}
 	perMesh := make([]meshCells, len(entries))
 	totalCells := 0
@@ -564,15 +586,15 @@ func Voxelize(ctx context.Context, model, colorModel *loader.LoadedModel, cellSi
 		NCols: nCols, NRows: nRows,
 		LayerLo: 0, LayerHi: nLayers - 1,
 	}
-	cellSet := voxelizeRegion(ctx, model, p, tracker, &voxCounter)
-	plog.Printf("  Voxelized: %d cells in %.1fs", len(cellSet), time.Since(tVoxelize).Seconds())
+	cellAreas := voxelizeRegion(ctx, model, p, tracker, &voxCounter)
+	plog.Printf("  Voxelized: %d cells in %.1fs", len(cellAreas), time.Since(tVoxelize).Seconds())
 
 	tracker.StageDone("Voxelizing")
 
 	tColor := time.Now()
-	tracker.StageStart("Coloring cells", true, len(cellSet))
+	tracker.StageStart("Coloring cells", true, len(cellAreas))
 	var counter atomic.Int64
-	cells, err := colorCells(ctx, model, si, nil, nil, cellSet, p, tracker, &counter, decals, 0, split.IdentityTransform, nil)
+	cells, err := colorCells(ctx, model, si, nil, nil, cellAreas, p, tracker, &counter, decals, 0, split.IdentityTransform, nil)
 	if err != nil {
 		return nil, nil, [3]float32{}, err
 	}

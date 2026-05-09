@@ -295,6 +295,112 @@ func TriangleAABBOverlap(v0, v1, v2, center, halfExtent [3]float32) bool {
 	return true
 }
 
+// TriangleAABBClippedArea returns the area of the portion of triangle
+// (v0, v1, v2) that lies inside the axis-aligned box defined by center
+// and half-extents. Returns 0 when the triangle does not overlap the
+// box (or the overlap is a line/point with zero area).
+//
+// Uses Sutherland-Hodgman clipping against the 6 box planes. Output is
+// exact up to float precision — no sampling. The clipped polygon has
+// at most 3 + 6 = 9 vertices, so the routine runs in bounded O(1)
+// time per call.
+//
+// Used by voxelization to weight per-voxel error diffusion and palette
+// selection by the actual surface area each voxel represents — a
+// triangle that barely clips a voxel should not dominate either.
+//
+// Boundary handling: a triangle exactly coincident with a box face is
+// counted with its full area in any cell adjacent to that face if the
+// caller invokes this routine on both. Production voxelization
+// (squarevoxel.voxelizeRegion) gates cell membership through
+// TriangleAABBOverlap's half-open boundary first, so only one of the
+// two adjacent cells calls this routine and double-counting does not
+// occur in practice.
+func TriangleAABBClippedArea(v0, v1, v2, center, halfExtent [3]float32) float32 {
+	// Two ping-pong buffers, max 9 vertices apiece (3 triangle + 6 plane clips).
+	var bufs [2][16][3]float32
+	in := 0
+	bufs[in][0] = [3]float32{v0[0] - center[0], v0[1] - center[1], v0[2] - center[2]}
+	bufs[in][1] = [3]float32{v1[0] - center[0], v1[1] - center[1], v1[2] - center[2]}
+	bufs[in][2] = [3]float32{v2[0] - center[0], v2[1] - center[1], v2[2] - center[2]}
+	n := 3
+
+	for axis := 0; axis < 3; axis++ {
+		out := 1 - in
+		h := halfExtent[axis]
+		n = clipPolygonAgainstPlane(&bufs[in], &bufs[out], n, axis, -h, true)
+		if n < 3 {
+			return 0
+		}
+		in = out
+		out = 1 - in
+		n = clipPolygonAgainstPlane(&bufs[in], &bufs[out], n, axis, +h, false)
+		if n < 3 {
+			return 0
+		}
+		in = out
+	}
+
+	// Polygon area in 3D: sum cross products of fan triangles from poly[0].
+	// For a planar polygon all crosses are parallel, so sum-then-magnitude
+	// gives the same answer as magnitude-sum-of-magnitudes but is faster
+	// and numerically cleaner.
+	p0 := bufs[in][0]
+	var nx, ny, nz float32
+	for i := 1; i < n-1; i++ {
+		a := bufs[in][i]
+		b := bufs[in][i+1]
+		ax, ay, az := a[0]-p0[0], a[1]-p0[1], a[2]-p0[2]
+		bx, by, bz := b[0]-p0[0], b[1]-p0[1], b[2]-p0[2]
+		nx += ay*bz - az*by
+		ny += az*bx - ax*bz
+		nz += ax*by - ay*bx
+	}
+	return 0.5 * float32(math.Sqrt(float64(nx*nx+ny*ny+nz*nz)))
+}
+
+// clipPolygonAgainstPlane clips the polygon in `in` (length n) against
+// the half-space defined by an axis-aligned plane at coordinate
+// `value` along axis `axis`. When keepGE is true keeps points with
+// in[axis] >= value; otherwise keeps points with in[axis] <= value.
+// Writes the clipped polygon to `out` and returns its vertex count.
+func clipPolygonAgainstPlane(in, out *[16][3]float32, n int, axis int, value float32, keepGE bool) int {
+	if n == 0 {
+		return 0
+	}
+	outN := 0
+	prev := in[n-1]
+	prevInside := (keepGE && prev[axis] >= value) || (!keepGE && prev[axis] <= value)
+	for i := 0; i < n; i++ {
+		cur := in[i]
+		curInside := (keepGE && cur[axis] >= value) || (!keepGE && cur[axis] <= value)
+		if curInside {
+			if !prevInside {
+				t := (value - prev[axis]) / (cur[axis] - prev[axis])
+				out[outN] = [3]float32{
+					prev[0] + t*(cur[0]-prev[0]),
+					prev[1] + t*(cur[1]-prev[1]),
+					prev[2] + t*(cur[2]-prev[2]),
+				}
+				outN++
+			}
+			out[outN] = cur
+			outN++
+		} else if prevInside {
+			t := (value - prev[axis]) / (cur[axis] - prev[axis])
+			out[outN] = [3]float32{
+				prev[0] + t*(cur[0]-prev[0]),
+				prev[1] + t*(cur[1]-prev[1]),
+				prev[2] + t*(cur[2]-prev[2]),
+			}
+			outN++
+		}
+		prev = cur
+		prevInside = curInside
+	}
+	return outN
+}
+
 // ComputeBounds returns the min and max corners of a point set.
 func ComputeBounds(verts [][3]float32) ([3]float32, [3]float32) {
 	minV := verts[0]
