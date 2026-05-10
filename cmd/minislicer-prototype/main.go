@@ -87,6 +87,11 @@ func main() {
 			countNonEmpty(layers), totalLoops)
 	}
 
+	// Simplify before partition + earcut to keep loop vertex
+	// counts in check (raw slicer output is 500+ verts per loop on
+	// curved-surface models like the 3D Benchy).
+	minislicer.SimplifyAndReclassify(layers, a.CellSize*0.25)
+
 	sections := minislicer.PartitionLoops(layers, a.CellSize)
 	if a.Verbose {
 		log.Printf("partitioned: %d sections (target length %.3f mm)", len(sections), a.CellSize)

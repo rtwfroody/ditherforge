@@ -592,6 +592,15 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		planes := minislicer.PlanesForRange(zMin, zMax, layerH)
 		layers := minislicer.SliceMesh(geomModel, planes)
 
+		// Simplify slice contours before partition + earcut. The
+		// raw slicer output has one vertex per crossing triangle
+		// (500+ on a 100mm Benchy hull); without simplification,
+		// earcut's O(n²) ear search dominates the Clip stage and
+		// can run for minutes. A tolerance well below cellSize
+		// preserves visible features but cuts vertex counts to
+		// tens.
+		minislicer.SimplifyAndReclassify(layers, cellSize*0.25)
+
 		sections := minislicer.PartitionLoops(layers, cellSize)
 		if len(sections) == 0 {
 			return nil, fmt.Errorf("slice: no sections produced")
