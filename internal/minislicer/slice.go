@@ -96,7 +96,17 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 		}
 		// Compute the two edge crossings. Walk edges in vertex order
 		// (0→1, 1→2, 2→0) and pick the two whose endpoints differ.
+		//
+		// Each crossing is computed with the edge's two endpoints
+		// canonicalized by vertex index (lower-index endpoint first),
+		// so two triangles sharing an edge produce bit-identical
+		// crossings regardless of their triangle-local vertex order.
+		// Without this, float-noise drift between (a + t*(b-a)) and
+		// (b + (1-t)*(a-b)) can land the two crossings in different
+		// quantize buckets — chainSegments then fails to close the
+		// loop and the layer is silently dropped.
 		pts := [3][3]float32{v0, v1, v2}
+		idx := [3]uint32{f[0], f[1], f[2]}
 		var crossings [2]Point2
 		ci := 0
 		for k := 0; k < 3; k++ {
@@ -107,7 +117,11 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 					ci = 0
 					break
 				}
-				crossings[ci] = lerpEdge(pts[k], pts[j], z)
+				lo, hi := pts[k], pts[j]
+				if idx[k] > idx[j] {
+					lo, hi = pts[j], pts[k]
+				}
+				crossings[ci] = lerpEdge(lo, hi, z)
 				ci++
 			}
 		}
