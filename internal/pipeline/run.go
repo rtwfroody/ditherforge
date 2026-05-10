@@ -597,6 +597,35 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			return nil, fmt.Errorf("slice: no sections produced")
 		}
 
+		// Cap sections: tile the topmost layer's top face and the
+		// bottommost layer's bottom face with cellSize × cellSize
+		// cap tiles so horizontal exposed surfaces dither too.
+		// LoopIdxBase = len(layers[*].Loops) (per layer, computed at
+		// emission time) keeps cap LoopIdx out of the ribbon namespace.
+		var topLayer, bottomLayer *minislicer.Layer
+		for i := range layers {
+			if len(layers[i].Loops) == 0 {
+				continue
+			}
+			if bottomLayer == nil {
+				bottomLayer = &layers[i]
+			}
+			topLayer = &layers[i]
+		}
+		if topLayer != nil {
+			loopBase := len(topLayer.Loops)
+			caps := minislicer.PartitionTopCap(*topLayer, layerH, cellSize, loopBase)
+			sections = append(sections, caps...)
+		}
+		if bottomLayer != nil {
+			loopBase := len(bottomLayer.Loops) + 1024
+			// +1024 keeps top and bottom cap LoopIdx ranges from
+			// colliding when the same layer is both the topmost and
+			// the bottommost (single-layer model).
+			caps := minislicer.PartitionBottomCap(*bottomLayer, layerH, cellSize, loopBase)
+			sections = append(sections, caps...)
+		}
+
 		si := voxel.NewSpatialIndex(colorModel, cellSize)
 		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, cellSize)
 

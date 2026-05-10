@@ -106,15 +106,6 @@ type Options struct {
 	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
-	// RemeshMode selects which surface-discretization pipeline to
-	// run. "voxel" (default / empty string) is the production
-	// stack: AABB voxelization → palette → dither → per-voxel mesh.
-	// "minislicer" is the prototype contour-slicer pipeline in
-	// internal/minislicer: per-layer 2D contour partitioned into
-	// arc-length sections that feed the dither directly. The
-	// minislicer path bypasses Voxelize/ColorAdjust/ColorWarp/
-	// Dither/Clip/Merge entirely and emits its own preview mesh.
-	RemeshMode string `json:"RemeshMode,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model

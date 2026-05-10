@@ -23,19 +23,46 @@ type Layer struct {
 	Loops     []Loop
 }
 
-// Section is one piece of a Loop, defined by an arc-length range.
-// Arc parameter is cumulative perimeter from the loop's first point.
+// SectionKind tags a Section as a perimeter-wall ribbon or as a
+// top / bottom cap tile. Cap tiles cover horizontal exposed surfaces
+// (the topmost layer's top, the bottommost layer's bottom — and, in
+// the future, "step" exposures between layers of different
+// footprints). The default zero value is KindRibbon so existing
+// constructors stay valid.
+type SectionKind uint8
+
+const (
+	KindRibbon SectionKind = iota
+	KindCapTop
+	KindCapBottom
+)
+
+// Section is one piece of a Loop's perimeter (Kind == KindRibbon)
+// or one tile of a layer's exposed top/bottom cap
+// (Kind == KindCapTop / KindCapBottom).
 //
 // LayerIdx + LoopIdx + Index uniquely identify the section. Mid is
-// the XY point at the midpoint of the arc range (used for color
-// sampling and adjacency).
+// the XY point at the section's midpoint — for ribbon sections, the
+// arc midpoint; for cap tiles, the tile's center. Z is the 3D Z
+// coordinate where color is sampled.
 type Section struct {
 	LayerIdx int
 	LoopIdx  int
-	Index    int     // index within the loop's section list
-	StartArc float32 // arc-length [m] from loop's point[0] to section start
-	EndArc   float32 // arc-length to section end (cyclic; EndArc may wrap)
-	Length   float32 // EndArc - StartArc, accounting for wrap
-	Mid      Point2  // XY at section midpoint
-	Z        float32 // copied from layer
+	Index    int // index within the loop's section list
+	Kind     SectionKind
+
+	Mid Point2  // XY: arc midpoint (ribbon) or tile center (cap)
+	Z   float32 // 3D Z for color sampling
+
+	// Ribbon-only.
+	StartArc float32
+	EndArc   float32
+	Length   float32
+
+	// Cap-only. CapBoundsXY = (minX, minY, maxX, maxY). TileCol/Row
+	// are the tile's grid coordinates within the cap, used by
+	// BuildSectionGraph for 4-neighbor adjacency.
+	CapBoundsXY [4]float32
+	TileCol     int
+	TileRow     int
 }

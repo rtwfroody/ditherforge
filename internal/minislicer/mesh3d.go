@@ -39,26 +39,93 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 		sortByIndex(ids, sections)
 	}
 
+	// Determine which layers have tiled top/bottom caps so the
+	// ribbon-prism emitter can skip the fan-triangulated fallback
+	// at those Z faces. Currently keyed only by LayerIdx (not by
+	// island), so a multi-island topmost layer either has tiles for
+	// every island or for none.
+	hasTopCap := make(map[int]bool)
+	hasBotCap := make(map[int]bool)
+	for _, s := range sections {
+		switch s.Kind {
+		case KindCapTop:
+			hasTopCap[s.LayerIdx] = true
+		case KindCapBottom:
+			hasBotCap[s.LayerIdx] = true
+		}
+	}
+
+	// Emit ribbon walls (one prism per ribbon loop). Each prism's
+	// top/bottom cap is fan-triangulated as a fallback, except where
+	// a tiled cap will paint over it — in which case we omit the
+	// fallback geometry entirely.
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
 		for lp := range layer.Loops {
 			loop := &layer.Loops[lp]
 			ids := loopSecs[loopKey{li, lp}]
-			if len(ids) == 0 {
+			if len(ids) == 0 || sections[ids[0]].Kind != KindRibbon {
 				continue
 			}
-			// For the prototype we treat every loop as an outer
-			// boundary. Hole-vs-outer requires nesting analysis; a
-			// CW (signed area < 0) orientation here just means our
-			// segment-chaining picked the reverse winding, not that
-			// the loop is a hole. emitLoopPrism reorients via
-			// signed area so the wall normals always face outward.
-			emitLoopPrism(m, &faceAssign, loop, ids, sections, assignments, zBot, zTop)
+			emitLoopPrism(m, &faceAssign, loop, ids, sections, assignments,
+				zBot, zTop,
+				hasTopCap[layer.LayerIdx],
+				hasBotCap[layer.LayerIdx])
 		}
 	}
 
+	// Emit tiled caps. One quad per cap section, painted with the
+	// section's palette index. The Z lives in the section itself.
+	for _, ids := range loopSecs {
+		if len(ids) == 0 {
+			continue
+		}
+		k := sections[ids[0]].Kind
+		if k != KindCapTop && k != KindCapBottom {
+			continue
+		}
+		emitCapTiles(m, &faceAssign, ids, sections, assignments)
+	}
+
 	return m, faceAssign
+}
+
+// emitCapTiles emits 2 triangles per cap section forming the tile
+// rectangle. Top caps wind CCW (normal +Z); bottom caps wind CW
+// (normal -Z) so they face outward.
+func emitCapTiles(
+	m *loader.LoadedModel,
+	faceAssign *[]int32,
+	sectionIDs []int,
+	sections []Section,
+	assignments []int32,
+) {
+	for _, sid := range sectionIDs {
+		s := sections[sid]
+		x0, y0, x1, y1 := s.CapBoundsXY[0], s.CapBoundsXY[1], s.CapBoundsXY[2], s.CapBoundsXY[3]
+		z := s.Z
+		baseV := uint32(len(m.Vertices))
+		// Tile corner order: 0=(x0,y0), 1=(x1,y0), 2=(x1,y1), 3=(x0,y1).
+		m.Vertices = append(m.Vertices,
+			[3]float32{x0, y0, z},
+			[3]float32{x1, y0, z},
+			[3]float32{x1, y1, z},
+			[3]float32{x0, y1, z})
+		col := assignments[sid]
+		if s.Kind == KindCapTop {
+			// CCW triangles: 0-1-2, 0-2-3.
+			m.Faces = append(m.Faces,
+				[3]uint32{baseV, baseV + 1, baseV + 2},
+				[3]uint32{baseV, baseV + 2, baseV + 3})
+		} else {
+			// CW triangles: 0-2-1, 0-3-2.
+			m.Faces = append(m.Faces,
+				[3]uint32{baseV, baseV + 2, baseV + 1},
+				[3]uint32{baseV, baseV + 3, baseV + 2})
+		}
+		*faceAssign = append(*faceAssign, col, col)
+	}
 }
 
 // emitLoopPrism appends the geometry for one closed CCW polygon
@@ -72,6 +139,8 @@ func emitLoopPrism(
 	sections []Section,
 	assignments []int32,
 	zBot, zTop float32,
+	skipTopCap bool,
+	skipBottomCap bool,
 ) {
 	pts := loop.Points
 	n := len(pts)
@@ -163,11 +232,19 @@ func emitLoopPrism(
 	// Caps: fan-triangulate from the centroid. Top cap winds CCW
 	// (so normal is +Z). Bottom cap winds CW (so normal is -Z).
 	// Each cap face is tagged as -1 (interior) since they're not
-	// part of the visible exterior wall.
-	cBot := uint32(len(m.Vertices))
-	m.Vertices = append(m.Vertices, [3]float32{centroid[0], centroid[1], zBot})
-	cTop := uint32(len(m.Vertices))
-	m.Vertices = append(m.Vertices, [3]float32{centroid[0], centroid[1], zTop})
+	// part of the visible exterior wall — except where the caller
+	// has indicated tiled cap sections will paint over them, in
+	// which case we omit the fan triangles entirely so the tiles
+	// are the only geometry at that Z face.
+	var cBot, cTop uint32
+	if !skipBottomCap {
+		cBot = uint32(len(m.Vertices))
+		m.Vertices = append(m.Vertices, [3]float32{centroid[0], centroid[1], zBot})
+	}
+	if !skipTopCap {
+		cTop = uint32(len(m.Vertices))
+		m.Vertices = append(m.Vertices, [3]float32{centroid[0], centroid[1], zTop})
+	}
 
 	for i := 0; i < w; i++ {
 		j := (i + 1) % w
@@ -175,11 +252,16 @@ func emitLoopPrism(
 		lo_j := baseV + uint32(2*j)
 		hi_i := baseV + uint32(2*i+1)
 		hi_j := baseV + uint32(2*j+1)
-		// Bottom cap: fan from cBot, winding for -Z normal.
-		m.Faces = append(m.Faces, [3]uint32{cBot, lo_j, lo_i})
-		// Top cap: fan from cTop, winding for +Z normal.
-		m.Faces = append(m.Faces, [3]uint32{cTop, hi_i, hi_j})
-		*faceAssign = append(*faceAssign, -1, -1)
+		if !skipBottomCap {
+			// Bottom cap: fan from cBot, winding for -Z normal.
+			m.Faces = append(m.Faces, [3]uint32{cBot, lo_j, lo_i})
+			*faceAssign = append(*faceAssign, -1)
+		}
+		if !skipTopCap {
+			// Top cap: fan from cTop, winding for +Z normal.
+			m.Faces = append(m.Faces, [3]uint32{cTop, hi_i, hi_j})
+			*faceAssign = append(*faceAssign, -1)
+		}
 	}
 }
 

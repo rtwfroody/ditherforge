@@ -40,24 +40,49 @@ func BuildSectionGraph(sections []Section, layers []Layer, proximityRadius float
 		})
 	}
 
-	// Within-loop prev/next. Cyclic; degenerate 1-section loops
-	// have no within-loop neighbors (skip self-edges).
+	// Within-loop adjacency. Two flavors:
+	//
+	//   - Ribbon loops (KindRibbon): cyclic prev/next in arc order.
+	//   - Cap loops (KindCapTop / KindCapBottom): 4-neighbor grid
+	//     adjacency by (TileCol, TileRow). Tiles aren't cyclic, so
+	//     boundary tiles simply have fewer neighbors.
+	//
+	// All within-loop edges have weight 1.0 — same diffusion weight as
+	// the voxel grid's face-adjacency.
 	for _, ids := range loopMembers {
 		m := len(ids)
 		if m < 2 {
 			continue
 		}
-		for k := 0; k < m; k++ {
-			cur := ids[k]
-			prev := ids[(k-1+m)%m]
-			next := ids[(k+1)%m]
-			if m == 2 {
-				// Two-section loop: prev == next; emit once.
-				neigh[cur] = append(neigh[cur], voxel.Neighbor{Idx: prev, Weight: 1.0})
-			} else {
-				neigh[cur] = append(neigh[cur],
-					voxel.Neighbor{Idx: prev, Weight: 1.0},
-					voxel.Neighbor{Idx: next, Weight: 1.0})
+		switch sections[ids[0]].Kind {
+		case KindRibbon:
+			for k := 0; k < m; k++ {
+				cur := ids[k]
+				prev := ids[(k-1+m)%m]
+				next := ids[(k+1)%m]
+				if m == 2 {
+					neigh[cur] = append(neigh[cur], voxel.Neighbor{Idx: prev, Weight: 1.0})
+				} else {
+					neigh[cur] = append(neigh[cur],
+						voxel.Neighbor{Idx: prev, Weight: 1.0},
+						voxel.Neighbor{Idx: next, Weight: 1.0})
+				}
+			}
+		case KindCapTop, KindCapBottom:
+			// Index by (col, row) for O(1) neighbor lookup.
+			tiles := make(map[[2]int]int, m)
+			for _, id := range ids {
+				s := sections[id]
+				tiles[[2]int{s.TileCol, s.TileRow}] = id
+			}
+			steps := [4][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
+			for _, id := range ids {
+				s := sections[id]
+				for _, st := range steps {
+					if nb, ok := tiles[[2]int{s.TileCol + st[0], s.TileRow + st[1]}]; ok {
+						neigh[id] = append(neigh[id], voxel.Neighbor{Idx: nb, Weight: 1.0})
+					}
+				}
 			}
 		}
 	}
