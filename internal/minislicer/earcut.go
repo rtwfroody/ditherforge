@@ -22,9 +22,15 @@ import (
 // and a triangle list where each triangle is three indices into
 // that vertex array.
 //
-// Adapted from Mapbox's earcut.js (ISC). No Z-order acceleration —
-// O(n²) worst case; fine for cap polygons in the 10s-100s of
-// vertices range.
+// Adapted from Mapbox's earcut.js (ISC).
+//
+// TODO: Mapbox's earcut runs the ear-search inner loop against a
+// Z-order (Morton-code) hash bucket so it only checks vertices
+// within the candidate ear's bounding box — amortized
+// ~O(n log n) instead of the O(n²) we have today. Worth adding
+// when cap polygons grow past a few hundred vertices and the
+// slicer starts to feel slow on big models; cap counts in the
+// 10s–100s (typical for sliced layers) are fast enough as-is.
 func Earcut(outer []Point2, holes [][]Point2) (verts []Point2, tris [][3]uint32) {
 	if len(outer) < 3 {
 		return outer, nil
