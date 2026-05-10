@@ -132,10 +132,48 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 	}
 
 	loops := chainSegments(segs, z)
+	classifyHoles(loops)
 	return Layer{
 		Z:        z,
 		LayerIdx: layerIdx,
 		Loops:    loops,
+	}
+}
+
+// classifyHoles sets IsHole on each loop using even-odd nesting:
+// for each loop, count how many other loops in the same layer
+// contain its centroid; odd count = hole.
+//
+// Centroid (rather than a single vertex) avoids the rare case where
+// the test point sits exactly on another loop's edge, which the
+// even-odd ray cast in pointInPolygon doesn't handle robustly.
+func classifyHoles(loops []Loop) {
+	for i := range loops {
+		pts := loops[i].Points
+		if len(pts) == 0 {
+			continue
+		}
+		var cx, cy float64
+		for _, p := range pts {
+			cx += float64(p[0])
+			cy += float64(p[1])
+		}
+		cx /= float64(len(pts))
+		cy /= float64(len(pts))
+		x, y := float32(cx), float32(cy)
+		depth := 0
+		for j := range loops {
+			if j == i {
+				continue
+			}
+			if len(loops[j].Points) < 3 {
+				continue
+			}
+			if pointInPolygon(loops[j].Points, x, y) {
+				depth++
+			}
+		}
+		loops[i].IsHole = (depth & 1) == 1
 	}
 }
 

@@ -25,9 +25,10 @@ func PartitionBottomCap(layer Layer, layerH, cellSize float32, loopIdxBase int) 
 // PartitionBottomCap. zOffset is added to layer.Z to get the cap
 // surface's 3D Z (positive for top, negative for bottom).
 //
-// Holes (signed area < 0) are skipped. Tiles whose center falls
-// outside the loop polygon are dropped; tiles partially clipped by
-// the loop boundary are emitted at full cellSize anyway (the
+// Iterates outer loops only (loop.IsHole == false); for each outer
+// loop, tiles whose centers fall outside the loop OR inside any
+// hole loop in the same layer are dropped. Tiles partially clipped
+// by the loop boundary are emitted at full cellSize anyway (the
 // resulting prism geometry overhangs the contour by a fraction of a
 // cell, which is acceptable for the prototype).
 func partitionCap(layer Layer, zOffset, cellSize float32, loopIdxBase int, kind SectionKind) []Section {
@@ -36,8 +37,15 @@ func partitionCap(layer Layer, zOffset, cellSize float32, loopIdxBase int, kind 
 	}
 	z := layer.Z + zOffset
 	var out []Section
+	// Cache the layer's hole loops for the per-tile exclusion test.
+	var holes []*Loop
+	for k := range layer.Loops {
+		if layer.Loops[k].IsHole {
+			holes = append(holes, &layer.Loops[k])
+		}
+	}
 	for li, loop := range layer.Loops {
-		if loop.SignedArea <= 0 {
+		if loop.IsHole {
 			continue
 		}
 		// Tight loop bbox.
@@ -82,6 +90,16 @@ func partitionCap(layer Layer, zOffset, cellSize float32, loopIdxBase int, kind 
 				cx := (x0 + x1) * 0.5
 				cy := (y0 + y1) * 0.5
 				if !pointInPolygon(loop.Points, cx, cy) {
+					continue
+				}
+				inHole := false
+				for _, h := range holes {
+					if pointInPolygon(h.Points, cx, cy) {
+						inHole = true
+						break
+					}
+				}
+				if inHole {
 					continue
 				}
 				out = append(out, Section{

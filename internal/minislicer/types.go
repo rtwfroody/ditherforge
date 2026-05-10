@@ -8,12 +8,19 @@ package minislicer
 type Point2 [2]float32
 
 // Loop is a closed 2D polygon at a single Z height. Points are NOT
-// duplicated at end-of-loop. SignedArea > 0 means CCW (outer
-// boundary); < 0 means CW (a hole).
+// duplicated at end-of-loop. SignedArea > 0 means CCW; < 0 means CW.
+//
+// IsHole is set after slicing by a nesting-depth pass: a loop whose
+// centroid falls inside an odd number of other loops in the same
+// layer is a hole. The slicer's segment-chaining doesn't enforce a
+// canonical winding, so SignedArea alone can't tell outer from hole
+// — IsHole is the load-bearing classifier downstream stages branch
+// on.
 type Loop struct {
 	Points     []Point2
 	Z          float32
 	SignedArea float32
+	IsHole     bool
 }
 
 // Layer is the cross-section of the model at a single Z height.

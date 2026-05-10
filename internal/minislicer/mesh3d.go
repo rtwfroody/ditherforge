@@ -55,10 +55,28 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 		}
 	}
 
-	// Emit ribbon walls (one prism per ribbon loop). Each prism's
-	// top/bottom cap is fan-triangulated as a fallback, except where
-	// a tiled cap will paint over it — in which case we omit the
-	// fallback geometry entirely.
+	// Per-layer "any hole" flag. Outer loops in layers with holes
+	// can't use the simple centroid-fan cap (the fan would cover
+	// the hole's region), so they skip caps entirely. Layers with no
+	// holes still get the fan, keeping the prism stack watertight in
+	// the common case.
+	hasHoles := make(map[int]bool)
+	for _, layer := range layers {
+		for _, loop := range layer.Loops {
+			if loop.IsHole {
+				hasHoles[layer.LayerIdx] = true
+				break
+			}
+		}
+	}
+
+	// Emit ribbon walls (one prism per ribbon loop). Cap geometry
+	// rules:
+	//   - Hole loops: never emit caps; cavity stays open.
+	//   - Outer loops in layers with holes: skip caps so the cavity
+	//     reads as empty space at every Z.
+	//   - Outer loops in hole-free layers: emit fan caps unless a
+	//     tiled top/bottom cap is painting over them.
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
@@ -68,10 +86,11 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 			if len(ids) == 0 || sections[ids[0]].Kind != KindRibbon {
 				continue
 			}
+			isHole := loop.IsHole
+			skipTop := isHole || hasHoles[layer.LayerIdx] || hasTopCap[layer.LayerIdx]
+			skipBot := isHole || hasHoles[layer.LayerIdx] || hasBotCap[layer.LayerIdx]
 			emitLoopPrism(m, &faceAssign, loop, ids, sections, assignments,
-				zBot, zTop,
-				hasTopCap[layer.LayerIdx],
-				hasBotCap[layer.LayerIdx])
+				zBot, zTop, isHole, skipTop, skipBot)
 		}
 	}
 
@@ -139,6 +158,7 @@ func emitLoopPrism(
 	sections []Section,
 	assignments []int32,
 	zBot, zTop float32,
+	isHole bool,
 	skipTopCap bool,
 	skipBottomCap bool,
 ) {
@@ -147,12 +167,13 @@ func emitLoopPrism(
 	if n < 3 {
 		return
 	}
-	// We assume CCW orientation downstream (outward wall normal,
-	// +Z top cap, −Z bottom cap). Reverse the polygon if the
-	// slicer chained it CW so the rest of this function sees a
-	// canonical CCW loop.
+	// Outer loops want CCW (interior = print material; wall normal
+	// faces outward). Hole loops want CW (interior = cavity; wall
+	// normal faces into the cavity). Reverse the polygon if it's
+	// not in the desired winding for its role.
 	ccw := loop.SignedArea > 0
-	if !ccw {
+	want := !isHole // outer wants CCW, hole wants CW
+	if ccw != want {
 		rev := make([]Point2, n)
 		for i, p := range pts {
 			rev[n-1-i] = p
