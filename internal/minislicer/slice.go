@@ -142,25 +142,22 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 
 // classifyHoles sets IsHole on each loop using even-odd nesting:
 // for each loop, count how many other loops in the same layer
-// contain its centroid; odd count = hole.
+// contain a vertex of the loop; odd count = hole.
 //
-// Centroid (rather than a single vertex) avoids the rare case where
-// the test point sits exactly on another loop's edge, which the
-// even-odd ray cast in pointInPolygon doesn't handle robustly.
+// Uses a vertex (not the centroid) because the centroid of a
+// concave polygon — including any outer loop with a cavity —
+// can fall outside the loop itself, e.g. inside its own hole. A
+// vertex sits exactly on the loop's boundary, which for two
+// non-intersecting polygons in the slicer's output is
+// unambiguously inside or outside any sibling polygon (not on
+// the sibling's edge).
 func classifyHoles(loops []Loop) {
 	for i := range loops {
 		pts := loops[i].Points
-		if len(pts) == 0 {
+		if len(pts) < 3 {
 			continue
 		}
-		var cx, cy float64
-		for _, p := range pts {
-			cx += float64(p[0])
-			cy += float64(p[1])
-		}
-		cx /= float64(len(pts))
-		cy /= float64(len(pts))
-		x, y := float32(cx), float32(cy)
+		x, y := pts[0][0], pts[0][1]
 		depth := 0
 		for j := range loops {
 			if j == i {
