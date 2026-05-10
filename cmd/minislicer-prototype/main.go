@@ -15,6 +15,7 @@ import (
 
 	"github.com/alexflint/go-arg"
 
+	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/palette"
@@ -29,6 +30,7 @@ type args struct {
 	LayerH    float32 `arg:"--layer" default:"0.2" help:"layer height in mm"`
 	Out       string  `arg:"--out" default:"./minislicer_out" help:"output directory for SVGs"`
 	Size      float32 `arg:"--size" default:"0" help:"normalize model so its largest dimension equals this many mm; 0 = no rescale (after unit conversion)"`
+	ThreeMF   string  `arg:"--3mf" help:"if set, also write a 3MF artifact at this path (per-section painted layer prisms)"`
 	Verbose   bool    `arg:"--verbose,-v"`
 }
 
@@ -134,6 +136,30 @@ func main() {
 		log.Fatalf("render: %v", err)
 	}
 
+	if a.ThreeMF != "" {
+		mesh, faceAssign := minislicer.BuildPrintableMesh(layers, sections, assignments, a.LayerH)
+		// Find a fallback color for interior faces (we want the
+		// most common section color in the model so the slicer
+		// renders a sensible interior).
+		fallback := mostCommonAssignment(assignments)
+		safe := minislicer.SafeAssignments(faceAssign, fallback)
+		if a.Verbose {
+			log.Printf("3MF mesh: %d verts, %d faces (interior fallback color = pal[%d])",
+				len(mesh.Vertices), len(mesh.Faces), fallback)
+		}
+		expOpts := export3mf.Options{
+			PrinterID:      export3mf.DefaultPrinterID,
+			NozzleDiameter: 0, // 0 = printer default (typically 0.4 mm)
+			LayerHeight:    a.LayerH,
+		}
+		if err := export3mf.Export(mesh, safe, a.ThreeMF, pal, expOpts); err != nil {
+			log.Fatalf("export 3MF: %v", err)
+		}
+		if a.Verbose {
+			log.Printf("wrote 3MF: %s", a.ThreeMF)
+		}
+	}
+
 	reports, ok := minislicer.VerifyPatchLengths(sections, layers, assignments, a.CellSize)
 	fmt.Println(minislicer.FormatReport(reports, a.CellSize))
 	if !ok {
@@ -210,6 +236,26 @@ func countNonEmpty(layers []minislicer.Layer) int {
 		}
 	}
 	return n
+}
+
+// mostCommonAssignment returns the palette index that appears most
+// often in assignments, ignoring -1 (hidden) entries.
+func mostCommonAssignment(assignments []int32) int32 {
+	counts := map[int32]int{}
+	for _, a := range assignments {
+		if a >= 0 {
+			counts[a]++
+		}
+	}
+	var best int32
+	bestN := -1
+	for k, v := range counts {
+		if v > bestN {
+			best = k
+			bestN = v
+		}
+	}
+	return best
 }
 
 // loadInventory reads an inventory file or returns a small default
