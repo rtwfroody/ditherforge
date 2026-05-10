@@ -11,16 +11,23 @@ type Point2 [2]float32
 // duplicated at end-of-loop. SignedArea > 0 means CCW; < 0 means CW.
 //
 // IsHole is set after slicing by a nesting-depth pass: a loop whose
-// centroid falls inside an odd number of other loops in the same
-// layer is a hole. The slicer's segment-chaining doesn't enforce a
-// canonical winding, so SignedArea alone can't tell outer from hole
-// — IsHole is the load-bearing classifier downstream stages branch
-// on.
+// boundary vertex falls inside an odd number of other loops in the
+// same layer is a hole. The slicer's segment-chaining doesn't
+// enforce a canonical winding, so SignedArea alone can't tell outer
+// from hole — IsHole is the load-bearing classifier downstream
+// stages branch on.
+//
+// HasHoleChild applies to outer loops only: true when at least one
+// hole loop in the same layer is contained in this outer. The mesh
+// emitter uses it to skip the simple fan-triangulated cap on outers
+// that need a polygon-with-holes triangulation; outers without any
+// hole children still get the fan and stay watertight.
 type Loop struct {
-	Points     []Point2
-	Z          float32
-	SignedArea float32
-	IsHole     bool
+	Points       []Point2
+	Z            float32
+	SignedArea   float32
+	IsHole       bool
+	HasHoleChild bool
 }
 
 // Layer is the cross-section of the model at a single Z height.

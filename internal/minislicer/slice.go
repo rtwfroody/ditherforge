@@ -172,6 +172,26 @@ func classifyHoles(loops []Loop) {
 		}
 		loops[i].IsHole = (depth & 1) == 1
 	}
+	// Per-outer: is any hole contained in me? Same vertex-based
+	// containment test as classification.
+	for i := range loops {
+		if loops[i].IsHole {
+			continue
+		}
+		for j := range loops {
+			if i == j || !loops[j].IsHole {
+				continue
+			}
+			if len(loops[j].Points) < 1 {
+				continue
+			}
+			x, y := loops[j].Points[0][0], loops[j].Points[0][1]
+			if pointInPolygon(loops[i].Points, x, y) {
+				loops[i].HasHoleChild = true
+				break
+			}
+		}
+	}
 }
 
 // lerpEdge returns the XY of the point on the line through pa and pb

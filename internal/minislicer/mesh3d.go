@@ -55,28 +55,19 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 		}
 	}
 
-	// Per-layer "any hole" flag. Outer loops in layers with holes
-	// can't use the simple centroid-fan cap (the fan would cover
-	// the hole's region), so they skip caps entirely. Layers with no
-	// holes still get the fan, keeping the prism stack watertight in
-	// the common case.
-	hasHoles := make(map[int]bool)
-	for _, layer := range layers {
-		for _, loop := range layer.Loops {
-			if loop.IsHole {
-				hasHoles[layer.LayerIdx] = true
-				break
-			}
-		}
-	}
-
 	// Emit ribbon walls (one prism per ribbon loop). Cap geometry
 	// rules:
 	//   - Hole loops: never emit caps; cavity stays open.
-	//   - Outer loops in layers with holes: skip caps so the cavity
-	//     reads as empty space at every Z.
-	//   - Outer loops in hole-free layers: emit fan caps unless a
-	//     tiled top/bottom cap is painting over them.
+	//   - Outer loops with hole children: skip the fan cap (a fan
+	//     from the centroid would cover the hole region). A real
+	//     polygon-with-holes cap would go here in the future; for
+	//     now adjacent layers' caps generally seal the gap.
+	//   - Outer loops without hole children: emit fan caps unless a
+	//     tiled top/bottom cap is painting over them. This applies
+	//     even when other outers in the same layer DO have holes —
+	//     a multi-island layer with one boat-hull-with-cavity and
+	//     a separate solid smokestack should still cap the
+	//     smokestack.
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
@@ -87,8 +78,9 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 				continue
 			}
 			isHole := loop.IsHole
-			skipTop := isHole || hasHoles[layer.LayerIdx] || hasTopCap[layer.LayerIdx]
-			skipBot := isHole || hasHoles[layer.LayerIdx] || hasBotCap[layer.LayerIdx]
+			capUntileable := isHole || loop.HasHoleChild
+			skipTop := capUntileable || hasTopCap[layer.LayerIdx]
+			skipBot := capUntileable || hasBotCap[layer.LayerIdx]
 			emitLoopPrism(m, &faceAssign, loop, ids, sections, assignments,
 				zBot, zTop, isHole, skipTop, skipBot)
 		}
