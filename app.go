@@ -189,6 +189,13 @@ func (a *App) kickDiskCacheSweep() {
 		if c == nil {
 			return
 		}
+		// Wait for in-flight async writes to land their meta sidecars
+		// before sweeping. Without this, a freshly-written data file
+		// whose cost-stamp goroutine hasn't run yet appears to Sweep
+		// with costMs=0 — top eviction bait — and gets dropped under
+		// size pressure. The next ExportFile then misses on the
+		// just-written entry and surfaces "pipeline has not been run yet".
+		a.cache.WaitForDiskWrites()
 		stats, err := c.Sweep(diskCacheMaxAge, diskCacheMaxBytes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "disk cache sweep: %v\n", err)
