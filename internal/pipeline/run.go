@@ -13,11 +13,11 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
-	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -222,7 +222,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			if !r.opts.NoSimplify {
 				cellSize := voxelCellSizes(r.opts).UpperXY
 				budget := decimateErrorBudget(cellSize)
-				preDec, derr := squarevoxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
+				preDec, derr := voxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
 					return nil, fmt.Errorf("pre-wrap decimate: %w", derr)
 				}
@@ -271,7 +271,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			if !r.opts.NoSimplify {
 				cellSize := voxelCellSizes(r.opts).UpperXY
 				budget := decimateErrorBudget(cellSize)
-				postDec, derr := squarevoxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
+				postDec, derr := voxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
 				if derr != nil {
 					return nil, fmt.Errorf("post-wrap decimate: %w", derr)
 				}
@@ -421,14 +421,14 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 			// Targets are vestigial under the cost-budget regime --
 			// pass 1 (DecimateHalves clamps to a per-half floor of 1)
 			// and let `budget` be the actual stopping criterion.
-			halves, derr := squarevoxel.DecimateHalves(r.ctx, so.Halves, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
+			halves, derr := voxel.DecimateHalves(r.ctx, so.Halves, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
 			if derr != nil {
 				return nil, fmt.Errorf("decimate (split): %w", derr)
 			}
 			return &decimateOutput{Halves: halves}, nil
 		}
 
-		decimModel, derr := squarevoxel.DecimateMesh(r.ctx, lo.Model, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
+		decimModel, derr := voxel.DecimateMesh(r.ctx, lo.Model, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
 		if derr != nil {
 			return nil, fmt.Errorf("decimate: %w", derr)
 		}
@@ -546,72 +546,143 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 	return so, nil
 }
 
+// Voxelize is a holdover stage name for the minislicer's
+// slice + partition + sample + adjacency phase. It produces the
+// per-section ActiveCells consumed by ColorAdjust / ColorWarp /
+// Palette / Dither, plus the section/layer/neighbor graph used by
+// Mesh3D and Dither directly.
 func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 	return runStage(r, StageVoxelize, &r.voxelize, func() (*voxelizeOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
 			return nil, err
 		}
-		so, err := r.Sticker()
-		if err != nil {
+		// Sticker / Split are stubbed during the minislicer
+		// transition; resolve them so their stubs cache, but
+		// ignore the (empty) outputs.
+		if _, err := r.Sticker(); err != nil {
 			return nil, err
 		}
-		spo, err := r.Split()
-		if err != nil {
+		if _, err := r.Split(); err != nil {
 			return nil, err
 		}
-		cells := voxelCellSizes(r.opts)
-		layer0Size, upperSize := cells.Layer0XY, cells.UpperXY
-		layer0H, upperH := cells.Layer0Z, cells.UpperZ
-		plog.Printf("  Voxel cell (XY × Z mm): layer 0 = %.3f × %.3f, upper = %.3f × %.3f",
-			layer0Size, layer0H, upperSize, upperH)
 
-		sampleModel := lo.SampleModel
-		var stickerModel *loader.LoadedModel
-		var stickerSI *voxel.SpatialIndex
-		if so.Model != nil {
-			if so.FromAlphaWrap {
-				stickerModel = so.Model
-				stickerSI = so.ensureSI()
-			} else {
-				sampleModel = so.Model
+		cellSize := r.opts.NozzleDiameter
+		if cellSize <= 0 {
+			cellSize = 0.4
+		}
+		layerH := r.opts.LayerHeight
+		if layerH <= 0 {
+			layerH = 0.2
+		}
+
+		stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], false, 0)
+		defer stage.Done()
+
+		// Slicing operates on the geometry mesh (alpha-wrapped if
+		// requested). Color sampling reads from ColorModel. They
+		// alias when alpha-wrap is off.
+		geomModel := lo.Model
+		colorModel := lo.ColorModel
+
+		zMin, zMax := modelZRange(geomModel)
+		if zMax <= zMin {
+			return nil, fmt.Errorf("slice: model has zero Z extent")
+		}
+		planes := minislicer.PlanesForRange(zMin, zMax, layerH)
+		layers := minislicer.SliceMesh(geomModel, planes)
+
+		sections := minislicer.PartitionLoops(layers, cellSize)
+		if len(sections) == 0 {
+			return nil, fmt.Errorf("slice: no sections produced")
+		}
+
+		si := voxel.NewSpatialIndex(colorModel, cellSize)
+		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, cellSize)
+
+		neighbors := minislicer.BuildSectionGraph(sections, layers, cellSize)
+
+		// Build ActiveCells: one per visible section. Hidden
+		// (alpha=false) sections are dropped here so palette
+		// selection and dither operate only on visible color.
+		// Section identity is encoded into Layer/Row/Col so any
+		// CellKey lookup downstream stays well-defined; this
+		// pipeline doesn't currently rely on those values, but
+		// keeping them unique avoids accidental aliasing.
+		cells := make([]voxel.ActiveCell, 0, len(sections))
+		visibleNeighbors := make([][]voxel.Neighbor, 0, len(sections))
+		visibleToFull := make([]int, 0, len(sections))
+		fullToVisible := make([]int, len(sections))
+		for i := range fullToVisible {
+			fullToVisible[i] = -1
+		}
+		for i, s := range sections {
+			if !alpha[i] {
+				continue
 			}
+			fullToVisible[i] = len(cells)
+			visibleToFull = append(visibleToFull, i)
+			cells = append(cells, voxel.ActiveCell{
+				Grid:  0,
+				Col:   s.Index,
+				Row:   s.LoopIdx,
+				Layer: s.LayerIdx,
+				Cx:    s.Mid[0],
+				Cy:    s.Mid[1],
+				Cz:    s.Z,
+				Color: colors[i],
+				Area:  s.Length * layerH,
+			})
 		}
-
-		var splitInfo *squarevoxel.SplitInfo
-		if spo.Enabled {
-			splitInfo = &squarevoxel.SplitInfo{
-				Halves: spo.Halves,
-				Xform:  spo.Xform,
+		// Reindex neighbor table from full-section indices to
+		// visible-cell indices, dropping hidden sections.
+		for fi, ns := range neighbors {
+			vi := fullToVisible[fi]
+			if vi < 0 {
+				continue
 			}
+			var out []voxel.Neighbor
+			for _, n := range ns {
+				vj := fullToVisible[n.Idx]
+				if vj < 0 {
+					continue
+				}
+				out = append(out, voxel.Neighbor{Idx: vj, Weight: n.Weight})
+			}
+			visibleNeighbors = append(visibleNeighbors, out)
 		}
 
-		// baseColorOverride routes parse errors through the tracker
-		// itself with per-session dedup, so we just pass nil through
-		// to the voxelizer on failure.
-		baseColorOverride, _ := r.cache.baseColorOverride(
-			r.opts.BaseColorMaterialX,
-			r.opts.BaseColorMaterialXTileMM,
-			r.opts.BaseColorMaterialXTriplanarSharpness,
-			r.tracker,
-		)
-		result, verr := squarevoxel.VoxelizeTwoGrids(r.ctx, lo.Model, sampleModel,
-			stickerModel, stickerSI,
-			layer0Size, upperSize, layer0H, upperH, r.tracker, so.Decals, splitInfo,
-			baseColorOverride)
-		if verr != nil {
-			return nil, fmt.Errorf("voxelize: %w", verr)
-		}
+		plog.Printf("  Sliced: %d layers, %d sections (%d visible), cellSize=%.3fmm layerH=%.3fmm",
+			len(layers), len(sections), len(cells), cellSize, layerH)
+
 		return &voxelizeOutput{
-			Cells:         result.Cells,
-			CellAssignMap: result.CellAssignMap,
-			MinV:          result.MinV,
-			Layer0Size:    layer0Size,
-			UpperSize:     upperSize,
-			Layer0H:       layer0H,
-			UpperH:        upperH,
+			Cells:         cells,
+			Layers:        layers,
+			Sections:      sections,
+			Neighbors:     visibleNeighbors,
+			VisibleToFull: visibleToFull,
+			LayerH:        layerH,
+			CellSize:      cellSize,
 		}, nil
 	})
+}
+
+// modelZRange returns the min and max Z over a model's vertices.
+func modelZRange(m *loader.LoadedModel) (zMin, zMax float32) {
+	if len(m.Vertices) == 0 {
+		return
+	}
+	zMin = m.Vertices[0][2]
+	zMax = m.Vertices[0][2]
+	for _, v := range m.Vertices {
+		if v[2] < zMin {
+			zMin = v[2]
+		}
+		if v[2] > zMax {
+			zMax = v[2]
+		}
+	}
+	return
 }
 
 func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
@@ -768,7 +839,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		var derr error
 		switch ditherMode {
 		case "dizzy-corrected":
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
 		case "dizzy-2hop":
 			// Single-pass dizzy with an expanded 2-hop neighbor
@@ -782,19 +853,19 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			// stranded cells: instead of dropping the residual,
 			// search neighbor palette swaps for one that absorbs
 			// it in the global-drift sense.
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, neighbors, r.tracker)
 		case "floyd-steinberg":
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
 		case "riemersma":
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
 		case "riemersma-pair":
 			// Sliding 2-cell Riemersma with residual-cancellation
 			// coupling. Same drift as base Riemersma; lower wander on
 			// flat/textured fixtures at ≈2× the per-cell cost.
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
 		case "blue-noise":
 			// Adaptive simplex blue-noise threshold dither: per-cell
@@ -804,7 +875,7 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			// reductions in wander on uniform/near-flat regions
 			// (where Riemersma's window accumulator forces visible
 			// far-palette picks).
-			neighbors := vo.getNeighbors()
+			neighbors := vo.Neighbors
 			tol := r.opts.BlueNoiseTolerance
 			if tol <= 0 {
 				tol = voxel.BlueNoiseAdaptiveTolDefault
@@ -831,34 +902,26 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 			c := pal[i]
 			plog.Printf("    #%02X%02X%02X: %d cells (%.1f%%)", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
 		}
-		tFlood := time.Now()
-		patchMap, numPatches, ferr := floodFillTwoGrids(r.ctx, cells, assignments, r.tracker)
-		if ferr != nil {
-			return nil, ferr
-		}
-		plog.Printf("  Flood fill: %d patches in %.1fs", numPatches, time.Since(tFlood).Seconds())
-		patchAssignment := make([]int32, numPatches)
-		for i, c := range cells {
-			k := voxel.CellKey{Grid: c.Grid, Col: c.Col, Row: c.Row, Layer: c.Layer}
-			pid := patchMap[k]
-			patchAssignment[pid] = assignments[i]
-		}
+		// The minislicer pipeline doesn't need flood-fill patches:
+		// each section is its own colored region in the prism wall,
+		// and Mesh3D extrudes per-section walls directly from
+		// `assignments`. Leaving PatchMap/NumPatches/PatchAssignment
+		// nil keeps the cached struct shape stable.
 		return &ditherOutput{
-			Assignments:     assignments,
-			PatchMap:        patchMap,
-			NumPatches:      numPatches,
-			PatchAssignment: patchAssignment,
+			Assignments: assignments,
 		}, nil
 	})
 }
 
+// Clip is a holdover stage name for the minislicer's Mesh3D phase:
+// it extrudes each per-layer prism from the section partition,
+// painting wall faces with their dithered palette index. Cap
+// (top/bottom) faces are tagged -1 by BuildPrintableMesh and remapped
+// here to the most common visible color for the cached
+// ShellAssignments slice (downstream Merge is color-agnostic).
 func (r *pipelineRun) Clip() (*clipOutput, error) {
 	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
 		do, err := r.Dither()
-		if err != nil {
-			return nil, err
-		}
-		deco, err := r.Decimate()
 		if err != nil {
 			return nil, err
 		}
@@ -866,100 +929,64 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		spo, err := r.Split()
-		if err != nil {
+		// Decimate + Split are stubbed during the minislicer
+		// transition; keep the calls so their stubs cache.
+		if _, err := r.Decimate(); err != nil {
 			return nil, err
 		}
+		if _, err := r.Split(); err != nil {
+			return nil, err
+		}
+
+		stage := progress.BeginStage(r.tracker, stageNames[StageClip], false, 0)
+		defer stage.Done()
 		tClip := time.Now()
-		cfg := voxel.TwoGridConfig{
-			MinV:       vo.MinV,
-			Layer0Size: vo.Layer0Size,
-			UpperSize:  vo.UpperSize,
-			Layer0H:    vo.Layer0H,
-			UpperH:     vo.UpperH,
-			SeamZ:      vo.MinV[2] + vo.Layer0H,
+
+		// Map dither outputs (per visible cell) back to per-section
+		// assignments. Hidden sections (alpha<128) keep -1; the
+		// prism builder skips their wall coloring naturally because
+		// SafeAssignments will substitute the fallback.
+		sectionAssign := make([]int32, len(vo.Sections))
+		for i := range sectionAssign {
+			sectionAssign[i] = -1
+		}
+		for vi, fi := range vo.VisibleToFull {
+			sectionAssign[fi] = do.Assignments[vi]
 		}
 
-		if spo.Enabled {
-			out, err := r.clipSplit(do, deco, vo, cfg)
-			if err != nil {
-				return nil, err
-			}
-			plog.Printf("  Clipped (split): %d faces in %.1fs", len(out.ShellFaces), time.Since(tClip).Seconds())
-			return out, nil
-		}
+		mesh, faceAssign := minislicer.BuildPrintableMesh(vo.Layers, vo.Sections, sectionAssign, vo.LayerH)
+		fallback := mostCommonNonNeg(faceAssign)
+		safe := minislicer.SafeAssignments(faceAssign, fallback)
 
-		shellVerts, shellFaces, shellAssignments, cerr := voxel.ClipMeshByPatchesTwoGrid(
-			r.ctx, deco.DecimModel, do.PatchMap, do.PatchAssignment, cfg, r.tracker)
-		if cerr != nil {
-			return nil, fmt.Errorf("clip: %w", cerr)
-		}
-		plog.Printf("  Clipped mesh: %d faces in %.1fs", len(shellFaces), time.Since(tClip).Seconds())
-		plog.Printf("  After clip: %s", voxel.CheckWatertight(shellFaces))
+		plog.Printf("  Mesh3D: %d verts, %d faces in %.1fs",
+			len(mesh.Vertices), len(mesh.Faces), time.Since(tClip).Seconds())
+
 		return &clipOutput{
-			ShellVerts:       shellVerts,
-			ShellFaces:       shellFaces,
-			ShellAssignments: shellAssignments,
+			ShellVerts:       mesh.Vertices,
+			ShellFaces:       mesh.Faces,
+			ShellAssignments: safe,
 		}, nil
 	})
 }
 
-// clipSplit runs ClipMeshByPatchesTwoGrid once per half, with each
-// half's PatchMap subset, and concatenates the per-half outputs into
-// a single clipOutput with ShellHalfIdx tagging each face.
-//
-// Patches are connected components of cells with the same color
-// assignment. Cells in different halves are spatially separated by
-// the bed-layout gap and never share neighbors, so flood-fill never
-// joins them: every patch belongs to exactly one half. We rely on
-// that to filter PatchMap by cell.HalfIdx without losing
-// connectivity.
-func (r *pipelineRun) clipSplit(do *ditherOutput, deco *decimateOutput, vo *voxelizeOutput, cfg voxel.TwoGridConfig) (*clipOutput, error) {
-	var halfPatchMaps [2]map[voxel.CellKey]int
-	for h := 0; h < 2; h++ {
-		halfPatchMaps[h] = make(map[voxel.CellKey]int)
+// mostCommonNonNeg returns the most frequent non-negative palette
+// index in a, or 0 if the slice has no non-negative entries.
+func mostCommonNonNeg(a []int32) int32 {
+	counts := map[int32]int{}
+	for _, v := range a {
+		if v >= 0 {
+			counts[v]++
+		}
 	}
-	for ck, patchIdx := range do.PatchMap {
-		cellIdx, ok := vo.CellAssignMap[ck]
-		if !ok {
-			continue
+	var best int32
+	bestN := -1
+	for k, n := range counts {
+		if n > bestN {
+			best = k
+			bestN = n
 		}
-		h := vo.Cells[cellIdx].HalfIdx
-		halfPatchMaps[h][ck] = patchIdx
 	}
-
-	var combinedVerts [][3]float32
-	var combinedFaces [][3]uint32
-	var combinedAssign []int32
-	var combinedHalfIdx []byte
-	for h := 0; h < 2; h++ {
-		// Empty-half short-circuit: with no cells/patches in this
-		// half, ClipMeshByPatchesTwoGrid would still iterate the
-		// half's mesh and clip it against the SeamZ plane only,
-		// producing geometry tagged with a default assignment that
-		// no caller validated. Skip the call.
-		if deco.Halves[h] == nil || len(deco.Halves[h].Faces) == 0 || len(halfPatchMaps[h]) == 0 {
-			continue
-		}
-		verts, faces, assigns, err := voxel.ClipMeshByPatchesTwoGrid(
-			r.ctx, deco.Halves[h], halfPatchMaps[h], do.PatchAssignment, cfg, r.tracker)
-		if err != nil {
-			return nil, fmt.Errorf("clip half %d: %w", h, err)
-		}
-		offset := uint32(len(combinedVerts))
-		combinedVerts = append(combinedVerts, verts...)
-		for _, f := range faces {
-			combinedFaces = append(combinedFaces, [3]uint32{f[0] + offset, f[1] + offset, f[2] + offset})
-			combinedHalfIdx = append(combinedHalfIdx, byte(h))
-		}
-		combinedAssign = append(combinedAssign, assigns...)
-	}
-	return &clipOutput{
-		ShellVerts:       combinedVerts,
-		ShellFaces:       combinedFaces,
-		ShellAssignments: combinedAssign,
-		ShellHalfIdx:     combinedHalfIdx,
-	}, nil
+	return best
 }
 
 func (r *pipelineRun) Merge() (*mergeOutput, error) {

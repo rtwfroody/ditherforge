@@ -16,6 +16,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/materialx"
+	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
@@ -425,41 +426,28 @@ type loadOutput struct {
 }
 
 type voxelizeOutput struct {
-	Cells         []voxel.ActiveCell
-	CellAssignMap map[voxel.CellKey]int
-	MinV          [3]float32
-	Layer0Size    float32
-	UpperSize     float32
-	// Per-grid Z heights. Layer0H == UpperH for printers that don't
-	// differentiate; Snapmaker-style profiles run a taller first
-	// layer for adhesion (e.g. 0.25 vs 0.20). Layer 0's center sits
-	// at MinV[2]; layer N (N≥1)'s center sits at MinV[2] +
-	// Layer0H/2 + (N-0.5)*UpperH.
-	Layer0H float32
-	UpperH  float32
+	// Cells holds one ActiveCell per Section, with the section's
+	// midpoint XYZ, sampled Color, and ribbon Area
+	// (Length×LayerHeight). Produced by the Slice stage from the
+	// per-layer contour partition; consumed by ColorAdjust /
+	// ColorWarp / Palette / Dither without their needing to know
+	// the underlying section topology.
+	Cells []voxel.ActiveCell
 
-	// neighbors caches the two-grid neighbor table. Voxel topology only
-	// changes on StageVoxelize, so dither re-runs (same cells, different
-	// dither mode) can reuse the table instead of rebuilding it. Valid for
-	// the lifetime of this voxelizeOutput; never mutate Cells in place.
-	// Unexported so gob skips it on the disk round-trip; rebuilt on demand
-	// by getNeighbors().
-	neighbors    [][]voxel.Neighbor
-	neighborOnce sync.Once
-}
-
-// getNeighbors returns the two-grid neighbor table, building it on first
-// call. sync.Once makes the lazy build safe even if a future change
-// introduces concurrent readers — without it, a downstream reader and the
-// disk-encode goroutine kicked off by setVoxelize would race on the
-// neighbors field. (gob skips unexported fields so the encode goroutine
-// doesn't touch this directly, but the invariant is easier to keep when
-// the synchronization is explicit.)
-func (vo *voxelizeOutput) getNeighbors() [][]voxel.Neighbor {
-	vo.neighborOnce.Do(func() {
-		vo.neighbors = voxel.BuildTwoGridNeighbors(vo.Cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
-	})
-	return vo.neighbors
+	// Layers, Sections, and Neighbors carry the full minislicer
+	// graph so the Mesh3D (Clip) and Dither stages can rebuild
+	// per-layer prism geometry / run error diffusion across the
+	// section adjacency.
+	Layers    []minislicer.Layer
+	Sections  []minislicer.Section
+	Neighbors [][]voxel.Neighbor
+	// VisibleToFull[i] = index into Sections for the i-th visible
+	// ActiveCell. Hidden (alpha<128) sections are skipped during
+	// dither; this maps dither outputs (per visible cell) back to
+	// the full section list for Mesh3D extrusion.
+	VisibleToFull []int
+	LayerH        float32
+	CellSize      float32
 }
 
 type stickerOutput struct {

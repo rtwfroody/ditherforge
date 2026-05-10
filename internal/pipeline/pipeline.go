@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
@@ -23,7 +22,6 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
-	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -108,6 +106,15 @@ type Options struct {
 	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
+	// RemeshMode selects which surface-discretization pipeline to
+	// run. "voxel" (default / empty string) is the production
+	// stack: AABB voxelization → palette → dither → per-voxel mesh.
+	// "minislicer" is the prototype contour-slicer pipeline in
+	// internal/minislicer: per-layer 2D contour partitioned into
+	// arc-length sections that feed the dither directly. The
+	// minislicer path bypasses Voxelize/ColorAdjust/ColorWarp/
+	// Dither/Clip/Merge entirely and emits its own preview mesh.
+	RemeshMode string `json:"RemeshMode,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -616,32 +623,20 @@ var offGridWarned sync.Map
 // stays uniform — there's no slicer setting available to derive a
 // taller first-layer height from.
 func voxelCellSizes(opts Options) (cells voxelCells) {
+	// Post-rearchitecture: the minislicer derives geometry directly
+	// from opts.NozzleDiameter and opts.LayerHeight; the named-return
+	// + defer pattern below is preserved so the printer-profile path
+	// keeps overriding when present, but the legacy nozzle×constant
+	// fallback now uses the bare nozzle diameter (no Layer0CellScale
+	// inflation, no AdhesionScale, no UpperLayerXYScale). The values
+	// flow into stage cache keys; the actual slice/section sizes come
+	// from the Voxelize body using opts directly.
 	cells = voxelCells{
-		Layer0XY: opts.NozzleDiameter * squarevoxel.Layer0CellScale,
-		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
+		Layer0XY: opts.NozzleDiameter,
+		UpperXY:  opts.NozzleDiameter,
 		Layer0Z:  opts.LayerHeight,
 		UpperZ:   opts.LayerHeight,
 	}
-	// Apply Layer0AdhesionXYScale and UpperLayerXYScale at the very
-	// end so they stack on top of whichever Layer0XY/UpperXY source
-	// wins below (slicer profile or nozzle×constant fallback). The
-	// named return lets the defer mutate the value the caller sees.
-	// Zero/negative on either field falls back to the squarevoxel
-	// package default so library callers using Options{} (and tests)
-	// see the same behavior they did before the field existed; the
-	// CLI defaults and GUI slider mins both keep 0 unreachable.
-	adhesionScale := opts.Layer0AdhesionXYScale
-	if adhesionScale <= 0 {
-		adhesionScale = squarevoxel.Layer0AdhesionXYScale
-	}
-	upperScale := opts.UpperLayerXYScale
-	if upperScale <= 0 {
-		upperScale = squarevoxel.UpperLayerXYScale
-	}
-	defer func() {
-		cells.Layer0XY *= adhesionScale
-		cells.UpperXY *= upperScale
-	}()
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
 	// voxel grid agrees with what the emitted 3MF claims to be.
@@ -847,68 +842,6 @@ func bakeMaterialXBaseColor(model *loader.LoadedModel, override voxel.BaseColorO
 		})
 		model.FaceBaseColor[i] = [4]uint8{rgb[0], rgb[1], rgb[2], 255}
 	}
-}
-
-// floodFillTwoGrids runs flood fill separately for each (Grid,
-// HalfIdx) partition and merges results. Partitioning by HalfIdx is
-// load-bearing for the Split path: FloodFillPatches operates on
-// CellKey index-arithmetic adjacency, not spatial adjacency, so two
-// halves whose CellKey columns happen to be adjacent in index space
-// (which can happen when the bed-layout gap is small relative to
-// cellSize) would otherwise have patches bridging across the
-// bed-layout gap. With this partition,
-// patches are guaranteed to live in exactly one (Grid, HalfIdx) pair.
-func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
-	// Up to 4 partitions: (Grid 0/1) × (HalfIdx 0/1). Empty groups are
-	// skipped; the unsplit path produces only HalfIdx=0 entries.
-	type partKey struct {
-		grid    uint8
-		halfIdx uint8
-	}
-	parts := make(map[partKey]*struct {
-		cells   []voxel.ActiveCell
-		assigns []int32
-	})
-	for i, c := range cells {
-		k := partKey{grid: c.Grid, halfIdx: c.HalfIdx}
-		p, ok := parts[k]
-		if !ok {
-			p = &struct {
-				cells   []voxel.ActiveCell
-				assigns []int32
-			}{}
-			parts[k] = p
-		}
-		p.cells = append(p.cells, c)
-		p.assigns = append(p.assigns, assignments[i])
-	}
-
-	var counter atomic.Int64
-	merged := make(map[voxel.CellKey]int, len(cells))
-	totalPatches := 0
-	// Iterate parts in a deterministic order so patch IDs are stable
-	// across runs (matters for cache stability on downstream stages).
-	order := []partKey{
-		{grid: 0, halfIdx: 0},
-		{grid: 0, halfIdx: 1},
-		{grid: 1, halfIdx: 0},
-		{grid: 1, halfIdx: 1},
-	}
-	for _, k := range order {
-		p, ok := parts[k]
-		if !ok {
-			continue
-		}
-		pm, n, err := voxel.FloodFillPatches(ctx, p.cells, p.assigns, tracker, &counter)
-		if err != nil {
-			return nil, 0, err
-		}
-		for ck, v := range pm {
-			merged[ck] = v + totalPatches
-		}
-		totalPatches += n
-	}
-	return merged, totalPatches, nil
 }
 
 func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
