@@ -66,20 +66,24 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 		}
 
 		// Caps: one earcut per outer (outer minus direct hole
-		// children). Skipped per-face when a tiled cap is covering
-		// that Z face.
+		// children) ALWAYS emitted at the exact Z face. When a
+		// layer also has tiled cap sections covering the exposed
+		// portion of the cap, those tiles are emitted at a Z
+		// pushed slightly outward (+capTileEpsilon for top,
+		// −capTileEpsilon for bottom) so they win the depth test
+		// from outside the model. The earcut underneath fills the
+		// "covered" remainder so adjacent layers don't see through
+		// to nothing when their footprints don't perfectly align.
+		_ = hasTopCap
+		_ = hasBotCap
 		for lp := range layer.Loops {
 			outer := &layer.Loops[lp]
 			if outer.IsHole {
 				continue
 			}
 			holes := collectChildHoles(layer.Loops, lp)
-			if !hasTopCap[layer.LayerIdx] {
-				emitEarcutCap(m, &faceAssign, outer.Points, holes, zTop, true, fallback)
-			}
-			if !hasBotCap[layer.LayerIdx] {
-				emitEarcutCap(m, &faceAssign, outer.Points, holes, zBot, false, fallback)
-			}
+			emitEarcutCap(m, &faceAssign, outer.Points, holes, zTop, true, fallback)
+			emitEarcutCap(m, &faceAssign, outer.Points, holes, zBot, false, fallback)
 		}
 	}
 

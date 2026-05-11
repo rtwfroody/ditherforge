@@ -2,24 +2,34 @@ package minislicer
 
 import "math"
 
+// capTileEpsilon is how far outside the slab face cap tiles sit
+// (above for KindCapTop, below for KindCapBottom). The earcut
+// fallback cap is emitted at the exact slab face Z; the tiny
+// outward offset on tiles makes them win the depth test from
+// outside the model so the dithered tile color shows through
+// instead of the earcut's flat fallback. 1µm is well above the
+// float32 z-buffer's discrimination threshold for mm-scale models
+// and far below any visible feature.
+const capTileEpsilon = 1e-3
+
 // PartitionTopCap tiles the top face of `layer` wherever it's
 // exposed — solid in `layer` and air in `neighborAbove` (the layer
 // directly above). Pass neighborAbove == nil for the topmost layer
 // (no layer above → all-air → every tile inside layer is exposed).
 //
 // `layerH` is the slab thickness; the tile's Z is at the slab's
-// upper face (layer.Z + layerH/2).
+// upper face + capTileEpsilon so tiles depth-beat the earcut cap.
 //
 // loopIdxBase shifts the per-loop LoopIdx for cap sections so they
 // don't collide with ribbon-section loop indices.
 func PartitionTopCap(layer Layer, neighborAbove *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, neighborAbove, layerH/2, cellSize, loopIdxBase, KindCapTop)
+	return partitionCap(layer, neighborAbove, layerH/2+capTileEpsilon, cellSize, loopIdxBase, KindCapTop)
 }
 
 // PartitionBottomCap is the bottom-face counterpart. Pass
 // neighborBelow == nil for the bottommost layer.
 func PartitionBottomCap(layer Layer, neighborBelow *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, neighborBelow, -layerH/2, cellSize, loopIdxBase, KindCapBottom)
+	return partitionCap(layer, neighborBelow, -layerH/2-capTileEpsilon, cellSize, loopIdxBase, KindCapBottom)
 }
 
 // insideSolid uses even-odd nesting: a point is inside the solid
