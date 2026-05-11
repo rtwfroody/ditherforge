@@ -662,7 +662,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		// into salmon-colored interior triangles when a cap really
 		// sits over a (sloped) dome surface.
 		minislicer.PopulateSectionNormalZ(colorModel, sections)
-		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, cellSize)
+		colors, alpha := minislicer.SampleSectionColors(colorModel, si, layers, sections, cellSize, layerH)
 
 		neighbors := minislicer.BuildSectionGraph(sections, layers, cellSize)
 

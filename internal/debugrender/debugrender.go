@@ -41,26 +41,97 @@ var DefaultViews = []View{
 	{"persp", 45, 25},
 }
 
-// InputMesh is the loaded model with a per-face quick-sampled
-// color, ready for rendering as a ground-truth reference.
+// InputMesh wraps the loaded model and exposes a per-pixel ColorAt
+// hook the renderer calls during rasterization. We keep the full
+// loader.LoadedModel reference so ColorAt can interpolate UVs /
+// vertex colors per pixel instead of flattening to one color per
+// triangle (which made low-poly textured meshes — earth.glb in
+// particular — render as obviously-faceted flat patches).
+//
+// Colors[fi] is the centroid color of face fi, retained for tests
+// that want a single representative RGB per triangle (e.g. the
+// extreme-axis side-color comparisons in sampled_match_input_test).
 type InputMesh struct {
+	Model    *loader.LoadedModel
 	Vertices [][3]float32
 	Faces    [][3]uint32
 	Colors   [][3]uint8
 }
 
-// ColorAt is the colorFn render.RenderColor expects.
+// ColorAt returns the per-pixel color the renderer wants at
+// barycentric (u, v) within face fi. (u, v) follow render's
+// convention: vertex 0 at (0,0), vertex 1 at (1,0), vertex 2 at
+// (0,1); the third weight is (1 - u - v).
 func (m *InputMesh) ColorAt(fi int, u, v float64) [3]uint8 {
-	if fi < 0 || fi >= len(m.Colors) {
+	if m.Model == nil || fi < 0 || fi >= len(m.Faces) {
+		if fi >= 0 && fi < len(m.Colors) {
+			return m.Colors[fi]
+		}
 		return [3]uint8{128, 128, 128}
 	}
-	return m.Colors[fi]
+	w0 := 1 - u - v
+	w1 := u
+	w2 := v
+	f := m.Faces[fi]
+	mod := m.Model
+
+	if mod.VertexColors != nil {
+		c0 := mod.VertexColors[f[0]]
+		c1 := mod.VertexColors[f[1]]
+		c2 := mod.VertexColors[f[2]]
+		return [3]uint8{
+			uint8(clamp255(w0*float64(c0[0]) + w1*float64(c1[0]) + w2*float64(c2[0]))),
+			uint8(clamp255(w0*float64(c0[1]) + w1*float64(c1[1]) + w2*float64(c2[1]))),
+			uint8(clamp255(w0*float64(c0[2]) + w1*float64(c1[2]) + w2*float64(c2[2]))),
+		}
+	}
+	if mod.UVs != nil && mod.FaceTextureIdx != nil && fi < len(mod.FaceTextureIdx) &&
+		mod.FaceTextureIdx[fi] >= 0 && int(mod.FaceTextureIdx[fi]) < len(mod.Textures) {
+		texIdx := int(mod.FaceTextureIdx[fi])
+		uv0 := mod.UVs[f[0]]
+		uv1 := mod.UVs[f[1]]
+		uv2 := mod.UVs[f[2]]
+		uu := w0*float64(uv0[0]) + w1*float64(uv1[0]) + w2*float64(uv2[0])
+		vv := w0*float64(uv0[1]) + w1*float64(uv1[1]) + w2*float64(uv2[1])
+		img := mod.Textures[texIdx]
+		b := img.Bounds()
+		uu = uu - float64(int(uu))
+		if uu < 0 {
+			uu += 1
+		}
+		vv = vv - float64(int(vv))
+		if vv < 0 {
+			vv += 1
+		}
+		px := int(uu*float64(b.Dx()-1)) + b.Min.X
+		py := int(vv*float64(b.Dy()-1)) + b.Min.Y
+		r, g, bl, _ := img.At(px, py).RGBA()
+		return [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8)}
+	}
+	if mod.FaceBaseColor != nil && fi < len(mod.FaceBaseColor) {
+		c := mod.FaceBaseColor[fi]
+		return [3]uint8{c[0], c[1], c[2]}
+	}
+	return [3]uint8{128, 128, 128}
+}
+
+func clamp255(x float64) float64 {
+	if x < 0 {
+		return 0
+	}
+	if x > 255 {
+		return 255
+	}
+	return x
 }
 
 // LoadInputMesh loads the model at path and applies the same unit
 // scale (GLB → mm) and optional size normalization the pipeline
 // uses, so the resulting mesh shares a world frame with the
-// pipeline's output mesh. Face colors come from FaceCentroidColor.
+// pipeline's output mesh. Colors[fi] is the centroid color of face
+// fi (used by tests that want a per-triangle representative color);
+// per-pixel rendering goes through ColorAt, which interpolates UVs
+// or vertex colors on the underlying loader.LoadedModel.
 func LoadInputMesh(path string, sizePtr *float32) (*InputMesh, error) {
 	model, err := LoadAnyModel(path)
 	if err != nil {
@@ -81,6 +152,7 @@ func LoadInputMesh(path string, sizePtr *float32) (*InputMesh, error) {
 		colors[fi] = FaceCentroidColor(model, fi)
 	}
 	return &InputMesh{
+		Model:    model,
 		Vertices: model.Vertices,
 		Faces:    model.Faces,
 		Colors:   colors,

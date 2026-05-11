@@ -518,47 +518,84 @@ func sampleBaryAt(p, v0, v1, v2 [3]float32) [3]float32 {
 // avoid nearest-tri picking up unrelated triangles from a nearby
 // object.
 func SampleByTriangle(p [3]float32, model *loader.LoadedModel, triIdx int32) [4]uint8 {
-	if triIdx < 0 || int(triIdx) >= len(model.Faces) {
+	return SampleByTrianglePoints(model, triIdx, []([3]float32){p})
+}
+
+// SampleByTrianglePoints averages a texture-color sample taken at
+// each point in `pts`, all evaluated against triangle `triIdx`'s
+// UVs / vertex colors / base color. The caller asserts every point
+// lies on (or near) this triangle's surface; for points that
+// project outside the XY footprint of the triangle, sampleBaryAt
+// falls back to 3D closest-point-on-triangle and clamps to the
+// triangle's bounds.
+//
+// Footprint averaging like this is what stops the sampled-mode
+// rendering from producing per-section color noise on
+// high-frequency textures (earth.glb): a single ribbon section
+// covers many texels of source texture, so the section's true
+// representative color is the average over its footprint, not one
+// texel at its midpoint.
+func SampleByTrianglePoints(model *loader.LoadedModel, triIdx int32, pts [][3]float32) [4]uint8 {
+	if triIdx < 0 || int(triIdx) >= len(model.Faces) || len(pts) == 0 {
 		return [4]uint8{128, 128, 128, 255}
 	}
 	f := model.Faces[triIdx]
 	v0 := model.Vertices[f[0]]
 	v1 := model.Vertices[f[1]]
 	v2 := model.Vertices[f[2]]
-	bary := sampleBaryAt(p, v0, v1, v2)
 	matAlpha, bc, texIdx := faceMaterial(int(triIdx), model)
 
-	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
+	var sumR, sumG, sumB, sumA float32
+	n := float32(len(pts))
+
+	switch {
+	case texIdx >= 0 && int(texIdx) < len(model.Textures):
 		uv0 := model.UVs[f[0]]
 		uv1 := model.UVs[f[1]]
 		uv2 := model.UVs[f[2]]
-		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
-		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
-		rgba := BilinearSample(model.Textures[texIdx], u, v)
-		texA := float32(rgba[3]) / 255
-		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
-		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
-		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
-		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
-		return rgba
-	}
-	if model.VertexColors != nil {
+		tex := model.Textures[texIdx]
+		for _, p := range pts {
+			bary := sampleBaryAt(p, v0, v1, v2)
+			u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+			v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+			rgba := BilinearSample(tex, u, v)
+			texA := float32(rgba[3]) / 255
+			sumR += float32(rgba[0])*texA + float32(bc[0])*(1-texA)
+			sumG += float32(rgba[1])*texA + float32(bc[1])*(1-texA)
+			sumB += float32(rgba[2])*texA + float32(bc[2])*(1-texA)
+			sumA += texA * float32(bc[3]) * matAlpha
+		}
+		return [4]uint8{
+			uint8(ClampF(sumR/n+0.5, 0, 255)),
+			uint8(ClampF(sumG/n+0.5, 0, 255)),
+			uint8(ClampF(sumB/n+0.5, 0, 255)),
+			uint8(ClampF(sumA/n+0.5, 0, 255)),
+		}
+	case model.VertexColors != nil:
 		c0 := model.VertexColors[f[0]]
 		c1 := model.VertexColors[f[1]]
 		c2 := model.VertexColors[f[2]]
-		rr := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
-		gg := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
-		bb := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
-		aa := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
-		return [4]uint8{
-			uint8(ClampF(rr*float32(bc[0])/255+0.5, 0, 255)),
-			uint8(ClampF(gg*float32(bc[1])/255+0.5, 0, 255)),
-			uint8(ClampF(bb*float32(bc[2])/255+0.5, 0, 255)),
-			uint8(ClampF(aa*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+		for _, p := range pts {
+			bary := sampleBaryAt(p, v0, v1, v2)
+			rr := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
+			gg := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
+			bb := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
+			aa := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
+			sumR += rr * float32(bc[0]) / 255
+			sumG += gg * float32(bc[1]) / 255
+			sumB += bb * float32(bc[2]) / 255
+			sumA += aa * float32(bc[3]) / 255 * matAlpha
 		}
+		return [4]uint8{
+			uint8(ClampF(sumR/n+0.5, 0, 255)),
+			uint8(ClampF(sumG/n+0.5, 0, 255)),
+			uint8(ClampF(sumB/n+0.5, 0, 255)),
+			uint8(ClampF(sumA/n+0.5, 0, 255)),
+		}
+	default:
+		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+		return [4]uint8{bc[0], bc[1], bc[2], a}
 	}
-	a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
-	return [4]uint8{bc[0], bc[1], bc[2], a}
 }
 
 // effectiveAreas returns a per-cell area slice for use by area-weighted
