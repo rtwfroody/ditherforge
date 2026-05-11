@@ -599,7 +599,16 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		// can run for minutes. A tolerance well below cellSize
 		// preserves visible features but cuts vertex counts to
 		// tens.
-		minislicer.SimplifyAndReclassify(layers, cellSize*0.25)
+		//
+		// opts.NoSimplify skips this — the existing checkbox
+		// previously only gated Load-stage alpha-wrap decimation
+		// (which doesn't apply to most pipelines). Useful as a
+		// diagnostic: if a sampling artifact disappears with
+		// NoSimplify on, DP is bridging across material boundaries
+		// and dragging section midpoints onto the wrong surface.
+		if !r.opts.NoSimplify {
+			minislicer.SimplifyAndReclassify(layers, cellSize*0.25)
+		}
 
 		sections := minislicer.PartitionLoops(layers, cellSize)
 		if len(sections) == 0 {
