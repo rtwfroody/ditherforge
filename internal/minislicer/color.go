@@ -1,6 +1,8 @@
 package minislicer
 
 import (
+	"math"
+
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
@@ -44,6 +46,17 @@ func SampleSectionColors(model *loader.LoadedModel, si *voxel.SpatialIndex, sect
 	// straddling neighboring tiles.
 	const capInset = 0.25
 
+	// Bias the sample point outward from the polygon boundary
+	// before doing the nearest-tri lookup. Without this, the DP
+	// simplification's allowed drift (cellSize/4 ≈ 0.1mm) can put a
+	// section midpoint just inside the contour — and on a thin-shell
+	// model (e.g. cut_fish, blue skin against a salmon cut surface
+	// less than a mm apart) the nearest-tri lookup picks the wrong
+	// side of the shell, flipping skin and cut colors. Biasing by
+	// half a cell guarantees the sample sits in air on the
+	// outward-facing side of the polygon.
+	biasDist := cellSize * 0.5
+
 	// Cache loop cumulative arc length so it's only computed once
 	// per (layer, loop), not per section.
 	type loopKey struct{ layer, loop int }
@@ -80,11 +93,43 @@ func SampleSectionColors(model *loader.LoadedModel, si *voxel.SpatialIndex, sect
 				alpha[i] = rgba[3] >= 128
 				continue
 			}
+			// Outward-bias direction at the section midpoint.
+			// Perpendicular to the local tangent, rotated 90° in the
+			// direction that points away from the polygon's interior
+			// (right of tangent for CCW, left for CW). For holes
+			// (IsHole=true) we flip the sign so the bias goes into
+			// the cavity instead of into the surrounding fish
+			// material — sampling the cavity-facing wall surface.
+			midArc := s.StartArc + 0.5*s.Length
+			ds := s.Length * 0.1
+			pA := pointAtArc(loop.Points, cum, midArc-ds)
+			pB := pointAtArc(loop.Points, cum, midArc+ds)
+			tx := pB[0] - pA[0]
+			ty := pB[1] - pA[1]
+			tn := float32(math.Sqrt(float64(tx*tx + ty*ty)))
+			var outX, outY float32
+			if tn > 1e-6 {
+				tx /= tn
+				ty /= tn
+				sign := float32(1)
+				if loop.SignedArea < 0 {
+					sign = -1
+				}
+				if loop.IsHole {
+					sign = -sign
+				}
+				outX = sign * ty
+				outY = sign * -tx
+			}
 			for k := 0; k < ribbonSamples; k++ {
 				t := (float32(k) + 0.5) / float32(ribbonSamples)
 				arc := s.StartArc + t*s.Length
 				xy := pointAtArc(loop.Points, cum, arc)
-				p := [3]float32{xy[0], xy[1], s.Z}
+				p := [3]float32{
+					xy[0] + outX*biasDist,
+					xy[1] + outY*biasDist,
+					s.Z,
+				}
 				rgba := voxel.SampleNearestColor(p, model, si, radius, buf, nil, nil)
 				rSum += float32(rgba[0])
 				gSum += float32(rgba[1])
@@ -104,8 +149,14 @@ func SampleSectionColors(model *loader.LoadedModel, si *voxel.SpatialIndex, sect
 				{cx + dx, cy + dy},
 				{cx - dx, cy + dy},
 			}
+			// Cap is on a horizontal surface — bias along ±Z based
+			// on whether the cap faces up or down.
+			zBias := biasDist
+			if s.Kind == KindCapBottom {
+				zBias = -biasDist
+			}
 			for _, sp := range samplePts {
-				p := [3]float32{sp[0], sp[1], s.Z}
+				p := [3]float32{sp[0], sp[1], s.Z + zBias}
 				rgba := voxel.SampleNearestColor(p, model, si, radius, buf, nil, nil)
 				rSum += float32(rgba[0])
 				gSum += float32(rgba[1])
