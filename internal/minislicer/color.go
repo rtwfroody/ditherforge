@@ -26,7 +26,20 @@ func SampleSectionColors(model *loader.LoadedModel, si *voxel.SpatialIndex, sect
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	for i, s := range sections {
 		p := [3]float32{s.Mid[0], s.Mid[1], s.Z}
-		rgba := voxel.SampleNearestColor(p, model, si, radius, buf, nil, nil)
+		var rgba [4]uint8
+		// Prefer source-triangle sampling: each ribbon section
+		// records the model triangle whose intersection with the
+		// slicing plane produced its midpoint. Sampling directly
+		// on that triangle's surface avoids the nearest-tri
+		// lookup picking up unrelated triangles from a nearby
+		// object — the cause of color leakage between a fish and
+		// the cutting board it rests on, or between adjacent
+		// pieces of a sliced model.
+		if s.SrcTriIdx >= 0 {
+			rgba = voxel.SampleByTriangle(p, model, s.SrcTriIdx)
+		} else {
+			rgba = voxel.SampleNearestColor(p, model, si, radius, buf, nil, nil)
+		}
 		colors[i] = [3]uint8{rgba[0], rgba[1], rgba[2]}
 		alpha[i] = rgba[3] >= 128
 	}

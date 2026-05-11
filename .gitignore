@@ -3,6 +3,7 @@ build/bin/
 /ditherbench
 /ditherforge
 /ditherforge-cli
+/debug-render
 
 # Frontend
 frontend/node_modules/

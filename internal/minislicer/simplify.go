@@ -17,15 +17,17 @@ func SimplifyAndReclassify(layers []Layer, tolerance float32) {
 	}
 	for li := range layers {
 		for lp := range layers[li].Loops {
-			pts := simplifyClosedDP(layers[li].Loops[lp].Points, tolerance)
+			pts, tris := simplifyClosedDPWithTris(
+				layers[li].Loops[lp].Points,
+				layers[li].Loops[lp].EdgeTris,
+				tolerance)
 			if len(pts) < 3 {
-				continue // keep original; degenerate after simplification
+				continue
 			}
 			layers[li].Loops[lp].Points = pts
+			layers[li].Loops[lp].EdgeTris = tris
 			layers[li].Loops[lp].SignedArea = signedArea(pts)
 		}
-		// Reclassify in case simplification changed the first-vertex
-		// position used by the classifier's point-in-polygon test.
 		for lp := range layers[li].Loops {
 			layers[li].Loops[lp].IsHole = false
 			layers[li].Loops[lp].HasHoleChild = false
@@ -39,12 +41,25 @@ func SimplifyAndReclassify(layers []Layer, tolerance float32) {
 // and DP-simplifying each arc independently. Returns a new slice
 // of points; never modifies the input.
 func simplifyClosedDP(pts []Point2, tol float32) []Point2 {
+	out, _ := simplifyClosedDPWithTris(pts, nil, tol)
+	return out
+}
+
+// simplifyClosedDPWithTris is simplifyClosedDP that also carries
+// a parallel per-edge triangle index array. tris[i] is the source
+// triangle for the edge pts[i] → pts[(i+1)%n]. After simplification
+// the surviving edges' triangle indices come from the LAST
+// pre-simplification edge that ended at the surviving vertex —
+// equivalently, the original edge whose endpoint is the surviving
+// vertex's "next" (preserves the invariant that edge i in the
+// output points to a triangle whose intersection with the slicing
+// plane actually contained the section's midpoint XY, modulo DP
+// tolerance). Pass nil tris to skip the bookkeeping.
+func simplifyClosedDPWithTris(pts []Point2, tris []int32, tol float32) ([]Point2, []int32) {
 	n := len(pts)
 	if n < 4 {
-		return pts
+		return pts, tris
 	}
-	// Diameter pair search is O(n²); fine for n in the 100s-1000s
-	// (1M ops at n=1000).
 	a, b := 0, 0
 	maxSq := float32(-1)
 	for i := 0; i < n; i++ {
@@ -64,13 +79,33 @@ func simplifyClosedDP(pts []Point2, tol float32) []Point2 {
 	tolSq := tol * tol
 	dpStep(pts, a, b, tolSq, keep, n)
 	dpStep(pts, b, a, tolSq, keep, n)
-	out := make([]Point2, 0, n)
-	for i, k := range keep {
-		if k {
-			out = append(out, pts[i])
+
+	outPts := make([]Point2, 0, n)
+	var outTris []int32
+	if tris != nil {
+		outTris = make([]int32, 0, n)
+	}
+	for i := 0; i < n; i++ {
+		if !keep[i] {
+			continue
+		}
+		outPts = append(outPts, pts[i])
+		if tris != nil {
+			// Each surviving vertex i in `keep` becomes a vertex in
+			// outPts; the outgoing edge to the NEXT surviving vertex
+			// spans the original edges (i, i+1, ..., next-1). We use
+			// the FIRST original edge's triangle (tris[i]) as the
+			// representative; this is the triangle whose original
+			// segment shared vertex i and is most likely to contain
+			// the simplified edge's midpoint.
+			if i < len(tris) {
+				outTris = append(outTris, tris[i])
+			} else {
+				outTris = append(outTris, -1)
+			}
 		}
 	}
-	return out
+	return outPts, outTris
 }
 
 // dpStep is the recursive Douglas-Peucker step over the half-arc

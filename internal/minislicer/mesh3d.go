@@ -62,6 +62,28 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 
 	fallback := mostCommonNonNegSafe(assignments)
 
+	// Per-layer XY index of visible ribbon sections, used to find
+	// the nearest ribbon section for each earcut cap triangle's
+	// centroid. The earcut faces inherit that section's index and
+	// dithered palette color, so:
+	//   - Normal mode: cap faces match the local wall color
+	//     (not a global most-common color that bleeds the wrong
+	//     region's color through gaps in adjacent walls).
+	//   - ShowSampledColors mode: the post-processor in pipeline.go
+	//     finds a valid faceSection for these faces and recolors
+	//     them with the local sampled RGB.
+	type ribbonRef struct {
+		sid   int32
+		mid   Point2
+	}
+	layerRibbons := make(map[int][]ribbonRef)
+	for i, s := range sections {
+		if s.Kind != KindRibbon {
+			continue
+		}
+		layerRibbons[s.LayerIdx] = append(layerRibbons[s.LayerIdx], ribbonRef{int32(i), s.Mid})
+	}
+
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
@@ -89,14 +111,36 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		// to nothing when their footprints don't perfectly align.
 		_ = hasTopCap
 		_ = hasBotCap
+		ribbons := layerRibbons[layer.LayerIdx]
+		colorAt := func(p Point2) (int32, int32) {
+			if len(ribbons) == 0 {
+				return -1, fallback
+			}
+			bestSid := int32(-1)
+			bestColor := fallback
+			bestSq := float32(1e30)
+			for _, r := range ribbons {
+				dx := r.mid[0] - p[0]
+				dy := r.mid[1] - p[1]
+				d := dx*dx + dy*dy
+				if d < bestSq {
+					bestSq = d
+					bestSid = r.sid
+					if assignments[r.sid] >= 0 {
+						bestColor = assignments[r.sid]
+					}
+				}
+			}
+			return bestSid, bestColor
+		}
 		for lp := range layer.Loops {
 			outer := &layer.Loops[lp]
 			if outer.IsHole {
 				continue
 			}
 			holes := collectChildHoles(layer.Loops, lp)
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, fallback)
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, fallback)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, colorAt)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, colorAt)
 		}
 	}
 
@@ -180,8 +224,10 @@ func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
 
 // emitEarcutCap triangulates outer + holes via Earcut and appends
 // the triangles to m at the given Z. isTop selects the winding so
-// the normal faces +Z (top cap) or -Z (bottom cap). Every emitted
-// face is tagged faceSection=-1 (no source section).
+// the normal faces +Z (top cap) or -Z (bottom cap). Each triangle's
+// faceSection + faceAssign come from the colorAt(centroid)
+// callback — typically "nearest visible ribbon section in this
+// layer." Falls back to (-1, fallback) when no ribbons exist.
 func emitEarcutCap(
 	m *loader.LoadedModel,
 	faceAssign *[]int32,
@@ -190,7 +236,7 @@ func emitEarcutCap(
 	holes [][]Point2,
 	z float32,
 	isTop bool,
-	color int32,
+	colorAt func(p Point2) (sid, color int32),
 ) {
 	if len(outer) < 3 {
 		return
@@ -204,14 +250,18 @@ func emitEarcutCap(
 		m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
 	}
 	for _, tr := range tris {
+		a := verts[tr[0]]
+		b := verts[tr[1]]
+		c := verts[tr[2]]
+		centroid := Point2{(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3}
+		sid, col := colorAt(centroid)
 		if isTop {
 			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
 		} else {
-			// Reverse winding so the bottom cap's normal points -Z.
 			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[2], baseV + tr[1]})
 		}
-		*faceAssign = append(*faceAssign, color)
-		*faceSection = append(*faceSection, -1)
+		*faceAssign = append(*faceAssign, col)
+		*faceSection = append(*faceSection, sid)
 	}
 }
 

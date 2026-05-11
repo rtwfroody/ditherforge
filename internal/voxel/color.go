@@ -477,6 +477,57 @@ type Neighbor struct {
 	Weight float32
 }
 
+// SampleByTriangle samples the model's color at a point assumed to
+// be at or near a specific triangle's surface. Computes barycentric
+// of p on triangle triIdx and looks up texture / vertex color /
+// base color from those coords. Unlike SampleNearestColor, this
+// performs no spatial-index search — the caller asserts which
+// triangle the point belongs to. Used when the slicer already
+// knows the source triangle for a sample point and we want to
+// avoid nearest-tri picking up unrelated triangles from a nearby
+// object.
+func SampleByTriangle(p [3]float32, model *loader.LoadedModel, triIdx int32) [4]uint8 {
+	if triIdx < 0 || int(triIdx) >= len(model.Faces) {
+		return [4]uint8{128, 128, 128, 255}
+	}
+	f := model.Faces[triIdx]
+	r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+	bary := [3]float32{1 - r.S - r.T, r.S, r.T}
+	matAlpha, bc, texIdx := faceMaterial(int(triIdx), model)
+
+	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
+		uv0 := model.UVs[f[0]]
+		uv1 := model.UVs[f[1]]
+		uv2 := model.UVs[f[2]]
+		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+		rgba := BilinearSample(model.Textures[texIdx], u, v)
+		texA := float32(rgba[3]) / 255
+		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
+		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
+		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
+		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
+		return rgba
+	}
+	if model.VertexColors != nil {
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		rr := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
+		gg := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
+		bb := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
+		aa := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
+		return [4]uint8{
+			uint8(ClampF(rr*float32(bc[0])/255+0.5, 0, 255)),
+			uint8(ClampF(gg*float32(bc[1])/255+0.5, 0, 255)),
+			uint8(ClampF(bb*float32(bc[2])/255+0.5, 0, 255)),
+			uint8(ClampF(aa*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+		}
+	}
+	a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+	return [4]uint8{bc[0], bc[1], bc[2], a}
+}
+
 // effectiveAreas returns a per-cell area slice for use by area-weighted
 // dithering. All-or-nothing: if every cell has Area > 0 (production
 // path), returns those areas verbatim. If any cell has Area <= 0

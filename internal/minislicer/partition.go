@@ -70,17 +70,49 @@ func partitionLoop(loop *Loop, layerIdx, loopIdx int, cellSize float32) []Sectio
 		endArc := startArc + step
 		midArc := startArc + 0.5*step
 		out[s] = Section{
-			LayerIdx: layerIdx,
-			LoopIdx:  loopIdx,
-			Index:    s,
-			StartArc: startArc,
+			LayerIdx:  layerIdx,
+			LoopIdx:   loopIdx,
+			Index:     s,
+			StartArc:  startArc,
 			EndArc:   endArc,
-			Length:   step,
-			Mid:      pointAtArc(loop.Points, cumLen, midArc),
-			Z:        loop.Z,
+			Length:    step,
+			Mid:       pointAtArc(loop.Points, cumLen, midArc),
+			Z:         loop.Z,
+			SrcTriIdx: edgeTriAtArc(loop, cumLen, midArc),
 		}
 	}
 	return out
+}
+
+// edgeTriAtArc returns the source triangle index of the loop edge
+// whose arc range contains `arc`, or -1 if EdgeTris isn't populated.
+func edgeTriAtArc(loop *Loop, cumLen []float32, arc float32) int32 {
+	if loop.EdgeTris == nil {
+		return -1
+	}
+	n := len(loop.Points)
+	perim := cumLen[n]
+	if perim <= 0 {
+		if len(loop.EdgeTris) > 0 {
+			return loop.EdgeTris[0]
+		}
+		return -1
+	}
+	for arc < 0 {
+		arc += perim
+	}
+	for arc >= perim {
+		arc -= perim
+	}
+	for i := 0; i < n; i++ {
+		if cumLen[i] <= arc && arc < cumLen[i+1] && i < len(loop.EdgeTris) {
+			return loop.EdgeTris[i]
+		}
+	}
+	if len(loop.EdgeTris) > 0 {
+		return loop.EdgeTris[len(loop.EdgeTris)-1]
+	}
+	return -1
 }
 
 // pointAtArc returns the XY point on a loop at the given arc-length

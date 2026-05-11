@@ -60,7 +60,8 @@ func PlanesForRange(zMin, zMax, layerH float32) []float32 {
 
 // segment is one triangle's intersection with a slicing plane.
 type segment struct {
-	a, b Point2
+	a, b   Point2
+	triIdx int32 // source triangle index in the model, or -1
 }
 
 // sliceAtZ slices the model at a single Z height.
@@ -74,7 +75,7 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 	var segs []segment
 
 	verts := model.Vertices
-	for _, f := range model.Faces {
+	for fi, f := range model.Faces {
 		v0 := verts[f[0]]
 		v1 := verts[f[1]]
 		v2 := verts[f[2]]
@@ -163,7 +164,7 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 		if ci != 2 {
 			continue
 		}
-		segs = append(segs, segment{a: crossings[0], b: crossings[1]})
+		segs = append(segs, segment{a: crossings[0], b: crossings[1], triIdx: int32(fi)})
 	}
 
 	loops := chainSegments(segs, z)
@@ -287,11 +288,15 @@ func chainSegments(segs []segment, z float32) []Loop {
 		used[startSeg] = true
 		s := segs[startSeg]
 		points := []Point2{s.a, s.b}
+		// edgeTris[i] = source triangle index of the edge
+		// points[i] → points[i+1]. Same length as edges = points-1
+		// for an open chain; for a closed loop the trailing edge
+		// (points[n-1] → points[0]) also has an entry.
+		edgeTris := []int32{s.triIdx}
 		startK := pkey(s.a)
 		curK := pkey(s.b)
 
 		for curK != startK {
-			// Find an unused segment that shares the current endpoint.
 			next := -1
 			nextOtherEnd := 0
 			for _, e := range adj[curK] {
@@ -303,7 +308,6 @@ func chainSegments(segs []segment, z float32) []Loop {
 				break
 			}
 			if next == -1 {
-				// Open chain — drop it; topology should be closed.
 				points = nil
 				break
 			}
@@ -316,6 +320,7 @@ func chainSegments(segs []segment, z float32) []Loop {
 				nextPt = ns.a
 			}
 			points = append(points, nextPt)
+			edgeTris = append(edgeTris, ns.triIdx)
 			curK = pkey(nextPt)
 		}
 		if len(points) < 3 {
@@ -325,16 +330,18 @@ func chainSegments(segs []segment, z float32) []Loop {
 		last := len(points) - 1
 		if pkey(points[last]) == pkey(points[0]) {
 			points = points[:last]
+			edgeTris = edgeTris[:last]
 		}
 		if len(points) < 3 {
 			continue
 		}
-		points = collapseCollinear(points)
+		points, edgeTris = collapseCollinearKeepTris(points, edgeTris)
 		if len(points) < 3 {
 			continue
 		}
 		loops = append(loops, Loop{
 			Points:     points,
+			EdgeTris:   edgeTris,
 			Z:          z,
 			SignedArea: signedArea(points),
 		})
@@ -347,15 +354,27 @@ func chainSegments(segs []segment, z float32) []Loop {
 // between their neighbors. It runs once around the loop with a
 // relative cross-product tolerance.
 func collapseCollinear(points []Point2) []Point2 {
+	pts, _ := collapseCollinearKeepTris(points, nil)
+	return pts
+}
+
+// collapseCollinearKeepTris is collapseCollinear with a parallel
+// edgeTris slice updated to match. edgeTris[i] is the source
+// triangle for the edge points[i] → points[(i+1)%n]; when point i
+// is dropped, the surviving edge from points[i-1] → points[i+1]
+// inherits edgeTris[i-1] (the "incoming" edge's triangle). Pass
+// edgeTris == nil to just collapse points.
+func collapseCollinearKeepTris(points []Point2, edgeTris []int32) ([]Point2, []int32) {
 	n := len(points)
 	if n < 3 {
-		return points
+		return points, edgeTris
 	}
-	// Tolerance is in (mesh-units)² of the cross product. 1e-7 mm² is
-	// well below any meaningful feature in this codebase's coordinate
-	// scale (mm), and snaps duplicate corners that float through lerp.
 	const crossEps = 1e-7
-	out := make([]Point2, 0, n)
+	outPts := make([]Point2, 0, n)
+	var outTris []int32
+	if edgeTris != nil {
+		outTris = make([]int32, 0, n)
+	}
 	for i := 0; i < n; i++ {
 		prev := points[(i-1+n)%n]
 		cur := points[i]
@@ -366,12 +385,14 @@ func collapseCollinear(points []Point2) []Point2 {
 		dy1 := float64(next[1] - cur[1])
 		cross := dx0*dy1 - dy0*dx1
 		if math.Abs(cross) < crossEps && (dx0*dx1+dy0*dy1) > 0 {
-			// Collinear and same direction — drop cur.
 			continue
 		}
-		out = append(out, cur)
+		outPts = append(outPts, cur)
+		if edgeTris != nil {
+			outTris = append(outTris, edgeTris[i])
+		}
 	}
-	return out
+	return outPts, outTris
 }
 
 // signedArea returns 2× the signed area of the closed polygon given

@@ -23,7 +23,17 @@ type Point2 [2]float32
 // that need a polygon-with-holes triangulation; outers without any
 // hole children still get the fan and stay watertight.
 type Loop struct {
-	Points       []Point2
+	Points []Point2
+	// EdgeTris[i] is the index of the source triangle in the model
+	// for the edge Points[i] → Points[(i+1) % len(Points)] —
+	// i.e. the triangle whose intersection with the slicing plane
+	// produced that edge. -1 means unknown (e.g. after a merge
+	// that lost provenance). Used by partitionLoop to tag each
+	// section with the triangle it really came from, so
+	// downstream color sampling can call voxel.SampleByTriangle
+	// instead of nearest-tri (which picks unrelated triangles from
+	// adjacent objects).
+	EdgeTris     []int32
 	Z            float32
 	SignedArea   float32
 	IsHole       bool
@@ -79,4 +89,10 @@ type Section struct {
 	CapBoundsXY [4]float32
 	TileCol     int
 	TileRow     int
+
+	// SrcTriIdx is the model triangle that produced the slicer
+	// segment containing this ribbon section's midpoint, or -1
+	// for cap tiles / sections with no recoverable source. Used
+	// by SampleSectionColors to bypass nearest-tri lookup.
+	SrcTriIdx int32
 }

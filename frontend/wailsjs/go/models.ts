@@ -432,6 +432,7 @@ export namespace pipeline {
 	    Layer0AdhesionXYScale: number;
 	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
+	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -476,6 +477,7 @@ export namespace pipeline {
 	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
 	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
+	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
