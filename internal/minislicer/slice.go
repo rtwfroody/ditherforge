@@ -26,8 +26,17 @@ func SliceMesh(model *loader.LoadedModel, zPlanes []float32) []Layer {
 
 // PlanesForRange returns slicing Z planes spanning [zMin, zMax] with
 // uniform spacing layerH. The first plane is at zMin + layerH/2 (the
-// center of layer 0) and subsequent planes at zMin + (k+0.5)*layerH.
-// The last plane is included if its center is <= zMax.
+// center of layer 0) and subsequent planes at zMin + (k+0.5)*layerH,
+// with a sub-µm-scale per-plane offset (planeJitter) added so no
+// plane lands exactly on a model vertex.
+//
+// Without the jitter, a plane passing through a high-valence vertex
+// (e.g. where the cut surface meets the skin) makes many of that
+// vertex's incident triangles produce segments ending at coincident
+// XY positions, and the chainer joins them in arbitrary order —
+// visible as occasional "messed up layers" of swapped colors in
+// the output. The offset is well above float precision at typical
+// model scales (~1e-5 mm) and far below any visible feature.
 func PlanesForRange(zMin, zMax, layerH float32) []float32 {
 	if layerH <= 0 || zMax <= zMin {
 		return nil
@@ -37,9 +46,10 @@ func PlanesForRange(zMin, zMax, layerH float32) []float32 {
 	if n < 1 {
 		n = 1
 	}
+	const planeJitter float32 = 1e-4 // mm; absolute, not relative
 	planes := make([]float32, 0, n)
 	for k := 0; k < n; k++ {
-		z := zMin + (float32(k)+0.5)*layerH
+		z := zMin + (float32(k)+0.5)*layerH + planeJitter
 		if z > zMax {
 			break
 		}
@@ -93,6 +103,31 @@ func sliceAtZ(model *loader.LoadedModel, z float32, layerIdx int) Layer {
 		}
 		if nAbove == 0 || nAbove == 3 {
 			continue
+		}
+		// Degenerate-touch case: exactly one vertex is on the
+		// slicing plane (zk ≈ z) and the other two are strictly
+		// below it. We've classified the on-plane vertex as
+		// "above," giving nAbove==1, but the triangle's actual
+		// intersection with the plane is a single point (that
+		// vertex), not a line segment. Both edge crossings
+		// computed below would lerp to t∈{0,1} at the on-plane
+		// vertex's XY, producing a zero-length segment that
+		// pollutes the chain — at high-valence model vertices
+		// where many triangles meet at the same Z, this leaks
+		// many coincident-endpoint segments and the chainer
+		// joins them in arbitrary order, scrambling the loop
+		// topology for the whole layer. Skip.
+		if nAbove == 1 {
+			loneAbove := 0
+			for k := 0; k < 3; k++ {
+				if above[k] {
+					loneAbove = k
+					break
+				}
+			}
+			if absf32(zs[loneAbove]-z) < planeEps {
+				continue
+			}
 		}
 		// Compute the two edge crossings. Walk edges in vertex order
 		// (0→1, 1→2, 2→0) and pick the two whose endpoints differ.

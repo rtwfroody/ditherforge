@@ -112,9 +112,12 @@ func TestPlanesForRange(t *testing.T) {
 	if len(planes) != len(want) {
 		t.Fatalf("got %v, want %v", planes, want)
 	}
+	// Per-plane offset (planeJitter, ~1e-4 mm) avoids landing
+	// exactly on a model vertex; tolerate it but verify each
+	// plane stays within a small neighborhood of the nominal Z.
 	for i := range planes {
-		if math.Abs(float64(planes[i]-want[i])) > 1e-5 {
-			t.Errorf("plane %d: got %g, want %g", i, planes[i], want[i])
+		if math.Abs(float64(planes[i]-want[i])) > 1e-3 {
+			t.Errorf("plane %d: got %g, want ≈ %g", i, planes[i], want[i])
 		}
 	}
 }
