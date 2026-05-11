@@ -3,20 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
-	"image"
-	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/alexflint/go-arg"
 
+	"github.com/rtwfroody/ditherforge/internal/debugrender"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
-	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	"github.com/rtwfroody/ditherforge/internal/progress"
-	"github.com/rtwfroody/ditherforge/internal/render"
 )
 
 // expandColors splits comma-separated --color values into individual color strings.
@@ -169,20 +166,6 @@ func main() {
 	}
 }
 
-// debugView is one orthographic camera angle in the --debug-render
-// strip.
-type debugView struct {
-	name          string
-	azimuth, elev float64
-}
-
-var debugViews = []debugView{
-	{"front", 0, 0},
-	{"side", 90, 0},
-	{"top", 0, 90},
-	{"persp", 45, 25},
-}
-
 // writeDebugRenders writes PNG renders of three things to dir:
 //   - input_<view>.png: the raw model with per-face sampled color
 //   - dithered_<view>.png: the pipeline output (palette-quantized)
@@ -198,21 +181,21 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 		return err
 	}
 
-	if inputMesh, err := loadInputRenderMesh(inputPath, opts.Size); err != nil {
+	if inputMesh, err := debugrender.LoadInputMesh(inputPath, opts.Size); err != nil {
 		fmt.Fprintf(os.Stderr, "debug-render: skipping input reference (%v)\n", err)
 	} else {
-		for _, v := range debugViews {
-			p := filepath.Join(dir, fmt.Sprintf("input_%s.png", v.name))
-			if err := writeMeshPNG(inputMesh.vertices, inputMesh.faces, inputMesh.colorAt, v.azimuth, v.elev, res, p); err != nil {
+		for _, v := range debugrender.DefaultViews {
+			p := filepath.Join(dir, fmt.Sprintf("input_%s.png", v.Name))
+			if err := debugrender.WritePNG(p, debugrender.RenderInput(inputMesh, v, res)); err != nil {
 				return err
 			}
 		}
 	}
 
 	if ditheredMesh != nil {
-		for _, v := range debugViews {
-			p := filepath.Join(dir, fmt.Sprintf("dithered_%s.png", v.name))
-			if err := writeMeshDataPNG(ditheredMesh, v.azimuth, v.elev, res, p); err != nil {
+		for _, v := range debugrender.DefaultViews {
+			p := filepath.Join(dir, fmt.Sprintf("dithered_%s.png", v.Name))
+			if err := debugrender.WritePNG(p, debugrender.RenderPipelineMesh(ditheredMesh, v, res)); err != nil {
 				return err
 			}
 		}
@@ -225,185 +208,12 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 		return fmt.Errorf("sampled re-run: %w", err)
 	}
 	if sampledPr.OutputMesh != nil {
-		for _, v := range debugViews {
-			p := filepath.Join(dir, fmt.Sprintf("sampled_%s.png", v.name))
-			if err := writeMeshDataPNG(sampledPr.OutputMesh, v.azimuth, v.elev, res, p); err != nil {
+		for _, v := range debugrender.DefaultViews {
+			p := filepath.Join(dir, fmt.Sprintf("sampled_%s.png", v.Name))
+			if err := debugrender.WritePNG(p, debugrender.RenderPipelineMesh(sampledPr.OutputMesh, v, res)); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
-}
-
-type inputRenderMesh struct {
-	vertices [][3]float32
-	faces    [][3]uint32
-	colors   [][3]uint8
-}
-
-func (m *inputRenderMesh) colorAt(fi int, u, v float64) [3]uint8 {
-	if fi < 0 || fi >= len(m.colors) {
-		return [3]uint8{128, 128, 128}
-	}
-	return m.colors[fi]
-}
-
-// loadInputRenderMesh loads the model the same way the pipeline does
-// (unit conversion + optional size normalization) and produces a
-// per-face color sampled at the face centroid — used as the
-// reference image to compare pipeline output against.
-func loadInputRenderMesh(path string, sizePtr *float32) (*inputRenderMesh, error) {
-	model, err := loadAnyModel(path)
-	if err != nil {
-		return nil, err
-	}
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == ".glb" {
-		loader.ScaleModel(model, 1000)
-	}
-	if sizePtr != nil {
-		e := maxExtent(model)
-		if e > 0 {
-			loader.ScaleModel(model, *sizePtr/e)
-		}
-	}
-	colors := make([][3]uint8, len(model.Faces))
-	for fi := range model.Faces {
-		colors[fi] = faceCentroidColor(model, fi)
-	}
-	return &inputRenderMesh{
-		vertices: model.Vertices,
-		faces:    model.Faces,
-		colors:   colors,
-	}, nil
-}
-
-func loadAnyModel(path string) (*loader.LoadedModel, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".glb":
-		return loader.LoadGLB(path, 0)
-	case ".3mf":
-		return loader.Load3MF(path, 0)
-	case ".stl":
-		return loader.LoadSTL(path, 0)
-	}
-	return nil, fmt.Errorf("unsupported format")
-}
-
-func maxExtent(m *loader.LoadedModel) float32 {
-	if len(m.Vertices) == 0 {
-		return 0
-	}
-	mn, mx := m.Vertices[0], m.Vertices[0]
-	for _, v := range m.Vertices {
-		for k := 0; k < 3; k++ {
-			if v[k] < mn[k] {
-				mn[k] = v[k]
-			}
-			if v[k] > mx[k] {
-				mx[k] = v[k]
-			}
-		}
-	}
-	var e float32
-	for k := 0; k < 3; k++ {
-		if d := mx[k] - mn[k]; d > e {
-			e = d
-		}
-	}
-	return e
-}
-
-// faceCentroidColor samples a face's representative color via vertex
-// colors → UV texture → base color, in that order. Cheap, visual,
-// used for the reference render only.
-func faceCentroidColor(m *loader.LoadedModel, fi int) [3]uint8 {
-	if fi < 0 || fi >= len(m.Faces) {
-		return [3]uint8{128, 128, 128}
-	}
-	f := m.Faces[fi]
-	if m.VertexColors != nil {
-		c0 := m.VertexColors[f[0]]
-		c1 := m.VertexColors[f[1]]
-		c2 := m.VertexColors[f[2]]
-		return [3]uint8{
-			uint8((int(c0[0]) + int(c1[0]) + int(c2[0])) / 3),
-			uint8((int(c0[1]) + int(c1[1]) + int(c2[1])) / 3),
-			uint8((int(c0[2]) + int(c1[2]) + int(c2[2])) / 3),
-		}
-	}
-	if m.UVs != nil && m.FaceTextureIdx != nil && m.FaceTextureIdx[fi] >= 0 &&
-		int(m.FaceTextureIdx[fi]) < len(m.Textures) {
-		texIdx := int(m.FaceTextureIdx[fi])
-		uv0 := m.UVs[f[0]]
-		uv1 := m.UVs[f[1]]
-		uv2 := m.UVs[f[2]]
-		u := (uv0[0] + uv1[0] + uv2[0]) / 3
-		v := (uv0[1] + uv1[1] + uv2[1]) / 3
-		img := m.Textures[texIdx]
-		b := img.Bounds()
-		u = u - float32(int(u))
-		if u < 0 {
-			u += 1
-		}
-		v = v - float32(int(v))
-		if v < 0 {
-			v += 1
-		}
-		px := int(u*float32(b.Dx()-1)) + b.Min.X
-		py := int(v*float32(b.Dy()-1)) + b.Min.Y
-		r, g, bl, _ := img.At(px, py).RGBA()
-		return [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8)}
-	}
-	if m.FaceBaseColor != nil && fi < len(m.FaceBaseColor) {
-		c := m.FaceBaseColor[fi]
-		return [3]uint8{c[0], c[1], c[2]}
-	}
-	return [3]uint8{128, 128, 128}
-}
-
-func writeMeshPNG(verts [][3]float32, faces [][3]uint32, colorFn func(fi int, u, v float64) [3]uint8, az, el float64, res int, path string) error {
-	bounds := render.ProjectedBounds(verts, az, el)
-	ci := render.RenderColor(verts, faces, az, el, res, bounds, colorFn)
-	return writePNG(path, ci.ToRGBA())
-}
-
-func writeMeshDataPNG(mesh *pipeline.MeshData, az, el float64, res int, path string) error {
-	nVerts := len(mesh.Vertices) / 3
-	verts := make([][3]float32, nVerts)
-	for i := 0; i < nVerts; i++ {
-		verts[i] = [3]float32{
-			mesh.Vertices[3*i],
-			mesh.Vertices[3*i+1],
-			mesh.Vertices[3*i+2],
-		}
-	}
-	nFaces := len(mesh.Faces) / 3
-	faces := make([][3]uint32, nFaces)
-	for i := 0; i < nFaces; i++ {
-		faces[i] = [3]uint32{
-			mesh.Faces[3*i],
-			mesh.Faces[3*i+1],
-			mesh.Faces[3*i+2],
-		}
-	}
-	return writeMeshPNG(verts, faces, func(fi int, u, v float64) [3]uint8 {
-		if fi < 0 || fi*3+2 >= len(mesh.FaceColors) {
-			return [3]uint8{128, 128, 128}
-		}
-		return [3]uint8{
-			uint8(mesh.FaceColors[3*fi+0]),
-			uint8(mesh.FaceColors[3*fi+1]),
-			uint8(mesh.FaceColors[3*fi+2]),
-		}
-	}, az, el, res, path)
-}
-
-func writePNG(path string, img *image.RGBA) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return png.Encode(f, img)
 }
