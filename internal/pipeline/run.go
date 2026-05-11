@@ -647,6 +647,14 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}
 
 		si := voxel.NewSpatialIndex(colorModel, cellSize)
+		// Re-anchor each cap tile's source triangle to the model
+		// triangle whose XY projection actually contains the tile
+		// center (vs the loop-edge fallback set in partitionCap).
+		// Without this, multiple tiles falling in the same
+		// loop-edge's Voronoi cell collapse onto one source
+		// triangle and one UV sample, producing wide flat patches
+		// in the rendered output for low-poly inputs.
+		minislicer.RefineCapSrcTriangles(colorModel, sections)
 		// Fill in each section's source-triangle normal Z so the
 		// mesh-builder can prefer ribbons facing the same direction
 		// as a cap when coloring earcut cap faces. This avoids the

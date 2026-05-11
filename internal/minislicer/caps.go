@@ -1,6 +1,193 @@
 package minislicer
 
-import "math"
+import (
+	"math"
+
+	"github.com/rtwfroody/ditherforge/internal/loader"
+)
+
+// RefineCapSrcTriangles replaces each cap-tile section's
+// SrcTriIdx (initially the closest loop-edge's triangle) with
+// the model triangle whose XY projection actually contains the
+// cap tile's center. That triangle is the one the cap tile
+// "sits under" (top cap) or "sits over" (bottom cap); sampling
+// against it gives the right barycentric and UV at (cx, cy)
+// rather than landing on the nearest loop-edge — which for a
+// low-poly model with sparse edges per layer collapses many
+// distinct cap tiles onto the same edge → same UV → wide flat
+// patches of one texture sample in the rendered output.
+//
+// When no model triangle projects to (cx, cy) (rare; usually a
+// numerical edge case), the existing nearestEdgeTri value is
+// left alone.
+func RefineCapSrcTriangles(model *loader.LoadedModel, sections []Section) {
+	if model == nil || len(model.Faces) == 0 {
+		return
+	}
+	idx := buildXYTriIndex(model)
+	for i := range sections {
+		s := &sections[i]
+		if s.Kind != KindCapTop && s.Kind != KindCapBottom {
+			continue
+		}
+		if tri := idx.findContaining(model, s.Mid[0], s.Mid[1], s.Z); tri >= 0 {
+			s.SrcTriIdx = tri
+		}
+	}
+}
+
+// xyTriIndex bins triangles into a uniform XY grid by bbox so
+// per-tile point-in-triangle queries skip irrelevant triangles.
+type xyTriIndex struct {
+	minX, minY float32
+	cellSize   float32
+	cols, rows int
+	cells      [][]int32
+}
+
+func buildXYTriIndex(model *loader.LoadedModel) *xyTriIndex {
+	if len(model.Vertices) == 0 || len(model.Faces) == 0 {
+		return &xyTriIndex{cellSize: 1, cols: 1, rows: 1, cells: [][]int32{{}}}
+	}
+	minX, minY := float32(math.MaxFloat32), float32(math.MaxFloat32)
+	maxX, maxY := float32(-math.MaxFloat32), float32(-math.MaxFloat32)
+	for _, v := range model.Vertices {
+		if v[0] < minX {
+			minX = v[0]
+		}
+		if v[0] > maxX {
+			maxX = v[0]
+		}
+		if v[1] < minY {
+			minY = v[1]
+		}
+		if v[1] > maxY {
+			maxY = v[1]
+		}
+	}
+	// Target ~sqrt(faces) cells per side, so each cell holds O(√F)
+	// triangles on average — keeps containment tests cheap without
+	// the index itself bloating memory.
+	side := int(math.Sqrt(float64(len(model.Faces))))
+	if side < 4 {
+		side = 4
+	}
+	wx := maxX - minX
+	wy := maxY - minY
+	maxW := wx
+	if wy > maxW {
+		maxW = wy
+	}
+	cellSize := maxW / float32(side)
+	if cellSize <= 0 {
+		cellSize = 1
+	}
+	cols := int(math.Ceil(float64(wx/cellSize))) + 1
+	rows := int(math.Ceil(float64(wy/cellSize))) + 1
+	cells := make([][]int32, cols*rows)
+	for ti, f := range model.Faces {
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+		tx0 := minf32(v0[0], minf32(v1[0], v2[0]))
+		tx1 := maxf32(v0[0], maxf32(v1[0], v2[0]))
+		ty0 := minf32(v0[1], minf32(v1[1], v2[1]))
+		ty1 := maxf32(v0[1], maxf32(v1[1], v2[1]))
+		c0 := int((tx0 - minX) / cellSize)
+		c1 := int((tx1 - minX) / cellSize)
+		r0 := int((ty0 - minY) / cellSize)
+		r1 := int((ty1 - minY) / cellSize)
+		if c0 < 0 {
+			c0 = 0
+		}
+		if r0 < 0 {
+			r0 = 0
+		}
+		if c1 >= cols {
+			c1 = cols - 1
+		}
+		if r1 >= rows {
+			r1 = rows - 1
+		}
+		for r := r0; r <= r1; r++ {
+			for c := c0; c <= c1; c++ {
+				cells[r*cols+c] = append(cells[r*cols+c], int32(ti))
+			}
+		}
+	}
+	return &xyTriIndex{minX: minX, minY: minY, cellSize: cellSize, cols: cols, rows: rows, cells: cells}
+}
+
+// findContaining returns the triangle whose XY projection
+// contains (x, y) and whose plane evaluates closest to z. -1 if
+// no triangle covers (x, y).
+func (g *xyTriIndex) findContaining(model *loader.LoadedModel, x, y, z float32) int32 {
+	c := int((x - g.minX) / g.cellSize)
+	r := int((y - g.minY) / g.cellSize)
+	if c < 0 || c >= g.cols || r < 0 || r >= g.rows {
+		return -1
+	}
+	candidates := g.cells[r*g.cols+c]
+	best := int32(-1)
+	bestDZ := float32(math.MaxFloat32)
+	for _, ti := range candidates {
+		f := model.Faces[ti]
+		v0 := model.Vertices[f[0]]
+		v1 := model.Vertices[f[1]]
+		v2 := model.Vertices[f[2]]
+		if !pointInTriangleXY(x, y, v0, v1, v2) {
+			continue
+		}
+		pz, ok := planeZAtXY(v0, v1, v2, x, y)
+		if !ok {
+			continue
+		}
+		dz := pz - z
+		if dz < 0 {
+			dz = -dz
+		}
+		if dz < bestDZ {
+			bestDZ = dz
+			best = ti
+		}
+	}
+	return best
+}
+
+// pointInTriangleXY tests whether (px, py) lies inside the 2D
+// projection of triangle (v0, v1, v2) onto the XY plane.
+func pointInTriangleXY(px, py float32, v0, v1, v2 [3]float32) bool {
+	// Signed-area test via cross products. Robust to winding.
+	s0 := (v1[0]-v0[0])*(py-v0[1]) - (v1[1]-v0[1])*(px-v0[0])
+	s1 := (v2[0]-v1[0])*(py-v1[1]) - (v2[1]-v1[1])*(px-v1[0])
+	s2 := (v0[0]-v2[0])*(py-v2[1]) - (v0[1]-v2[1])*(px-v2[0])
+	hasNeg := s0 < 0 || s1 < 0 || s2 < 0
+	hasPos := s0 > 0 || s1 > 0 || s2 > 0
+	return !(hasNeg && hasPos)
+}
+
+// planeZAtXY returns the Z of the triangle's plane evaluated at
+// (x, y). ok=false if the triangle is degenerate or its plane is
+// nearly vertical (so a horizontal slice through (x, y) doesn't
+// have a well-defined z).
+func planeZAtXY(v0, v1, v2 [3]float32, x, y float32) (float32, bool) {
+	ex := v1[0] - v0[0]
+	ey := v1[1] - v0[1]
+	ez := v1[2] - v0[2]
+	fx := v2[0] - v0[0]
+	fy := v2[1] - v0[1]
+	fz := v2[2] - v0[2]
+	nx := ey*fz - ez*fy
+	ny := ez*fx - ex*fz
+	nz := ex*fy - ey*fx
+	if nz > -1e-6 && nz < 1e-6 {
+		return 0, false
+	}
+	// Plane: nx*(X-v0x) + ny*(Y-v0y) + nz*(Z-v0z) = 0
+	// → Z = v0z - (nx*(x-v0x) + ny*(y-v0y)) / nz
+	z := v0[2] - (nx*(x-v0[0])+ny*(y-v0[1]))/nz
+	return z, true
+}
 
 // capTileEpsilon is how far outside the slab face cap tiles sit
 // (above for KindCapTop, below for KindCapBottom). The earcut
