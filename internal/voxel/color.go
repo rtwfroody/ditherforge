@@ -477,6 +477,37 @@ type Neighbor struct {
 	Weight float32
 }
 
+// sampleBaryAt returns the barycentric coords of `p` on triangle
+// (v0,v1,v2). Two-pass logic:
+//
+//   - If `p`'s XY projection falls inside the triangle's XY
+//     projection, return the barycentric of (p.x, p.y, planeZ)
+//     where planeZ is the triangle's plane evaluated at (p.x,
+//     p.y). This is the point "directly above" (or below) p on
+//     the triangle's surface, and is correct for a cap-tile
+//     point whose Z sits next to the surface — it doesn't snap
+//     to an edge the way 3D closest-point-on-triangle does for
+//     steep triangles.
+//   - Otherwise fall back to 3D closest-point-on-triangle, which
+//     is the right answer when p genuinely isn't bounded above
+//     or below by this triangle (e.g. ribbon midpoints, where p
+//     sits exactly on a triangle edge).
+func sampleBaryAt(p, v0, v1, v2 [3]float32) [3]float32 {
+	// 2D XY barycentric. Denominator uses signed area; sign is
+	// irrelevant since we divide consistently.
+	denom := (v1[1]-v2[1])*(v0[0]-v2[0]) + (v2[0]-v1[0])*(v0[1]-v2[1])
+	if denom != 0 {
+		a := ((v1[1]-v2[1])*(p[0]-v2[0]) + (v2[0]-v1[0])*(p[1]-v2[1])) / denom
+		b := ((v2[1]-v0[1])*(p[0]-v2[0]) + (v0[0]-v2[0])*(p[1]-v2[1])) / denom
+		c := 1 - a - b
+		if a >= 0 && b >= 0 && c >= 0 {
+			return [3]float32{a, b, c}
+		}
+	}
+	r := ClosestPointOnTriangle(p, v0, v1, v2)
+	return [3]float32{1 - r.S - r.T, r.S, r.T}
+}
+
 // SampleByTriangle samples the model's color at a point assumed to
 // be at or near a specific triangle's surface. Computes barycentric
 // of p on triangle triIdx and looks up texture / vertex color /
@@ -491,8 +522,10 @@ func SampleByTriangle(p [3]float32, model *loader.LoadedModel, triIdx int32) [4]
 		return [4]uint8{128, 128, 128, 255}
 	}
 	f := model.Faces[triIdx]
-	r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
-	bary := [3]float32{1 - r.S - r.T, r.S, r.T}
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	bary := sampleBaryAt(p, v0, v1, v2)
 	matAlpha, bc, texIdx := faceMaterial(int(triIdx), model)
 
 	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
