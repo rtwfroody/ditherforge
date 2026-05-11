@@ -62,26 +62,25 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 
 	fallback := mostCommonNonNegSafe(assignments)
 
-	// Per-layer XY index of visible ribbon sections, used to find
-	// the nearest ribbon section for each earcut cap triangle's
-	// centroid. The earcut faces inherit that section's index and
-	// dithered palette color, so:
-	//   - Normal mode: cap faces match the local wall color
-	//     (not a global most-common color that bleeds the wrong
-	//     region's color through gaps in adjacent walls).
-	//   - ShowSampledColors mode: the post-processor in pipeline.go
-	//     finds a valid faceSection for these faces and recolors
-	//     them with the local sampled RGB.
+	// Per-(layer, loop) ribbon midpoints, used to find the nearest
+	// ribbon section for each earcut cap triangle's centroid. The
+	// lookup is scoped to the specific outer loop being capped + its
+	// hole children — not "any ribbon in the layer", which leaks
+	// color across disjoint outer loops (e.g. the cutting board's
+	// top cap picking up the fish's color because the fish loop is
+	// closer to most cap interior points than the cutting board's
+	// own perimeter).
 	type ribbonRef struct {
-		sid   int32
-		mid   Point2
+		sid int32
+		mid Point2
 	}
-	layerRibbons := make(map[int][]ribbonRef)
+	layerLoopRibbons := make(map[loopKey][]ribbonRef)
 	for i, s := range sections {
 		if s.Kind != KindRibbon {
 			continue
 		}
-		layerRibbons[s.LayerIdx] = append(layerRibbons[s.LayerIdx], ribbonRef{int32(i), s.Mid})
+		k := loopKey{s.LayerIdx, s.LoopIdx}
+		layerLoopRibbons[k] = append(layerLoopRibbons[k], ribbonRef{int32(i), s.Mid})
 	}
 
 	for li, layer := range layers {
@@ -111,34 +110,48 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		// to nothing when their footprints don't perfectly align.
 		_ = hasTopCap
 		_ = hasBotCap
-		ribbons := layerRibbons[layer.LayerIdx]
-		colorAt := func(p Point2) (int32, int32) {
-			if len(ribbons) == 0 {
-				return -1, fallback
-			}
-			bestSid := int32(-1)
-			bestColor := fallback
-			bestSq := float32(1e30)
-			for _, r := range ribbons {
-				dx := r.mid[0] - p[0]
-				dy := r.mid[1] - p[1]
-				d := dx*dx + dy*dy
-				if d < bestSq {
-					bestSq = d
-					bestSid = r.sid
-					if assignments[r.sid] >= 0 {
-						bestColor = assignments[r.sid]
-					}
-				}
-			}
-			return bestSid, bestColor
-		}
 		for lp := range layer.Loops {
 			outer := &layer.Loops[lp]
 			if outer.IsHole {
 				continue
 			}
-			holes := collectChildHoles(layer.Loops, lp)
+			holes, _ := collectChildHolesWithIdx(layer.Loops, lp)
+			// Scope nearest-ribbon to THIS outer loop's own ribbons
+			// only. Holes are not included even when they're real
+			// cavities, because:
+			//   - For true cavities, the cap material is bounded by
+			//     the outer; outer perimeter is on the same surface
+			//     as the cap, so its sample matches.
+			//   - For "holes" that are actually a separate object's
+			//     outer loop nested inside this one (e.g. a fish
+			//     sitting on a cutting board, where classifyHoles'
+			//     even-odd rule paints the fish as a hole of the
+			//     board), the hole's ribbons sample an unrelated
+			//     material and would leak that color into the cap.
+			// Sections from sibling disjoint outer loops in the same
+			// layer also aren't candidates by construction.
+			ribbons := layerLoopRibbons[loopKey{li, lp}]
+			colorAt := func(p Point2) (int32, int32) {
+				if len(ribbons) == 0 {
+					return -1, fallback
+				}
+				bestSid := int32(-1)
+				bestColor := fallback
+				bestSq := float32(1e30)
+				for _, r := range ribbons {
+					dx := r.mid[0] - p[0]
+					dy := r.mid[1] - p[1]
+					d := dx*dx + dy*dy
+					if d < bestSq {
+						bestSq = d
+						bestSid = r.sid
+						if assignments[r.sid] >= 0 {
+							bestColor = assignments[r.sid]
+						}
+					}
+				}
+				return bestSid, bestColor
+			}
 			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, colorAt)
 			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, colorAt)
 		}
@@ -188,8 +201,16 @@ func mostCommonNonNegSafe(a []int32) int32 {
 // one's vertices either entirely inside or entirely outside the
 // other, so testing the first vertex is sufficient.
 func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
+	holes, _ := collectChildHolesWithIdx(loops, outerIdx)
+	return holes
+}
+
+// collectChildHolesWithIdx is collectChildHoles that also returns
+// the per-hole loop index in `loops` for each returned hole.
+func collectChildHolesWithIdx(loops []Loop, outerIdx int) ([][]Point2, []int) {
 	outer := &loops[outerIdx]
 	var out [][]Point2
+	var idxs []int
 	for hi := range loops {
 		hole := &loops[hi]
 		if !hole.IsHole || len(hole.Points) < 3 {
@@ -198,8 +219,6 @@ func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
 		if !pointInPolygon(outer.Points, hole.Points[0][0], hole.Points[0][1]) {
 			continue
 		}
-		// Reject if another outer (different from ours) sits between
-		// us and this hole.
 		isDirect := true
 		for oj := range loops {
 			if oj == outerIdx || loops[oj].IsHole {
@@ -217,9 +236,10 @@ func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
 		}
 		if isDirect {
 			out = append(out, hole.Points)
+			idxs = append(idxs, hi)
 		}
 	}
-	return out
+	return out, idxs
 }
 
 // emitEarcutCap triangulates outer + holes via Earcut and appends

@@ -148,6 +148,13 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 					CapBoundsXY: [4]float32{x0, y0, x1, y1},
 					TileCol:     i,
 					TileRow:     j,
+					// Cap tile centers don't sit on any one triangle's
+					// surface (they're inside the polygon, not on its
+					// boundary), so route them through the nearest-tri
+					// path in SampleSectionColors rather than letting
+					// the zero-value SrcTriIdx (which is a valid face
+					// index!) silently sample triangle 0.
+					SrcTriIdx: -1,
 				})
 				idx++
 			}
