@@ -638,7 +638,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}
 
 		si := voxel.NewSpatialIndex(colorModel, cellSize)
-		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, cellSize)
+		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, layers, cellSize)
 
 		neighbors := minislicer.BuildSectionGraph(sections, layers, cellSize)
 
