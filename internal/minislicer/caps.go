@@ -148,19 +148,61 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 					CapBoundsXY: [4]float32{x0, y0, x1, y1},
 					TileCol:     i,
 					TileRow:     j,
-					// Cap tile centers don't sit on any one triangle's
-					// surface (they're inside the polygon, not on its
-					// boundary), so route them through the nearest-tri
-					// path in SampleSectionColors rather than letting
-					// the zero-value SrcTriIdx (which is a valid face
-					// index!) silently sample triangle 0.
-					SrcTriIdx: -1,
+					// Cap tile color comes from the nearest loop edge's
+					// source triangle. Without this, SrcTriIdx=-1 would
+					// route to SampleNearestColor's global spatial-index
+					// search, which can pull in triangles from a nearby
+					// but unrelated mesh region — e.g. a salmon cut-
+					// surface triangle being picked for a blue dome
+					// cap, producing horizontal salmon "streaks" in the
+					// rendered output. Anchoring the cap to the same
+					// mesh component its loop traces avoids that leak.
+					SrcTriIdx: nearestEdgeTri(&loop, cx, cy),
 				})
 				idx++
 			}
 		}
 	}
 	return out
+}
+
+// nearestEdgeTri returns the source triangle index of the loop edge
+// whose midpoint is geometrically closest (squared XY distance) to
+// (x, y). Returns -1 if the loop has no EdgeTris or has fewer than
+// 2 points.
+//
+// Used by partitionCap to anchor each cap tile to a triangle from
+// the same connected mesh region as its bounding loop. The cap
+// tile sits inside the polygon rather than on any one triangle's
+// surface, so SampleByTriangle then samples that triangle's
+// closest-point-on-triangle for (cx, cy, tileZ) — which lives on
+// the same mesh component the loop traces. This avoids the global
+// nearest-tri search picking up unrelated nearby geometry (e.g. a
+// cut surface inside a fish dome, or a cutting board next to a
+// fish footprint).
+func nearestEdgeTri(loop *Loop, x, y float32) int32 {
+	n := len(loop.Points)
+	if n < 2 || len(loop.EdgeTris) == 0 {
+		return -1
+	}
+	best := int32(-1)
+	bestSq := float32(math.MaxFloat32)
+	for i := 0; i < n; i++ {
+		if i >= len(loop.EdgeTris) {
+			break
+		}
+		j := (i + 1) % n
+		mx := (loop.Points[i][0] + loop.Points[j][0]) * 0.5
+		my := (loop.Points[i][1] + loop.Points[j][1]) * 0.5
+		dx := mx - x
+		dy := my - y
+		d := dx*dx + dy*dy
+		if d < bestSq {
+			bestSq = d
+			best = loop.EdgeTris[i]
+		}
+	}
+	return best
 }
 
 // pointInPolygon does even-odd ray casting along +X. The polygon is

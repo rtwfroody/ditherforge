@@ -647,6 +647,13 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}
 
 		si := voxel.NewSpatialIndex(colorModel, cellSize)
+		// Fill in each section's source-triangle normal Z so the
+		// mesh-builder can prefer ribbons facing the same direction
+		// as a cap when coloring earcut cap faces. This avoids the
+		// nearest-XY pick reaching across a vertical cut surface
+		// into salmon-colored interior triangles when a cap really
+		// sits over a (sloped) dome surface.
+		minislicer.PopulateSectionNormalZ(colorModel, sections)
 		colors, alpha := minislicer.SampleSectionColors(colorModel, si, sections, cellSize)
 
 		neighbors := minislicer.BuildSectionGraph(sections, layers, cellSize)

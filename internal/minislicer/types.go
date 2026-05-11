@@ -95,4 +95,27 @@ type Section struct {
 	// for cap tiles / sections with no recoverable source. Used
 	// by SampleSectionColors to bypass nearest-tri lookup.
 	SrcTriIdx int32
+
+	// SrcTriNormalZ is the Z component of the source triangle's
+	// unit normal (in mesh coords). Used by the earcut cap
+	// colorer to prefer ribbons whose source triangle faces in
+	// the same direction as the cap (upward for top caps,
+	// downward for bottom caps): the cap material is bounded
+	// above (or below) by a roughly upward-facing (or
+	// downward-facing) surface, so picking a ribbon whose
+	// source triangle matches that orientation gives a color
+	// from the right surface region.
+	//
+	// In particular, near a vertical cut surface inside a
+	// solid (e.g. the salmon-colored interior of a sliced
+	// fish), the cut surface's triangles have ~zero normal_z;
+	// without this filter the cap's nearest-XY ribbon search
+	// can pick a cut-surface ribbon and paint a dome cap
+	// salmon — visible as horizontal stripes in front/side
+	// renderings.
+	//
+	// 0 (the zero value) is a valid value for a vertical-wall
+	// triangle; we don't treat it as "missing." For sections
+	// without a recoverable source (SrcTriIdx<0) leave at 0.
+	SrcTriNormalZ float32
 }

@@ -70,10 +70,6 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 	// top cap picking up the fish's color because the fish loop is
 	// closer to most cap interior points than the cutting board's
 	// own perimeter).
-	type ribbonRef struct {
-		sid int32
-		mid Point2
-	}
 	layerLoopRibbons := make(map[loopKey][]ribbonRef)
 	for i, s := range sections {
 		if s.Kind != KindRibbon {
@@ -123,37 +119,19 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 			//     the outer; outer perimeter is on the same surface
 			//     as the cap, so its sample matches.
 			//   - For "holes" that are actually a separate object's
-			//     outer loop nested inside this one (e.g. a fish
-			//     sitting on a cutting board, where classifyHoles'
-			//     even-odd rule paints the fish as a hole of the
-			//     board), the hole's ribbons sample an unrelated
-			//     material and would leak that color into the cap.
-			// Sections from sibling disjoint outer loops in the same
-			// layer also aren't candidates by construction.
+			//     outer loop nested inside this one, the hole's
+			//     ribbons sample an unrelated material and would
+			//     leak that color into the cap.
 			ribbons := layerLoopRibbons[loopKey{li, lp}]
-			colorAt := func(p Point2) (int32, int32) {
-				if len(ribbons) == 0 {
-					return -1, fallback
-				}
-				bestSid := int32(-1)
-				bestColor := fallback
-				bestSq := float32(1e30)
-				for _, r := range ribbons {
-					dx := r.mid[0] - p[0]
-					dy := r.mid[1] - p[1]
-					d := dx*dx + dy*dy
-					if d < bestSq {
-						bestSq = d
-						bestSid = r.sid
-						if assignments[r.sid] >= 0 {
-							bestColor = assignments[r.sid]
-						}
-					}
-				}
-				return bestSid, bestColor
-			}
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, colorAt)
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, colorAt)
+			// Top vs bottom cap colorers prefer ribbons whose
+			// source-triangle normal matches the cap's facing
+			// direction; falls back to plain nearest-XY when no
+			// candidate matches the orientation. See pickRibbon for
+			// the scoring detail.
+			colorAtTop := makeColorAt(ribbons, sections, assignments, fallback, +1)
+			colorAtBot := makeColorAt(ribbons, sections, assignments, fallback, -1)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, colorAtTop)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, colorAtBot)
 		}
 	}
 
@@ -240,6 +218,78 @@ func collectChildHolesWithIdx(loops []Loop, outerIdx int) ([][]Point2, []int) {
 		}
 	}
 	return out, idxs
+}
+
+// makeColorAt builds an earcut-cap color callback. It picks a
+// ribbon section to source the cap face's section index and
+// dithered-palette index from, preferring ribbons whose source
+// triangle is roughly aligned with the cap's facing direction:
+//
+//   - capDir = +1 → top cap (face normal +Z) → prefer ribbons
+//     with source-tri normal_z > 0 (e.g. an upper-dome side
+//     triangle, whose surface lies above the cap material).
+//   - capDir = -1 → bottom cap → prefer normal_z < 0.
+//
+// A vertical "wall" triangle (cut surface, side of a box) has
+// normal_z ≈ 0 and is ineligible under either preference, so
+// it's only used as a fallback when no aligned ribbon exists.
+// Among aligned candidates we pick the nearest in XY distance,
+// the same metric the previous version used unconditionally.
+//
+// This filter exists to stop a salmon-colored cut surface inside
+// a fish dome (normal_z ≈ 0) from being chosen as the nearest
+// ribbon for a dome-region cap, which manifests as horizontal
+// salmon stripes in front/side renderings (the cap edge-on at
+// each Z layer).
+func makeColorAt(
+	ribbons []ribbonRef,
+	sections []Section,
+	assignments []int32,
+	fallback int32,
+	capDir float32,
+) func(p Point2) (int32, int32) {
+	const alignedThresh = 0.05
+	return func(p Point2) (int32, int32) {
+		if len(ribbons) == 0 {
+			return -1, fallback
+		}
+		bestSid := int32(-1)
+		bestColor := fallback
+		bestSq := float32(1e30)
+		bestAligned := false
+		for _, r := range ribbons {
+			dx := r.mid[0] - p[0]
+			dy := r.mid[1] - p[1]
+			d := dx*dx + dy*dy
+			aligned := sections[r.sid].SrcTriNormalZ*capDir > alignedThresh
+			// Aligned candidates dominate non-aligned ones outright
+			// (even at greater XY distance). Within each tier we
+			// take the nearest in XY.
+			switch {
+			case aligned && !bestAligned:
+				bestSq = d
+				bestSid = r.sid
+				bestAligned = true
+				if assignments[r.sid] >= 0 {
+					bestColor = assignments[r.sid]
+				}
+			case aligned == bestAligned && d < bestSq:
+				bestSq = d
+				bestSid = r.sid
+				if assignments[r.sid] >= 0 {
+					bestColor = assignments[r.sid]
+				}
+			}
+		}
+		return bestSid, bestColor
+	}
+}
+
+// ribbonRef is one ribbon section's id and XY midpoint, used by
+// the earcut color callback for nearest-ribbon lookup.
+type ribbonRef struct {
+	sid int32
+	mid Point2
 }
 
 // emitEarcutCap triangulates outer + holes via Earcut and appends
