@@ -606,33 +606,35 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			return nil, fmt.Errorf("slice: no sections produced")
 		}
 
-		// Cap sections: tile the topmost layer's top face and the
-		// bottommost layer's bottom face with cellSize × cellSize
-		// cap tiles so horizontal exposed surfaces dither too.
-		// LoopIdxBase = len(layers[*].Loops) (per layer, computed at
-		// emission time) keeps cap LoopIdx out of the ribbon namespace.
-		var topLayer, bottomLayer *minislicer.Layer
-		for i := range layers {
-			if len(layers[i].Loops) == 0 {
+		// Cap sections: tile every layer's top and bottom face
+		// wherever it's exposed (solid in this layer, air in the
+		// neighbor on that side). For the topmost/bottommost layer
+		// of the model the neighbor on the exposed side is nil
+		// (treated as all-air, so every tile inside the layer is
+		// exposed). LoopIdxBase keeps cap LoopIdx out of the
+		// ribbon namespace and out of the other-cap-kind's range.
+		for li := range layers {
+			if len(layers[li].Loops) == 0 {
 				continue
 			}
-			if bottomLayer == nil {
-				bottomLayer = &layers[i]
+			var above, below *minislicer.Layer
+			for k := li + 1; k < len(layers); k++ {
+				if len(layers[k].Loops) > 0 {
+					above = &layers[k]
+					break
+				}
 			}
-			topLayer = &layers[i]
-		}
-		if topLayer != nil {
-			loopBase := len(topLayer.Loops)
-			caps := minislicer.PartitionTopCap(*topLayer, layerH, cellSize, loopBase)
-			sections = append(sections, caps...)
-		}
-		if bottomLayer != nil {
-			loopBase := len(bottomLayer.Loops) + 1024
-			// +1024 keeps top and bottom cap LoopIdx ranges from
-			// colliding when the same layer is both the topmost and
-			// the bottommost (single-layer model).
-			caps := minislicer.PartitionBottomCap(*bottomLayer, layerH, cellSize, loopBase)
-			sections = append(sections, caps...)
+			for k := li - 1; k >= 0; k-- {
+				if len(layers[k].Loops) > 0 {
+					below = &layers[k]
+					break
+				}
+			}
+			base := len(layers[li].Loops)
+			topCaps := minislicer.PartitionTopCap(layers[li], above, layerH, cellSize, base)
+			sections = append(sections, topCaps...)
+			botCaps := minislicer.PartitionBottomCap(layers[li], below, layerH, cellSize, base+1024)
+			sections = append(sections, botCaps...)
 		}
 
 		si := voxel.NewSpatialIndex(colorModel, cellSize)

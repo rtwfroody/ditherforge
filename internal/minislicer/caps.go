@@ -2,23 +2,44 @@ package minislicer
 
 import "math"
 
-// PartitionTopCap tiles the top face of `layer` with cellSize ×
-// cellSize cap tiles, producing one Section per tile whose center
-// falls inside one of the layer's outer (CCW) loops.
+// PartitionTopCap tiles the top face of `layer` wherever it's
+// exposed — solid in `layer` and air in `neighborAbove` (the layer
+// directly above). Pass neighborAbove == nil for the topmost layer
+// (no layer above → all-air → every tile inside layer is exposed).
 //
 // `layerH` is the slab thickness; the tile's Z is at the slab's
 // upper face (layer.Z + layerH/2).
 //
 // loopIdxBase shifts the per-loop LoopIdx for cap sections so they
-// don't collide with ribbon-section loop indices. Pass it as
-// len(layer.Loops) when ribbons use 0..len-1.
-func PartitionTopCap(layer Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, layerH/2, cellSize, loopIdxBase, KindCapTop)
+// don't collide with ribbon-section loop indices.
+func PartitionTopCap(layer Layer, neighborAbove *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
+	return partitionCap(layer, neighborAbove, layerH/2, cellSize, loopIdxBase, KindCapTop)
 }
 
-// PartitionBottomCap is the bottom-face counterpart to PartitionTopCap.
-func PartitionBottomCap(layer Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, -layerH/2, cellSize, loopIdxBase, KindCapBottom)
+// PartitionBottomCap is the bottom-face counterpart. Pass
+// neighborBelow == nil for the bottommost layer.
+func PartitionBottomCap(layer Layer, neighborBelow *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
+	return partitionCap(layer, neighborBelow, -layerH/2, cellSize, loopIdxBase, KindCapBottom)
+}
+
+// insideSolid uses even-odd nesting: a point is inside the solid
+// region of `layer` iff an odd number of layer.Loops contain it.
+// Returns false when layer == nil (treating "no layer" as all-air,
+// so all tiles in the calling layer are exposed at that face).
+func insideSolid(layer *Layer, x, y float32) bool {
+	if layer == nil {
+		return false
+	}
+	count := 0
+	for i := range layer.Loops {
+		if len(layer.Loops[i].Points) < 3 {
+			continue
+		}
+		if pointInPolygon(layer.Loops[i].Points, x, y) {
+			count++
+		}
+	}
+	return (count & 1) == 1
 }
 
 // partitionCap is the shared body of PartitionTopCap and
@@ -31,7 +52,7 @@ func PartitionBottomCap(layer Layer, layerH, cellSize float32, loopIdxBase int) 
 // by the loop boundary are emitted at full cellSize anyway (the
 // resulting prism geometry overhangs the contour by a fraction of a
 // cell, which is acceptable for the prototype).
-func partitionCap(layer Layer, zOffset, cellSize float32, loopIdxBase int, kind SectionKind) []Section {
+func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopIdxBase int, kind SectionKind) []Section {
 	if cellSize <= 0 {
 		return nil
 	}
@@ -100,6 +121,11 @@ func partitionCap(layer Layer, zOffset, cellSize float32, loopIdxBase int, kind 
 					}
 				}
 				if inHole {
+					continue
+				}
+				// Exposure test: tile is exposed at this Z face
+				// only if the adjacent layer is air at (cx, cy).
+				if insideSolid(neighbor, cx, cy) {
 					continue
 				}
 				out = append(out, Section{
