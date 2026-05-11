@@ -24,8 +24,21 @@ import (
 // (Vertices + Faces only) plus a parallel `assignments` slice with
 // one palette index per face.
 func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32, layerH float32) (*loader.LoadedModel, []int32) {
+	m, faceAssign, _ := BuildPrintableMeshFull(layers, sections, assignments, layerH)
+	return m, faceAssign
+}
+
+// BuildPrintableMeshFull is BuildPrintableMesh plus a parallel
+// faceSection slice: faceSection[i] is the index into `sections`
+// that produced face i, or -1 for faces that don't trace to a
+// single section (earcut cap interior triangles). Used by the
+// pipeline's ShowSampledColors debug mode to color faces by the
+// originating section's raw sampled RGB instead of its dithered
+// palette index.
+func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []int32, layerH float32) (*loader.LoadedModel, []int32, []int32) {
 	m := &loader.LoadedModel{}
 	var faceAssign []int32
+	var faceSection []int32
 
 	type loopKey struct{ layer, loop int }
 	loopSecs := make(map[loopKey][]int)
@@ -61,7 +74,7 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 			if len(ids) == 0 || sections[ids[0]].Kind != KindRibbon {
 				continue
 			}
-			emitLoopWall(m, &faceAssign, loop, ids, sections, assignments,
+			emitLoopWall(m, &faceAssign, &faceSection, loop, ids, sections, assignments,
 				zBot, zTop, loop.IsHole)
 		}
 
@@ -82,8 +95,8 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 				continue
 			}
 			holes := collectChildHoles(layer.Loops, lp)
-			emitEarcutCap(m, &faceAssign, outer.Points, holes, zTop, true, fallback)
-			emitEarcutCap(m, &faceAssign, outer.Points, holes, zBot, false, fallback)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, fallback)
+			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, fallback)
 		}
 	}
 
@@ -96,10 +109,10 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 		if k != KindCapTop && k != KindCapBottom {
 			continue
 		}
-		emitCapTiles(m, &faceAssign, ids, sections, assignments)
+		emitCapTiles(m, &faceAssign, &faceSection, ids, sections, assignments)
 	}
 
-	return m, faceAssign
+	return m, faceAssign, faceSection
 }
 
 // mostCommonNonNegSafe returns the most frequent non-negative
@@ -167,10 +180,12 @@ func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
 
 // emitEarcutCap triangulates outer + holes via Earcut and appends
 // the triangles to m at the given Z. isTop selects the winding so
-// the normal faces +Z (top cap) or -Z (bottom cap).
+// the normal faces +Z (top cap) or -Z (bottom cap). Every emitted
+// face is tagged faceSection=-1 (no source section).
 func emitEarcutCap(
 	m *loader.LoadedModel,
 	faceAssign *[]int32,
+	faceSection *[]int32,
 	outer []Point2,
 	holes [][]Point2,
 	z float32,
@@ -196,15 +211,18 @@ func emitEarcutCap(
 			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[2], baseV + tr[1]})
 		}
 		*faceAssign = append(*faceAssign, color)
+		*faceSection = append(*faceSection, -1)
 	}
 }
 
 // emitCapTiles emits 2 triangles per cap section forming the tile
 // rectangle. Top caps wind CCW (normal +Z); bottom caps wind CW
-// (normal -Z) so they face outward.
+// (normal -Z) so they face outward. Both triangles per tile are
+// tagged with the originating section index in faceSection.
 func emitCapTiles(
 	m *loader.LoadedModel,
 	faceAssign *[]int32,
+	faceSection *[]int32,
 	sectionIDs []int,
 	sections []Section,
 	assignments []int32,
@@ -230,6 +248,7 @@ func emitCapTiles(
 				[3]uint32{baseV, baseV + 3, baseV + 2})
 		}
 		*faceAssign = append(*faceAssign, col, col)
+		*faceSection = append(*faceSection, int32(sid), int32(sid))
 	}
 }
 
@@ -244,6 +263,7 @@ func emitCapTiles(
 func emitLoopWall(
 	m *loader.LoadedModel,
 	faceAssign *[]int32,
+	faceSection *[]int32,
 	loop *Loop,
 	sectionIDs []int,
 	sections []Section,
@@ -269,16 +289,19 @@ func emitLoopWall(
 
 	wallPts := make([]Point2, 0, n*2)
 	wallColors := make([]int32, 0, n*2)
+	wallSections := make([]int32, 0, n*2)
 	for _, sid := range sectionIDs {
 		s := sections[sid]
 		color := assignments[sid]
 		wallPts = append(wallPts, pointAtArc(pts, cum, s.StartArc))
 		wallColors = append(wallColors, color)
+		wallSections = append(wallSections, int32(sid))
 		for i := 0; i < n; i++ {
 			a := cum[i]
 			if a > s.StartArc+1e-5 && a < s.EndArc-1e-5 {
 				wallPts = append(wallPts, pts[i])
 				wallColors = append(wallColors, color)
+				wallSections = append(wallSections, int32(sid))
 			}
 		}
 	}
@@ -301,7 +324,9 @@ func emitLoopWall(
 		m.Faces = append(m.Faces, [3]uint32{i0, j0, j1})
 		m.Faces = append(m.Faces, [3]uint32{i0, j1, i1})
 		col := wallColors[i]
+		sec := wallSections[i]
 		*faceAssign = append(*faceAssign, col, col)
+		*faceSection = append(*faceSection, sec, sec)
 	}
 }
 

@@ -701,6 +701,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			Sections:      sections,
 			Neighbors:     visibleNeighbors,
 			VisibleToFull: visibleToFull,
+			SectionColors: colors,
 			LayerH:        layerH,
 			CellSize:      cellSize,
 		}, nil
@@ -994,7 +995,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			sectionAssign[fi] = do.Assignments[vi]
 		}
 
-		mesh, faceAssign := minislicer.BuildPrintableMesh(vo.Layers, vo.Sections, sectionAssign, vo.LayerH)
+		mesh, faceAssign, faceSection := minislicer.BuildPrintableMeshFull(vo.Layers, vo.Sections, sectionAssign, vo.LayerH)
 		fallback := mostCommonNonNeg(faceAssign)
 		safe := minislicer.SafeAssignments(faceAssign, fallback)
 
@@ -1005,6 +1006,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			ShellVerts:       mesh.Vertices,
 			ShellFaces:       mesh.Faces,
 			ShellAssignments: safe,
+			ShellSectionIdx:  faceSection,
 		}, nil
 	})
 }
@@ -1039,6 +1041,7 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 		shellFaces := co.ShellFaces
 		shellAssignments := co.ShellAssignments
 		shellHalfIdx := co.ShellHalfIdx
+		shellSectionIdx := co.ShellSectionIdx
 		if !r.opts.NoMerge {
 			tMerge := time.Now()
 			before := len(shellFaces)
@@ -1062,6 +1065,9 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 				return nil, fmt.Errorf("merge: %w", merr)
 			}
 			plog.Printf("  Merged shell: %d -> %d faces in %.1fs", before, len(shellFaces), time.Since(tMerge).Seconds())
+			// Merge groups faces by color and re-triangulates;
+			// section provenance is no longer per-face.
+			shellSectionIdx = nil
 		} else {
 			progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
 		}
@@ -1070,6 +1076,7 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 			ShellVerts:       shellVerts,
 			ShellFaces:       shellFaces,
 			ShellAssignments: shellAssignments,
+			ShellSectionIdx:  shellSectionIdx,
 			ShellHalfIdx:     shellHalfIdx,
 		}, nil
 	})

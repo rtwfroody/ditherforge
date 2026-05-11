@@ -106,6 +106,16 @@ type Options struct {
 	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
+
+	// ShowSampledColors is a diagnostic mode: when true, the output
+	// mesh's per-face colors come from each face's originating
+	// section's RAW SAMPLED RGB instead of its dithered palette
+	// index. Bypasses the palette/dither stage for visualization
+	// only. Use to isolate sampling bugs from dither/palette bugs:
+	// if an artifact is visible in the sampled-color view, it's in
+	// SampleSectionColors (or upstream slicer geometry); if only in
+	// the normal view, it's in dither/palette/mesh-emission.
+	ShowSampledColors bool `json:"ShowSampledColors,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -425,14 +435,42 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Merge — the final output mesh. On a warm cache this is the
 	// only intermediate stage we touch; Voxelize/ColorAdjust/Warp/
 	// Dither/Clip stay on disk and are never read.
-	mo, err := r.Merge()
-	if err != nil {
-		return nil, err
+	//
+	// ShowSampledColors debug bypass: skip Merge (which would erase
+	// per-face section provenance via coplanar coalescing) and
+	// synthesize the mergeOutput from the unmerged Clip output. The
+	// post-processing below uses mo.ShellSectionIdx + the
+	// voxelizeOutput's per-section sampled colors to recolor faces.
+	var mo *mergeOutput
+	if opts.ShowSampledColors {
+		co, err := r.Clip()
+		if err != nil {
+			return nil, err
+		}
+		mo = &mergeOutput{
+			ShellVerts:       co.ShellVerts,
+			ShellFaces:       co.ShellFaces,
+			ShellAssignments: co.ShellAssignments,
+			ShellSectionIdx:  co.ShellSectionIdx,
+			ShellHalfIdx:     co.ShellHalfIdx,
+		}
+	} else {
+		mo, err = r.Merge()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Build output preview mesh from merge result + palette.
 	outModel := buildOutputModel(lo.ColorModel, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
+	if opts.ShowSampledColors && mo.ShellSectionIdx != nil {
+		vo, err := r.Voxelize()
+		if err != nil {
+			return nil, err
+		}
+		overrideFaceColorsFromSamples(outputMesh, mo.ShellSectionIdx, vo.SectionColors)
+	}
 	if lo.PreviewScale != 1 {
 		for i := range outputMesh.Vertices {
 			outputMesh.Vertices[i] *= lo.PreviewScale
@@ -534,6 +572,33 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 // emit two `<object>` entries. Until that lands, the export path
 // emits a single `<object>` containing both halves with the
 // bed-layout gap between them.
+// overrideFaceColorsFromSamples rewrites outputMesh.FaceColors so
+// each face's RGB is its originating section's raw sampled color
+// (looked up by faceSection[fi] in sectionColors). Faces with
+// faceSection[fi] < 0 (earcut interior triangles) are left at
+// their dithered-palette color so the unsampled fallback geometry
+// still has *some* color. Used only when opts.ShowSampledColors
+// is set.
+func overrideFaceColorsFromSamples(mesh *MeshData, faceSection []int32, sectionColors [][3]uint8) {
+	if mesh == nil || len(mesh.FaceColors) == 0 {
+		return
+	}
+	nFaces := len(mesh.FaceColors) / 3
+	if len(faceSection) != nFaces {
+		return
+	}
+	for fi := 0; fi < nFaces; fi++ {
+		sid := faceSection[fi]
+		if sid < 0 || int(sid) >= len(sectionColors) {
+			continue
+		}
+		c := sectionColors[sid]
+		mesh.FaceColors[3*fi+0] = uint16(c[0])
+		mesh.FaceColors[3*fi+1] = uint16(c[1])
+		mesh.FaceColors[3*fi+2] = uint16(c[2])
+	}
+}
+
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})

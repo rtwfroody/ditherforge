@@ -184,6 +184,11 @@
   let noMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
+  // Debug: when true, the output mesh is colored by each face's
+  // originating section's raw sampled RGB instead of the dithered
+  // palette. Lets us visually distinguish sampling bugs from
+  // dither / mesh-emission bugs in the GUI viewer.
+  let showSampledColors = $state(false);
   let alphaWrap = $state(false);
   let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
@@ -903,6 +908,7 @@
       noMerge,
       noSimplify,
       stats,
+      showSampledColors,
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
@@ -1094,6 +1100,7 @@
     { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
+    { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
@@ -1391,6 +1398,7 @@
       RiemersmaInputBias: committedRiemersmaBias,
       BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
+      ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
@@ -2111,6 +2119,13 @@
                 Stats
                 <HelpTip>
                   Log summary statistics (triangle counts, color usage, timings) to the terminal.
+                </HelpTip>
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={showSampledColors} />
+                Show sampled colors (debug)
+                <HelpTip>
+                  Color the output mesh by each face's raw pre-dither sampled RGB instead of its dithered palette index. Bypasses Merge so per-face provenance survives. Use to isolate sampling bugs from dither / palette / mesh-emission bugs: if an artifact is visible in this mode it's in section sampling (or upstream slicer geometry); if only visible with the box off it's in the dither stack.
                 </HelpTip>
               </label>
             </div>

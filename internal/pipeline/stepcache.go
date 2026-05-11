@@ -446,6 +446,11 @@ type voxelizeOutput struct {
 	// dither; this maps dither outputs (per visible cell) back to
 	// the full section list for Mesh3D extrusion.
 	VisibleToFull []int
+	// SectionColors[i] is the raw pre-dither sampled RGB for
+	// Sections[i] (whether visible or hidden). Carried so the
+	// ShowSampledColors debug mode can recolor output mesh faces by
+	// their originating section's sampled value.
+	SectionColors [][3]uint8
 	LayerH        float32
 	CellSize      float32
 }
@@ -543,6 +548,12 @@ type clipOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	// ShellSectionIdx is parallel to ShellFaces; each entry is the
+	// index into voxelizeOutput.Sections of the section that
+	// produced this face, or -1 for faces that have no single
+	// section (earcut cap interior triangles). Used by the
+	// ShowSampledColors debug mode in RunCached.
+	ShellSectionIdx []int32
 	// ShellHalfIdx is parallel to ShellFaces; non-nil only when Split
 	// is enabled, in which case each face is tagged with the half it
 	// came from. Downstream Merge keeps it parallel through the
@@ -558,7 +569,13 @@ type mergeOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
-	ShellHalfIdx     []byte // parallel to ShellFaces; nil when Split disabled
+	// ShellSectionIdx is parallel to ShellFaces. Carried through
+	// only on the NoMerge path (and via the ShowSampledColors
+	// debug bypass in RunCached); set to nil when merging because
+	// MergeCoplanarTriangles groups faces by color and can't
+	// preserve per-face section provenance.
+	ShellSectionIdx []int32
+	ShellHalfIdx    []byte // parallel to ShellFaces; nil when Split disabled
 }
 
 // --- Per-stage settings structs for cache key computation ---
