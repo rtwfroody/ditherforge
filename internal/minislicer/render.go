@@ -37,6 +37,30 @@ func DefaultRenderConfig(outDir string) RenderConfig {
 // `assignments[i] == -1` means the section is hidden (alpha=false)
 // and is rendered in light gray.
 func RenderLayers(layers []Layer, sections []Section, palette [][3]uint8, assignments []int32, cfg RenderConfig) error {
+	return renderLayersWithFn(layers, sections, cfg, func(sid int) string {
+		if sid < 0 || sid >= len(assignments) || assignments[sid] < 0 {
+			return "#888888"
+		}
+		rgb := palette[assignments[sid]]
+		return fmt.Sprintf("#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
+	})
+}
+
+// RenderLayersSampled writes SVGs colored by each section's raw
+// pre-dither sampled RGB. Use this alongside RenderLayers to
+// distinguish sampling bugs (visible in both) from dither bugs
+// (visible only in dithered output).
+func RenderLayersSampled(layers []Layer, sections []Section, sampleColors [][3]uint8, cfg RenderConfig) error {
+	return renderLayersWithFn(layers, sections, cfg, func(sid int) string {
+		if sid < 0 || sid >= len(sampleColors) {
+			return "#888888"
+		}
+		c := sampleColors[sid]
+		return fmt.Sprintf("#%02x%02x%02x", c[0], c[1], c[2])
+	})
+}
+
+func renderLayersWithFn(layers []Layer, sections []Section, cfg RenderConfig, colorFor func(int) string) error {
 	if cfg.OutputDir == "" {
 		return fmt.Errorf("RenderConfig.OutputDir is required")
 	}
@@ -115,18 +139,32 @@ func RenderLayers(layers []Layer, sections []Section, palette [][3]uint8, assign
 			_ = perim
 			for _, secID := range ids {
 				s := sections[secID]
-				// Build a polyline along the loop from StartArc to EndArc.
-				poly := pathBetweenArcs(lp.Points, cumLen, s.StartArc, s.EndArc)
-				color := "#888888"
-				if assignments[secID] >= 0 {
-					rgb := palette[assignments[secID]]
-					color = fmt.Sprintf("#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
+				if s.Kind != KindRibbon {
+					continue
 				}
+				poly := pathBetweenArcs(lp.Points, cumLen, s.StartArc, s.EndArc)
+				color := colorFor(secID)
 				fmt.Fprintf(&b,
 					"    <polyline points=\"%s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%.4f\" stroke-linecap=\"round\"/>\n",
 					polylinePointsAttr(poly), color,
 					float32(cfg.StrokeWidth)/cfg.PixelsPerUnit)
 			}
+		}
+
+		// Cap tile rectangles, colored from the same colorFor()
+		// callback so the diagnostic shows both ribbons and caps.
+		for sid, s := range sections {
+			if s.LayerIdx != layer.LayerIdx {
+				continue
+			}
+			if s.Kind != KindCapTop && s.Kind != KindCapBottom {
+				continue
+			}
+			x0, y0, x1, y1 := s.CapBoundsXY[0], s.CapBoundsXY[1], s.CapBoundsXY[2], s.CapBoundsXY[3]
+			color := colorFor(sid)
+			fmt.Fprintf(&b,
+				"    <rect x=\"%.4f\" y=\"%.4f\" width=\"%.4f\" height=\"%.4f\" fill=\"%s\" stroke=\"none\" opacity=\"0.7\"/>\n",
+				x0, y0, x1-x0, y1-y0, color)
 		}
 
 		fmt.Fprintf(&b, "  </g>\n</svg>\n")

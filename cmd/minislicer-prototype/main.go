@@ -141,6 +141,21 @@ func main() {
 		log.Fatalf("render: %v", err)
 	}
 
+	// Diagnostic: also write a parallel SVG set colored by raw
+	// pre-dither sampled RGB. If a flip is visible in the dithered
+	// SVGs but NOT in the sampled SVGs, the bug is in dither /
+	// palette / mesh emission. If it's visible in both, the bug is
+	// in sampling. Output dir: <Out>_sampled.
+	sampledOut := a.Out + "_sampled"
+	sampledCfg := minislicer.DefaultRenderConfig(sampledOut)
+	if err := minislicer.RenderLayersSampled(layers, sections, colors, sampledCfg); err != nil {
+		log.Fatalf("render sampled: %v", err)
+	}
+	if a.Verbose {
+		log.Printf("wrote dithered SVGs: %s", a.Out)
+		log.Printf("wrote sampled SVGs:  %s", sampledOut)
+	}
+
 	if a.ThreeMF != "" {
 		mesh, faceAssign := minislicer.BuildPrintableMesh(layers, sections, assignments, a.LayerH)
 		// Find a fallback color for interior faces (we want the
