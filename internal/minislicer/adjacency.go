@@ -49,6 +49,16 @@ func BuildSectionGraph(sections []Section, layers []Layer, proximityRadius float
 	//
 	// All within-loop edges have weight 1.0 — same diffusion weight as
 	// the voxel grid's face-adjacency.
+	//
+	// TODO: there's no explicit ribbon↔cap edge within a single
+	// layer. A ribbon section at layer N's perimeter and a cap tile
+	// at layer N's top or bottom face are physically adjacent
+	// (they meet at the prism's top-of-wall / bottom-of-wall
+	// corner) but the graph only connects them implicitly via
+	// cross-layer XY proximity to N±1 sections. The dither's color
+	// continuity at that corner is weaker than the geometry would
+	// suggest — visible as a color seam between a slope's vertical
+	// wall and its horizontal cap on some inputs.
 	for _, ids := range loopMembers {
 		m := len(ids)
 		if m < 2 {
