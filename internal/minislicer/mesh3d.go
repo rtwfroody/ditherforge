@@ -396,16 +396,22 @@ func emitLoopWall(
 	if n < 3 {
 		return
 	}
-	ccw := loop.SignedArea > 0
-	want := !isHole
-	if ccw != want {
-		rev := make([]Point2, n)
-		for i, p := range pts {
-			rev[n-1-i] = p
-		}
-		pts = rev
-	}
+	// Sections' StartArc / EndArc live in the loop's *original* arc
+	// frame (the order it was chained + partitioned in). Walls must
+	// be assembled in that same frame so per-section arc lookups
+	// stay valid: a section's color is sampled at its loop-arc
+	// midpoint, and we want that color painted on the wall span
+	// covering the same arc range. If we reversed pts for winding
+	// here, a section at arc 0..2 in the original frame would end
+	// up painted across the OPPOSITE arc on the wall, mirroring
+	// the texture around the loop. For symmetric shapes (a sliced
+	// sphere, say) this looks like an X-axis flip in the rendered
+	// output. Instead we walk pts in original order and flip the
+	// triangle winding below to control outward/inward normals.
 	cum := loopCumLen(pts)
+	ccw := loop.SignedArea > 0
+	wantCCW := !isHole
+	flipWinding := ccw != wantCCW
 
 	wallPts := make([]Point2, 0, n*2)
 	wallColors := make([]int32, 0, n*2)
@@ -441,8 +447,13 @@ func emitLoopWall(
 		i1 := baseV + uint32(2*i+1)
 		j0 := baseV + uint32(2*j)
 		j1 := baseV + uint32(2*j+1)
-		m.Faces = append(m.Faces, [3]uint32{i0, j0, j1})
-		m.Faces = append(m.Faces, [3]uint32{i0, j1, i1})
+		if flipWinding {
+			m.Faces = append(m.Faces, [3]uint32{i0, j1, j0})
+			m.Faces = append(m.Faces, [3]uint32{i0, i1, j1})
+		} else {
+			m.Faces = append(m.Faces, [3]uint32{i0, j0, j1})
+			m.Faces = append(m.Faces, [3]uint32{i0, j1, i1})
+		}
 		col := wallColors[i]
 		sec := wallSections[i]
 		*faceAssign = append(*faceAssign, col, col)

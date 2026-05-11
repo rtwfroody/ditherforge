@@ -39,7 +39,12 @@ func TestSampledMatchesInput(t *testing.T) {
 		path      string
 		maxAvgErr float64 // 0..255 per channel, averaged
 	}{
-		{"earth", filepath.Join("objects", "earth.glb"), 35},
+		// The threshold is loose enough to absorb the slicer's
+		// 0.2 mm Z-stepping (visible as horizontal noise in the
+		// sampled render) while still catching a section→wall
+		// arc-mapping inversion: that bug pushed earth/side to
+		// ~49 here and was the original trigger for this test.
+		{"earth", filepath.Join("objects", "earth.glb"), 40},
 	}
 
 	for _, tc := range cases {
@@ -87,6 +92,10 @@ func TestSampledMatchesInput(t *testing.T) {
 			sxp, sxn := sampledExtremeColors(pr.OutputMesh)
 			t.Logf("input  +X side mean RGB: (%3d,%3d,%3d)  -X side mean RGB: (%3d,%3d,%3d)", ixp[0], ixp[1], ixp[2], ixn[0], ixn[1], ixn[2])
 			t.Logf("sampled +X side mean RGB: (%3d,%3d,%3d)  -X side mean RGB: (%3d,%3d,%3d)", sxp[0], sxp[1], sxp[2], sxn[0], sxn[1], sxn[2])
+			iyp, iyn := inputExtremeYColors(inputMesh)
+			syp, syn := sampledExtremeYColors(pr.OutputMesh)
+			t.Logf("input  +Y side mean RGB: (%3d,%3d,%3d)  -Y side mean RGB: (%3d,%3d,%3d)", iyp[0], iyp[1], iyp[2], iyn[0], iyn[1], iyn[2])
+			t.Logf("sampled +Y side mean RGB: (%3d,%3d,%3d)  -Y side mean RGB: (%3d,%3d,%3d)", syp[0], syp[1], syp[2], syn[0], syn[1], syn[2])
 
 			const res = 256
 			// When DF_TEST_DUMP_DIR is set, also dump PNGs there
@@ -122,16 +131,33 @@ func TestSampledMatchesInput(t *testing.T) {
 	}
 }
 
+// inputExtremeYColors / sampledExtremeYColors: same as the X
+// versions but split by Y instead.
+func inputExtremeYColors(m *debugrender.InputMesh) (yp, yn [3]int) {
+	return inputExtremeAxis(m, 1)
+}
+func sampledExtremeYColors(md *pipeline.MeshData) (yp, yn [3]int) {
+	return sampledExtremeAxis(md, 1)
+}
+
 // inputExtremeColors returns the mean face color of faces whose
 // centroid sits in the +X 20% slab vs the -X 20% slab of the mesh.
 func inputExtremeColors(m *debugrender.InputMesh) (xp, xn [3]int) {
-	var mn, mx float32 = m.Vertices[0][0], m.Vertices[0][0]
+	return inputExtremeAxis(m, 0)
+}
+
+func sampledExtremeColors(md *pipeline.MeshData) (xp, xn [3]int) {
+	return sampledExtremeAxis(md, 0)
+}
+
+func inputExtremeAxis(m *debugrender.InputMesh, axis int) (vp, vn [3]int) {
+	var mn, mx float32 = m.Vertices[0][axis], m.Vertices[0][axis]
 	for _, v := range m.Vertices {
-		if v[0] < mn {
-			mn = v[0]
+		if v[axis] < mn {
+			mn = v[axis]
 		}
-		if v[0] > mx {
-			mx = v[0]
+		if v[axis] > mx {
+			mx = v[axis]
 		}
 	}
 	w := mx - mn
@@ -140,35 +166,34 @@ func inputExtremeColors(m *debugrender.InputMesh) (xp, xn [3]int) {
 	var sumPos, sumNeg [3]int
 	var nPos, nNeg int
 	for i, f := range m.Faces {
-		cx := (m.Vertices[f[0]][0] + m.Vertices[f[1]][0] + m.Vertices[f[2]][0]) / 3
-		if cx >= thrPos {
-			c := m.Colors[i]
-			sumPos[0] += int(c[0])
-			sumPos[1] += int(c[1])
-			sumPos[2] += int(c[2])
+		c := (m.Vertices[f[0]][axis] + m.Vertices[f[1]][axis] + m.Vertices[f[2]][axis]) / 3
+		col := m.Colors[i]
+		if c >= thrPos {
+			sumPos[0] += int(col[0])
+			sumPos[1] += int(col[1])
+			sumPos[2] += int(col[2])
 			nPos++
-		} else if cx <= thrNeg {
-			c := m.Colors[i]
-			sumNeg[0] += int(c[0])
-			sumNeg[1] += int(c[1])
-			sumNeg[2] += int(c[2])
+		} else if c <= thrNeg {
+			sumNeg[0] += int(col[0])
+			sumNeg[1] += int(col[1])
+			sumNeg[2] += int(col[2])
 			nNeg++
 		}
 	}
 	if nPos > 0 {
 		for k := 0; k < 3; k++ {
-			xp[k] = sumPos[k] / nPos
+			vp[k] = sumPos[k] / nPos
 		}
 	}
 	if nNeg > 0 {
 		for k := 0; k < 3; k++ {
-			xn[k] = sumNeg[k] / nNeg
+			vn[k] = sumNeg[k] / nNeg
 		}
 	}
 	return
 }
 
-func sampledExtremeColors(md *pipeline.MeshData) (xp, xn [3]int) {
+func sampledExtremeAxis(md *pipeline.MeshData, axis int) (vp, vn [3]int) {
 	if md == nil || len(md.Vertices) < 3 {
 		return
 	}
@@ -177,13 +202,13 @@ func sampledExtremeColors(md *pipeline.MeshData) (xp, xn [3]int) {
 	for i := 0; i < nV; i++ {
 		verts[i] = [3]float32{md.Vertices[3*i], md.Vertices[3*i+1], md.Vertices[3*i+2]}
 	}
-	var mn, mx float32 = verts[0][0], verts[0][0]
+	var mn, mx float32 = verts[0][axis], verts[0][axis]
 	for _, v := range verts {
-		if v[0] < mn {
-			mn = v[0]
+		if v[axis] < mn {
+			mn = v[axis]
 		}
-		if v[0] > mx {
-			mx = v[0]
+		if v[axis] > mx {
+			mx = v[axis]
 		}
 	}
 	w := mx - mn
@@ -196,19 +221,19 @@ func sampledExtremeColors(md *pipeline.MeshData) (xp, xn [3]int) {
 		a := md.Faces[3*fi]
 		b := md.Faces[3*fi+1]
 		c := md.Faces[3*fi+2]
-		cx := (verts[a][0] + verts[b][0] + verts[c][0]) / 3
+		cax := (verts[a][axis] + verts[b][axis] + verts[c][axis]) / 3
 		if 3*fi+2 >= len(md.FaceColors) {
 			continue
 		}
 		r := int(md.FaceColors[3*fi])
 		g := int(md.FaceColors[3*fi+1])
 		bl := int(md.FaceColors[3*fi+2])
-		if cx >= thrPos {
+		if cax >= thrPos {
 			sumPos[0] += r
 			sumPos[1] += g
 			sumPos[2] += bl
 			nPos++
-		} else if cx <= thrNeg {
+		} else if cax <= thrNeg {
 			sumNeg[0] += r
 			sumNeg[1] += g
 			sumNeg[2] += bl
@@ -217,16 +242,18 @@ func sampledExtremeColors(md *pipeline.MeshData) (xp, xn [3]int) {
 	}
 	if nPos > 0 {
 		for k := 0; k < 3; k++ {
-			xp[k] = sumPos[k] / nPos
+			vp[k] = sumPos[k] / nPos
 		}
 	}
 	if nNeg > 0 {
 		for k := 0; k < 3; k++ {
-			xn[k] = sumNeg[k] / nNeg
+			vn[k] = sumNeg[k] / nNeg
 		}
 	}
 	return
 }
+
+// Old sampledExtremeColors block — leftover duplication removed.
 
 // meshBBox formats the XYZ bounding box of a vertex slice.
 func meshBBox(verts [][3]float32) string {
