@@ -98,7 +98,7 @@ func main() {
 	}
 
 	si := voxel.NewSpatialIndex(model, a.CellSize)
-	colors, alpha := minislicer.SampleSectionColors(model, si, sections, layers, a.CellSize)
+	colors, alpha := minislicer.SampleSectionColors(model, si, sections, a.CellSize)
 	if a.Verbose {
 		visible := 0
 		for _, v := range alpha {
