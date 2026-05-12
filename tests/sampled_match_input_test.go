@@ -39,6 +39,7 @@ func TestSampledMatchesInput(t *testing.T) {
 		path       string
 		maxAvgErr  float64 // global MAE, 0..255 per channel
 		maxTileErr float64 // per-tile MAE limit
+		alphaWrap  bool
 	}{
 		// Thresholds are calibrated to accept inherent slicer
 		// quantization (Z-step horizontal banding, per-section
@@ -51,7 +52,19 @@ func TestSampledMatchesInput(t *testing.T) {
 		//     dragged colors across coastlines (worst-tile ~45)
 		// Below those limits the orientation+UV sampling is
 		// correct and remaining residue is inherent quantization.
-		{"earth", filepath.Join("objects", "earth.glb"), 32, 50},
+		{"earth", filepath.Join("objects", "earth.glb"), 32, 50, false},
+		// low_poly_building is a multi-primitive GLB (floor +
+		// walls + windows + roof) needing alpha-wrap to produce
+		// a printable shell. Alpha-wrap replaces the original
+		// detailed roof texture with a smoothed surface (a
+		// known limitation: the wrap is "making something up"
+		// where the source mesh has alpha-blended detail), so
+		// the top-down view diverges hard from the input (worst
+		// tile ~105). Thresholds set to accept that fabrication
+		// while still catching multi-object regressions in the
+		// wall views — front/side/persp all pass under tighter
+		// limits with the current sampling.
+		{"building", filepath.Join("objects", "low_poly_building.glb"), 80, 130, true},
 	}
 
 	for _, tc := range cases {
@@ -59,6 +72,7 @@ func TestSampledMatchesInput(t *testing.T) {
 			size := float32(50)
 			opts := pipeline.Options{
 				Input:             tc.path,
+				ObjectIndex:       -1,
 				NumColors:         6,
 				InventoryColors:   inventoryRGB(),
 				InventoryLabels:   inventoryLabels(),
@@ -70,6 +84,7 @@ func TestSampledMatchesInput(t *testing.T) {
 				Force:             true,
 				ShowSampledColors: true,
 				Scale:             1,
+				AlphaWrap:         tc.alphaWrap,
 			}
 			cache := pipeline.NewStageCache()
 			pr, err := pipeline.RunCached(context.Background(), cache, opts, nil)

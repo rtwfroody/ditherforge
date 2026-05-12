@@ -161,14 +161,20 @@ func LoadInputMesh(path string, sizePtr *float32) (*InputMesh, error) {
 
 // LoadAnyModel dispatches to the right loader for a given file
 // extension. Returns an error for unsupported formats.
+//
+// Uses ObjectIndex = -1 ("all objects") so multi-primitive scenes
+// (e.g. a building with floor + walls + windows + roof as
+// separate glTF meshes) render in full instead of showing only
+// the first primitive. Matches the pipeline's default — the CLI
+// passes -1 for the same reason.
 func LoadAnyModel(path string) (*loader.LoadedModel, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".glb":
-		return loader.LoadGLB(path, 0)
+		return loader.LoadGLB(path, -1)
 	case ".3mf":
-		return loader.Load3MF(path, 0)
+		return loader.Load3MF(path, -1)
 	case ".stl":
-		return loader.LoadSTL(path, 0)
+		return loader.LoadSTL(path, -1)
 	}
 	return nil, fmt.Errorf("unsupported format: %s", filepath.Ext(path))
 }
