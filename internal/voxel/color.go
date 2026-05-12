@@ -478,32 +478,14 @@ type Neighbor struct {
 }
 
 // sampleBaryAt returns the barycentric coords of `p` on triangle
-// (v0,v1,v2). Two-pass logic:
-//
-//   - If `p`'s XY projection falls inside the triangle's XY
-//     projection, return the barycentric of (p.x, p.y, planeZ)
-//     where planeZ is the triangle's plane evaluated at (p.x,
-//     p.y). This is the point "directly above" (or below) p on
-//     the triangle's surface, and is correct for a cap-tile
-//     point whose Z sits next to the surface — it doesn't snap
-//     to an edge the way 3D closest-point-on-triangle does for
-//     steep triangles.
-//   - Otherwise fall back to 3D closest-point-on-triangle, which
-//     is the right answer when p genuinely isn't bounded above
-//     or below by this triangle (e.g. ribbon midpoints, where p
-//     sits exactly on a triangle edge).
+// (v0,v1,v2) via 3D closest-point. For points lying on the
+// triangle (ribbon section midpoints) this returns the exact
+// barycentric. For points off the surface (cap-tile XY centers
+// at z = cap_z, where the dome surface curves above/below the
+// tile) it returns the barycentric of the nearest surface point,
+// which is what we want — sample the model's color at the
+// closest piece of geometry.
 func sampleBaryAt(p, v0, v1, v2 [3]float32) [3]float32 {
-	// 2D XY barycentric. Denominator uses signed area; sign is
-	// irrelevant since we divide consistently.
-	denom := (v1[1]-v2[1])*(v0[0]-v2[0]) + (v2[0]-v1[0])*(v0[1]-v2[1])
-	if denom != 0 {
-		a := ((v1[1]-v2[1])*(p[0]-v2[0]) + (v2[0]-v1[0])*(p[1]-v2[1])) / denom
-		b := ((v2[1]-v0[1])*(p[0]-v2[0]) + (v0[0]-v2[0])*(p[1]-v2[1])) / denom
-		c := 1 - a - b
-		if a >= 0 && b >= 0 && c >= 0 {
-			return [3]float32{a, b, c}
-		}
-	}
 	r := ClosestPointOnTriangle(p, v0, v1, v2)
 	return [3]float32{1 - r.S - r.T, r.S, r.T}
 }
