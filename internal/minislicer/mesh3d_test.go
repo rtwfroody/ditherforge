@@ -120,3 +120,106 @@ func TestBuildPrintableMeshWithHole(t *testing.T) {
 		t.Errorf("bottom cap area magnitude = %g, want ≈ %g", -botArea, wantArea)
 	}
 }
+
+// TestStackedCubeNoInternalCaps verifies that a multi-layer column
+// of identical-footprint loops produces exactly one top cap and one
+// bottom cap (no internal coplanar cap surfaces between adjacent
+// layers). This is the watertight-cap invariant the Clipper-based
+// rewrite was meant to deliver: surfaces only on the air-facing
+// boundary of the print, never buried inside the solid.
+func TestStackedCubeNoInternalCaps(t *testing.T) {
+	const nLayers = 5
+	const layerH = float32(0.2)
+	pts := []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
+	layers := make([]Layer, nLayers)
+	for i := 0; i < nLayers; i++ {
+		loop := Loop{Points: pts, Z: float32(i) * layerH}
+		loop.SignedArea = signedArea(loop.Points)
+		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
+	}
+	secs := PartitionLoops(layers, 1.0)
+	// No top/bottom cap tiles for this minimal test — the only
+	// caps come from BuildPrintableMesh's per-slab-boundary
+	// exposed-region triangulation.
+	assigns := make([]int32, len(secs))
+	mesh, _ := BuildPrintableMesh(layers, secs, assigns, layerH)
+
+	// Count faces by Z (caps are coplanar at a single Z; walls
+	// span two Z values). Expected: caps at the topmost top face
+	// (z = (nLayers-0.5)*layerH) and bottommost bottom face
+	// (z = -0.5*layerH), nothing in between.
+	capsByZ := map[float32]int{}
+	for _, tr := range mesh.Faces {
+		a := mesh.Vertices[tr[0]]
+		b := mesh.Vertices[tr[1]]
+		c := mesh.Vertices[tr[2]]
+		if a[2] == b[2] && b[2] == c[2] {
+			capsByZ[a[2]]++
+		}
+	}
+	if len(capsByZ) != 2 {
+		t.Fatalf("expected exactly 2 cap Z-planes (top + bottom of stack), got %d: %v", len(capsByZ), capsByZ)
+	}
+	wantBot := -layerH / 2
+	wantTop := float32(nLayers-1)*layerH + layerH/2
+	if _, ok := capsByZ[wantBot]; !ok {
+		t.Errorf("missing bottom cap at z=%g; have %v", wantBot, capsByZ)
+	}
+	if _, ok := capsByZ[wantTop]; !ok {
+		t.Errorf("missing top cap at z=%g; have %v", wantTop, capsByZ)
+	}
+}
+
+// TestSteppedPyramidEmitsStepCaps verifies that two layers with
+// different footprints (a smaller square stacked on a larger one)
+// emit a step cap at their interface — covering the annulus where
+// the lower layer's top face is air-facing. The interior overlap
+// (where the smaller layer covers the larger one) must NOT emit a
+// cap, and the buried bottom of the upper layer must NOT emit
+// either.
+func TestSteppedPyramidEmitsStepCaps(t *testing.T) {
+	const layerH = float32(0.2)
+	bigPts := []Point2{{0, 0}, {2, 0}, {2, 2}, {0, 2}}
+	smallPts := []Point2{{0.5, 0.5}, {1.5, 0.5}, {1.5, 1.5}, {0.5, 1.5}}
+	big := Loop{Points: bigPts, Z: 0}
+	big.SignedArea = signedArea(big.Points)
+	small := Loop{Points: smallPts, Z: layerH}
+	small.SignedArea = signedArea(small.Points)
+	layers := []Layer{
+		{Z: 0, LayerIdx: 0, Loops: []Loop{big}},
+		{Z: layerH, LayerIdx: 1, Loops: []Loop{small}},
+	}
+	secs := PartitionLoops(layers, 1.0)
+	assigns := make([]int32, len(secs))
+	mesh, _ := BuildPrintableMesh(layers, secs, assigns, layerH)
+
+	// At z = +layerH/2 (the shared slab boundary), there should
+	// be exactly one cap surface facing +Z, covering the annulus
+	// big - small. The buried part (overlap of big and small)
+	// must contribute zero geometry — that's the watertightness
+	// fix this rewrite was meant to deliver.
+	shareZ := layerH / 2
+	var stepArea float64
+	var nStepFaces int
+	for _, tr := range mesh.Faces {
+		a := mesh.Vertices[tr[0]]
+		b := mesh.Vertices[tr[1]]
+		c := mesh.Vertices[tr[2]]
+		if a[2] == shareZ && b[2] == shareZ && c[2] == shareZ {
+			nStepFaces++
+			signed := float64((b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]))
+			stepArea += signed / 2
+		}
+	}
+	if nStepFaces == 0 {
+		t.Fatalf("expected step-cap faces at z=%g, found none", shareZ)
+	}
+	// Big square area is 4, small square area is 1, annulus area
+	// is 3. Top cap of layer 0 emits +Z (positive signed area);
+	// any leakage from a buried internal cap would either inflate
+	// this or contribute negative area. Allow Clipper int-rounding
+	// slop.
+	if stepArea < 2.95 || stepArea > 3.05 {
+		t.Errorf("step-cap area = %g, want ≈ 3 (annulus big - small); internal cap geometry leaking?", stepArea)
+	}
+}

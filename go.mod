@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/alexflint/go-arg v1.5.1
+	github.com/ctessum/go.clipper v0.1.2
 	github.com/hschendel/stl v1.0.4
 	github.com/james-bowman/sparse v0.0.0-20260216202247-495ee4f84d35
 	github.com/klauspost/compress v1.18.5

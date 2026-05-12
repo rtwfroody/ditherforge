@@ -189,34 +189,27 @@ func planeZAtXY(v0, v1, v2 [3]float32, x, y float32) (float32, bool) {
 	return z, true
 }
 
-// capTileEpsilon is how far outside the slab face cap tiles sit
-// (above for KindCapTop, below for KindCapBottom). The earcut
-// fallback cap is emitted at the exact slab face Z; the tiny
-// outward offset on tiles makes them win the depth test from
-// outside the model so the dithered tile color shows through
-// instead of the earcut's flat fallback. 1µm is well above the
-// float32 z-buffer's discrimination threshold for mm-scale models
-// and far below any visible feature.
-const capTileEpsilon = 1e-3
-
 // PartitionTopCap tiles the top face of `layer` wherever it's
 // exposed — solid in `layer` and air in `neighborAbove` (the layer
 // directly above). Pass neighborAbove == nil for the topmost layer
 // (no layer above → all-air → every tile inside layer is exposed).
 //
-// `layerH` is the slab thickness; the tile's Z is at the slab's
-// upper face + capTileEpsilon so tiles depth-beat the earcut cap.
+// `layerH` is the slab thickness; the section's Z is at the slab's
+// upper face (no depth-bias offset — cap geometry is emitted by the
+// mesh builder as one watertight surface on the exact slab face,
+// and tile sections supply per-triangle color via nearest-Mid
+// lookup, so there is no overlap to disambiguate).
 //
 // loopIdxBase shifts the per-loop LoopIdx for cap sections so they
 // don't collide with ribbon-section loop indices.
 func PartitionTopCap(layer Layer, neighborAbove *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, neighborAbove, layerH/2+capTileEpsilon, cellSize, loopIdxBase, KindCapTop)
+	return partitionCap(layer, neighborAbove, layerH/2, cellSize, loopIdxBase, KindCapTop)
 }
 
 // PartitionBottomCap is the bottom-face counterpart. Pass
 // neighborBelow == nil for the bottommost layer.
 func PartitionBottomCap(layer Layer, neighborBelow *Layer, layerH, cellSize float32, loopIdxBase int) []Section {
-	return partitionCap(layer, neighborBelow, -layerH/2-capTileEpsilon, cellSize, loopIdxBase, KindCapBottom)
+	return partitionCap(layer, neighborBelow, -layerH/2, cellSize, loopIdxBase, KindCapBottom)
 }
 
 // insideSolid uses even-odd nesting: a point is inside the solid
@@ -262,6 +255,17 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 			holes = append(holes, &layer.Loops[k])
 		}
 	}
+	exposedAt := func(loopPts []Point2, x, y float32) bool {
+		if !pointInPolygon(loopPts, x, y) {
+			return false
+		}
+		for _, h := range holes {
+			if pointInPolygon(h.Points, x, y) {
+				return false
+			}
+		}
+		return !insideSolid(neighbor, x, y)
+	}
 	for li, loop := range layer.Loops {
 		if loop.IsHole {
 			continue
@@ -299,30 +303,18 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 				y0 := yMin + float32(j)*cellSize
 				x1 := x0 + cellSize
 				y1 := y0 + cellSize
-				if x1 > xMax {
-					x1 = xMax
-				}
-				if y1 > yMax {
-					y1 = yMax
-				}
 				cx := (x0 + x1) * 0.5
 				cy := (y0 + y1) * 0.5
-				if !pointInPolygon(loop.Points, cx, cy) {
-					continue
-				}
-				inHole := false
-				for _, h := range holes {
-					if pointInPolygon(h.Points, cx, cy) {
-						inHole = true
-						break
-					}
-				}
-				if inHole {
-					continue
-				}
-				// Exposure test: tile is exposed at this Z face
-				// only if the adjacent layer is air at (cx, cy).
-				if insideSolid(neighbor, cx, cy) {
+				// Tile becomes a section iff some sample point
+				// inside its rect is exposed. Cell center plus
+				// four corners catches both interior and
+				// boundary-straddling tiles; cells fully outside
+				// or fully covered fail all five tests and drop.
+				if !exposedAt(loop.Points, cx, cy) &&
+					!exposedAt(loop.Points, x0, y0) &&
+					!exposedAt(loop.Points, x1, y0) &&
+					!exposedAt(loop.Points, x1, y1) &&
+					!exposedAt(loop.Points, x0, y1) {
 					continue
 				}
 				out = append(out, Section{

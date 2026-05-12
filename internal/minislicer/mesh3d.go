@@ -1,8 +1,14 @@
 package minislicer
 
 import (
+	"math"
+
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
+
+// loopKey identifies one loop within one layer. Used as a section
+// lookup key.
+type loopKey struct{ layer, loop int }
 
 // BuildPrintableMesh assembles a 3D triangle mesh from the per-layer
 // contour partition.
@@ -11,14 +17,16 @@ import (
 //   - Walls: one tube per loop (outer or hole), painted per ribbon
 //     section. Outer-loop walls face outward; hole-loop walls face
 //     inward into the cavity.
-//   - Caps: per-outer earcut of (outer minus immediate hole
-//     children) at the top and bottom Z faces. Caps are emitted with
-//     the model's most-common visible color as a fallback (cap
-//     faces are interior to the print and not separately
-//     colored). When a layer's top or bottom face is being tiled
-//     by cap sections (the visible top/bottom of the model), the
-//     earcut cap at that Z is skipped so the tiles are the only
-//     geometry there.
+//   - Caps: one watertight cap surface per slab boundary, covering
+//     ONLY the region exposed to air on that side — i.e. the
+//     symmetric-difference annulus between this layer's footprint
+//     and the adjacent layer's footprint. Computed via Clipper
+//     polygon difference, then earcut-triangulated. Each triangle's
+//     color comes from the nearest cap-tile section's dithered
+//     palette index, so the cap surface carries the dither pattern
+//     directly in its triangulation — no separate "floating tiles"
+//     above an earcut underneath, no internal coplanar caps between
+//     adjacent layers.
 //
 // The output is a flat triangle list packed into a LoadedModel
 // (Vertices + Faces only) plus a parallel `assignments` slice with
@@ -31,16 +39,14 @@ func BuildPrintableMesh(layers []Layer, sections []Section, assignments []int32,
 // BuildPrintableMeshFull is BuildPrintableMesh plus a parallel
 // faceSection slice: faceSection[i] is the index into `sections`
 // that produced face i, or -1 for faces that don't trace to a
-// single section (earcut cap interior triangles). Used by the
-// pipeline's ShowSampledColors debug mode to color faces by the
-// originating section's raw sampled RGB instead of its dithered
-// palette index.
+// single section. Used by the pipeline's ShowSampledColors debug
+// mode to color faces by the originating section's raw sampled RGB
+// instead of its dithered palette index.
 func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []int32, layerH float32) (*loader.LoadedModel, []int32, []int32) {
 	m := &loader.LoadedModel{}
 	var faceAssign []int32
 	var faceSection []int32
 
-	type loopKey struct{ layer, loop int }
 	loopSecs := make(map[loopKey][]int)
 	for i, s := range sections {
 		loopSecs[loopKey{s.LayerIdx, s.LoopIdx}] = append(loopSecs[loopKey{s.LayerIdx, s.LoopIdx}], i)
@@ -49,27 +55,21 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		sortByIndex(ids, sections)
 	}
 
-	hasTopCap := make(map[int]bool)
-	hasBotCap := make(map[int]bool)
-	for _, s := range sections {
-		switch s.Kind {
-		case KindCapTop:
-			hasTopCap[s.LayerIdx] = true
-		case KindCapBottom:
-			hasBotCap[s.LayerIdx] = true
-		}
-	}
-
 	fallback := mostCommonNonNegSafe(assignments)
 
+	// Per-layer cap-tile sections (one slice per kind+layer), with
+	// each section's CapBoundsXY rectangle indexed by tile cell.
+	// Earcut triangles' centroids look up here to pick the tile
+	// section painting that triangle.
+	topTiles := buildLayerTileIdx(sections, KindCapTop)
+	botTiles := buildLayerTileIdx(sections, KindCapBottom)
+
 	// Per-(layer, loop) ribbon midpoints, used to find the nearest
-	// ribbon section for each earcut cap triangle's centroid. The
-	// lookup is scoped to the specific outer loop being capped + its
-	// hole children — not "any ribbon in the layer", which leaks
-	// color across disjoint outer loops (e.g. the cutting board's
-	// top cap picking up the fish's color because the fish loop is
-	// closer to most cap interior points than the cutting board's
-	// own perimeter).
+	// ribbon section for any cap-triangle whose centroid doesn't
+	// land inside a tile rectangle. Same scope rule as the
+	// pre-rewrite code: a single outer loop's ribbons only —
+	// otherwise unrelated outer loops in the same layer leak color
+	// across each other.
 	layerLoopRibbons := make(map[loopKey][]ribbonRef)
 	for i, s := range sections {
 		if s.Kind != KindRibbon {
@@ -79,12 +79,10 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		layerLoopRibbons[k] = append(layerLoopRibbons[k], ribbonRef{int32(i), s.Mid})
 	}
 
+	// Walls: every loop (outer or hole) gets a wall tube.
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
-
-		// Walls: every loop (outer or hole) gets walls; cap fans are
-		// no longer emitted here.
 		for lp := range layer.Loops {
 			loop := &layer.Loops[lp]
 			ids := loopSecs[loopKey{li, lp}]
@@ -94,60 +92,473 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 			emitLoopWall(m, &faceAssign, &faceSection, loop, ids, sections, assignments,
 				zBot, zTop, loop.IsHole)
 		}
-
-		// Caps: one earcut per outer (outer minus direct hole
-		// children) ALWAYS emitted at the exact Z face. When a
-		// layer also has tiled cap sections covering the exposed
-		// portion of the cap, those tiles are emitted at a Z
-		// pushed slightly outward (+capTileEpsilon for top,
-		// −capTileEpsilon for bottom) so they win the depth test
-		// from outside the model. The earcut underneath fills the
-		// "covered" remainder so adjacent layers don't see through
-		// to nothing when their footprints don't perfectly align.
-		_ = hasTopCap
-		_ = hasBotCap
-		for lp := range layer.Loops {
-			outer := &layer.Loops[lp]
-			if outer.IsHole {
-				continue
-			}
-			holes, _ := collectChildHolesWithIdx(layer.Loops, lp)
-			// Scope nearest-ribbon to THIS outer loop's own ribbons
-			// only. Holes are not included even when they're real
-			// cavities, because:
-			//   - For true cavities, the cap material is bounded by
-			//     the outer; outer perimeter is on the same surface
-			//     as the cap, so its sample matches.
-			//   - For "holes" that are actually a separate object's
-			//     outer loop nested inside this one, the hole's
-			//     ribbons sample an unrelated material and would
-			//     leak that color into the cap.
-			ribbons := layerLoopRibbons[loopKey{li, lp}]
-			// Top vs bottom cap colorers prefer ribbons whose
-			// source-triangle normal matches the cap's facing
-			// direction; falls back to plain nearest-XY when no
-			// candidate matches the orientation. See pickRibbon for
-			// the scoring detail.
-			colorAtTop := makeColorAt(ribbons, sections, assignments, fallback, +1)
-			colorAtBot := makeColorAt(ribbons, sections, assignments, fallback, -1)
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zTop, true, colorAtTop)
-			emitEarcutCap(m, &faceAssign, &faceSection, outer.Points, holes, zBot, false, colorAtBot)
-		}
 	}
 
-	// Tiled caps for the visible top/bottom of the model.
-	for _, ids := range loopSecs {
-		if len(ids) == 0 {
+	// Caps: one watertight surface per slab boundary, restricted to
+	// the air-facing region. Topmost/bottommost layer uses a nil
+	// neighbor → full footprint exposed. The exposed region is
+	// triangulated once via Earcut; per-triangle color comes from
+	// the cap-tile section whose rectangle contains the triangle's
+	// centroid, falling back to the nearest ribbon section of this
+	// loop (orientation-matched) when no tile contains the
+	// centroid — same fallback rule the pre-rewrite code applied
+	// to its full earcut cap, which gives slope-derived colors on
+	// thin step caps instead of XY-projected fabric colors.
+	for li := range layers {
+		layer := &layers[li]
+		if len(layer.Loops) == 0 {
 			continue
 		}
-		k := sections[ids[0]].Kind
-		if k != KindCapTop && k != KindCapBottom {
-			continue
+		zBot := layer.Z - layerH/2
+		zTop := layer.Z + layerH/2
+
+		var above, below *Layer
+		for k := li + 1; k < len(layers); k++ {
+			if len(layers[k].Loops) > 0 {
+				above = &layers[k]
+				break
+			}
 		}
-		emitCapTiles(m, &faceAssign, &faceSection, ids, sections, assignments)
+		for k := li - 1; k >= 0; k-- {
+			if len(layers[k].Loops) > 0 {
+				below = &layers[k]
+				break
+			}
+		}
+
+		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
+			layer, above, zTop, true, topTiles[li], +1,
+			sections, assignments, fallback, layerLoopRibbons, li)
+		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
+			layer, below, zBot, false, botTiles[li], -1,
+			sections, assignments, fallback, layerLoopRibbons, li)
 	}
 
 	return m, faceAssign, faceSection
+}
+
+// ribbonRef is a ribbon section's id and XY midpoint. Used by the
+// cap colorer to find the nearest ribbon section for triangles
+// that don't land inside any tile rectangle.
+type ribbonRef struct {
+	sid int32
+	mid Point2
+}
+
+// emitLayerFaceCap emits the cap geometry for one slab face of one
+// layer. The exposed region is the layer's footprint minus the
+// neighbor's footprint (full footprint when neighbor == nil). The
+// cap is subdivided by per-section tile rectangles so each
+// section paints its own quad and the dither pattern remains
+// tile-aligned; tiles straddling the loop or neighbor boundary
+// are Clipper-intersected to clip them exactly. Any uncovered
+// residue (e.g. tiny slivers along the loop boundary where a
+// tile-center test had dropped the tile) is emitted with
+// `fallback` and faceSection = -1 to keep the cap watertight.
+// emitLayerFaceCapUnified emits the cap geometry for one slab face
+// of one layer as a single watertight surface. The exposed region
+// (this layer's footprint minus the neighbor's footprint, or the
+// full footprint when neighbor == nil) is triangulated once with
+// Earcut, then each triangle's centroid picks a color:
+//
+//   - if the centroid falls inside a cap-tile section's rectangle,
+//     use that section's dithered color.
+//   - otherwise pick the orientation-preferred nearest ribbon
+//     section in (layer, loop)'s ribbons, mirroring the legacy
+//     earcut-cap colorer.
+//
+// This gives a watertight single-surface cap with tile-precision
+// color where the dither grid covers, and slope-derived colors on
+// thin step caps where no tile center landed. capDir is +1 for
+// top caps, -1 for bottom caps; passed through to ribbon picking
+// so cap and source-triangle orientation match.
+func emitLayerFaceCapUnified(
+	m *loader.LoadedModel,
+	faceAssign *[]int32,
+	faceSection *[]int32,
+	layer *Layer,
+	neighbor *Layer,
+	z float32,
+	isTop bool,
+	tiles *layerTileIdx,
+	capDir float32,
+	sections []Section,
+	assignments []int32,
+	fallback int32,
+	ribbonsByLoop map[loopKey][]ribbonRef,
+	layerIdx int,
+) {
+	regions := exposedCapRegions(layer, neighbor)
+	if len(regions) == 0 {
+		return
+	}
+	for _, region := range regions {
+		verts, tris := Earcut(region.Outer, region.Holes)
+		if len(tris) == 0 {
+			continue
+		}
+		// Pick which loop's ribbons to use as a fallback color
+		// source: the loop in this layer whose first outer point
+		// most closely matches the region's representative point.
+		// Different outer loops in the same layer have unrelated
+		// surface samples; scoping per-loop avoids leaking color
+		// across them (the cutting-board / fish problem from the
+		// pre-rewrite era).
+		rep := region.Outer[0]
+		bestLoop := -1
+		bestDistSq := float32(math.MaxFloat32)
+		for lp := range layer.Loops {
+			if layer.Loops[lp].IsHole {
+				continue
+			}
+			pts := layer.Loops[lp].Points
+			if len(pts) == 0 {
+				continue
+			}
+			for _, p := range pts {
+				dx := p[0] - rep[0]
+				dy := p[1] - rep[1]
+				d := dx*dx + dy*dy
+				if d < bestDistSq {
+					bestDistSq = d
+					bestLoop = lp
+				}
+			}
+		}
+		var ribbons []ribbonRef
+		if bestLoop >= 0 {
+			ribbons = ribbonsByLoop[struct{ layer, loop int }{layerIdx, bestLoop}]
+		}
+		ribbonColor := makeRibbonColorPicker(ribbons, sections, assignments, fallback, capDir)
+
+		baseV := uint32(len(m.Vertices))
+		for _, p := range verts {
+			m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
+		}
+		for _, tr := range tris {
+			a := verts[tr[0]]
+			b := verts[tr[1]]
+			c := verts[tr[2]]
+			cx := (a[0] + b[0] + c[0]) / 3
+			cy := (a[1] + b[1] + c[1]) / 3
+			sid, col := tiles.lookup(cx, cy, sections, assignments)
+			if sid < 0 {
+				sid, col = ribbonColor(Point2{cx, cy})
+			}
+			if isTop {
+				m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
+			} else {
+				m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[2], baseV + tr[1]})
+			}
+			*faceAssign = append(*faceAssign, col)
+			*faceSection = append(*faceSection, sid)
+		}
+	}
+}
+
+// makeRibbonColorPicker returns a closure that picks the nearest
+// orientation-preferred ribbon section for color fallback on cap
+// triangles. capDir = +1 for top caps (prefer source-tri normal
+// pointing up); -1 for bottom caps. Mirrors the pre-rewrite
+// makeColorAt rule that kept salmon cut-surface stripes off
+// dome-shaped caps.
+func makeRibbonColorPicker(
+	ribbons []ribbonRef,
+	sections []Section,
+	assignments []int32,
+	fallback int32,
+	capDir float32,
+) func(p Point2) (int32, int32) {
+	const alignedThresh = 0.05
+	return func(p Point2) (int32, int32) {
+		if len(ribbons) == 0 {
+			return -1, fallback
+		}
+		bestSid := int32(-1)
+		bestColor := fallback
+		bestSq := float32(math.MaxFloat32)
+		bestAligned := false
+		for _, r := range ribbons {
+			dx := r.mid[0] - p[0]
+			dy := r.mid[1] - p[1]
+			d := dx*dx + dy*dy
+			aligned := sections[r.sid].SrcTriNormalZ*capDir > alignedThresh
+			switch {
+			case aligned && !bestAligned:
+				bestSq = d
+				bestSid = r.sid
+				bestAligned = true
+				if assignments[r.sid] >= 0 {
+					bestColor = assignments[r.sid]
+				}
+			case aligned == bestAligned && d < bestSq:
+				bestSq = d
+				bestSid = r.sid
+				if assignments[r.sid] >= 0 {
+					bestColor = assignments[r.sid]
+				}
+			}
+		}
+		return bestSid, bestColor
+	}
+}
+
+// layerTileIdx maps (col, row) → cap-tile section index for one
+// layer of one kind. Looking up a point: convert (x, y) to (col,
+// row) using the tile's grid origin (derived from any one tile's
+// CapBoundsXY) and look up the section. Returns -1 if the point
+// is outside the indexed cells or no section covers it.
+type layerTileIdx struct {
+	originX, originY float32
+	cellW            float32
+	hasOrigin        bool
+	cells            map[[2]int]int32 // (col, row) → section id
+}
+
+// buildLayerTileIdx groups cap-tile sections of one kind by their
+// layer and builds a per-layer (col, row)→section map. The map's
+// grid origin is fixed at the first tile encountered for that
+// layer; subsequent tiles (which should share an origin since they
+// were emitted from the same partition pass) snap to it.
+func buildLayerTileIdx(sections []Section, kind SectionKind) map[int]*layerTileIdx {
+	out := make(map[int]*layerTileIdx)
+	for i, s := range sections {
+		if s.Kind != kind {
+			continue
+		}
+		idx := out[s.LayerIdx]
+		if idx == nil {
+			cellW := s.CapBoundsXY[2] - s.CapBoundsXY[0]
+			if cellW <= 0 {
+				cellW = 1
+			}
+			idx = &layerTileIdx{
+				originX:   s.CapBoundsXY[0] - float32(s.TileCol)*cellW,
+				originY:   s.CapBoundsXY[1] - float32(s.TileRow)*cellW,
+				cellW:     cellW,
+				hasOrigin: true,
+				cells:     map[[2]int]int32{},
+			}
+			out[s.LayerIdx] = idx
+		}
+		idx.cells[[2]int{s.TileCol, s.TileRow}] = int32(i)
+	}
+	return out
+}
+
+// lookup returns (sid, col) for the cap-tile section whose
+// rectangle contains (x, y), or (-1, fallback-not-used) if none
+// does. col is the section's dithered palette index, with -1
+// substituted by the section's assignment-or-fallback policy
+// — but here we only return col when sid >= 0, so the caller
+// applies its own fallback.
+func (g *layerTileIdx) lookup(x, y float32, sections []Section, assignments []int32) (int32, int32) {
+	if g == nil || !g.hasOrigin {
+		return -1, 0
+	}
+	c := int((x - g.originX) / g.cellW)
+	r := int((y - g.originY) / g.cellW)
+	if sid, ok := g.cells[[2]int{c, r}]; ok {
+		col := assignments[sid]
+		return sid, col
+	}
+	return -1, 0
+}
+
+// centroidOf returns the mean-of-vertices centroid approximation
+// of `points` (a representative interior point). Sufficient for
+// color lookup on a small fallback region.
+func centroidOf(points []Point2) Point2 {
+	if len(points) == 0 {
+		return Point2{}
+	}
+	var sx, sy float32
+	for _, p := range points {
+		sx += p[0]
+		sy += p[1]
+	}
+	return Point2{sx / float32(len(points)), sy / float32(len(points))}
+}
+
+// globalCapIdx is a coarse XY spatial bucket of cap-tile section
+// midpoints across all layers, restricted to one Kind. Used to
+// pick a color for fallback cap regions in layers where no tile
+// section landed inside (e.g. a sub-cellSize annulus on a steep
+// slope) — the nearest cap section's color produces a coherent
+// roof-like patch rather than the model's overall fallback color.
+type globalCapIdx struct {
+	ids     []int32
+	cellSz  float32
+	minX    float32
+	minY    float32
+	cols    int
+	rows    int
+	buckets [][]int32 // section indices per (col, row)
+}
+
+// buildGlobalCapIdx builds the index for a single Kind. Bucket
+// size is the cap-tile cellSize derived from any section's
+// CapBoundsXY.
+func buildGlobalCapIdx(sections []Section, kind SectionKind) *globalCapIdx {
+	var ids []int32
+	for i, s := range sections {
+		if s.Kind == kind {
+			ids = append(ids, int32(i))
+		}
+	}
+	if len(ids) == 0 {
+		return &globalCapIdx{}
+	}
+	first := sections[ids[0]]
+	cell := first.CapBoundsXY[2] - first.CapBoundsXY[0]
+	if cell <= 0 {
+		cell = 1
+	}
+	minX := float32(math.MaxFloat32)
+	minY := float32(math.MaxFloat32)
+	maxX := float32(-math.MaxFloat32)
+	maxY := float32(-math.MaxFloat32)
+	for _, id := range ids {
+		m := sections[id].Mid
+		if m[0] < minX {
+			minX = m[0]
+		}
+		if m[1] < minY {
+			minY = m[1]
+		}
+		if m[0] > maxX {
+			maxX = m[0]
+		}
+		if m[1] > maxY {
+			maxY = m[1]
+		}
+	}
+	cols := int((maxX-minX)/cell) + 1
+	rows := int((maxY-minY)/cell) + 1
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	buckets := make([][]int32, cols*rows)
+	for _, id := range ids {
+		m := sections[id].Mid
+		c := int((m[0] - minX) / cell)
+		r := int((m[1] - minY) / cell)
+		if c < 0 {
+			c = 0
+		}
+		if c >= cols {
+			c = cols - 1
+		}
+		if r < 0 {
+			r = 0
+		}
+		if r >= rows {
+			r = rows - 1
+		}
+		buckets[r*cols+c] = append(buckets[r*cols+c], id)
+	}
+	return &globalCapIdx{ids: ids, cellSz: cell, minX: minX, minY: minY, cols: cols, rows: rows, buckets: buckets}
+}
+
+// lookup returns (sid, col) for the nearest cap section to (x, y)
+// in XY distance, or (-1, fallback) if the index is empty. Expands
+// the bucket search radius until it finds a candidate, then linear-
+// scans nearby buckets for the actual nearest.
+func (g *globalCapIdx) lookup(p Point2, sections []Section, assignments []int32, fallback int32) (int32, int32) {
+	if g == nil || len(g.ids) == 0 {
+		return -1, fallback
+	}
+	x, y := p[0], p[1]
+	c := int((x - g.minX) / g.cellSz)
+	r := int((y - g.minY) / g.cellSz)
+	best := int32(-1)
+	bestSq := float32(math.MaxFloat32)
+	radius := 1
+	for {
+		for dr := -radius; dr <= radius; dr++ {
+			for dc := -radius; dc <= radius; dc++ {
+				cc, rr := c+dc, r+dr
+				if cc < 0 || cc >= g.cols || rr < 0 || rr >= g.rows {
+					continue
+				}
+				for _, id := range g.buckets[rr*g.cols+cc] {
+					m := sections[id].Mid
+					dx := m[0] - x
+					dy := m[1] - y
+					d := dx*dx + dy*dy
+					if d < bestSq {
+						bestSq = d
+						best = id
+					}
+				}
+			}
+		}
+		if best >= 0 || radius > g.cols+g.rows {
+			break
+		}
+		radius++
+	}
+	if best < 0 {
+		return -1, fallback
+	}
+	col := assignments[best]
+	if col < 0 {
+		col = fallback
+	}
+	return best, col
+}
+
+// insideLoopsXY returns true when (x, y) is inside the solid region
+// of `loops` using even-odd nesting: containment by an odd number of
+// loops. Returns false when loops is empty (treating "no layer" as
+// all-air).
+func insideLoopsXY(loops []Loop, x, y float32) bool {
+	count := 0
+	for i := range loops {
+		if len(loops[i].Points) < 3 {
+			continue
+		}
+		if pointInPolygon(loops[i].Points, x, y) {
+			count++
+		}
+	}
+	return (count & 1) == 1
+}
+
+// emitCapQuad emits a single axis-aligned rectangle as 2 triangles
+// at the given Z, with winding chosen for the face direction. This
+// is the fast path for fully-exposed cap tiles — no Clipper or
+// earcut needed.
+func emitCapQuad(
+	m *loader.LoadedModel,
+	faceAssign *[]int32,
+	faceSection *[]int32,
+	bounds [4]float32,
+	z float32,
+	isTop bool,
+	sid, col int32,
+) {
+	x0, y0, x1, y1 := bounds[0], bounds[1], bounds[2], bounds[3]
+	baseV := uint32(len(m.Vertices))
+	m.Vertices = append(m.Vertices,
+		[3]float32{x0, y0, z},
+		[3]float32{x1, y0, z},
+		[3]float32{x1, y1, z},
+		[3]float32{x0, y1, z})
+	if isTop {
+		m.Faces = append(m.Faces,
+			[3]uint32{baseV, baseV + 1, baseV + 2},
+			[3]uint32{baseV, baseV + 2, baseV + 3})
+	} else {
+		m.Faces = append(m.Faces,
+			[3]uint32{baseV, baseV + 2, baseV + 1},
+			[3]uint32{baseV, baseV + 3, baseV + 2})
+	}
+	*faceAssign = append(*faceAssign, col, col)
+	*faceSection = append(*faceSection, sid, sid)
 }
 
 // mostCommonNonNegSafe returns the most frequent non-negative
@@ -170,148 +581,23 @@ func mostCommonNonNegSafe(a []int32) int32 {
 	return best
 }
 
-// collectChildHoles returns the points of every hole loop that's a
-// direct child of `loops[outerIdx]` — inside this outer, and not
-// inside any other outer that's itself inside this one.
-//
-// Vertex-based containment (consistent with classifyHoles); two
-// non-intersecting polygons in the slicer's output have all of
-// one's vertices either entirely inside or entirely outside the
-// other, so testing the first vertex is sufficient.
-func collectChildHoles(loops []Loop, outerIdx int) [][]Point2 {
-	holes, _ := collectChildHolesWithIdx(loops, outerIdx)
-	return holes
-}
-
-// collectChildHolesWithIdx is collectChildHoles that also returns
-// the per-hole loop index in `loops` for each returned hole.
-func collectChildHolesWithIdx(loops []Loop, outerIdx int) ([][]Point2, []int) {
-	outer := &loops[outerIdx]
-	var out [][]Point2
-	var idxs []int
-	for hi := range loops {
-		hole := &loops[hi]
-		if !hole.IsHole || len(hole.Points) < 3 {
-			continue
-		}
-		if !pointInPolygon(outer.Points, hole.Points[0][0], hole.Points[0][1]) {
-			continue
-		}
-		isDirect := true
-		for oj := range loops {
-			if oj == outerIdx || loops[oj].IsHole {
-				continue
-			}
-			other := &loops[oj]
-			if len(other.Points) < 1 {
-				continue
-			}
-			if pointInPolygon(other.Points, hole.Points[0][0], hole.Points[0][1]) &&
-				pointInPolygon(outer.Points, other.Points[0][0], other.Points[0][1]) {
-				isDirect = false
-				break
-			}
-		}
-		if isDirect {
-			out = append(out, hole.Points)
-			idxs = append(idxs, hi)
-		}
-	}
-	return out, idxs
-}
-
-// makeColorAt builds an earcut-cap color callback. It picks a
-// ribbon section to source the cap face's section index and
-// dithered-palette index from, preferring ribbons whose source
-// triangle is roughly aligned with the cap's facing direction:
-//
-//   - capDir = +1 → top cap (face normal +Z) → prefer ribbons
-//     with source-tri normal_z > 0 (e.g. an upper-dome side
-//     triangle, whose surface lies above the cap material).
-//   - capDir = -1 → bottom cap → prefer normal_z < 0.
-//
-// A vertical "wall" triangle (cut surface, side of a box) has
-// normal_z ≈ 0 and is ineligible under either preference, so
-// it's only used as a fallback when no aligned ribbon exists.
-// Among aligned candidates we pick the nearest in XY distance,
-// the same metric the previous version used unconditionally.
-//
-// This filter exists to stop a salmon-colored cut surface inside
-// a fish dome (normal_z ≈ 0) from being chosen as the nearest
-// ribbon for a dome-region cap, which manifests as horizontal
-// salmon stripes in front/side renderings (the cap edge-on at
-// each Z layer).
-func makeColorAt(
-	ribbons []ribbonRef,
-	sections []Section,
-	assignments []int32,
-	fallback int32,
-	capDir float32,
-) func(p Point2) (int32, int32) {
-	const alignedThresh = 0.05
-	return func(p Point2) (int32, int32) {
-		if len(ribbons) == 0 {
-			return -1, fallback
-		}
-		bestSid := int32(-1)
-		bestColor := fallback
-		bestSq := float32(1e30)
-		bestAligned := false
-		for _, r := range ribbons {
-			dx := r.mid[0] - p[0]
-			dy := r.mid[1] - p[1]
-			d := dx*dx + dy*dy
-			aligned := sections[r.sid].SrcTriNormalZ*capDir > alignedThresh
-			// Aligned candidates dominate non-aligned ones outright
-			// (even at greater XY distance). Within each tier we
-			// take the nearest in XY.
-			switch {
-			case aligned && !bestAligned:
-				bestSq = d
-				bestSid = r.sid
-				bestAligned = true
-				if assignments[r.sid] >= 0 {
-					bestColor = assignments[r.sid]
-				}
-			case aligned == bestAligned && d < bestSq:
-				bestSq = d
-				bestSid = r.sid
-				if assignments[r.sid] >= 0 {
-					bestColor = assignments[r.sid]
-				}
-			}
-		}
-		return bestSid, bestColor
-	}
-}
-
-// ribbonRef is one ribbon section's id and XY midpoint, used by
-// the earcut color callback for nearest-ribbon lookup.
-type ribbonRef struct {
-	sid int32
-	mid Point2
-}
-
-// emitEarcutCap triangulates outer + holes via Earcut and appends
-// the triangles to m at the given Z. isTop selects the winding so
-// the normal faces +Z (top cap) or -Z (bottom cap). Each triangle's
-// faceSection + faceAssign come from the colorAt(centroid)
-// callback — typically "nearest visible ribbon section in this
-// layer." Falls back to (-1, fallback) when no ribbons exist.
-func emitEarcutCap(
+// emitCapTriangulation triangulates one polygon-with-holes region
+// of a cap surface at the given Z and appends the triangles to m.
+// isTop selects the winding so the normal faces +Z (top cap) or -Z
+// (bottom cap). All emitted triangles share (sid, col); a section
+// id of -1 marks a leftover-sliver region the caller has no
+// section for.
+func emitCapTriangulation(
 	m *loader.LoadedModel,
 	faceAssign *[]int32,
 	faceSection *[]int32,
-	outer []Point2,
-	holes [][]Point2,
+	region CapRegion,
 	z float32,
 	isTop bool,
-	colorAt func(p Point2) (sid, color int32),
+	sid int32,
+	col int32,
 ) {
-	if len(outer) < 3 {
-		return
-	}
-	verts, tris := Earcut(outer, holes)
+	verts, tris := Earcut(region.Outer, region.Holes)
 	if len(tris) == 0 {
 		return
 	}
@@ -320,11 +606,6 @@ func emitEarcutCap(
 		m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
 	}
 	for _, tr := range tris {
-		a := verts[tr[0]]
-		b := verts[tr[1]]
-		c := verts[tr[2]]
-		centroid := Point2{(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3}
-		sid, col := colorAt(centroid)
 		if isTop {
 			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
 		} else {
@@ -332,43 +613,6 @@ func emitEarcutCap(
 		}
 		*faceAssign = append(*faceAssign, col)
 		*faceSection = append(*faceSection, sid)
-	}
-}
-
-// emitCapTiles emits 2 triangles per cap section forming the tile
-// rectangle. Top caps wind CCW (normal +Z); bottom caps wind CW
-// (normal -Z) so they face outward. Both triangles per tile are
-// tagged with the originating section index in faceSection.
-func emitCapTiles(
-	m *loader.LoadedModel,
-	faceAssign *[]int32,
-	faceSection *[]int32,
-	sectionIDs []int,
-	sections []Section,
-	assignments []int32,
-) {
-	for _, sid := range sectionIDs {
-		s := sections[sid]
-		x0, y0, x1, y1 := s.CapBoundsXY[0], s.CapBoundsXY[1], s.CapBoundsXY[2], s.CapBoundsXY[3]
-		z := s.Z
-		baseV := uint32(len(m.Vertices))
-		m.Vertices = append(m.Vertices,
-			[3]float32{x0, y0, z},
-			[3]float32{x1, y0, z},
-			[3]float32{x1, y1, z},
-			[3]float32{x0, y1, z})
-		col := assignments[sid]
-		if s.Kind == KindCapTop {
-			m.Faces = append(m.Faces,
-				[3]uint32{baseV, baseV + 1, baseV + 2},
-				[3]uint32{baseV, baseV + 2, baseV + 3})
-		} else {
-			m.Faces = append(m.Faces,
-				[3]uint32{baseV, baseV + 2, baseV + 1},
-				[3]uint32{baseV, baseV + 3, baseV + 2})
-		}
-		*faceAssign = append(*faceAssign, col, col)
-		*faceSection = append(*faceSection, int32(sid), int32(sid))
 	}
 }
 
