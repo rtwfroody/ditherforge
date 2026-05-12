@@ -90,11 +90,46 @@ func SampleSectionColors(model *loader.LoadedModel, si *voxel.SpatialIndex, laye
 
 	for i, s := range sections {
 		p := [3]float32{s.Mid[0], s.Mid[1], s.Z}
+		// SrcTriIdx tracking is lossy across DP simplification —
+		// the simplified loop edge inherits only one source
+		// triangle even when it merged several. So a section
+		// midpoint on a simplified edge may point at the wrong
+		// (nearby but distinct) original triangle, giving wildly
+		// wrong UVs on textures whose detail varies inside the
+		// merged arc.
+		//
+		// Re-find the source triangle at sample time via the
+		// spatial index: same cost as SampleNearestColor, but we
+		// keep the picked triangle so we can also box-filter the
+		// texture over its UV footprint (the section's color =
+		// average over its footprint, not one texel). Trades the
+		// multi-object isolation that SrcTriIdx used to give for
+		// correctness on the single-object models we care about
+		// today — TODO: thread per-arc source-tri provenance
+		// through SimplifyAndReclassify so we can rely on
+		// SrcTriIdx again and constrain the spatial lookup to the
+		// expected object.
+		cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
+		bestDistSq := float32(1e30)
+		bestTri := int32(-1)
+		for _, ti := range cands {
+			f := model.Faces[ti]
+			r := voxel.ClosestPointOnTriangle(p,
+				model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+			if r.DistSq < bestDistSq {
+				bestDistSq = r.DistSq
+				bestTri = ti
+			}
+		}
+
 		var rgba [4]uint8
-		if s.SrcTriIdx >= 0 {
-			rU, rV := getRadii(s.SrcTriIdx)
-			rgba = voxel.SampleByTriangleFootprint(p, model, s.SrcTriIdx, rU, rV)
+		if bestTri >= 0 {
+			rU, rV := getRadii(bestTri)
+			rgba = voxel.SampleByTriangleFootprint(p, model, bestTri, rU, rV)
 		} else {
+			// Spatial-index radius missed every triangle (rare).
+			// Fall back to the un-filtered nearest-color, which
+			// expands its own search internally.
 			rgba = voxel.SampleNearestColor(p, model, si, radius, buf, nil, nil)
 		}
 		colors[i] = [3]uint8{rgba[0], rgba[1], rgba[2]}
@@ -168,15 +203,9 @@ func triFootprintRadii(model *loader.LoadedModel, triIdx int32, cellSize, layerH
 	densityPerMM := float32(math.Sqrt(float64(areaTex / area3D)))
 	// Filter half-radius = section size × density / 4. Box width
 	// (2r+1) then roughly matches the section's UV footprint /
-	// 2: enough to smooth texel-level noise from undersampling,
-	// but small enough that adjacent sections still see distinct
-	// average colors and the source texture's coarse features
-	// (continents, coastlines) stay sharp.
-	//
-	// At 0.25× the previous (footprint/2) radius, an earth.glb
-	// section of ~6 texels U-span gets rU=2 (5-texel box) instead
-	// of rU=4 (9-texel box), and India's coastline stays a
-	// recognizable peninsula instead of becoming a brown blur.
+	// 2: enough to smooth texel-level noise from undersampling
+	// without erasing the texture's coarse features (continents,
+	// coastlines).
 	rU := int(0.25*cellSize*densityPerMM + 0.5)
 	rV := int(0.25*layerH*densityPerMM + 0.5)
 	if rU < 0 {
