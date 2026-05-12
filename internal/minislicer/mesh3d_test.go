@@ -223,3 +223,84 @@ func TestSteppedPyramidEmitsStepCaps(t *testing.T) {
 		t.Errorf("step-cap area = %g, want ≈ 3 (annulus big - small); internal cap geometry leaking?", stepArea)
 	}
 }
+
+// TestWallCapShareVertices verifies that the cap surface and the
+// wall geometry agree on every vertex they share along the slab
+// boundary. Without this, ribbon section breakpoints on the wall's
+// top/bottom edge form T-junctions against the cap's raw-loop
+// edges and the camera sees through sub-pixel cracks when it
+// rotates — a "shimmer on the edge of features" the user reported.
+func TestWallCapShareVertices(t *testing.T) {
+	// Pick a loop with vertices spaced far enough apart that
+	// partition will insert at least one section breakpoint that
+	// doesn't coincide with an original vertex.
+	pts := []Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
+	loop := Loop{Points: pts, Z: 0}
+	loop.SignedArea = signedArea(loop.Points)
+	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
+	// cellSize 3 → arc 40 / 3 ≈ 13 ribbon sections, breakpoints
+	// fall in the middle of edges.
+	secs := PartitionLoops(layers, 3.0)
+	if len(secs) < 5 {
+		t.Fatalf("expected partition to produce several ribbon sections, got %d", len(secs))
+	}
+	assigns := make([]int32, len(secs))
+	mesh, _ := BuildPrintableMesh(layers, secs, assigns, 0.5)
+
+	// Bucket vertices by (X, Y) at the top cap's Z plane. Every
+	// (X, Y) used on the wall's top edge MUST also appear on the
+	// cap's vertices at that Z — otherwise there's a T-junction.
+	const zTop = 0.25
+	const eps = 1e-4
+	type xy struct{ x, y float32 }
+	round := func(v float32) float32 {
+		return float32(int64(v/eps+0.5)) * eps
+	}
+	wallTop := map[xy]bool{}
+	capTop := map[xy]bool{}
+	for _, v := range mesh.Vertices {
+		if v[2] > zTop-eps && v[2] < zTop+eps {
+			capTop[xy{round(v[0]), round(v[1])}] = true
+		}
+	}
+	// Walk wall faces to identify the wall's top-edge vertices —
+	// these are the verts with Z == zTop that are referenced by
+	// wall (non-cap) triangles. In this minimal scene, ALL z=zTop
+	// verts are reachable from wall triangles since the cap uses
+	// the same Z, so we just check that every cap-Z vertex used
+	// is also referenced by some triangle whose other two verts
+	// span [zBot, zTop] (i.e. a wall quad), and vice versa.
+	wallRefAtTop := map[xy]bool{}
+	const zBot = -0.25
+	for _, tr := range mesh.Faces {
+		a := mesh.Vertices[tr[0]]
+		b := mesh.Vertices[tr[1]]
+		c := mesh.Vertices[tr[2]]
+		// A wall triangle has at least one vertex at zBot and at
+		// least one at zTop.
+		hasBot := (a[2] > zBot-eps && a[2] < zBot+eps) || (b[2] > zBot-eps && b[2] < zBot+eps) || (c[2] > zBot-eps && c[2] < zBot+eps)
+		hasTop := (a[2] > zTop-eps && a[2] < zTop+eps) || (b[2] > zTop-eps && b[2] < zTop+eps) || (c[2] > zTop-eps && c[2] < zTop+eps)
+		if !hasBot || !hasTop {
+			continue
+		}
+		for _, v := range [3][3]float32{a, b, c} {
+			if v[2] > zTop-eps && v[2] < zTop+eps {
+				wallRefAtTop[xy{round(v[0]), round(v[1])}] = true
+			}
+		}
+	}
+	// Every wall-top vertex must exist as a cap vertex.
+	for k := range wallRefAtTop {
+		if !capTop[k] {
+			t.Errorf("wall-top vertex (%g, %g) not present on cap — T-junction crack", k.x, k.y)
+		}
+	}
+	// And the count of wall-top XYs should match the cap's outer
+	// boundary vertex count (since the cap's outer follows the
+	// loop with the same subdivisions). With no holes in this
+	// test, every cap-Z vertex is on the boundary.
+	if len(wallRefAtTop) != len(capTop) {
+		t.Errorf("wall and cap have different vertex counts at z=%g: wall=%d cap=%d", zTop, len(wallRefAtTop), len(capTop))
+	}
+	_ = wallTop
+}

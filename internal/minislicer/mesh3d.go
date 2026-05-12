@@ -79,6 +79,32 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		layerLoopRibbons[k] = append(layerLoopRibbons[k], ribbonRef{int32(i), s.Mid})
 	}
 
+	// Pre-build wall-conforming subdivided loops per (layer, loop).
+	// The cap polygon feeds these to Clipper so cap-mesh vertices
+	// on the cap's outer/inner boundary exactly match wall-mesh
+	// vertices on the wall's top/bottom edges. Without that match
+	// the wall's section-breakpoint vertices form T-junctions
+	// against the cap's raw-loop edges, leaving hairline cracks
+	// the camera sees background through (visible as a shimmering
+	// edge that flickers as the view rotates).
+	wallLoops := make([][][]Point2, len(layers))
+	for li := range layers {
+		lps := make([][]Point2, len(layers[li].Loops))
+		for lp := range layers[li].Loops {
+			loop := &layers[li].Loops[lp]
+			ids := loopSecs[loopKey{li, lp}]
+			if len(ids) > 0 && sections[ids[0]].Kind == KindRibbon {
+				pts, _, _ := buildLoopWallSeq(loop, ids, sections, assignments)
+				if len(pts) >= 3 {
+					lps[lp] = pts
+					continue
+				}
+			}
+			lps[lp] = loop.Points
+		}
+		wallLoops[li] = lps
+	}
+
 	// Walls: every loop (outer or hole) gets a wall tube.
 	for li, layer := range layers {
 		zBot := layer.Z - layerH/2
@@ -112,25 +138,25 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		zBot := layer.Z - layerH/2
 		zTop := layer.Z + layerH/2
 
-		var above, below *Layer
+		var aboveLoops, belowLoops [][]Point2
 		for k := li + 1; k < len(layers); k++ {
 			if len(layers[k].Loops) > 0 {
-				above = &layers[k]
+				aboveLoops = wallLoops[k]
 				break
 			}
 		}
 		for k := li - 1; k >= 0; k-- {
 			if len(layers[k].Loops) > 0 {
-				below = &layers[k]
+				belowLoops = wallLoops[k]
 				break
 			}
 		}
 
 		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, above, zTop, true, topTiles[li], +1,
+			layer, wallLoops[li], aboveLoops, zTop, true, topTiles[li], +1,
 			sections, assignments, fallback, layerLoopRibbons, li)
 		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, below, zBot, false, botTiles[li], -1,
+			layer, wallLoops[li], belowLoops, zBot, false, botTiles[li], -1,
 			sections, assignments, fallback, layerLoopRibbons, li)
 	}
 
@@ -177,7 +203,8 @@ func emitLayerFaceCapUnified(
 	faceAssign *[]int32,
 	faceSection *[]int32,
 	layer *Layer,
-	neighbor *Layer,
+	layerLoops [][]Point2,
+	neighborLoops [][]Point2,
 	z float32,
 	isTop bool,
 	tiles *layerTileIdx,
@@ -188,7 +215,7 @@ func emitLayerFaceCapUnified(
 	ribbonsByLoop map[loopKey][]ribbonRef,
 	layerIdx int,
 ) {
-	regions := exposedCapRegions(layer, neighbor)
+	regions := exposedCapRegions(layerLoops, neighborLoops)
 	if len(regions) == 0 {
 		return
 	}
@@ -616,6 +643,63 @@ func emitCapTriangulation(
 	}
 }
 
+// snapToClipperGrid rounds a Point2 to the same int-coordinate
+// grid that pointSetsToClipperPaths quantizes onto when feeding
+// Clipper. The wall emitter snaps its subdivided vertex sequence
+// through this so cap vertices coming back out of Clipper (which
+// are float32-of-int round-tripped) match wall vertex positions
+// bit-exactly. Without the snap, an arc-length section breakpoint
+// like 3.0769231 mm becomes 3.077 mm after Clipper round-trip and
+// the cap stops sharing vertices with the wall — recreating the
+// T-junction shimmer.
+func snapToClipperGrid(p Point2) Point2 {
+	return Point2{
+		float32(math.Round(float64(p[0])*clipperScale) / clipperScale),
+		float32(math.Round(float64(p[1])*clipperScale) / clipperScale),
+	}
+}
+
+// buildLoopWallSeq walks one loop in original arc order, inserting
+// a vertex at each ribbon section's StartArc and at every original
+// loop vertex strictly inside a section's arc range. Vertices are
+// snapped to the Clipper grid so cap geometry (which goes through
+// Clipper int-coordinate round-trip) matches wall geometry
+// vertex-for-vertex at the shared slab boundary. Returns the
+// polygon vertex sequence plus parallel slices of per-vertex color
+// (the section's palette assignment) and section id.
+func buildLoopWallSeq(
+	loop *Loop,
+	sectionIDs []int,
+	sections []Section,
+	assignments []int32,
+) (pts []Point2, cols []int32, secs []int32) {
+	src := loop.Points
+	n := len(src)
+	if n < 3 || len(sectionIDs) == 0 {
+		return nil, nil, nil
+	}
+	cum := loopCumLen(src)
+	pts = make([]Point2, 0, n*2)
+	cols = make([]int32, 0, n*2)
+	secs = make([]int32, 0, n*2)
+	for _, sid := range sectionIDs {
+		s := sections[sid]
+		color := assignments[sid]
+		pts = append(pts, snapToClipperGrid(pointAtArc(src, cum, s.StartArc)))
+		cols = append(cols, color)
+		secs = append(secs, int32(sid))
+		for i := 0; i < n; i++ {
+			a := cum[i]
+			if a > s.StartArc+1e-5 && a < s.EndArc-1e-5 {
+				pts = append(pts, snapToClipperGrid(src[i]))
+				cols = append(cols, color)
+				secs = append(secs, int32(sid))
+			}
+		}
+	}
+	return pts, cols, secs
+}
+
 // emitLoopWall appends only the wall geometry for one loop — no
 // caps. faceAssign receives one palette index per triangle (each
 // quad contributes two).
@@ -635,9 +719,7 @@ func emitLoopWall(
 	zBot, zTop float32,
 	isHole bool,
 ) {
-	pts := loop.Points
-	n := len(pts)
-	if n < 3 {
+	if len(loop.Points) < 3 {
 		return
 	}
 	// Sections' StartArc / EndArc live in the loop's *original* arc
@@ -652,29 +734,11 @@ func emitLoopWall(
 	// sphere, say) this looks like an X-axis flip in the rendered
 	// output. Instead we walk pts in original order and flip the
 	// triangle winding below to control outward/inward normals.
-	cum := loopCumLen(pts)
 	ccw := loop.SignedArea > 0
 	wantCCW := !isHole
 	flipWinding := ccw != wantCCW
 
-	wallPts := make([]Point2, 0, n*2)
-	wallColors := make([]int32, 0, n*2)
-	wallSections := make([]int32, 0, n*2)
-	for _, sid := range sectionIDs {
-		s := sections[sid]
-		color := assignments[sid]
-		wallPts = append(wallPts, pointAtArc(pts, cum, s.StartArc))
-		wallColors = append(wallColors, color)
-		wallSections = append(wallSections, int32(sid))
-		for i := 0; i < n; i++ {
-			a := cum[i]
-			if a > s.StartArc+1e-5 && a < s.EndArc-1e-5 {
-				wallPts = append(wallPts, pts[i])
-				wallColors = append(wallColors, color)
-				wallSections = append(wallSections, int32(sid))
-			}
-		}
-	}
+	wallPts, wallColors, wallSections := buildLoopWallSeq(loop, sectionIDs, sections, assignments)
 	if len(wallPts) < 3 {
 		return
 	}

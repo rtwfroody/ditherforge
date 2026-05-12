@@ -19,22 +19,23 @@ type CapRegion struct {
 	Holes [][]Point2
 }
 
-// loopsToClipperPaths converts a layer's loops to Clipper paths in
-// int coords. Loops with fewer than 3 points are skipped. The
-// orientation of each loop is preserved; downstream Boolean ops use
-// even-odd fill, so winding doesn't affect inside/outside.
-func loopsToClipperPaths(loops []Loop) clipper.Paths {
+// pointSetsToClipperPaths converts a list of polygon vertex
+// sequences to Clipper paths in int coords. Polygons with fewer
+// than 3 points are skipped. Used by the cap emitter to feed
+// already-wall-conforming subdivided loops to Clipper, so
+// downstream cap geometry shares vertex sets with the wall on
+// their common boundary.
+func pointSetsToClipperPaths(loops [][]Point2) clipper.Paths {
 	if len(loops) == 0 {
 		return nil
 	}
 	out := make(clipper.Paths, 0, len(loops))
-	for i := range loops {
-		l := &loops[i]
-		if len(l.Points) < 3 {
+	for _, pts := range loops {
+		if len(pts) < 3 {
 			continue
 		}
-		path := make(clipper.Path, 0, len(l.Points))
-		for _, p := range l.Points {
+		path := make(clipper.Path, 0, len(pts))
+		for _, p := range pts {
 			x := clipper.CInt(math.Round(float64(p[0]) * clipperScale))
 			y := clipper.CInt(math.Round(float64(p[1]) * clipperScale))
 			path = append(path, &clipper.IntPoint{X: x, Y: y})
@@ -44,14 +45,33 @@ func loopsToClipperPaths(loops []Loop) clipper.Paths {
 	return out
 }
 
+// loopsToClipperPaths is the convenience pointSetsToClipperPaths
+// wrapper for the raw Loop slice.
+func loopsToClipperPaths(loops []Loop) clipper.Paths {
+	if len(loops) == 0 {
+		return nil
+	}
+	pts := make([][]Point2, 0, len(loops))
+	for i := range loops {
+		pts = append(pts, loops[i].Points)
+	}
+	return pointSetsToClipperPaths(pts)
+}
+
 // clipperOp runs a single Boolean op on two Clipper Paths sets with
 // even-odd fill. Returns the result paths, or nil on failure / empty
 // inputs.
+//
+// IoPreserveCollinear keeps wall-subdivision vertices that lie
+// mid-edge from being silently dropped. Without it the cap's outer
+// boundary would have fewer vertices than the wall's top edge at
+// the same slab Z, recreating T-junctions and the camera-rotates-
+// then-shimmers artifact this rewrite is meant to eliminate.
 func clipperOp(subj, clip clipper.Paths, op clipper.ClipType) clipper.Paths {
 	if len(subj) == 0 {
 		return nil
 	}
-	c := clipper.NewClipper(clipper.IoNone)
+	c := clipper.NewClipper(clipper.IoPreserveCollinear)
 	c.AddPaths(subj, clipper.PtSubject, true)
 	if len(clip) > 0 {
 		c.AddPaths(clip, clipper.PtClip, true)
@@ -71,7 +91,7 @@ func clipperPathsToRegions(paths clipper.Paths) []CapRegion {
 	if len(paths) == 0 {
 		return nil
 	}
-	c := clipper.NewClipper(clipper.IoNone)
+	c := clipper.NewClipper(clipper.IoPreserveCollinear)
 	c.AddPaths(paths, clipper.PtSubject, true)
 	tree, ok := c.Execute2(clipper.CtUnion, clipper.PftEvenOdd, clipper.PftEvenOdd)
 	if !ok || tree == nil {
@@ -143,18 +163,22 @@ func clipperPathToPoints(p clipper.Path) []Point2 {
 }
 
 // exposedCapRegions returns the polygon-with-holes pieces of the
-// layer's slab face that are NOT covered by neighbor — i.e. air-
-// facing at that Z. Pass neighbor == nil for the topmost/bottommost
-// layer (no neighbor → the whole layer footprint is exposed).
-func exposedCapRegions(layer *Layer, neighbor *Layer) []CapRegion {
-	subj := loopsToClipperPaths(layer.Loops)
+// layer's slab face that are NOT covered by the neighbor. The
+// caller supplies subdivided loop point-sets for both the layer
+// and the neighbor; passing the wall-emitter's exact vertex
+// sequence here makes cap and wall share vertex sets along their
+// common boundary, eliminating T-junction cracks the camera can
+// see background through. neighbor == nil → full footprint exposed
+// (topmost or bottommost layer).
+func exposedCapRegions(layerLoops [][]Point2, neighborLoops [][]Point2) []CapRegion {
+	subj := pointSetsToClipperPaths(layerLoops)
 	if len(subj) == 0 {
 		return nil
 	}
-	if neighbor == nil {
+	if len(neighborLoops) == 0 {
 		return clipperPathsToRegions(subj)
 	}
-	nbr := loopsToClipperPaths(neighbor.Loops)
+	nbr := pointSetsToClipperPaths(neighborLoops)
 	if len(nbr) == 0 {
 		return clipperPathsToRegions(subj)
 	}
