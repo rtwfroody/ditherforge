@@ -35,16 +35,19 @@ func TestSampledMatchesInput(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		path      string
-		maxAvgErr float64 // 0..255 per channel, averaged
+		name         string
+		path         string
+		maxAvgErr    float64 // global MAE, 0..255 per channel
+		maxTileErr   float64 // per-tile MAE limit
 	}{
-		// The threshold is loose enough to absorb the slicer's
-		// 0.2 mm Z-stepping (visible as horizontal noise in the
-		// sampled render) while still catching a section→wall
-		// arc-mapping inversion: that bug pushed earth/side to
-		// ~49 here and was the original trigger for this test.
-		{"earth", filepath.Join("objects", "earth.glb"), 40},
+		// MAE caps were loose enough that visibly-broken sampled
+		// outputs (texture blurred into mush, wrong fine detail)
+		// still passed. Tightened so a regression in section-UV
+		// sampling fails the test. The per-tile structural check
+		// runs on an 8×8 grid of tile mean colors so a feature
+		// landing in the wrong place fails even if the global
+		// average diff stays low.
+		{"earth", filepath.Join("objects", "earth.glb"), 20, 25},
 	}
 
 	for _, tc := range cases {
@@ -115,8 +118,9 @@ func TestSampledMatchesInput(t *testing.T) {
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("input_%s.png", v.Name)), inputImg)
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("sampled_%s.png", v.Name)), sampledImg)
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
-				t.Logf("%s/%s: overlap=%d px, mean abs RGB err=%.2f (limit %.1f)",
-					tc.name, v.Name, overlap, mae, tc.maxAvgErr)
+				maxTileMAE, tileGrid := tileMeanMAE(inputImg, sampledImg, 8)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid)",
+					tc.name, v.Name, overlap, mae, tc.maxAvgErr, maxTileMAE, tc.maxTileErr, tileGrid, tileGrid)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -125,6 +129,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				if mae > tc.maxAvgErr {
 					t.Errorf("%s/%s: sampled output diverges from input (mae=%.2f > %.1f); PNGs in %s",
 						tc.name, v.Name, mae, tc.maxAvgErr, dumpDir)
+				}
+				if maxTileMAE > tc.maxTileErr {
+					t.Errorf("%s/%s: worst-tile mean color diverges (tile mae=%.2f > %.1f); features in wrong screen positions; PNGs in %s",
+						tc.name, v.Name, maxTileMAE, tc.maxTileErr, dumpDir)
 				}
 			}
 		})
@@ -287,6 +295,72 @@ func meshDataBBox(m *pipeline.MeshData) string {
 		verts[i] = [3]float32{m.Vertices[3*i], m.Vertices[3*i+1], m.Vertices[3*i+2]}
 	}
 	return meshBBox(verts)
+}
+
+// tileMeanMAE splits both images into an N×N grid of tiles,
+// computes each tile's mean RGB over its non-transparent pixels,
+// and returns the WORST per-tile MAE between matching tiles
+// (input vs sampled). Catches cases where global MAE is low but
+// features have shifted: e.g. Africa rendered where the Indian
+// Ocean should be produces a low global mean diff but a huge
+// per-tile mean diff on those tiles.
+//
+// Returns (0, n) if either image is empty.
+func tileMeanMAE(a, b *image.RGBA, n int) (float64, int) {
+	if a.Bounds() != b.Bounds() || n < 1 {
+		return 0, n
+	}
+	bounds := a.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	var worst float64
+	for ty := 0; ty < n; ty++ {
+		for tx := 0; tx < n; tx++ {
+			x0 := tx * w / n
+			x1 := (tx + 1) * w / n
+			y0 := ty * h / n
+			y1 := (ty + 1) * h / n
+			var aR, aG, aB, bR, bG, bB int
+			var nA, nB int
+			for y := y0; y < y1; y++ {
+				for x := x0; x < x1; x++ {
+					ai := (y-bounds.Min.Y)*a.Stride + (x-bounds.Min.X)*4
+					bi := (y-bounds.Min.Y)*b.Stride + (x-bounds.Min.X)*4
+					if a.Pix[ai+3] != 0 {
+						aR += int(a.Pix[ai])
+						aG += int(a.Pix[ai+1])
+						aB += int(a.Pix[ai+2])
+						nA++
+					}
+					if b.Pix[bi+3] != 0 {
+						bR += int(b.Pix[bi])
+						bG += int(b.Pix[bi+1])
+						bB += int(b.Pix[bi+2])
+						nB++
+					}
+				}
+			}
+			// Skip tiles that are mostly background in either
+			// image — they don't usefully constrain alignment.
+			minPx := (x1 - x0) * (y1 - y0) / 4
+			if nA < minPx || nB < minPx {
+				continue
+			}
+			diff := absDiff(aR/nA, bR/nB) + absDiff(aG/nA, bG/nB) + absDiff(aB/nA, bB/nB)
+			tileMAE := float64(diff) / 3
+			if tileMAE > worst {
+				worst = tileMAE
+			}
+		}
+	}
+	return worst, n
+}
+
+func absDiff(a, b int) int {
+	if a < b {
+		return b - a
+	}
+	return a - b
 }
 
 // meanAbsoluteRGBError walks two same-sized RGBA images and

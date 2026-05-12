@@ -166,17 +166,24 @@ func triFootprintRadii(model *loader.LoadedModel, triIdx int32, cellSize, layerH
 	}
 	// Texels per mm along the triangle plane (isotropic).
 	densityPerMM := float32(math.Sqrt(float64(areaTex / area3D)))
-	rU := int(0.5*cellSize*densityPerMM + 0.5)
-	rV := int(0.5*layerH*densityPerMM + 0.5)
-	// Clamp to at least 1 if we'd otherwise produce 0 (means
-	// section covers < 1 texel; a 3x3 box still smooths bilinear
-	// noise) and to a sane upper bound so we don't read a huge
-	// box for a degenerate UV layout.
-	if rU < 1 {
-		rU = 1
+	// Filter half-radius = section size × density / 4. Box width
+	// (2r+1) then roughly matches the section's UV footprint /
+	// 2: enough to smooth texel-level noise from undersampling,
+	// but small enough that adjacent sections still see distinct
+	// average colors and the source texture's coarse features
+	// (continents, coastlines) stay sharp.
+	//
+	// At 0.25× the previous (footprint/2) radius, an earth.glb
+	// section of ~6 texels U-span gets rU=2 (5-texel box) instead
+	// of rU=4 (9-texel box), and India's coastline stays a
+	// recognizable peninsula instead of becoming a brown blur.
+	rU := int(0.25*cellSize*densityPerMM + 0.5)
+	rV := int(0.25*layerH*densityPerMM + 0.5)
+	if rU < 0 {
+		rU = 0
 	}
-	if rV < 1 {
-		rV = 1
+	if rV < 0 {
+		rV = 0
 	}
 	if rU > 32 {
 		rU = 32
