@@ -437,10 +437,25 @@ func isEar(ear *ecNode) bool {
 // non-adjacent vertices that coincide (a self-intersection produces
 // these). Splits the polygon at such pairs, emitting any resulting
 // triangle along the way. Returns true if it made progress.
+//
+// Bounded by an iteration count derived from the polygon length: if
+// the loop's original `start` ever gets removed by an ecRemove call
+// (the cure case), the `p == start` exit condition can never be
+// reached (`start` is unlinked from the ring), so a degenerate
+// polygon with a self-intersection at the entry node would loop
+// forever. The iteration cap walks the polygon at most once.
 func cureLocalIntersections(start *ecNode, tris *[][3]uint32) bool {
 	cured := false
+	// Count nodes in the current ring so we can bound the walk.
+	maxIter := 0
+	for n := start; ; n = n.next {
+		maxIter++
+		if n.next == start || maxIter > 1<<20 {
+			break
+		}
+	}
 	p := start
-	for {
+	for i := 0; i < maxIter+2; i++ {
 		a := p.prev
 		b := p.next.next
 		if !ecEquals(a, b) && intersects(a, p, p.next, b) && locallyInside(a, b) && locallyInside(b, a) {
@@ -449,6 +464,7 @@ func cureLocalIntersections(start *ecNode, tris *[][3]uint32) bool {
 			ecRemove(p.next)
 			p = b
 			cured = true
+			continue
 		}
 		p = p.next
 		if p == start {
