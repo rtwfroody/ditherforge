@@ -19,6 +19,50 @@ type CapRegion struct {
 	Holes [][]Point2
 }
 
+// rectClipperPath builds a single-rectangle Clipper Path from
+// CapBoundsXY = (x0, y0, x1, y1).
+func rectClipperPath(bounds [4]float32) clipper.Path {
+	x0 := clipper.CInt(math.Round(float64(bounds[0]) * clipperScale))
+	y0 := clipper.CInt(math.Round(float64(bounds[1]) * clipperScale))
+	x1 := clipper.CInt(math.Round(float64(bounds[2]) * clipperScale))
+	y1 := clipper.CInt(math.Round(float64(bounds[3]) * clipperScale))
+	return clipper.Path{
+		&clipper.IntPoint{X: x0, Y: y0},
+		&clipper.IntPoint{X: x1, Y: y0},
+		&clipper.IntPoint{X: x1, Y: y1},
+		&clipper.IntPoint{X: x0, Y: y1},
+	}
+}
+
+// regionArea returns the unsigned area of a CapRegion (outer area
+// minus hole areas). Used to drop sub-µm² leftover slivers before
+// they reach Earcut.
+func regionArea(r CapRegion) float64 {
+	a := math.Abs(float64(polygonSignedArea(r.Outer)))
+	for _, h := range r.Holes {
+		a -= math.Abs(float64(polygonSignedArea(h)))
+	}
+	if a < 0 {
+		return 0
+	}
+	return a
+}
+
+// polygonSignedArea is 2× the signed area of a closed polygon.
+// Positive when CCW. Float32 input, float64 accumulator to keep
+// precision on long polygons.
+func polygonSignedArea(pts []Point2) float32 {
+	if len(pts) < 3 {
+		return 0
+	}
+	var sum float64
+	for i := range pts {
+		j := (i + 1) % len(pts)
+		sum += float64(pts[i][0])*float64(pts[j][1]) - float64(pts[j][0])*float64(pts[i][1])
+	}
+	return float32(sum * 0.5)
+}
+
 // pointSetsToClipperPaths converts a list of polygon vertex
 // sequences to Clipper paths in int coords. Polygons with fewer
 // than 3 points are skipped. Used by the cap emitter to feed

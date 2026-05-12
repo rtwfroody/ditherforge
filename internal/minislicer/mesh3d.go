@@ -3,6 +3,7 @@ package minislicer
 import (
 	"math"
 
+	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
@@ -63,6 +64,16 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 	// section painting that triangle.
 	topTiles := buildLayerTileIdx(sections, KindCapTop)
 	botTiles := buildLayerTileIdx(sections, KindCapBottom)
+	topByLayer := make(map[int][]int32)
+	botByLayer := make(map[int][]int32)
+	for i, s := range sections {
+		switch s.Kind {
+		case KindCapTop:
+			topByLayer[s.LayerIdx] = append(topByLayer[s.LayerIdx], int32(i))
+		case KindCapBottom:
+			botByLayer[s.LayerIdx] = append(botByLayer[s.LayerIdx], int32(i))
+		}
+	}
 
 	// Per-(layer, loop) ribbon midpoints, used to find the nearest
 	// ribbon section for any cap-triangle whose centroid doesn't
@@ -153,10 +164,10 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		}
 
 		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, wallLoops[li], aboveLoops, zTop, true, topTiles[li], +1,
+			layer, wallLoops[li], aboveLoops, zTop, true, topTiles[li], topByLayer[li], +1,
 			sections, assignments, fallback, layerLoopRibbons, li)
 		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, wallLoops[li], belowLoops, zBot, false, botTiles[li], -1,
+			layer, wallLoops[li], belowLoops, zBot, false, botTiles[li], botByLayer[li], -1,
 			sections, assignments, fallback, layerLoopRibbons, li)
 	}
 
@@ -208,6 +219,7 @@ func emitLayerFaceCapUnified(
 	z float32,
 	isTop bool,
 	tiles *layerTileIdx,
+	tileIDs []int32,
 	capDir float32,
 	sections []Section,
 	assignments []int32,
@@ -215,23 +227,34 @@ func emitLayerFaceCapUnified(
 	ribbonsByLoop map[loopKey][]ribbonRef,
 	layerIdx int,
 ) {
-	regions := exposedCapRegions(layerLoops, neighborLoops)
-	if len(regions) == 0 {
+	// Build the exposed-region polygon (this layer's footprint
+	// minus the neighbor's). This is the Clipper Paths form so we
+	// can intersect tile rectangles against it without going back
+	// through CapRegion.
+	subj := pointSetsToClipperPaths(layerLoops)
+	if len(subj) == 0 {
 		return
 	}
-	for _, region := range regions {
-		verts, tris := Earcut(region.Outer, region.Holes)
-		if len(tris) == 0 {
-			continue
+	var exposed clipper.Paths
+	if len(neighborLoops) > 0 {
+		nbr := pointSetsToClipperPaths(neighborLoops)
+		if len(nbr) > 0 {
+			exposed = clipperOp(subj, nbr, clipper.CtDifference)
+		} else {
+			exposed = subj
 		}
-		// Pick which loop's ribbons to use as a fallback color
-		// source: the loop in this layer whose first outer point
-		// most closely matches the region's representative point.
-		// Different outer loops in the same layer have unrelated
-		// surface samples; scoping per-loop avoids leaking color
-		// across them (the cutting-board / fish problem from the
-		// pre-rewrite era).
-		rep := region.Outer[0]
+	} else {
+		exposed = subj
+	}
+	if len(exposed) == 0 {
+		return
+	}
+
+	// Set up the ribbon-fallback colorer once per layer face. It
+	// applies only to leftover triangles where no tile-section
+	// rectangle contains the centroid.
+	ribbonColorByLoop := make(map[int]func(p Point2) (int32, int32))
+	getRibbonColorAt := func(p Point2) (int32, int32) {
 		bestLoop := -1
 		bestDistSq := float32(math.MaxFloat32)
 		for lp := range layer.Loops {
@@ -239,12 +262,9 @@ func emitLayerFaceCapUnified(
 				continue
 			}
 			pts := layer.Loops[lp].Points
-			if len(pts) == 0 {
-				continue
-			}
-			for _, p := range pts {
-				dx := p[0] - rep[0]
-				dy := p[1] - rep[1]
+			for _, q := range pts {
+				dx := q[0] - p[0]
+				dy := q[1] - p[1]
 				d := dx*dx + dy*dy
 				if d < bestDistSq {
 					bestDistSq = d
@@ -252,12 +272,73 @@ func emitLayerFaceCapUnified(
 				}
 			}
 		}
-		var ribbons []ribbonRef
-		if bestLoop >= 0 {
-			ribbons = ribbonsByLoop[struct{ layer, loop int }{layerIdx, bestLoop}]
+		if bestLoop < 0 {
+			return -1, fallback
 		}
-		ribbonColor := makeRibbonColorPicker(ribbons, sections, assignments, fallback, capDir)
+		fn, ok := ribbonColorByLoop[bestLoop]
+		if !ok {
+			fn = makeRibbonColorPicker(
+				ribbonsByLoop[loopKey{layerIdx, bestLoop}],
+				sections, assignments, fallback, capDir,
+			)
+			ribbonColorByLoop[bestLoop] = fn
+		}
+		return fn(p)
+	}
 
+	// Emit per cap-tile section: clip its rectangle to the exposed
+	// region, earcut the clipped piece, paint with the section's
+	// dithered color. This gives the cap surface a tile-aligned
+	// color grid that matches the dither pattern, instead of a
+	// unified earcut blurring many tiles into one big triangle.
+	allRects := make(clipper.Paths, 0, len(tileIDs))
+	for _, sid := range tileIDs {
+		s := sections[sid]
+		col := assignments[sid]
+		if col < 0 {
+			col = fallback
+		}
+		rect := clipper.Paths{rectClipperPath(s.CapBoundsXY)}
+		piece := clipperOp(rect, exposed, clipper.CtIntersection)
+		allRects = append(allRects, rect[0])
+		if len(piece) == 0 {
+			continue
+		}
+		for _, r := range clipperPathsToRegions(piece) {
+			emitCapTriangulation(m, faceAssign, faceSection, r, z, isTop, sid, col)
+		}
+	}
+
+	// Leftover: parts of the exposed region not covered by any
+	// tile rectangle. Union all tile rects then subtract from
+	// exposed in one pass; emit each leftover piece with the
+	// loop-scoped ribbon-fallback color so thin slope-cap rings
+	// blend into the surrounding step caps' color rather than
+	// flashing a stark fallback.
+	var leftover clipper.Paths
+	if len(allRects) > 0 {
+		c := clipper.NewClipper(clipper.IoPreserveCollinear)
+		c.AddPaths(allRects, clipper.PtSubject, true)
+		unioned, ok := c.Execute1(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
+		if ok && len(unioned) > 0 {
+			d := clipper.NewClipper(clipper.IoPreserveCollinear)
+			d.AddPaths(exposed, clipper.PtSubject, true)
+			d.AddPaths(unioned, clipper.PtClip, true)
+			leftover, _ = d.Execute1(clipper.CtDifference, clipper.PftEvenOdd, clipper.PftNonZero)
+		}
+	} else {
+		leftover = exposed
+	}
+	for _, region := range clipperPathsToRegions(leftover) {
+		// Skip slivers below ~1µm² to avoid feeding Earcut
+		// degenerate polygons it can spin on.
+		if regionArea(region) < 1e-3 {
+			continue
+		}
+		verts, tris := Earcut(region.Outer, region.Holes)
+		if len(tris) == 0 {
+			continue
+		}
 		baseV := uint32(len(m.Vertices))
 		for _, p := range verts {
 			m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
@@ -268,10 +349,7 @@ func emitLayerFaceCapUnified(
 			c := verts[tr[2]]
 			cx := (a[0] + b[0] + c[0]) / 3
 			cy := (a[1] + b[1] + c[1]) / 3
-			sid, col := tiles.lookup(cx, cy, sections, assignments)
-			if sid < 0 {
-				sid, col = ribbonColor(Point2{cx, cy})
-			}
+			sid, col := getRibbonColorAt(Point2{cx, cy})
 			if isTop {
 				m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
 			} else {

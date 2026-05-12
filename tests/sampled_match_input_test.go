@@ -34,37 +34,53 @@ func TestSampledMatchesInput(t *testing.T) {
 		t.Skip("integration test (-short)")
 	}
 
+	type viewLimits struct {
+		avg, tile float64
+	}
 	cases := []struct {
-		name       string
-		path       string
-		maxAvgErr  float64 // global MAE, 0..255 per channel
-		maxTileErr float64 // per-tile MAE limit
-		alphaWrap  bool
+		name string
+		path string
+		// `def` applies to every view that doesn't have a
+		// per-view override in `perView`. Per-view overrides
+		// exist for cases where alpha-wrap or sampling
+		// limitations produce known wider divergence on one
+		// specific camera (typically top / persp) while the
+		// other views stay tight.
+		def       viewLimits
+		perView   map[string]viewLimits
+		alphaWrap bool
 	}{
-		// Thresholds are calibrated to accept inherent slicer
-		// quantization (Z-step horizontal banding, per-section
-		// flat shading vs the input's per-pixel UV interpolation,
-		// box-filter smoothing of texels) while still catching:
-		//   - the section-arc-mapping flip that put India on the
-		//     wrong side of the world (worst-tile MAE ~50)
-		//   - SrcTriIdx misassignment after DP simplification
-		//     that sampled UVs from a neighboring triangle and
-		//     dragged colors across coastlines (worst-tile ~45)
-		// Below those limits the orientation+UV sampling is
-		// correct and remaining residue is inherent quantization.
-		{"earth", filepath.Join("objects", "earth.glb"), 32, 50, false},
+		// earth.glb is a clean single-mesh model; per-tile
+		// sampling matches the input UVs closely on every view.
+		// Limits set to ~1.5× actual measurements so honest
+		// regressions (worst-tile drift on coastlines, section-
+		// arc-mapping flips, SrcTriIdx misassignment) fail loud.
+		{
+			"earth",
+			filepath.Join("objects", "earth.glb"),
+			viewLimits{avg: 16, tile: 10},
+			nil,
+			false,
+		},
 		// low_poly_building is a multi-primitive GLB (floor +
-		// walls + windows + roof) needing alpha-wrap to produce
-		// a printable shell. Alpha-wrap replaces the original
-		// detailed roof texture with a smoothed surface (a
-		// known limitation: the wrap is "making something up"
-		// where the source mesh has alpha-blended detail), so
-		// the top-down view diverges hard from the input (worst
-		// tile ~105). Thresholds set to accept that fabrication
-		// while still catching multi-object regressions in the
-		// wall views — front/side/persp all pass under tighter
-		// limits with the current sampling.
-		{"building", filepath.Join("objects", "low_poly_building.glb"), 80, 130, true},
+		// walls + windows + roof) needing alpha-wrap. The wrap
+		// replaces the detailed roof texture with a smoothed
+		// surface that samples a quite different color than the
+		// original — top-down and persp views are dominated by
+		// that fabrication, so their limits are loosened just
+		// enough to accept it. Front/side don't see the roof,
+		// so they get tight wall-sampling limits that catch
+		// multi-object regressions.
+		{
+			"building",
+			filepath.Join("objects", "low_poly_building.glb"),
+			viewLimits{avg: 30, tile: 30},
+			map[string]viewLimits{
+				"top":   {avg: 75, tile: 128},
+				"persp": {avg: 30, tile: 125},
+			},
+			true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -132,6 +148,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				dumpDir = extra
 			}
 			for _, v := range debugrender.DefaultViews {
+				limits, ok := tc.perView[v.Name]
+				if !ok {
+					limits = tc.def
+				}
 				inputImg := debugrender.RenderInput(inputMesh, v, res)
 				sampledImg := debugrender.RenderPipelineMesh(pr.OutputMesh, v, res)
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("input_%s.png", v.Name)), inputImg)
@@ -139,19 +159,19 @@ func TestSampledMatchesInput(t *testing.T) {
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
 				maxTileMAE, tileGrid, worstTileDesc := tileMeanMAE(inputImg, sampledImg, 8)
 				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid) %s",
-					tc.name, v.Name, overlap, mae, tc.maxAvgErr, maxTileMAE, tc.maxTileErr, tileGrid, tileGrid, worstTileDesc)
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
 					continue
 				}
-				if mae > tc.maxAvgErr {
+				if mae > limits.avg {
 					t.Errorf("%s/%s: sampled output diverges from input (mae=%.2f > %.1f); PNGs in %s",
-						tc.name, v.Name, mae, tc.maxAvgErr, dumpDir)
+						tc.name, v.Name, mae, limits.avg, dumpDir)
 				}
-				if maxTileMAE > tc.maxTileErr {
+				if maxTileMAE > limits.tile {
 					t.Errorf("%s/%s: worst-tile mean color diverges (tile mae=%.2f > %.1f); features in wrong screen positions; PNGs in %s",
-						tc.name, v.Name, maxTileMAE, tc.maxTileErr, dumpDir)
+						tc.name, v.Name, maxTileMAE, limits.tile, dumpDir)
 				}
 			}
 		})

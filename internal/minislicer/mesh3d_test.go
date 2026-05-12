@@ -1,6 +1,10 @@
 package minislicer
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/rtwfroody/ditherforge/internal/loader"
+)
 
 // TestBuildPrintableMeshCube exercises the earcut-cap layout on a
 // single-layer unit square cube. With 4 wall sections we get:
@@ -303,4 +307,105 @@ func TestWallCapShareVertices(t *testing.T) {
 		t.Errorf("wall and cap have different vertex counts at z=%g: wall=%d cap=%d", zTop, len(wallRefAtTop), len(capTop))
 	}
 	_ = wallTop
+}
+
+// TestStackedCubeManifold verifies that a multi-layer cube produces
+// a manifold mesh: every edge is shared by exactly 2 triangles.
+// T-junctions between adjacent wall layers, or between walls and
+// caps, leave edges shared by only 1 triangle — which the camera
+// can see background through as the view rotates (the "shimmer on
+// the edge of features" artifact). Asserting strict manifold-ness
+// catches this class of mesh bug at the unit-test level.
+func TestStackedCubeManifold(t *testing.T) {
+	const nLayers = 5
+	const layerH = float32(0.2)
+	pts := []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
+	layers := make([]Layer, nLayers)
+	for i := 0; i < nLayers; i++ {
+		loop := Loop{Points: pts, Z: float32(i) * layerH}
+		loop.SignedArea = signedArea(loop.Points)
+		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
+	}
+	secs := PartitionLoops(layers, 0.3)
+	assigns := make([]int32, len(secs))
+	mesh, _ := BuildPrintableMesh(layers, secs, assigns, layerH)
+	assertManifold(t, mesh)
+}
+
+// TestSteppedPyramidManifold verifies the slope case: layers of
+// different footprints should still produce a closed manifold mesh
+// once wall + cap geometry meets at slab boundaries. This is the
+// shape of a printable roof; T-junctions at the wall/cap interface
+// were exactly the bug the snap-to-Clipper-grid + preserve-collinear
+// fixes were meant to eliminate.
+func TestSteppedPyramidManifold(t *testing.T) {
+	const layerH = float32(0.2)
+	loops := [][]Point2{
+		{{0, 0}, {3, 0}, {3, 3}, {0, 3}},
+		{{0.4, 0.4}, {2.6, 0.4}, {2.6, 2.6}, {0.4, 2.6}},
+		{{0.9, 0.9}, {2.1, 0.9}, {2.1, 2.1}, {0.9, 2.1}},
+	}
+	layers := make([]Layer, len(loops))
+	for i, pts := range loops {
+		loop := Loop{Points: pts, Z: float32(i) * layerH}
+		loop.SignedArea = signedArea(loop.Points)
+		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
+	}
+	secs := PartitionLoops(layers, 0.3)
+	assigns := make([]int32, len(secs))
+	mesh, _ := BuildPrintableMesh(layers, secs, assigns, layerH)
+	assertManifold(t, mesh)
+}
+
+// assertManifold reports edges shared by != 2 triangles. Each edge
+// is keyed by the rounded XYZ of its endpoints (sorted so direction
+// doesn't matter) — vertices duplicated across wall and cap
+// segments collapse to the same key as long as their positions
+// agree to ~0.1µm.
+func assertManifold(t *testing.T, mesh *loader.LoadedModel) {
+	t.Helper()
+	type vertKey struct{ x, y, z int64 }
+	type edgeKey [2]vertKey
+	const scale = 1e4
+	round := func(v float32) int64 {
+		if v >= 0 {
+			return int64(float64(v)*scale + 0.5)
+		}
+		return int64(float64(v)*scale - 0.5)
+	}
+	keyOf := func(a, b [3]float32) edgeKey {
+		ka := vertKey{round(a[0]), round(a[1]), round(a[2])}
+		kb := vertKey{round(b[0]), round(b[1]), round(b[2])}
+		if ka.x > kb.x || (ka.x == kb.x && ka.y > kb.y) || (ka.x == kb.x && ka.y == kb.y && ka.z > kb.z) {
+			ka, kb = kb, ka
+		}
+		return edgeKey{ka, kb}
+	}
+	counts := make(map[edgeKey]int)
+	for _, tr := range mesh.Faces {
+		va := mesh.Vertices[tr[0]]
+		vb := mesh.Vertices[tr[1]]
+		vc := mesh.Vertices[tr[2]]
+		counts[keyOf(va, vb)]++
+		counts[keyOf(vb, vc)]++
+		counts[keyOf(vc, va)]++
+	}
+	bad := 0
+	for k, c := range counts {
+		if c == 2 {
+			continue
+		}
+		bad++
+		if bad <= 5 {
+			a := k[0]
+			b := k[1]
+			t.Errorf("non-manifold edge: (%g,%g,%g)→(%g,%g,%g) shared by %d face(s)",
+				float64(a.x)/scale, float64(a.y)/scale, float64(a.z)/scale,
+				float64(b.x)/scale, float64(b.y)/scale, float64(b.z)/scale,
+				c)
+		}
+	}
+	if bad > 5 {
+		t.Errorf("... and %d more non-manifold edges (T-junctions or holes)", bad-5)
+	}
 }
