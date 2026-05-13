@@ -340,55 +340,50 @@ func emitClippedCapTilesChunk(
 	// quads — that's the common case for interior tiles in a flat
 	// top/bottom cap, where Clipper-clipping every one of
 	// thousands of tiles otherwise dominates the Clip stage's
-	// runtime. Bbox pre-check on each polygon membership test
-	// makes the corner classification near-free for tiles well
-	// inside or outside loop boundaries.
-	type bbox struct{ minX, minY, maxX, maxY float32 }
-	pointsBBox := func(pts []Point2) bbox {
-		if len(pts) == 0 {
-			return bbox{}
-		}
-		b := bbox{pts[0][0], pts[0][1], pts[0][0], pts[0][1]}
+	// runtime. Loop.Contains bbox-rejects far points so the
+	// corner classification is near-free for tiles well inside or
+	// outside loop boundaries.
+	//
+	// neighborLoops is the wall-conforming subdivided point set,
+	// not a []Loop, so we build per-loop bboxes for it inline.
+	type boundedPoly struct {
+		pts                    []Point2
+		minX, minY, maxX, maxY float32
+	}
+	bboxOf := func(pts []Point2) (mnX, mnY, mxX, mxY float32) {
+		mnX, mnY = pts[0][0], pts[0][1]
+		mxX, mxY = mnX, mnY
 		for _, p := range pts[1:] {
-			if p[0] < b.minX {
-				b.minX = p[0]
+			if p[0] < mnX {
+				mnX = p[0]
 			}
-			if p[0] > b.maxX {
-				b.maxX = p[0]
+			if p[0] > mxX {
+				mxX = p[0]
 			}
-			if p[1] < b.minY {
-				b.minY = p[1]
+			if p[1] < mnY {
+				mnY = p[1]
 			}
-			if p[1] > b.maxY {
-				b.maxY = p[1]
+			if p[1] > mxY {
+				mxY = p[1]
 			}
 		}
-		return b
+		return
 	}
-	layerLoopPts := make([][]Point2, 0, len(layer.Loops))
-	layerLoopBB := make([]bbox, 0, len(layer.Loops))
-	for i := range layer.Loops {
-		if len(layer.Loops[i].Points) < 3 {
-			continue
-		}
-		layerLoopPts = append(layerLoopPts, layer.Loops[i].Points)
-		layerLoopBB = append(layerLoopBB, pointsBBox(layer.Loops[i].Points))
-	}
-	neighborBB := make([]bbox, 0, len(neighborLoops))
+	neighborBP := make([]boundedPoly, 0, len(neighborLoops))
 	for _, pts := range neighborLoops {
 		if len(pts) < 3 {
 			continue
 		}
-		neighborBB = append(neighborBB, pointsBBox(pts))
+		mnX, mnY, mxX, mxY := bboxOf(pts)
+		neighborBP = append(neighborBP, boundedPoly{pts, mnX, mnY, mxX, mxY})
 	}
-	insideEvenOdd := func(loops [][]Point2, bbs []bbox, x, y float32) bool {
+	insideNeighbor := func(x, y float32) bool {
 		count := 0
-		for i, pts := range loops {
-			b := bbs[i]
-			if x < b.minX || x > b.maxX || y < b.minY || y > b.maxY {
+		for _, l := range neighborBP {
+			if x < l.minX || x > l.maxX || y < l.minY || y > l.maxY {
 				continue
 			}
-			if pointInPolygon(pts, x, y) {
+			if pointInPolygon(l.pts, x, y) {
 				count++
 			}
 		}
@@ -396,13 +391,10 @@ func emitClippedCapTilesChunk(
 	}
 	allRects := make(clipper.Paths, 0, len(tileIDs))
 	cornerExposed := func(x, y float32) bool {
-		if !insideEvenOdd(layerLoopPts, layerLoopBB, x, y) {
+		if !insideSolid(layer, x, y) {
 			return false
 		}
-		if len(neighborLoops) == 0 {
-			return true
-		}
-		return !insideEvenOdd(neighborLoops, neighborBB, x, y)
+		return !insideNeighbor(x, y)
 	}
 	for _, sid := range tileIDs {
 		s := sections[sid]

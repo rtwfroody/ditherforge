@@ -225,7 +225,7 @@ func insideSolid(layer *Layer, x, y float32) bool {
 		if len(layer.Loops[i].Points) < 3 {
 			continue
 		}
-		if pointInPolygon(layer.Loops[i].Points, x, y) {
+		if layer.Loops[i].Contains(x, y) {
 			count++
 		}
 	}
@@ -248,45 +248,32 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 	}
 	z := layer.Z + zOffset
 	var out []Section
-	// Cache the layer's hole loops for the per-tile exclusion test.
+
+	// Cache pointers to hole loops; Loop.Contains does bbox
+	// rejection itself.
 	var holes []*Loop
 	for k := range layer.Loops {
-		if layer.Loops[k].IsHole {
+		if layer.Loops[k].IsHole && len(layer.Loops[k].Points) >= 3 {
 			holes = append(holes, &layer.Loops[k])
 		}
 	}
-	exposedAt := func(loopPts []Point2, x, y float32) bool {
-		if !pointInPolygon(loopPts, x, y) {
+	exposedAt := func(outer *Loop, x, y float32) bool {
+		if !outer.Contains(x, y) {
 			return false
 		}
 		for _, h := range holes {
-			if pointInPolygon(h.Points, x, y) {
+			if h.Contains(x, y) {
 				return false
 			}
 		}
 		return !insideSolid(neighbor, x, y)
 	}
-	for li, loop := range layer.Loops {
-		if loop.IsHole {
+	for li := range layer.Loops {
+		loop := &layer.Loops[li]
+		if loop.IsHole || len(loop.Points) < 3 {
 			continue
 		}
-		// Tight loop bbox.
-		xMin, yMin := float32(math.Inf(1)), float32(math.Inf(1))
-		xMax, yMax := float32(math.Inf(-1)), float32(math.Inf(-1))
-		for _, p := range loop.Points {
-			if p[0] < xMin {
-				xMin = p[0]
-			}
-			if p[0] > xMax {
-				xMax = p[0]
-			}
-			if p[1] < yMin {
-				yMin = p[1]
-			}
-			if p[1] > yMax {
-				yMax = p[1]
-			}
-		}
+		xMin, yMin, xMax, yMax := loop.MinX, loop.MinY, loop.MaxX, loop.MaxY
 		cols := int(math.Ceil(float64((xMax - xMin) / cellSize)))
 		rows := int(math.Ceil(float64((yMax - yMin) / cellSize)))
 		if cols < 1 {
@@ -310,11 +297,11 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 				// four corners catches both interior and
 				// boundary-straddling tiles; cells fully outside
 				// or fully covered fail all five tests and drop.
-				if !exposedAt(loop.Points, cx, cy) &&
-					!exposedAt(loop.Points, x0, y0) &&
-					!exposedAt(loop.Points, x1, y0) &&
-					!exposedAt(loop.Points, x1, y1) &&
-					!exposedAt(loop.Points, x0, y1) {
+				if !exposedAt(loop, cx, cy) &&
+					!exposedAt(loop, x0, y0) &&
+					!exposedAt(loop, x1, y0) &&
+					!exposedAt(loop, x1, y1) &&
+					!exposedAt(loop, x0, y1) {
 					continue
 				}
 				out = append(out, Section{
@@ -336,7 +323,7 @@ func partitionCap(layer Layer, neighbor *Layer, zOffset, cellSize float32, loopI
 					// cap, producing horizontal salmon "streaks" in the
 					// rendered output. Anchoring the cap to the same
 					// mesh component its loop traces avoids that leak.
-					SrcTriIdx: nearestEdgeTri(&loop, cx, cy),
+					SrcTriIdx: nearestEdgeTri(loop, cx, cy),
 				})
 				idx++
 			}

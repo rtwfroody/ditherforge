@@ -17,8 +17,8 @@ func TestClassifyHolesConcaveOuter(t *testing.T) {
 	hole := []Point2{{2, 2}, {4, 2}, {4, 4}, {2, 4}}
 
 	loops := []Loop{
-		{Points: outer, SignedArea: signedArea(outer)},
-		{Points: hole, SignedArea: signedArea(hole)},
+		newTestLoop(outer),
+		newTestLoop(hole),
 	}
 	classifyHoles(loops)
 	if loops[0].IsHole {
@@ -36,8 +36,8 @@ func TestClassifyHolesTwoIslands(t *testing.T) {
 	a := []Point2{{0, 0}, {2, 0}, {2, 2}, {0, 2}}
 	b := []Point2{{10, 10}, {12, 10}, {12, 12}, {10, 12}}
 	loops := []Loop{
-		{Points: a, SignedArea: signedArea(a)},
-		{Points: b, SignedArea: signedArea(b)},
+		newTestLoop(a),
+		newTestLoop(b),
 	}
 	classifyHoles(loops)
 	if loops[0].IsHole || loops[1].IsHole {
@@ -55,9 +55,9 @@ func TestClassifyHolesPerOuterChild(t *testing.T) {
 	hullHole := []Point2{{2, 2}, {8, 2}, {8, 8}, {2, 8}}
 	smokestack := []Point2{{20, 0}, {22, 0}, {22, 2}, {20, 2}}
 	loops := []Loop{
-		{Points: hullOuter, SignedArea: signedArea(hullOuter)},
-		{Points: hullHole, SignedArea: signedArea(hullHole)},
-		{Points: smokestack, SignedArea: signedArea(smokestack)},
+		newTestLoop(hullOuter),
+		newTestLoop(hullHole),
+		newTestLoop(smokestack),
 	}
 	classifyHoles(loops)
 	if !loops[0].HasHoleChild {
@@ -78,9 +78,9 @@ func TestClassifyHolesNestedTwice(t *testing.T) {
 	hole := []Point2{{4, 4}, {16, 4}, {16, 16}, {4, 16}}
 	island := []Point2{{8, 8}, {12, 8}, {12, 12}, {8, 12}}
 	loops := []Loop{
-		{Points: outer, SignedArea: signedArea(outer)},
-		{Points: hole, SignedArea: signedArea(hole)},
-		{Points: island, SignedArea: signedArea(island)},
+		newTestLoop(outer),
+		newTestLoop(hole),
+		newTestLoop(island),
 	}
 	classifyHoles(loops)
 	if loops[0].IsHole {
@@ -92,4 +92,12 @@ func TestClassifyHolesNestedTwice(t *testing.T) {
 	if loops[2].IsHole {
 		t.Errorf("island (depth 2) should be outer; got hole")
 	}
+}
+
+// newTestLoop builds a Loop for tests: sets Points + SignedArea +
+// bbox so Loop.Contains works without a separate setup step.
+func newTestLoop(pts []Point2) Loop {
+	l := Loop{Points: pts}
+	l.RefreshDerived()
+	return l
 }

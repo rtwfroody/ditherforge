@@ -202,7 +202,7 @@ func classifyHoles(loops []Loop) {
 			if len(loops[j].Points) < 3 {
 				continue
 			}
-			if pointInPolygon(loops[j].Points, x, y) {
+			if loops[j].Contains(x, y) {
 				depth++
 			}
 		}
@@ -222,7 +222,7 @@ func classifyHoles(loops []Loop) {
 				continue
 			}
 			x, y := loops[j].Points[0][0], loops[j].Points[0][1]
-			if pointInPolygon(loops[i].Points, x, y) {
+			if loops[i].Contains(x, y) {
 				loops[i].HasHoleChild = true
 				break
 			}
@@ -339,12 +339,13 @@ func chainSegments(segs []segment, z float32) []Loop {
 		if len(points) < 3 {
 			continue
 		}
-		loops = append(loops, Loop{
-			Points:     points,
-			EdgeTris:   edgeTris,
-			Z:          z,
-			SignedArea: signedArea(points),
-		})
+		l := Loop{
+			Points:   points,
+			EdgeTris: edgeTris,
+			Z:        z,
+		}
+		l.RefreshDerived()
+		loops = append(loops, l)
 	}
 
 	return loops

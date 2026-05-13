@@ -14,7 +14,7 @@ import (
 // total: 16 verts, 12 tris.
 func TestBuildPrintableMeshCube(t *testing.T) {
 	loop := Loop{Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 1.0)
 	if len(secs) != 4 {
@@ -54,7 +54,7 @@ func TestBuildPrintableMeshCube(t *testing.T) {
 // with a CW input; should produce the same geometry counts.
 func TestBuildPrintableMeshReversesCWLoops(t *testing.T) {
 	loop := Loop{Points: []Point2{{0, 0}, {0, 1}, {1, 1}, {1, 0}}, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	if loop.SignedArea > 0 {
 		t.Fatalf("expected CW loop with negative signed area, got %g", loop.SignedArea)
 	}
@@ -72,9 +72,9 @@ func TestBuildPrintableMeshReversesCWLoops(t *testing.T) {
 // hole. The cap area should be (outer area - hole area).
 func TestBuildPrintableMeshWithHole(t *testing.T) {
 	outer := Loop{Points: []Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}, Z: 0}
-	outer.SignedArea = signedArea(outer.Points)
+	outer.RefreshDerived()
 	hole := Loop{Points: []Point2{{3, 3}, {3, 7}, {7, 7}, {7, 3}}, Z: 0}
-	hole.SignedArea = signedArea(hole.Points)
+	hole.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{outer, hole}}}
 	// Run classify to populate IsHole / HasHoleChild fields.
 	classifyHoles(layers[0].Loops)
@@ -138,7 +138,7 @@ func TestStackedCubeNoInternalCaps(t *testing.T) {
 	layers := make([]Layer, nLayers)
 	for i := 0; i < nLayers; i++ {
 		loop := Loop{Points: pts, Z: float32(i) * layerH}
-		loop.SignedArea = signedArea(loop.Points)
+		loop.RefreshDerived()
 		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
 	}
 	secs := PartitionLoops(layers, 1.0)
@@ -186,9 +186,9 @@ func TestSteppedPyramidEmitsStepCaps(t *testing.T) {
 	bigPts := []Point2{{0, 0}, {2, 0}, {2, 2}, {0, 2}}
 	smallPts := []Point2{{0.5, 0.5}, {1.5, 0.5}, {1.5, 1.5}, {0.5, 1.5}}
 	big := Loop{Points: bigPts, Z: 0}
-	big.SignedArea = signedArea(big.Points)
+	big.RefreshDerived()
 	small := Loop{Points: smallPts, Z: layerH}
-	small.SignedArea = signedArea(small.Points)
+	small.RefreshDerived()
 	layers := []Layer{
 		{Z: 0, LayerIdx: 0, Loops: []Loop{big}},
 		{Z: layerH, LayerIdx: 1, Loops: []Loop{small}},
@@ -240,7 +240,7 @@ func TestWallCapShareVertices(t *testing.T) {
 	// doesn't coincide with an original vertex.
 	pts := []Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
 	loop := Loop{Points: pts, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	// cellSize 3 → arc 40 / 3 ≈ 13 ribbon sections, breakpoints
 	// fall in the middle of edges.
@@ -323,7 +323,7 @@ func TestStackedCubeManifold(t *testing.T) {
 	layers := make([]Layer, nLayers)
 	for i := 0; i < nLayers; i++ {
 		loop := Loop{Points: pts, Z: float32(i) * layerH}
-		loop.SignedArea = signedArea(loop.Points)
+		loop.RefreshDerived()
 		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
 	}
 	secs := PartitionLoops(layers, 0.3)
@@ -348,7 +348,7 @@ func TestSteppedPyramidManifold(t *testing.T) {
 	layers := make([]Layer, len(loops))
 	for i, pts := range loops {
 		loop := Loop{Points: pts, Z: float32(i) * layerH}
-		loop.SignedArea = signedArea(loop.Points)
+		loop.RefreshDerived()
 		layers[i] = Layer{Z: loop.Z, LayerIdx: i, Loops: []Loop{loop}}
 	}
 	secs := PartitionLoops(layers, 0.3)

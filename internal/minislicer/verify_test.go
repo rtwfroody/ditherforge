@@ -8,7 +8,7 @@ import "testing"
 // sections of the same color is too.
 func TestVerifyPasses(t *testing.T) {
 	loop := Loop{Points: []Point2{{0, 0}, {4, 0}, {4, 1}, {0, 1}}, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 1.0)
 	// Each section gets a distinct color (worst case for patch
@@ -27,7 +27,7 @@ func TestVerifyPasses(t *testing.T) {
 // cellSize) and confirms VerifyPatchLengths flags it.
 func TestVerifyDetectsShort(t *testing.T) {
 	loop := Loop{Points: []Point2{{0, 0}, {4, 0}, {4, 1}, {0, 1}}, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 1.0)
 	if len(secs) < 4 {
@@ -58,7 +58,7 @@ func TestVerifyDetectsShort(t *testing.T) {
 func TestVerifyExemptsTinyLoop(t *testing.T) {
 	// Triangle with perimeter ~3.0, cellSize=10.
 	loop := Loop{Points: []Point2{{0, 0}, {1, 0}, {0.5, 0.866}}, Z: 0}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 10.0)
 	if len(secs) != 1 {

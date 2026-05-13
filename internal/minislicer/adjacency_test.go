@@ -9,7 +9,7 @@ func TestAdjacencyWithinLoop(t *testing.T) {
 		Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 		Z:      0,
 	}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 1.0)
 	if len(secs) != 4 {
@@ -36,9 +36,9 @@ func TestAdjacencyWithinLoop(t *testing.T) {
 func TestAdjacencyCrossLayer(t *testing.T) {
 	// Two stacked unit squares at z=0 and z=0.5.
 	loop1 := Loop{Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, Z: 0}
-	loop1.SignedArea = signedArea(loop1.Points)
+	loop1.RefreshDerived()
 	loop2 := Loop{Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, Z: 0.5}
-	loop2.SignedArea = signedArea(loop2.Points)
+	loop2.RefreshDerived()
 	layers := []Layer{
 		{Z: 0, LayerIdx: 0, Loops: []Loop{loop1}},
 		{Z: 0.5, LayerIdx: 1, Loops: []Loop{loop2}},

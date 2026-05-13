@@ -11,7 +11,7 @@ func TestPartitionUnitSquare(t *testing.T) {
 		Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 		Z:      0,
 	}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 
 	cases := []struct {
@@ -51,7 +51,7 @@ func TestPartitionMidpoints(t *testing.T) {
 		Points: []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 		Z:      0,
 	}
-	loop.SignedArea = signedArea(loop.Points)
+	loop.RefreshDerived()
 	layers := []Layer{{Z: 0, LayerIdx: 0, Loops: []Loop{loop}}}
 	secs := PartitionLoops(layers, 1.0)
 	wantMids := []Point2{{0.5, 0}, {1, 0.5}, {0.5, 1}, {0, 0.5}}

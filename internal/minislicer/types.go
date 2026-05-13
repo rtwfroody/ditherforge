@@ -38,6 +38,50 @@ type Loop struct {
 	SignedArea   float32
 	IsHole       bool
 	HasHoleChild bool
+	// XY bbox of Points, populated by RefreshDerived. The cap
+	// partition's per-cell 5-point exposure test and the cap
+	// emitter's per-corner exposure test both call Contains
+	// across thousands of points per layer; the bbox lets the
+	// common "point nowhere near this loop" case bail out in O(1)
+	// before the O(N) ray cast.
+	MinX, MinY, MaxX, MaxY float32
+}
+
+// RefreshDerived recomputes SignedArea and the XY bbox from
+// Points. Call after constructing a Loop literal or mutating
+// Points in place.
+func (l *Loop) RefreshDerived() {
+	l.SignedArea = signedArea(l.Points)
+	if len(l.Points) == 0 {
+		l.MinX, l.MinY, l.MaxX, l.MaxY = 0, 0, 0, 0
+		return
+	}
+	l.MinX, l.MaxX = l.Points[0][0], l.Points[0][0]
+	l.MinY, l.MaxY = l.Points[0][1], l.Points[0][1]
+	for _, p := range l.Points[1:] {
+		if p[0] < l.MinX {
+			l.MinX = p[0]
+		}
+		if p[0] > l.MaxX {
+			l.MaxX = p[0]
+		}
+		if p[1] < l.MinY {
+			l.MinY = p[1]
+		}
+		if p[1] > l.MaxY {
+			l.MaxY = p[1]
+		}
+	}
+}
+
+// Contains returns true when (x, y) is inside the closed polygon
+// l.Points, using even-odd ray casting along +X. Bbox-rejects far
+// points in O(1). RefreshDerived must have populated the bbox.
+func (l *Loop) Contains(x, y float32) bool {
+	if x < l.MinX || x > l.MaxX || y < l.MinY || y > l.MaxY {
+		return false
+	}
+	return pointInPolygon(l.Points, x, y)
 }
 
 // Layer is the cross-section of the model at a single Z height.

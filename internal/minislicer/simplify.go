@@ -26,7 +26,7 @@ func SimplifyAndReclassify(layers []Layer, tolerance float32) {
 			}
 			layers[li].Loops[lp].Points = pts
 			layers[li].Loops[lp].EdgeTris = tris
-			layers[li].Loops[lp].SignedArea = signedArea(pts)
+			layers[li].Loops[lp].RefreshDerived()
 		}
 		for lp := range layers[li].Loops {
 			layers[li].Loops[lp].IsHole = false
