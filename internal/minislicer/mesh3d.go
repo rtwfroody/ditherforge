@@ -2,6 +2,8 @@ package minislicer
 
 import (
 	"math"
+	"runtime"
+	"sync"
 
 	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -58,12 +60,9 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 
 	fallback := mostCommonNonNegSafe(assignments)
 
-	// Per-layer cap-tile sections (one slice per kind+layer), with
-	// each section's CapBoundsXY rectangle indexed by tile cell.
-	// Earcut triangles' centroids look up here to pick the tile
-	// section painting that triangle.
-	topTiles := buildLayerTileIdx(sections, KindCapTop)
-	botTiles := buildLayerTileIdx(sections, KindCapBottom)
+	// Per-layer cap-tile section IDs, partitioned by Kind. The
+	// cap emitter Clipper-clips each rectangle to the exposed
+	// region and paints with the section's dithered color.
 	topByLayer := make(map[int][]int32)
 	botByLayer := make(map[int][]int32)
 	for i, s := range sections {
@@ -116,62 +115,119 @@ func BuildPrintableMeshFull(layers []Layer, sections []Section, assignments []in
 		wallLoops[li] = lps
 	}
 
-	// Walls: every loop (outer or hole) gets a wall tube.
-	for li, layer := range layers {
-		zBot := layer.Z - layerH/2
-		zTop := layer.Z + layerH/2
-		for lp := range layer.Loops {
-			loop := &layer.Loops[lp]
-			ids := loopSecs[loopKey{li, lp}]
-			if len(ids) == 0 || sections[ids[0]].Kind != KindRibbon {
-				continue
-			}
-			emitLoopWall(m, &faceAssign, &faceSection, loop, ids, sections, assignments,
-				zBot, zTop, loop.IsHole)
-		}
-	}
-
-	// Caps: one watertight surface per slab boundary, restricted to
-	// the air-facing region. Topmost/bottommost layer uses a nil
-	// neighbor → full footprint exposed. The exposed region is
-	// triangulated once via Earcut; per-triangle color comes from
-	// the cap-tile section whose rectangle contains the triangle's
-	// centroid, falling back to the nearest ribbon section of this
-	// loop (orientation-matched) when no tile contains the
-	// centroid — same fallback rule the pre-rewrite code applied
-	// to its full earcut cap, which gives slope-derived colors on
-	// thin step caps instead of XY-projected fabric colors.
+	// Build per-layer mesh chunks in parallel — per-tile Clipper
+	// dominates cap emission and each layer is independent. Each
+	// worker emits into a local chunk whose face indices are
+	// chunk-local; we concatenate chunks in layer order at the end
+	// and offset the indices accordingly.
+	chunks := make([]meshChunk, len(layers))
+	workCh := make(chan int, len(layers))
 	for li := range layers {
-		layer := &layers[li]
-		if len(layer.Loops) == 0 {
-			continue
-		}
-		zBot := layer.Z - layerH/2
-		zTop := layer.Z + layerH/2
+		workCh <- li
+	}
+	close(workCh)
+	nw := runtime.GOMAXPROCS(0)
+	if nw > len(layers) {
+		nw = len(layers)
+	}
+	if nw < 1 {
+		nw = 1
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < nw; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for li := range workCh {
+				layer := &layers[li]
+				if len(layer.Loops) == 0 {
+					continue
+				}
+				zBot := layer.Z - layerH/2
+				zTop := layer.Z + layerH/2
 
-		var aboveLoops, belowLoops [][]Point2
-		for k := li + 1; k < len(layers); k++ {
-			if len(layers[k].Loops) > 0 {
-				aboveLoops = wallLoops[k]
-				break
-			}
-		}
-		for k := li - 1; k >= 0; k-- {
-			if len(layers[k].Loops) > 0 {
-				belowLoops = wallLoops[k]
-				break
-			}
-		}
+				ch := &chunks[li]
 
-		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, wallLoops[li], aboveLoops, zTop, true, topTiles[li], topByLayer[li], +1,
-			sections, assignments, fallback, layerLoopRibbons, li)
-		emitLayerFaceCapUnified(m, &faceAssign, &faceSection,
-			layer, wallLoops[li], belowLoops, zBot, false, botTiles[li], botByLayer[li], -1,
-			sections, assignments, fallback, layerLoopRibbons, li)
+				// Walls for this layer.
+				for lp := range layer.Loops {
+					loop := &layer.Loops[lp]
+					ids := loopSecs[loopKey{li, lp}]
+					if len(ids) == 0 || sections[ids[0]].Kind != KindRibbon {
+						continue
+					}
+					emitLoopWallChunk(ch, loop, ids, sections, assignments,
+						zBot, zTop, loop.IsHole)
+				}
+
+				// Caps for this layer.
+				var aboveLoops, belowLoops [][]Point2
+				for k := li + 1; k < len(layers); k++ {
+					if len(layers[k].Loops) > 0 {
+						aboveLoops = wallLoops[k]
+						break
+					}
+				}
+				for k := li - 1; k >= 0; k-- {
+					if len(layers[k].Loops) > 0 {
+						belowLoops = wallLoops[k]
+						break
+					}
+				}
+				emitClippedCapTilesChunk(ch, layer, wallLoops[li], aboveLoops,
+					zTop, true, topByLayer[li], +1,
+					sections, assignments, fallback, layerLoopRibbons, li)
+				emitClippedCapTilesChunk(ch, layer, wallLoops[li], belowLoops,
+					zBot, false, botByLayer[li], -1,
+					sections, assignments, fallback, layerLoopRibbons, li)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Concatenate chunks in layer order, offsetting face indices
+	// so they land in the final flat vertex slice.
+	totalV, totalF := 0, 0
+	for i := range chunks {
+		totalV += len(chunks[i].verts)
+		totalF += len(chunks[i].faces)
+	}
+	m.Vertices = make([][3]float32, 0, totalV)
+	m.Faces = make([][3]uint32, 0, totalF)
+	faceAssign = make([]int32, 0, totalF)
+	faceSection = make([]int32, 0, totalF)
+	for i := range chunks {
+		baseV := uint32(len(m.Vertices))
+		m.Vertices = append(m.Vertices, chunks[i].verts...)
+		for _, tr := range chunks[i].faces {
+			m.Faces = append(m.Faces, [3]uint32{tr[0] + baseV, tr[1] + baseV, tr[2] + baseV})
+		}
+		faceAssign = append(faceAssign, chunks[i].colors...)
+		faceSection = append(faceSection, chunks[i].sections...)
 	}
 
 	return m, faceAssign, faceSection
+}
+
+// meshChunk is a per-layer accumulator the parallel workers emit
+// into. Face indices are local to verts; the main loop offsets
+// them when stitching chunks together.
+type meshChunk struct {
+	verts    [][3]float32
+	faces    [][3]uint32
+	colors   []int32
+	sections []int32
+}
+
+func (c *meshChunk) addVert(x, y, z float32) uint32 {
+	idx := uint32(len(c.verts))
+	c.verts = append(c.verts, [3]float32{x, y, z})
+	return idx
+}
+
+func (c *meshChunk) addFace(a, b, d uint32, col, sec int32) {
+	c.faces = append(c.faces, [3]uint32{a, b, d})
+	c.colors = append(c.colors, col)
+	c.sections = append(c.sections, sec)
 }
 
 // ribbonRef is a ribbon section's id and XY midpoint. Used by the
@@ -182,43 +238,35 @@ type ribbonRef struct {
 	mid Point2
 }
 
-// emitLayerFaceCap emits the cap geometry for one slab face of one
-// layer. The exposed region is the layer's footprint minus the
-// neighbor's footprint (full footprint when neighbor == nil). The
-// cap is subdivided by per-section tile rectangles so each
-// section paints its own quad and the dither pattern remains
-// tile-aligned; tiles straddling the loop or neighbor boundary
-// are Clipper-intersected to clip them exactly. Any uncovered
-// residue (e.g. tiny slivers along the loop boundary where a
-// tile-center test had dropped the tile) is emitted with
-// `fallback` and faceSection = -1 to keep the cap watertight.
-// emitLayerFaceCapUnified emits the cap geometry for one slab face
-// of one layer as a single watertight surface. The exposed region
-// (this layer's footprint minus the neighbor's footprint, or the
-// full footprint when neighbor == nil) is triangulated once with
-// Earcut, then each triangle's centroid picks a color:
+// emitClippedCapTilesChunk emits the cap geometry for one slab
+// face of one layer into a meshChunk. The exposed region is this
+// layer's footprint minus the neighbor's footprint (full footprint
+// when neighbor == nil); we subdivide it tile-by-tile so the
+// dither pattern stays at tile resolution rather than blurring
+// across earcut's giant triangles.
 //
-//   - if the centroid falls inside a cap-tile section's rectangle,
-//     use that section's dithered color.
-//   - otherwise pick the orientation-preferred nearest ribbon
-//     section in (layer, loop)'s ribbons, mirroring the legacy
-//     earcut-cap colorer.
+// For each cap-tile section:
+//   - if all four corners of the tile rectangle pass the inside-
+//     layer / outside-neighbor test, emit the rectangle as a quad
+//     directly (no Clipper call needed — the rect is already fully
+//     inside the exposed region).
+//   - otherwise Clipper-intersect the rect with the exposed region
+//     and earcut the result.
 //
-// This gives a watertight single-surface cap with tile-precision
-// color where the dither grid covers, and slope-derived colors on
-// thin step caps where no tile center landed. capDir is +1 for
-// top caps, -1 for bottom caps; passed through to ribbon picking
-// so cap and source-triangle orientation match.
-func emitLayerFaceCapUnified(
-	m *loader.LoadedModel,
-	faceAssign *[]int32,
-	faceSection *[]int32,
+// After all tile pieces, any leftover sliver of the exposed region
+// (the staircase-to-loop gap where partition didn't drop a tile
+// center) is subtracted and triangulated with a loop-scoped
+// ribbon-derived fallback color, so thin slope-cap rings blend in
+// with the surrounding step caps instead of flashing a stark
+// most-common color. capDir is +1 for top caps, -1 for bottom
+// caps; it routes to the orientation-matched ribbon picker.
+func emitClippedCapTilesChunk(
+	ch *meshChunk,
 	layer *Layer,
 	layerLoops [][]Point2,
 	neighborLoops [][]Point2,
 	z float32,
 	isTop bool,
-	tiles *layerTileIdx,
 	tileIDs []int32,
 	capDir float32,
 	sections []Section,
@@ -286,46 +334,114 @@ func emitLayerFaceCapUnified(
 		return fn(p)
 	}
 
-	// Emit per cap-tile section: clip its rectangle to the exposed
-	// region, earcut the clipped piece, paint with the section's
-	// dithered color. This gives the cap surface a tile-aligned
-	// color grid that matches the dither pattern, instead of a
-	// unified earcut blurring many tiles into one big triangle.
+	// Emit per cap-tile section: rect ∩ exposed → emit. Fully-
+	// exposed tiles (all 4 corners pass the inside-layer /
+	// outside-neighbor test) skip Clipper entirely and emit as
+	// quads — that's the common case for interior tiles in a flat
+	// top/bottom cap, where Clipper-clipping every one of
+	// thousands of tiles otherwise dominates the Clip stage's
+	// runtime. Bbox pre-check on each polygon membership test
+	// makes the corner classification near-free for tiles well
+	// inside or outside loop boundaries.
+	type bbox struct{ minX, minY, maxX, maxY float32 }
+	pointsBBox := func(pts []Point2) bbox {
+		if len(pts) == 0 {
+			return bbox{}
+		}
+		b := bbox{pts[0][0], pts[0][1], pts[0][0], pts[0][1]}
+		for _, p := range pts[1:] {
+			if p[0] < b.minX {
+				b.minX = p[0]
+			}
+			if p[0] > b.maxX {
+				b.maxX = p[0]
+			}
+			if p[1] < b.minY {
+				b.minY = p[1]
+			}
+			if p[1] > b.maxY {
+				b.maxY = p[1]
+			}
+		}
+		return b
+	}
+	layerLoopPts := make([][]Point2, 0, len(layer.Loops))
+	layerLoopBB := make([]bbox, 0, len(layer.Loops))
+	for i := range layer.Loops {
+		if len(layer.Loops[i].Points) < 3 {
+			continue
+		}
+		layerLoopPts = append(layerLoopPts, layer.Loops[i].Points)
+		layerLoopBB = append(layerLoopBB, pointsBBox(layer.Loops[i].Points))
+	}
+	neighborBB := make([]bbox, 0, len(neighborLoops))
+	for _, pts := range neighborLoops {
+		if len(pts) < 3 {
+			continue
+		}
+		neighborBB = append(neighborBB, pointsBBox(pts))
+	}
+	insideEvenOdd := func(loops [][]Point2, bbs []bbox, x, y float32) bool {
+		count := 0
+		for i, pts := range loops {
+			b := bbs[i]
+			if x < b.minX || x > b.maxX || y < b.minY || y > b.maxY {
+				continue
+			}
+			if pointInPolygon(pts, x, y) {
+				count++
+			}
+		}
+		return (count & 1) == 1
+	}
 	allRects := make(clipper.Paths, 0, len(tileIDs))
+	cornerExposed := func(x, y float32) bool {
+		if !insideEvenOdd(layerLoopPts, layerLoopBB, x, y) {
+			return false
+		}
+		if len(neighborLoops) == 0 {
+			return true
+		}
+		return !insideEvenOdd(neighborLoops, neighborBB, x, y)
+	}
 	for _, sid := range tileIDs {
 		s := sections[sid]
 		col := assignments[sid]
 		if col < 0 {
 			col = fallback
 		}
-		rect := clipper.Paths{rectClipperPath(s.CapBoundsXY)}
+		b := s.CapBoundsXY
+		allRects = append(allRects, rectClipperPath(b))
+		if cornerExposed(b[0], b[1]) && cornerExposed(b[2], b[1]) &&
+			cornerExposed(b[2], b[3]) && cornerExposed(b[0], b[3]) {
+			// Fast path: tile is entirely inside the exposed
+			// region. Emit as a single quad, no Clipper call.
+			emitCapQuadChunk(ch, b, z, isTop, sid, col)
+			continue
+		}
+		// Boundary tile: clip against the exposed region.
+		rect := clipper.Paths{rectClipperPath(b)}
 		piece := clipperOp(rect, exposed, clipper.CtIntersection)
-		allRects = append(allRects, rect[0])
 		if len(piece) == 0 {
 			continue
 		}
 		for _, r := range clipperPathsToRegions(piece) {
-			emitCapTriangulation(m, faceAssign, faceSection, r, z, isTop, sid, col)
+			emitCapTriangulationChunk(ch, r, z, isTop, sid, col)
 		}
 	}
 
 	// Leftover: parts of the exposed region not covered by any
-	// tile rectangle. Union all tile rects then subtract from
-	// exposed in one pass; emit each leftover piece with the
-	// loop-scoped ribbon-fallback color so thin slope-cap rings
-	// blend into the surrounding step caps' color rather than
-	// flashing a stark fallback.
+	// tile rectangle (a thin annulus where partition's 5-point
+	// exposure test dropped every sample inside a sub-cellSize
+	// step). Pass all rects directly as the clip with NonZero
+	// fill so adjacent shared edges don't cancel under even-odd —
+	// one Clipper call instead of an explicit union + difference.
 	var leftover clipper.Paths
 	if len(allRects) > 0 {
-		c := clipper.NewClipper(clipper.IoPreserveCollinear)
-		c.AddPaths(allRects, clipper.PtSubject, true)
-		unioned, ok := c.Execute1(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
-		if ok && len(unioned) > 0 {
-			d := clipper.NewClipper(clipper.IoPreserveCollinear)
-			d.AddPaths(exposed, clipper.PtSubject, true)
-			d.AddPaths(unioned, clipper.PtClip, true)
-			leftover, _ = d.Execute1(clipper.CtDifference, clipper.PftEvenOdd, clipper.PftNonZero)
-		}
+		d := clipper.NewClipper(clipper.IoPreserveCollinear)
+		d.AddPaths(exposed, clipper.PtSubject, true)
+		d.AddPaths(allRects, clipper.PtClip, true)
+		leftover, _ = d.Execute1(clipper.CtDifference, clipper.PftEvenOdd, clipper.PftNonZero)
 	} else {
 		leftover = exposed
 	}
@@ -339,9 +455,9 @@ func emitLayerFaceCapUnified(
 		if len(tris) == 0 {
 			continue
 		}
-		baseV := uint32(len(m.Vertices))
+		baseV := uint32(len(ch.verts))
 		for _, p := range verts {
-			m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
+			ch.verts = append(ch.verts, [3]float32{p[0], p[1], z})
 		}
 		for _, tr := range tris {
 			a := verts[tr[0]]
@@ -351,12 +467,108 @@ func emitLayerFaceCapUnified(
 			cy := (a[1] + b[1] + c[1]) / 3
 			sid, col := getRibbonColorAt(Point2{cx, cy})
 			if isTop {
-				m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
+				ch.addFace(baseV+tr[0], baseV+tr[1], baseV+tr[2], col, sid)
 			} else {
-				m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[2], baseV + tr[1]})
+				ch.addFace(baseV+tr[0], baseV+tr[2], baseV+tr[1], col, sid)
 			}
-			*faceAssign = append(*faceAssign, col)
-			*faceSection = append(*faceSection, sid)
+		}
+	}
+}
+
+// emitCapQuadChunk emits a rectangle as 2 triangles into a
+// meshChunk. Fast path for fully-exposed cap tiles.
+func emitCapQuadChunk(
+	ch *meshChunk,
+	bounds [4]float32,
+	z float32,
+	isTop bool,
+	sid, col int32,
+) {
+	x0, y0, x1, y1 := bounds[0], bounds[1], bounds[2], bounds[3]
+	a := ch.addVert(x0, y0, z)
+	b := ch.addVert(x1, y0, z)
+	c := ch.addVert(x1, y1, z)
+	d := ch.addVert(x0, y1, z)
+	if isTop {
+		ch.addFace(a, b, c, col, sid)
+		ch.addFace(a, c, d, col, sid)
+	} else {
+		ch.addFace(a, c, b, col, sid)
+		ch.addFace(a, d, c, col, sid)
+	}
+}
+
+// emitCapTriangulationChunk earcuts one polygon-with-holes cap
+// region into a meshChunk at the given Z.
+func emitCapTriangulationChunk(
+	ch *meshChunk,
+	region CapRegion,
+	z float32,
+	isTop bool,
+	sid, col int32,
+) {
+	verts, tris := Earcut(region.Outer, region.Holes)
+	if len(tris) == 0 {
+		return
+	}
+	baseV := uint32(len(ch.verts))
+	for _, p := range verts {
+		ch.verts = append(ch.verts, [3]float32{p[0], p[1], z})
+	}
+	for _, tr := range tris {
+		if isTop {
+			ch.addFace(baseV+tr[0], baseV+tr[1], baseV+tr[2], col, sid)
+		} else {
+			ch.addFace(baseV+tr[0], baseV+tr[2], baseV+tr[1], col, sid)
+		}
+	}
+}
+
+// emitLoopWallChunk emits the wall tube for one loop into a chunk.
+// Outer loops want CCW (interior = material; wall normal outward);
+// hole loops want CW (interior = cavity; normal into cavity).
+func emitLoopWallChunk(
+	ch *meshChunk,
+	loop *Loop,
+	sectionIDs []int,
+	sections []Section,
+	assignments []int32,
+	zBot, zTop float32,
+	isHole bool,
+) {
+	if len(loop.Points) < 3 {
+		return
+	}
+	ccw := loop.SignedArea > 0
+	wantCCW := !isHole
+	flipWinding := ccw != wantCCW
+
+	wallPts, wallColors, wallSections := buildLoopWallSeq(loop, sectionIDs, sections, assignments)
+	if len(wallPts) < 3 {
+		return
+	}
+
+	w := len(wallPts)
+	baseV := uint32(len(ch.verts))
+	for _, p := range wallPts {
+		ch.verts = append(ch.verts,
+			[3]float32{p[0], p[1], zBot},
+			[3]float32{p[0], p[1], zTop})
+	}
+	for i := 0; i < w; i++ {
+		j := (i + 1) % w
+		i0 := baseV + uint32(2*i)
+		i1 := baseV + uint32(2*i+1)
+		j0 := baseV + uint32(2*j)
+		j1 := baseV + uint32(2*j+1)
+		col := wallColors[i]
+		sec := wallSections[i]
+		if flipWinding {
+			ch.addFace(i0, j1, j0, col, sec)
+			ch.addFace(i0, i1, j1, col, sec)
+		} else {
+			ch.addFace(i0, j0, j1, col, sec)
+			ch.addFace(i0, j1, i1, col, sec)
 		}
 	}
 }
@@ -408,264 +620,6 @@ func makeRibbonColorPicker(
 	}
 }
 
-// layerTileIdx maps (col, row) → cap-tile section index for one
-// layer of one kind. Looking up a point: convert (x, y) to (col,
-// row) using the tile's grid origin (derived from any one tile's
-// CapBoundsXY) and look up the section. Returns -1 if the point
-// is outside the indexed cells or no section covers it.
-type layerTileIdx struct {
-	originX, originY float32
-	cellW            float32
-	hasOrigin        bool
-	cells            map[[2]int]int32 // (col, row) → section id
-}
-
-// buildLayerTileIdx groups cap-tile sections of one kind by their
-// layer and builds a per-layer (col, row)→section map. The map's
-// grid origin is fixed at the first tile encountered for that
-// layer; subsequent tiles (which should share an origin since they
-// were emitted from the same partition pass) snap to it.
-func buildLayerTileIdx(sections []Section, kind SectionKind) map[int]*layerTileIdx {
-	out := make(map[int]*layerTileIdx)
-	for i, s := range sections {
-		if s.Kind != kind {
-			continue
-		}
-		idx := out[s.LayerIdx]
-		if idx == nil {
-			cellW := s.CapBoundsXY[2] - s.CapBoundsXY[0]
-			if cellW <= 0 {
-				cellW = 1
-			}
-			idx = &layerTileIdx{
-				originX:   s.CapBoundsXY[0] - float32(s.TileCol)*cellW,
-				originY:   s.CapBoundsXY[1] - float32(s.TileRow)*cellW,
-				cellW:     cellW,
-				hasOrigin: true,
-				cells:     map[[2]int]int32{},
-			}
-			out[s.LayerIdx] = idx
-		}
-		idx.cells[[2]int{s.TileCol, s.TileRow}] = int32(i)
-	}
-	return out
-}
-
-// lookup returns (sid, col) for the cap-tile section whose
-// rectangle contains (x, y), or (-1, fallback-not-used) if none
-// does. col is the section's dithered palette index, with -1
-// substituted by the section's assignment-or-fallback policy
-// — but here we only return col when sid >= 0, so the caller
-// applies its own fallback.
-func (g *layerTileIdx) lookup(x, y float32, sections []Section, assignments []int32) (int32, int32) {
-	if g == nil || !g.hasOrigin {
-		return -1, 0
-	}
-	c := int((x - g.originX) / g.cellW)
-	r := int((y - g.originY) / g.cellW)
-	if sid, ok := g.cells[[2]int{c, r}]; ok {
-		col := assignments[sid]
-		return sid, col
-	}
-	return -1, 0
-}
-
-// centroidOf returns the mean-of-vertices centroid approximation
-// of `points` (a representative interior point). Sufficient for
-// color lookup on a small fallback region.
-func centroidOf(points []Point2) Point2 {
-	if len(points) == 0 {
-		return Point2{}
-	}
-	var sx, sy float32
-	for _, p := range points {
-		sx += p[0]
-		sy += p[1]
-	}
-	return Point2{sx / float32(len(points)), sy / float32(len(points))}
-}
-
-// globalCapIdx is a coarse XY spatial bucket of cap-tile section
-// midpoints across all layers, restricted to one Kind. Used to
-// pick a color for fallback cap regions in layers where no tile
-// section landed inside (e.g. a sub-cellSize annulus on a steep
-// slope) — the nearest cap section's color produces a coherent
-// roof-like patch rather than the model's overall fallback color.
-type globalCapIdx struct {
-	ids     []int32
-	cellSz  float32
-	minX    float32
-	minY    float32
-	cols    int
-	rows    int
-	buckets [][]int32 // section indices per (col, row)
-}
-
-// buildGlobalCapIdx builds the index for a single Kind. Bucket
-// size is the cap-tile cellSize derived from any section's
-// CapBoundsXY.
-func buildGlobalCapIdx(sections []Section, kind SectionKind) *globalCapIdx {
-	var ids []int32
-	for i, s := range sections {
-		if s.Kind == kind {
-			ids = append(ids, int32(i))
-		}
-	}
-	if len(ids) == 0 {
-		return &globalCapIdx{}
-	}
-	first := sections[ids[0]]
-	cell := first.CapBoundsXY[2] - first.CapBoundsXY[0]
-	if cell <= 0 {
-		cell = 1
-	}
-	minX := float32(math.MaxFloat32)
-	minY := float32(math.MaxFloat32)
-	maxX := float32(-math.MaxFloat32)
-	maxY := float32(-math.MaxFloat32)
-	for _, id := range ids {
-		m := sections[id].Mid
-		if m[0] < minX {
-			minX = m[0]
-		}
-		if m[1] < minY {
-			minY = m[1]
-		}
-		if m[0] > maxX {
-			maxX = m[0]
-		}
-		if m[1] > maxY {
-			maxY = m[1]
-		}
-	}
-	cols := int((maxX-minX)/cell) + 1
-	rows := int((maxY-minY)/cell) + 1
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	buckets := make([][]int32, cols*rows)
-	for _, id := range ids {
-		m := sections[id].Mid
-		c := int((m[0] - minX) / cell)
-		r := int((m[1] - minY) / cell)
-		if c < 0 {
-			c = 0
-		}
-		if c >= cols {
-			c = cols - 1
-		}
-		if r < 0 {
-			r = 0
-		}
-		if r >= rows {
-			r = rows - 1
-		}
-		buckets[r*cols+c] = append(buckets[r*cols+c], id)
-	}
-	return &globalCapIdx{ids: ids, cellSz: cell, minX: minX, minY: minY, cols: cols, rows: rows, buckets: buckets}
-}
-
-// lookup returns (sid, col) for the nearest cap section to (x, y)
-// in XY distance, or (-1, fallback) if the index is empty. Expands
-// the bucket search radius until it finds a candidate, then linear-
-// scans nearby buckets for the actual nearest.
-func (g *globalCapIdx) lookup(p Point2, sections []Section, assignments []int32, fallback int32) (int32, int32) {
-	if g == nil || len(g.ids) == 0 {
-		return -1, fallback
-	}
-	x, y := p[0], p[1]
-	c := int((x - g.minX) / g.cellSz)
-	r := int((y - g.minY) / g.cellSz)
-	best := int32(-1)
-	bestSq := float32(math.MaxFloat32)
-	radius := 1
-	for {
-		for dr := -radius; dr <= radius; dr++ {
-			for dc := -radius; dc <= radius; dc++ {
-				cc, rr := c+dc, r+dr
-				if cc < 0 || cc >= g.cols || rr < 0 || rr >= g.rows {
-					continue
-				}
-				for _, id := range g.buckets[rr*g.cols+cc] {
-					m := sections[id].Mid
-					dx := m[0] - x
-					dy := m[1] - y
-					d := dx*dx + dy*dy
-					if d < bestSq {
-						bestSq = d
-						best = id
-					}
-				}
-			}
-		}
-		if best >= 0 || radius > g.cols+g.rows {
-			break
-		}
-		radius++
-	}
-	if best < 0 {
-		return -1, fallback
-	}
-	col := assignments[best]
-	if col < 0 {
-		col = fallback
-	}
-	return best, col
-}
-
-// insideLoopsXY returns true when (x, y) is inside the solid region
-// of `loops` using even-odd nesting: containment by an odd number of
-// loops. Returns false when loops is empty (treating "no layer" as
-// all-air).
-func insideLoopsXY(loops []Loop, x, y float32) bool {
-	count := 0
-	for i := range loops {
-		if len(loops[i].Points) < 3 {
-			continue
-		}
-		if pointInPolygon(loops[i].Points, x, y) {
-			count++
-		}
-	}
-	return (count & 1) == 1
-}
-
-// emitCapQuad emits a single axis-aligned rectangle as 2 triangles
-// at the given Z, with winding chosen for the face direction. This
-// is the fast path for fully-exposed cap tiles — no Clipper or
-// earcut needed.
-func emitCapQuad(
-	m *loader.LoadedModel,
-	faceAssign *[]int32,
-	faceSection *[]int32,
-	bounds [4]float32,
-	z float32,
-	isTop bool,
-	sid, col int32,
-) {
-	x0, y0, x1, y1 := bounds[0], bounds[1], bounds[2], bounds[3]
-	baseV := uint32(len(m.Vertices))
-	m.Vertices = append(m.Vertices,
-		[3]float32{x0, y0, z},
-		[3]float32{x1, y0, z},
-		[3]float32{x1, y1, z},
-		[3]float32{x0, y1, z})
-	if isTop {
-		m.Faces = append(m.Faces,
-			[3]uint32{baseV, baseV + 1, baseV + 2},
-			[3]uint32{baseV, baseV + 2, baseV + 3})
-	} else {
-		m.Faces = append(m.Faces,
-			[3]uint32{baseV, baseV + 2, baseV + 1},
-			[3]uint32{baseV, baseV + 3, baseV + 2})
-	}
-	*faceAssign = append(*faceAssign, col, col)
-	*faceSection = append(*faceSection, sid, sid)
-}
-
 // mostCommonNonNegSafe returns the most frequent non-negative
 // palette index in a, or 0 if there are no non-negative entries.
 func mostCommonNonNegSafe(a []int32) int32 {
@@ -684,41 +638,6 @@ func mostCommonNonNegSafe(a []int32) int32 {
 		}
 	}
 	return best
-}
-
-// emitCapTriangulation triangulates one polygon-with-holes region
-// of a cap surface at the given Z and appends the triangles to m.
-// isTop selects the winding so the normal faces +Z (top cap) or -Z
-// (bottom cap). All emitted triangles share (sid, col); a section
-// id of -1 marks a leftover-sliver region the caller has no
-// section for.
-func emitCapTriangulation(
-	m *loader.LoadedModel,
-	faceAssign *[]int32,
-	faceSection *[]int32,
-	region CapRegion,
-	z float32,
-	isTop bool,
-	sid int32,
-	col int32,
-) {
-	verts, tris := Earcut(region.Outer, region.Holes)
-	if len(tris) == 0 {
-		return
-	}
-	baseV := uint32(len(m.Vertices))
-	for _, p := range verts {
-		m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], z})
-	}
-	for _, tr := range tris {
-		if isTop {
-			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[1], baseV + tr[2]})
-		} else {
-			m.Faces = append(m.Faces, [3]uint32{baseV + tr[0], baseV + tr[2], baseV + tr[1]})
-		}
-		*faceAssign = append(*faceAssign, col)
-		*faceSection = append(*faceSection, sid)
-	}
 }
 
 // snapToClipperGrid rounds a Point2 to the same int-coordinate
@@ -776,75 +695,6 @@ func buildLoopWallSeq(
 		}
 	}
 	return pts, cols, secs
-}
-
-// emitLoopWall appends only the wall geometry for one loop — no
-// caps. faceAssign receives one palette index per triangle (each
-// quad contributes two).
-//
-// Outer loops want CCW orientation (interior = print material; wall
-// normal faces outward). Hole loops want CW orientation (interior =
-// cavity; wall normal faces into the cavity). The polygon is
-// re-oriented as needed before walking.
-func emitLoopWall(
-	m *loader.LoadedModel,
-	faceAssign *[]int32,
-	faceSection *[]int32,
-	loop *Loop,
-	sectionIDs []int,
-	sections []Section,
-	assignments []int32,
-	zBot, zTop float32,
-	isHole bool,
-) {
-	if len(loop.Points) < 3 {
-		return
-	}
-	// Sections' StartArc / EndArc live in the loop's *original* arc
-	// frame (the order it was chained + partitioned in). Walls must
-	// be assembled in that same frame so per-section arc lookups
-	// stay valid: a section's color is sampled at its loop-arc
-	// midpoint, and we want that color painted on the wall span
-	// covering the same arc range. If we reversed pts for winding
-	// here, a section at arc 0..2 in the original frame would end
-	// up painted across the OPPOSITE arc on the wall, mirroring
-	// the texture around the loop. For symmetric shapes (a sliced
-	// sphere, say) this looks like an X-axis flip in the rendered
-	// output. Instead we walk pts in original order and flip the
-	// triangle winding below to control outward/inward normals.
-	ccw := loop.SignedArea > 0
-	wantCCW := !isHole
-	flipWinding := ccw != wantCCW
-
-	wallPts, wallColors, wallSections := buildLoopWallSeq(loop, sectionIDs, sections, assignments)
-	if len(wallPts) < 3 {
-		return
-	}
-
-	w := len(wallPts)
-	baseV := uint32(len(m.Vertices))
-	for _, p := range wallPts {
-		m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], zBot})
-		m.Vertices = append(m.Vertices, [3]float32{p[0], p[1], zTop})
-	}
-	for i := 0; i < w; i++ {
-		j := (i + 1) % w
-		i0 := baseV + uint32(2*i)
-		i1 := baseV + uint32(2*i+1)
-		j0 := baseV + uint32(2*j)
-		j1 := baseV + uint32(2*j+1)
-		if flipWinding {
-			m.Faces = append(m.Faces, [3]uint32{i0, j1, j0})
-			m.Faces = append(m.Faces, [3]uint32{i0, i1, j1})
-		} else {
-			m.Faces = append(m.Faces, [3]uint32{i0, j0, j1})
-			m.Faces = append(m.Faces, [3]uint32{i0, j1, i1})
-		}
-		col := wallColors[i]
-		sec := wallSections[i]
-		*faceAssign = append(*faceAssign, col, col)
-		*faceSection = append(*faceSection, sec, sec)
-	}
 }
 
 // SafeAssignments substitutes -1 entries (interior faces) with a
