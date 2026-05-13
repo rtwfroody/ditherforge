@@ -385,6 +385,13 @@ func earcutLinked(ear *ecNode, tris *[][3]uint32) {
 	if ear == ear.next || ear == ear.next.next {
 		return
 	}
+	// cureLocalIntersections can return cured=true without actually
+	// shrinking the ring (its splitPolygon target sometimes doesn't
+	// remove the "no ear found" obstruction), and the outer loop
+	// would retry the same configuration forever. Bound the
+	// cure-and-retry attempts so degenerate input always reaches
+	// the fan fallback.
+	cureAttempts := 0
 	stop := ear
 	for ear.prev != ear.next {
 		prev := ear.prev
@@ -394,19 +401,18 @@ func earcutLinked(ear *ecNode, tris *[][3]uint32) {
 			ecRemove(ear)
 			ear = next.next
 			stop = next.next
+			cureAttempts = 0
 			continue
 		}
 		ear = next
 		if ear == stop {
-			// No ear found in a full pass: degenerate input.
-			// Attempt a recovery by splitting at any pair of
-			// non-adjacent vertices that pass the locallyInside test.
-			if cured := cureLocalIntersections(ear, tris); cured {
-				// Restart pass.
-				stop = ear
-				continue
+			if cureAttempts < 4 {
+				if cured := cureLocalIntersections(ear, tris); cured {
+					cureAttempts++
+					stop = ear
+					continue
+				}
 			}
-			// Final fallback: emit a fan from the first vertex.
 			emitFanFallback(ear, tris)
 			return
 		}

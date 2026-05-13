@@ -206,6 +206,66 @@ func clipperPathToPoints(p clipper.Path) []Point2 {
 	return out
 }
 
+// capRegionFromInt64Paths converts Clipper2 RectClip output
+// (paths in int64 coords on the Clipper grid) into a CapRegion
+// ready for Earcut. The first non-empty path with positive signed
+// area becomes the outer; subsequent paths become holes. Drops
+// degenerate (<3 vertex) paths and zero-area outputs.
+func capRegionFromInt64Paths(paths [][][2]int64) CapRegion {
+	const inv = 1.0 / clipperScale
+	var region CapRegion
+	for _, p := range paths {
+		if len(p) < 3 {
+			continue
+		}
+		pts := make([]Point2, len(p))
+		for i, xy := range p {
+			pts[i] = Point2{float32(float64(xy[0]) * inv), float32(float64(xy[1]) * inv)}
+		}
+		pts = compactPathDupes(pts)
+		if len(pts) < 3 {
+			continue
+		}
+		area := polygonSignedArea(pts)
+		if region.Outer == nil && area > 0 {
+			region.Outer = pts
+		} else if region.Outer != nil {
+			region.Holes = append(region.Holes, pts)
+		} else {
+			// First path is CW (hole-like) — Clipper2 may emit
+			// outer first regardless of winding. Take it as
+			// outer and reverse for CCW.
+			for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
+				pts[i], pts[j] = pts[j], pts[i]
+			}
+			region.Outer = pts
+		}
+	}
+	return region
+}
+
+// compactPathDupes drops consecutive duplicate vertices from the
+// path. RectClip64 output can include a vertex that coincides
+// with its neighbour when an input edge runs exactly along a rect
+// edge.
+func compactPathDupes(pts []Point2) []Point2 {
+	if len(pts) < 2 {
+		return pts
+	}
+	w := 1
+	for i := 1; i < len(pts); i++ {
+		if pts[i] == pts[w-1] {
+			continue
+		}
+		pts[w] = pts[i]
+		w++
+	}
+	if w > 1 && pts[0] == pts[w-1] {
+		w--
+	}
+	return pts[:w]
+}
+
 // exposedCapRegions returns the polygon-with-holes pieces of the
 // layer's slab face that are NOT covered by the neighbor. The
 // caller supplies subdivided loop point-sets for both the layer

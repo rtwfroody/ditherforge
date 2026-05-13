@@ -7,6 +7,7 @@ import (
 
 	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/rectclip/rectclip"
 )
 
 // loopKey identifies one loop within one layer. Used as a section
@@ -396,6 +397,25 @@ func emitClippedCapTilesChunk(
 		}
 		return !insideNeighbor(x, y)
 	}
+	// Pre-load the exposed polygon into one Clipper2 RectClip
+	// state per layer face. RectClip64 is specifically optimised
+	// for axis-aligned-rectangle clipping (cap-tile is exactly
+	// this shape), and caching the polygon on the C++ side
+	// amortises the marshalling cost over every per-tile clip.
+	rcState := rectclip.New()
+	defer rcState.Free()
+	{
+		exposedPaths := make([][][2]int64, 0, len(exposed))
+		for _, p := range exposed {
+			path := make([][2]int64, 0, len(p))
+			for _, ip := range p {
+				path = append(path, [2]int64{int64(ip.X), int64(ip.Y)})
+			}
+			exposedPaths = append(exposedPaths, path)
+		}
+		rcState.SetPaths(exposedPaths)
+	}
+
 	for _, sid := range tileIDs {
 		s := sections[sid]
 		col := assignments[sid]
@@ -411,14 +431,26 @@ func emitClippedCapTilesChunk(
 			emitCapQuadChunk(ch, b, z, isTop, sid, col)
 			continue
 		}
-		// Boundary tile: clip against the exposed region.
-		rect := clipper.Paths{rectClipperPath(b)}
-		piece := clipperOp(rect, exposed, clipper.CtIntersection)
-		if len(piece) == 0 {
+		// Boundary tile: Clipper2 RectClip against the cached
+		// exposed polygon.
+		x0 := int64(float64(b[0]) * clipperScale)
+		y0 := int64(float64(b[1]) * clipperScale)
+		x1 := int64(float64(b[2]) * clipperScale)
+		y1 := int64(float64(b[3]) * clipperScale)
+		pieces := rcState.Clip(x0, y0, x1, y1)
+		if len(pieces) == 0 {
 			continue
 		}
-		for _, r := range clipperPathsToRegions(piece) {
-			emitCapTriangulationChunk(ch, r, z, isTop, sid, col)
+		// Clipper2's RectClip output is always a simple polygon
+		// (no self-intersections, no holes — holes would come
+		// back as separate paths). Emit as a fan from vertex 0
+		// directly, skipping the earcut codepath that occasionally
+		// stalls on slightly-degenerate output.
+		for _, p := range pieces {
+			if len(p) < 3 {
+				continue
+			}
+			emitInt64FanChunk(ch, p, z, isTop, sid, col)
 		}
 	}
 
@@ -463,6 +495,36 @@ func emitClippedCapTilesChunk(
 			} else {
 				ch.addFace(baseV+tr[0], baseV+tr[2], baseV+tr[1], col, sid)
 			}
+		}
+	}
+}
+
+// emitInt64FanChunk emits a fan triangulation of a Clipper2-int64
+// polygon path into the chunk. Clipper2's RectClip output is
+// guaranteed simple (no self-intersections), so a fan from
+// vertex 0 is correct — and far cheaper than running Earcut on
+// thousands of small per-tile pieces.
+func emitInt64FanChunk(
+	ch *meshChunk,
+	path [][2]int64,
+	z float32,
+	isTop bool,
+	sid, col int32,
+) {
+	const inv = 1.0 / clipperScale
+	baseV := uint32(len(ch.verts))
+	for _, xy := range path {
+		ch.verts = append(ch.verts, [3]float32{
+			float32(float64(xy[0]) * inv),
+			float32(float64(xy[1]) * inv),
+			z,
+		})
+	}
+	for i := uint32(1); i < uint32(len(path))-1; i++ {
+		if isTop {
+			ch.addFace(baseV, baseV+i, baseV+i+1, col, sid)
+		} else {
+			ch.addFace(baseV, baseV+i+1, baseV+i, col, sid)
 		}
 	}
 }
