@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
+	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
@@ -546,18 +546,18 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 	return so, nil
 }
 
-// Voxelize is a holdover stage name for the minislicer's
-// slice + partition + sample + adjacency phase. It produces the
-// per-section ActiveCells consumed by ColorAdjust / ColorWarp /
-// Palette / Dither, plus the section/layer/neighbor graph used by
-// Mesh3D and Dither directly.
+// Voxelize partitions the geometry mesh into cellslicer slabs and
+// cells, then samples a color per cell from the texture-bearing
+// color mesh. Output cells feed ColorAdjust / ColorWarp / Palette /
+// Dither. The cell-adjacency graph (vo.Neighbors) is left empty in
+// Phase 2 — Phase 3 will derive it from the rasterized cell map.
 func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 	return runStage(r, StageVoxelize, &r.voxelize, func() (*voxelizeOutput, error) {
 		lo, err := r.Load()
 		if err != nil {
 			return nil, err
 		}
-		// Sticker / Split are stubbed during the minislicer
+		// Sticker / Split are stubbed during the cellslicer
 		// transition; resolve them so their stubs cache, but
 		// ignore the (empty) outputs.
 		if _, err := r.Sticker(); err != nil {
@@ -585,147 +585,53 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		geomModel := lo.Model
 		colorModel := lo.ColorModel
 
-		zMin, zMax := modelZRange(geomModel)
-		if zMax <= zMin {
-			return nil, fmt.Errorf("slice: model has zero Z extent")
+		tSlice := time.Now()
+		slabs := cellslicer.PartitionModel(geomModel, layerH, cellSize)
+		if len(slabs) == 0 {
+			return nil, fmt.Errorf("cellslicer: no slabs produced")
 		}
-		planes := minislicer.PlanesForRange(zMin, zMax, layerH)
-		layers := minislicer.SliceMesh(geomModel, planes)
-
-		// Simplify slice contours before partition + earcut. The
-		// raw slicer output has one vertex per crossing triangle
-		// (500+ on a 100mm Benchy hull); without simplification,
-		// earcut's O(n²) ear search dominates the Clip stage and
-		// can run for minutes. A tolerance well below cellSize
-		// preserves visible features but cuts vertex counts to
-		// tens.
-		//
-		// opts.NoSimplify skips this — the existing checkbox
-		// previously only gated Load-stage alpha-wrap decimation
-		// (which doesn't apply to most pipelines). Useful as a
-		// diagnostic: if a sampling artifact disappears with
-		// NoSimplify on, DP is bridging across material boundaries
-		// and dragging section midpoints onto the wrong surface.
-		if !r.opts.NoSimplify {
-			minislicer.SimplifyAndReclassify(layers, cellSize*0.25)
-		}
-
-		sections := minislicer.PartitionLoops(layers, cellSize)
-		if len(sections) == 0 {
-			return nil, fmt.Errorf("slice: no sections produced")
-		}
-
-		// Cap sections: tile every layer's top and bottom face
-		// wherever it's exposed (solid in this layer, air in the
-		// neighbor on that side). For the topmost/bottommost layer
-		// of the model the neighbor on the exposed side is nil
-		// (treated as all-air, so every tile inside the layer is
-		// exposed). LoopIdxBase keeps cap LoopIdx out of the
-		// ribbon namespace and out of the other-cap-kind's range.
-		for li := range layers {
-			if len(layers[li].Loops) == 0 {
-				continue
-			}
-			var above, below *minislicer.Layer
-			for k := li + 1; k < len(layers); k++ {
-				if len(layers[k].Loops) > 0 {
-					above = &layers[k]
-					break
-				}
-			}
-			for k := li - 1; k >= 0; k-- {
-				if len(layers[k].Loops) > 0 {
-					below = &layers[k]
-					break
-				}
-			}
-			base := len(layers[li].Loops)
-			topCaps := minislicer.PartitionTopCap(layers[li], above, layerH, cellSize, base)
-			sections = append(sections, topCaps...)
-			botCaps := minislicer.PartitionBottomCap(layers[li], below, layerH, cellSize, base+1024)
-			sections = append(sections, botCaps...)
+		nCells := 0
+		for i := range slabs {
+			nCells += len(slabs[i].Cells)
 		}
 
 		si := voxel.NewSpatialIndex(colorModel, cellSize)
-		// Re-anchor each cap tile's source triangle to the model
-		// triangle whose XY projection actually contains the tile
-		// center (vs the loop-edge fallback set in partitionCap).
-		// Without this, multiple tiles falling in the same
-		// loop-edge's Voronoi cell collapse onto one source
-		// triangle and one UV sample, producing wide flat patches
-		// in the rendered output for low-poly inputs.
-		minislicer.RefineCapSrcTriangles(colorModel, sections)
-		// Fill in each section's source-triangle normal Z so the
-		// mesh-builder can prefer ribbons facing the same direction
-		// as a cap when coloring earcut cap faces. This avoids the
-		// nearest-XY pick reaching across a vertical cut surface
-		// into salmon-colored interior triangles when a cap really
-		// sits over a (sloped) dome surface.
-		minislicer.PopulateSectionNormalZ(colorModel, sections)
-		colors, alpha := minislicer.SampleSectionColors(colorModel, si, layers, sections, cellSize, layerH)
+		samples := cellslicer.SampleCells(slabs, colorModel, si, cellSize, 0, nil, nil)
 
-		neighbors := minislicer.BuildSectionGraph(sections, layers, cellSize)
-
-		// Build ActiveCells: one per visible section. Hidden
-		// (alpha=false) sections are dropped here so palette
-		// selection and dither operate only on visible color.
-		// Section identity is encoded into Layer/Row/Col so any
-		// CellKey lookup downstream stays well-defined; this
-		// pipeline doesn't currently rely on those values, but
-		// keeping them unique avoids accidental aliasing.
-		cells := make([]voxel.ActiveCell, 0, len(sections))
-		visibleNeighbors := make([][]voxel.Neighbor, 0, len(sections))
-		visibleToFull := make([]int, 0, len(sections))
-		fullToVisible := make([]int, len(sections))
-		for i := range fullToVisible {
-			fullToVisible[i] = -1
-		}
-		for i, s := range sections {
-			if !alpha[i] {
+		// Build ActiveCells: one per visible cell. Hidden
+		// (Alpha == false) cells are dropped so palette selection
+		// and dither operate only on visible color. Layer/Row/Col
+		// encode SlabIdx/LoopID/CellIdx-within-slab so CellKey
+		// lookups stay unique.
+		cells := make([]voxel.ActiveCell, 0, len(samples))
+		visibleToCell := make([]int, 0, len(samples))
+		for gi, s := range samples {
+			if !s.Alpha {
 				continue
 			}
-			fullToVisible[i] = len(cells)
-			visibleToFull = append(visibleToFull, i)
+			visibleToCell = append(visibleToCell, gi)
 			cells = append(cells, voxel.ActiveCell{
 				Grid:  0,
-				Col:   s.Index,
-				Row:   s.LoopIdx,
-				Layer: s.LayerIdx,
-				Cx:    s.Mid[0],
-				Cy:    s.Mid[1],
-				Cz:    s.Z,
-				Color: colors[i],
-				Area:  s.Length * layerH,
+				Col:   s.CellIdx,
+				Row:   0,
+				Layer: s.SlabIdx,
+				Cx:    s.Centroid[0],
+				Cy:    s.Centroid[1],
+				Cz:    s.Centroid[2],
+				Color: s.Color,
+				Area:  s.Area,
 			})
 		}
-		// Reindex neighbor table from full-section indices to
-		// visible-cell indices, dropping hidden sections.
-		for fi, ns := range neighbors {
-			vi := fullToVisible[fi]
-			if vi < 0 {
-				continue
-			}
-			var out []voxel.Neighbor
-			for _, n := range ns {
-				vj := fullToVisible[n.Idx]
-				if vj < 0 {
-					continue
-				}
-				out = append(out, voxel.Neighbor{Idx: vj, Weight: n.Weight})
-			}
-			visibleNeighbors = append(visibleNeighbors, out)
-		}
 
-		plog.Printf("  Sliced: %d layers, %d sections (%d visible), cellSize=%.3fmm layerH=%.3fmm",
-			len(layers), len(sections), len(cells), cellSize, layerH)
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), cellSize=%.3fmm layerH=%.3fmm in %.1fs",
+			len(slabs), nCells, len(cells), cellSize, layerH, time.Since(tSlice).Seconds())
 
 		return &voxelizeOutput{
 			Cells:         cells,
-			Layers:        layers,
-			Sections:      sections,
-			Neighbors:     visibleNeighbors,
-			VisibleToFull: visibleToFull,
-			SectionColors: colors,
+			CellSlabs:     slabs,
+			CellSamples:   samples,
+			Neighbors:     nil, // Phase 3: derive from rasterized cell map.
+			VisibleToCell: visibleToCell,
 			LayerH:        layerH,
 			CellSize:      cellSize,
 		}, nil
@@ -902,6 +808,20 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 		tDither := time.Now()
 		var assignments []int32
 		var derr error
+		// Phase 2 transition: cellslicer Voxelize doesn't yet
+		// populate the adjacency graph (Phase 3 will). Error-
+		// diffusion dithers degenerate to nearest-palette without
+		// neighbors, so short-circuit to AssignColors when the
+		// graph is empty, regardless of requested mode.
+		if len(vo.Neighbors) == 0 {
+			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
+			if derr != nil {
+				return nil, derr
+			}
+			plog.Printf("  Dithered (none; cell-adjacency graph empty, Phase 3 TODO) %d cells in %.1fs",
+				len(cells), time.Since(tDither).Seconds())
+			return &ditherOutput{Assignments: assignments}, nil
+		}
 		switch ditherMode {
 		case "dizzy-corrected":
 			neighbors := vo.Neighbors
@@ -986,15 +906,13 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 // ShellAssignments slice (downstream Merge is color-agnostic).
 func (r *pipelineRun) Clip() (*clipOutput, error) {
 	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
-		do, err := r.Dither()
-		if err != nil {
+		if _, err := r.Dither(); err != nil {
 			return nil, err
 		}
-		vo, err := r.Voxelize()
-		if err != nil {
+		if _, err := r.Voxelize(); err != nil {
 			return nil, err
 		}
-		// Decimate + Split are stubbed during the minislicer
+		// Decimate + Split are stubbed during the cellslicer
 		// transition; keep the calls so their stubs cache.
 		if _, err := r.Decimate(); err != nil {
 			return nil, err
@@ -1002,36 +920,10 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if _, err := r.Split(); err != nil {
 			return nil, err
 		}
-
-		stage := progress.BeginStage(r.tracker, stageNames[StageClip], false, 0)
-		defer stage.Done()
-		tClip := time.Now()
-
-		// Map dither outputs (per visible cell) back to per-section
-		// assignments. Hidden sections (alpha<128) keep -1; the
-		// prism builder skips their wall coloring naturally because
-		// SafeAssignments will substitute the fallback.
-		sectionAssign := make([]int32, len(vo.Sections))
-		for i := range sectionAssign {
-			sectionAssign[i] = -1
-		}
-		for vi, fi := range vo.VisibleToFull {
-			sectionAssign[fi] = do.Assignments[vi]
-		}
-
-		mesh, faceAssign, faceSection := minislicer.BuildPrintableMeshFull(vo.Layers, vo.Sections, sectionAssign, vo.LayerH)
-		fallback := mostCommonNonNeg(faceAssign)
-		safe := minislicer.SafeAssignments(faceAssign, fallback)
-
-		plog.Printf("  Mesh3D: %d verts, %d faces in %.1fs",
-			len(mesh.Vertices), len(mesh.Faces), time.Since(tClip).Seconds())
-
-		return &clipOutput{
-			ShellVerts:       mesh.Vertices,
-			ShellFaces:       mesh.Faces,
-			ShellAssignments: safe,
-			ShellSectionIdx:  faceSection,
-		}, nil
+		// Phase 4 will replace this with CGAL Boolean prism × mesh
+		// intersection. Until then, downstream Merge / Export are
+		// unimplemented; ditherforge runs only through Dither.
+		return nil, fmt.Errorf("Clip stage: cellslicer prism intersection not yet implemented (Phase 4)")
 	})
 }
 

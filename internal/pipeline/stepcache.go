@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/cacheblob"
+	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/materialx"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
@@ -426,33 +426,33 @@ type loadOutput struct {
 }
 
 type voxelizeOutput struct {
-	// Cells holds one ActiveCell per Section, with the section's
-	// midpoint XYZ, sampled Color, and ribbon Area
-	// (Length×LayerHeight). Produced by the Slice stage from the
-	// per-layer contour partition; consumed by ColorAdjust /
-	// ColorWarp / Palette / Dither without their needing to know
-	// the underlying section topology.
+	// Cells holds one ActiveCell per visible cellslicer cell, with
+	// the cell's centroid XYZ, sampled Color, and XY area times
+	// LayerHeight. Produced by the Voxelize stage from the cellslicer
+	// partition; consumed by ColorAdjust / ColorWarp / Palette /
+	// Dither without their needing to know the cell topology.
 	Cells []voxel.ActiveCell
 
-	// Layers, Sections, and Neighbors carry the full minislicer
-	// graph so the Mesh3D (Clip) and Dither stages can rebuild
-	// per-layer prism geometry / run error diffusion across the
-	// section adjacency.
-	Layers    []minislicer.Layer
-	Sections  []minislicer.Section
+	// CellSlabs is the full slab/cell partition (visible AND hidden
+	// cells) needed by the Clip stage to extrude per-cell prisms.
+	CellSlabs []cellslicer.Slab
+	// CellSamples is one entry per cell across all slabs, parallel
+	// to flattening CellSlabs[*].Cells. Carries sampled colors,
+	// alpha, and slab index so Clip can color output fragments by
+	// dithered palette index even for hidden cells.
+	CellSamples []cellslicer.CellSample
+	// Neighbors is the cell adjacency graph used by Dither, indexed
+	// by visible-cell position (parallel to Cells). Empty in the
+	// Phase-2 transition until Phase 3 lands; dither modes that need
+	// neighbors degrade to "no error diffusion" until then.
 	Neighbors [][]voxel.Neighbor
-	// VisibleToFull[i] = index into Sections for the i-th visible
-	// ActiveCell. Hidden (alpha<128) sections are skipped during
-	// dither; this maps dither outputs (per visible cell) back to
-	// the full section list for Mesh3D extrusion.
-	VisibleToFull []int
-	// SectionColors[i] is the raw pre-dither sampled RGB for
-	// Sections[i] (whether visible or hidden). Carried so the
-	// ShowSampledColors debug mode can recolor output mesh faces by
-	// their originating section's sampled value.
-	SectionColors [][3]uint8
-	LayerH        float32
-	CellSize      float32
+	// VisibleToCell[v] = global cell index (into the flattened
+	// CellSamples list) for the v-th visible Cell. Used by Clip to
+	// look up the dithered palette index per cell.
+	VisibleToCell []int
+
+	LayerH   float32
+	CellSize float32
 }
 
 type stickerOutput struct {
@@ -1160,6 +1160,14 @@ func (c *StageCache) getLoad(opts Options) *loadOutput {
 		return nil
 	}
 	return v.(*loadOutput)
+}
+
+func (c *StageCache) getVoxelize(opts Options) *voxelizeOutput {
+	v := c.get(StageVoxelize, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*voxelizeOutput)
 }
 
 func (c *StageCache) getPalette(opts Options) *paletteOutput {

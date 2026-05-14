@@ -64,6 +64,7 @@ type Args struct {
 	UpperLayerXYScale               float32  `arg:"--upper-layer-xy-scale" default:"1.25" help:"Multiplier on upper-layer voxel cell XY size relative to the slicer line width (1 = at line width, higher = coarser color detail with fewer primitives)"`
 	DebugRender                     string   `arg:"--debug-render" help:"After running the pipeline, write PNG renders (input + dithered + sampled, four views each) into this directory. Useful for headless debugging."`
 	DebugRenderRes                  int      `arg:"--debug-render-res" default:"800" help:"PNG resolution (square) for --debug-render output"`
+	DebugCellsDir                   string   `arg:"--debug-cells-dir" help:"After Voxelize, write per-slab cell PNGs colored by the sampled RGB into this directory."`
 }
 
 func (Args) Description() string {
@@ -138,9 +139,21 @@ func main() {
 	}
 	cb := &pipeline.Callbacks{Progress: progress.NewCLITracker()}
 
-	pr, err := pipeline.RunCached(ctx, cache, opts, cb)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	pr, runErr := pipeline.RunCached(ctx, cache, opts, cb)
+
+	// Even if RunCached fails (Clip / Merge stubbed during the
+	// cellslicer transition), the Voxelize stage may have completed
+	// — emit debug cell PNGs from the cache before exiting.
+	if args.DebugCellsDir != "" {
+		if err := pipeline.WriteCellsDebugPNGs(cache, opts, args.DebugCellsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "debug-cells-dir: %v\n", err)
+		} else {
+			fmt.Printf("Wrote per-slab cell PNGs to %s\n", args.DebugCellsDir)
+		}
+	}
+
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
 		os.Exit(1)
 	}
 	if pr.NeedsForce {
