@@ -663,7 +663,7 @@ type voxelizeSettings struct {
 // currentCellslicerEpoch is stamped into every voxelizeSettings. Bump
 // on any cellslicer Voxelize behavior change. Phase 5 will fold this
 // into VersionSemver.
-const currentCellslicerEpoch = 4
+const currentCellslicerEpoch = 6
 
 type stickerSettings struct {
 	Stickers []Sticker

@@ -984,7 +984,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		}
 
 		triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
-		clipped, cerr := cellslicer.ClipMeshToCells(lo.Model, vo.CellSlabs, triIdx)
+		clipped, cerr := cellslicer.ClipMeshToCells2D(lo.Model, vo.CellSlabs, triIdx)
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
 		}
