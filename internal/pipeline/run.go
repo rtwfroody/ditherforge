@@ -938,12 +938,23 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 // (top/bottom) faces are tagged -1 by BuildPrintableMesh and remapped
 // here to the most common visible color for the cached
 // ShellAssignments slice (downstream Merge is color-agnostic).
+// Clip runs per-cell CGAL surface clipping of the geometry mesh
+// against each cell's 3D prism. Each output face carries the
+// dithered palette index of its source cell. The geometry mesh
+// must be closed and orientable — the alpha-wrap path produces this
+// directly; for raw meshes the pipeline relies on opts.AlphaWrap.
 func (r *pipelineRun) Clip() (*clipOutput, error) {
 	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
-		if _, err := r.Dither(); err != nil {
+		do, err := r.Dither()
+		if err != nil {
 			return nil, err
 		}
-		if _, err := r.Voxelize(); err != nil {
+		vo, err := r.Voxelize()
+		if err != nil {
+			return nil, err
+		}
+		lo, err := r.Load()
+		if err != nil {
 			return nil, err
 		}
 		// Decimate + Split are stubbed during the cellslicer
@@ -954,10 +965,56 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if _, err := r.Split(); err != nil {
 			return nil, err
 		}
-		// Phase 4 will replace this with CGAL Boolean prism × mesh
-		// intersection. Until then, downstream Merge / Export are
-		// unimplemented; ditherforge runs only through Dither.
-		return nil, fmt.Errorf("Clip stage: cellslicer prism intersection not yet implemented (Phase 4)")
+
+		stage := progress.BeginStage(r.tracker, stageNames[StageClip], false, 0)
+		defer stage.Done()
+		tClip := time.Now()
+
+		// Build a global-cell-index → palette-assignment lookup.
+		// Visible cells have a valid Dither output; hidden cells
+		// (currently none, since SampleCells marks every textured
+		// surface alpha=true) get -1.
+		nGlobal := len(vo.CellSamples)
+		cellAssign := make([]int32, nGlobal)
+		for i := range cellAssign {
+			cellAssign[i] = -1
+		}
+		for vi, gi := range vo.VisibleToCell {
+			cellAssign[gi] = do.Assignments[vi]
+		}
+
+		triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
+		clipped, cerr := cellslicer.ClipMeshToCells(lo.Model, vo.CellSlabs, triIdx)
+		if cerr != nil {
+			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
+		}
+		// Map per-face cell index → palette assignment. Faces from
+		// cells with no assignment (-1) get -1, downstream
+		// SafeAssignments will substitute the fallback.
+		faceAssign := make([]int32, len(clipped.Faces))
+		for i, gi := range clipped.FaceCellIdx {
+			if gi >= 0 && int(gi) < len(cellAssign) {
+				faceAssign[i] = cellAssign[gi]
+			} else {
+				faceAssign[i] = -1
+			}
+		}
+		fallback := mostCommonNonNeg(faceAssign)
+		for i, a := range faceAssign {
+			if a < 0 {
+				faceAssign[i] = fallback
+			}
+		}
+
+		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
+			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
+
+		return &clipOutput{
+			ShellVerts:       clipped.Verts,
+			ShellFaces:       clipped.Faces,
+			ShellAssignments: faceAssign,
+			ShellSectionIdx:  clipped.FaceCellIdx,
+		}, nil
 	})
 }
 
