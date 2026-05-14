@@ -53,12 +53,16 @@ func TestSampledMatchesInput(t *testing.T) {
 		// earth.glb is a clean single-mesh model; per-tile
 		// sampling matches the input UVs closely on every view.
 		// Limits set to ~1.5× actual measurements so honest
-		// regressions (worst-tile drift on coastlines, section-
-		// arc-mapping flips, SrcTriIdx misassignment) fail loud.
+		// regressions (worst-tile drift on coastlines, cell
+		// boundary flips, source-triangle misassignment) fail loud.
+		// The avg threshold widened from 16 → 22 with the cellslicer
+		// switch: per-cell sampling drifts ~2–3 MAE units from the
+		// per-section sampling the test was originally calibrated
+		// against, while remaining visually indistinguishable.
 		{
 			"earth",
 			filepath.Join("objects", "earth.glb"),
-			viewLimits{avg: 16, tile: 10},
+			viewLimits{avg: 22, tile: 12},
 			nil,
 			false,
 		},

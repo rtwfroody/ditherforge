@@ -20,16 +20,18 @@ import (
 )
 
 // slabTri is a triangle that lies entirely within a slab's Z range.
-// PlaneA*x + PlaneB*y + PlaneC*z + PlaneD = 0 describes its supporting
-// plane; PlaneC == 0 marks a perfectly vertical triangle (zero XY
-// area — these are dropped during sliceToSlab since they can't
-// contribute to a cap-style fragment).
+// Vertices are stored in mesh coords; Z lifting from a 2D (x, y) is
+// done via barycentric interpolation in clipCellTris, which is
+// numerically stable for any non-degenerate XY projection (avoiding
+// the divide-by-near-zero that the plane equation suffers on
+// near-vertical triangles). Triangles whose XY projection has zero
+// area are dropped at sliceTriangleToSlab time.
 type slabTri struct {
 	V0, V1, V2 [3]float32
-	PlaneA     float32
-	PlaneB     float32
-	PlaneC     float32
-	PlaneD     float32
+	// InvAreaXY is 1 / signed_area_xy(V0,V1,V2), precomputed so
+	// per-point barycentric weights are 3 multiplies + 3 cross-
+	// product evaluations.
+	InvAreaXY float32
 }
 
 // ClipMeshToCells2D produces a per-cell-tagged mesh fragment in the
@@ -123,7 +125,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				if len(tris) == 0 {
 					continue
 				}
-				verts, faces := clipCellTris(tris, cell.Outer)
+				verts, faces := clipCellTris(tris, cell.Outer, s.ZBot, s.ZTop)
 				if len(faces) == 0 {
 					continue
 				}
@@ -164,9 +166,9 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 // sliceTriangleToSlab clips triangle (a,b,c) against the half-spaces
 // z >= zBot and z <= zTop and returns the resulting pieces as
 // slabTris. The result is a triangle fan over the sub-polygon (1–3
-// triangles). Returns empty for vertical triangles (PlaneC == 0)
-// since their XY projection has zero area and they can't produce
-// cap fragments.
+// triangles). Triangles whose XY projection has zero area
+// (perfectly vertical) are dropped — they can't contribute to a
+// cap-style fragment, and their barycentric coords are undefined.
 func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) []slabTri {
 	// Drop fully outside.
 	zMin := minf3(a[2], b[2], c[2])
@@ -174,14 +176,6 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) []slabTri {
 	if zMax < zBot || zMin > zTop {
 		return nil
 	}
-	// Plane of (a, b, c): normal = (b-a) × (c-a); plane eqn n·p = n·a.
-	nx := (b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1])
-	ny := (b[2]-a[2])*(c[0]-a[0]) - (b[0]-a[0])*(c[2]-a[2])
-	nz := (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-	if absf(nz) < 1e-9 {
-		return nil // vertical triangle, no XY footprint
-	}
-	d := -(nx*a[0] + ny*a[1] + nz*a[2])
 	// Build the sub-polygon by clipping against z >= zBot then z <= zTop.
 	poly := [][3]float32{a, b, c}
 	poly = clipPolygonByZHalfSpace(poly, zBot, true /* keep z >= zBot */)
@@ -193,12 +187,29 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) []slabTri {
 		return nil
 	}
 	// Fan-triangulate (the slabbed sub-polygon is convex — Z-plane
-	// clipping of a triangle produces a convex polygon).
+	// clipping of a triangle produces a convex polygon). Drop any
+	// resulting sub-triangle whose XY projection has near-zero
+	// area; their barycentric-lift would be unstable.
 	tris := make([]slabTri, 0, len(poly)-2)
 	for i := 1; i < len(poly)-1; i++ {
+		v0 := poly[0]
+		v1 := poly[i]
+		v2 := poly[i+1]
+		areaXY := (v1[0]-v0[0])*(v2[1]-v0[1]) - (v2[0]-v0[0])*(v1[1]-v0[1])
+		// Threshold relative to the sub-triangle's XY bbox so the
+		// filter scales with the per-triangle size. A ratio of 1e-6
+		// catches degenerate cases without rejecting legitimate
+		// small slivers.
+		bboxXY := (maxf3(v0[0], v1[0], v2[0]) - minf3(v0[0], v1[0], v2[0])) *
+			(maxf3(v0[1], v1[1], v2[1]) - minf3(v0[1], v1[1], v2[1]))
+		if absf(areaXY) < 1e-6*absf(bboxXY) || absf(areaXY) < 1e-12 {
+			continue
+		}
 		tris = append(tris, slabTri{
-			V0: poly[0], V1: poly[i], V2: poly[i+1],
-			PlaneA: nx, PlaneB: ny, PlaneC: nz, PlaneD: d,
+			V0:        v0,
+			V1:        v1,
+			V2:        v2,
+			InvAreaXY: 1.0 / areaXY,
 		})
 	}
 	return tris
@@ -253,10 +264,15 @@ func lerpAtZ(a, b [3]float32, z float32) [3]float32 {
 }
 
 // clipCellTris clips every triangle's XY projection against the
-// cell polygon and emits 3D triangles whose Z is determined by each
-// source triangle's plane equation. Caller is responsible for
-// concatenating per-cell results into the global mesh.
-func clipCellTris(tris []slabTri, cell []minislicer.Point2) ([][3]float32, [][3]uint32) {
+// cell polygon and emits 3D triangles whose Z is barycentric-
+// interpolated on each source triangle. Lifted Z is clamped to
+// [zBot, zTop] to absorb floating-point fuzz at the cell/triangle
+// boundary — Clipper's integer rounding can push intersection
+// points a hair outside the triangle's XY projection, where
+// extrapolated barycentric weights would otherwise blow up the Z.
+// Caller is responsible for concatenating per-cell results into the
+// global mesh.
+func clipCellTris(tris []slabTri, cell []minislicer.Point2, zBot, zTop float32) ([][3]float32, [][3]uint32) {
 	cellMinX, cellMinY, cellMaxX, cellMaxY := polyBoundsP2(cell)
 	cellPath := pointsToClipperPath(cell)
 	var verts [][3]float32
@@ -305,8 +321,24 @@ func clipCellTris(tris []slabTri, cell []minislicer.Point2) ([][3]float32, [][3]
 			}
 			base := uint32(len(verts))
 			for _, p := range pts {
-				// Lift to 3D via the source plane: z = -(A*x + B*y + D) / C.
-				z := -(t.PlaneA*p[0] + t.PlaneB*p[1] + t.PlaneD) / t.PlaneC
+				// Lift to 3D via barycentric interpolation of Z on
+				// the source triangle's XY projection. Stable for
+				// any triangle whose XY area is non-zero.
+				// areaA / area = bary weight for V0 (opposite edge V1V2)
+				areaA := ((t.V1[0]-p[0])*(t.V2[1]-p[1]) - (t.V2[0]-p[0])*(t.V1[1]-p[1])) * t.InvAreaXY
+				areaB := ((t.V2[0]-p[0])*(t.V0[1]-p[1]) - (t.V0[0]-p[0])*(t.V2[1]-p[1])) * t.InvAreaXY
+				areaC := 1 - areaA - areaB
+				z := areaA*t.V0[2] + areaB*t.V1[2] + areaC*t.V2[2]
+				// Clamp to slab Z range — Clipper integer rounding
+				// can push intersection points slightly outside the
+				// triangle's XY projection, where extrapolated
+				// barycentric weights would otherwise produce a Z
+				// orders of magnitude outside the cell's prism.
+				if z < zBot {
+					z = zBot
+				} else if z > zTop {
+					z = zTop
+				}
 				verts = append(verts, [3]float32{p[0], p[1], z})
 			}
 			for _, tri := range earTris {
