@@ -30,6 +30,29 @@ type DebugPNGOptions struct {
 	DrawEdges bool
 }
 
+// RenderSlabDebugImage renders a single slab to an in-memory
+// image.Image. Returns nil when the slab has no footprint geometry.
+// Exposed so callers (e.g. the GUI Debug menu) can paint one slab
+// at a time without going through the disk-backed WriteDebugPNGs
+// path.
+func RenderSlabDebugImage(slabs []Slab, samples []CellSample, slabIdx int, opt DebugPNGOptions) image.Image {
+	if slabIdx < 0 || slabIdx >= len(slabs) {
+		return nil
+	}
+	s := &slabs[slabIdx]
+	if s.Footprint == nil || len(s.Footprint.Loops) == 0 {
+		return nil
+	}
+	// Collect this slab's sample indices.
+	var sampleIdxs []int
+	for gi, sp := range samples {
+		if sp.SlabIdx == slabIdx {
+			sampleIdxs = append(sampleIdxs, gi)
+		}
+	}
+	return renderSlabDebug(s, samples, sampleIdxs, opt)
+}
+
 // WriteDebugPNGs writes one slab_NNNN.png per slab into dir,
 // rendering each cell filled with the matching CellSample's RGB
 // (cells with no sample / Alpha == false are rendered transparent).

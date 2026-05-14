@@ -571,6 +571,39 @@ func (a *App) LogMessage(level, msg string) {
 	plog.Printf("[JS %s] %s", level, msg)
 }
 
+// DebugCellsSlabResult is the payload returned by DebugCellsSlabPNG:
+// PNG data (base64-encoded for transport over the Wails bridge) plus
+// the total number of slabs in the current run so the frontend can
+// bound its slab-index slider.
+type DebugCellsSlabResult struct {
+	PNGBase64 string `json:"pngBase64"`
+	SlabCount int    `json:"slabCount"`
+}
+
+// DebugCellsSlabPNG renders one slab's cell partition (colored by
+// sampled RGB) and returns the PNG as a base64 string. Requires the
+// pipeline to have run through Voxelize at least once for the
+// currently loaded options; returns an error otherwise.
+//
+// The Wails bridge serializes Go's []byte as base64 anyway, but
+// surfacing it as a JSON string with a wrapper struct lets the
+// frontend bind `src={"data:image/png;base64," + result.pngBase64}`
+// without an extra decode step.
+func (a *App) DebugCellsSlabPNG(slabIdx int) (*DebugCellsSlabResult, error) {
+	last := a.lastOpts.Load()
+	if last == nil {
+		return nil, fmt.Errorf("no model loaded yet — run the pipeline first")
+	}
+	data, slabCount, err := pipeline.CellsSlabPNG(a.cache, *last, slabIdx)
+	if err != nil {
+		return nil, err
+	}
+	return &DebugCellsSlabResult{
+		PNGBase64: base64.StdEncoding.EncodeToString(data),
+		SlabCount: slabCount,
+	}, nil
+}
+
 // Version returns the application version string.
 func (a *App) Version() string {
 	return pipeline.Version

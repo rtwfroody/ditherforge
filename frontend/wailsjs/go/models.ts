@@ -39,6 +39,20 @@ export namespace main {
 	        this.builtIn = source["builtIn"];
 	    }
 	}
+	export class DebugCellsSlabResult {
+	    pngBase64: string;
+	    slabCount: number;
+
+	    static createFrom(source: any = {}) {
+	        return new DebugCellsSlabResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pngBase64 = source["pngBase64"];
+	        this.slabCount = source["slabCount"];
+	    }
+	}
 	export class ColorEntry {
 	    hex: string;
 	    label: string;

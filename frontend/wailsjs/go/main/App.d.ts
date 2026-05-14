@@ -6,6 +6,8 @@ import {pipeline} from '../models';
 
 export function CreateCollection(arg1:string):Promise<void>;
 
+export function DebugCellsSlabPNG(arg1:number):Promise<main.DebugCellsSlabResult>;
+
 export function DefaultSettingsPath(arg1:string):Promise<string>;
 
 export function DeleteCollection(arg1:string):Promise<void>;

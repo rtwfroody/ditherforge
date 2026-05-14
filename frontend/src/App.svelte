@@ -22,6 +22,7 @@
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import StickerPanel from '$lib/components/StickerPanel.svelte';
   import ObjectPicker from '$lib/components/ObjectPicker.svelte';
+  import DebugCellsDialog from '$lib/components/DebugCellsDialog.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
@@ -393,6 +394,7 @@
   let version = $state('');
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
+  let debugCellsDialogOpen = $state(false);
 
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
@@ -1536,6 +1538,14 @@
         <Menubar.Item onSelect={handleImportCollection}>Import...</Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
+    <Menubar.Menu>
+      <Menubar.Trigger>Debug</Menubar.Trigger>
+      <Menubar.Content>
+        <Menubar.Item onSelect={() => { debugCellsDialogOpen = true; }} disabled={!outputMeshUrl || running}>
+          View Cells…
+        </Menubar.Item>
+      </Menubar.Content>
+    </Menubar.Menu>
     <div class="ml-auto flex items-center gap-2 pr-2">
       {#if settingsPath || inputFile}
         <span class="text-xs text-muted-foreground" title={settingsPath || inputFile}>{shortenPath(settingsPath || inputFile)}</span>
@@ -2255,5 +2265,7 @@
   bind:open={objectPickerOpen}
   onSelect={onObjectSelected}
 />
+
+<DebugCellsDialog bind:open={debugCellsDialogOpen} />
 
 </Tooltip.Provider>

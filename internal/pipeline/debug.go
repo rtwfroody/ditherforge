@@ -1,7 +1,10 @@
 package pipeline
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 
 	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 )
@@ -25,4 +28,37 @@ func WriteCellsDebugPNGs(cache *StageCache, opts Options, dir string) error {
 		FillBackgroundWhite: true,
 		DrawEdges:           true,
 	})
+}
+
+// CellsSlabPNG renders a single slab's cell partition (colored by
+// each cell's sampled RGB) to a PNG-encoded byte slice. Returns the
+// total slab count alongside the image so the GUI can drive a Z
+// slider without needing a separate round-trip. The Voxelize stage
+// for opts must have run; otherwise returns an error.
+//
+// Slabs with no footprint geometry return a 1×1 transparent PNG;
+// callers can use the slab-count return value to know which indices
+// are valid.
+func CellsSlabPNG(cache *StageCache, opts Options, slabIdx int) (data []byte, slabCount int, err error) {
+	cache.WaitForDiskWrites()
+	vo := cache.getVoxelize(opts)
+	if vo == nil {
+		return nil, 0, fmt.Errorf("voxelize stage has not run yet — run the pipeline first")
+	}
+	slabCount = len(vo.CellSlabs)
+	img := cellslicer.RenderSlabDebugImage(vo.CellSlabs, vo.CellSamples, slabIdx, cellslicer.DebugPNGOptions{
+		CellSizeMM:          vo.CellSize,
+		FillBackgroundWhite: true,
+		DrawEdges:           true,
+	})
+	if img == nil {
+		// Empty slab — encode a 1×1 transparent placeholder so the
+		// GUI image element doesn't break.
+		img = image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, slabCount, err
+	}
+	return buf.Bytes(), slabCount, nil
 }
