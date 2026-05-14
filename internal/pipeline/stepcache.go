@@ -651,7 +651,19 @@ type voxelizeSettings struct {
 	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
 	BaseColorMaterialXTileMM             float64
 	BaseColorMaterialXTriplanarSharpness float64
+	// CellslicerEpoch bumps when the cellslicer-based Voxelize body
+	// changes shape (output struct fields, adjacency definition,
+	// sampling pattern, etc.). Increment here to invalidate prior
+	// disk-cache entries without needing to bump VersionSemver
+	// mid-phase. The constant lives in stepcache.go as
+	// currentCellslicerEpoch.
+	CellslicerEpoch int
 }
+
+// currentCellslicerEpoch is stamped into every voxelizeSettings. Bump
+// on any cellslicer Voxelize behavior change. Phase 5 will fold this
+// into VersionSemver.
+const currentCellslicerEpoch = 3
 
 type stickerSettings struct {
 	Stickers []Sticker
@@ -777,6 +789,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 		cells := voxelCellSizes(opts)
 		return voxelizeSettings{
+			CellslicerEpoch:                      currentCellslicerEpoch,
 			Layer0XY:                             cells.Layer0XY,
 			UpperXY:                              cells.UpperXY,
 			Layer0Z:                              cells.Layer0Z,
@@ -920,6 +933,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
 		writeFloat64(h, v.BaseColorMaterialXTileMM)
 		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
+		writeInt(h, v.CellslicerEpoch)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)

@@ -595,20 +595,26 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nCells += len(slabs[i].Cells)
 		}
 
-		si := voxel.NewSpatialIndex(colorModel, cellSize)
-		samples := cellslicer.SampleCells(slabs, colorModel, si, cellSize, 0, nil, nil)
+		spatial := voxel.NewSpatialIndex(colorModel, cellSize)
+		samples := cellslicer.SampleCells(slabs, colorModel, spatial, cellSize, 0, nil, nil)
 
 		// Build ActiveCells: one per visible cell. Hidden
 		// (Alpha == false) cells are dropped so palette selection
 		// and dither operate only on visible color. Layer/Row/Col
-		// encode SlabIdx/LoopID/CellIdx-within-slab so CellKey
-		// lookups stay unique.
+		// encode SlabIdx / CellIdx-within-slab so CellKey lookups
+		// stay unique. cellToVisible maps global cell index → visible
+		// index, used to reindex the adjacency graph below.
 		cells := make([]voxel.ActiveCell, 0, len(samples))
 		visibleToCell := make([]int, 0, len(samples))
+		cellToVisible := make([]int, len(samples))
+		for i := range cellToVisible {
+			cellToVisible[i] = -1
+		}
 		for gi, s := range samples {
 			if !s.Alpha {
 				continue
 			}
+			cellToVisible[gi] = len(cells)
 			visibleToCell = append(visibleToCell, gi)
 			cells = append(cells, voxel.ActiveCell{
 				Grid:  0,
@@ -623,14 +629,42 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			})
 		}
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), cellSize=%.3fmm layerH=%.3fmm in %.1fs",
-			len(slabs), nCells, len(cells), cellSize, layerH, time.Since(tSlice).Seconds())
+		// Build the cell adjacency graph (within-slab via raster,
+		// cross-slab via Clipper polygon overlap) and reindex from
+		// global cell index to visible cell index, dropping hidden
+		// cells.
+		tAdj := time.Now()
+		globalNeighbors := cellslicer.BuildAdjacency(slabs, cellSize, 0)
+		visibleNeighbors := make([][]voxel.Neighbor, len(cells))
+		nEdges := 0
+		for gi, nbrs := range globalNeighbors {
+			vi := cellToVisible[gi]
+			if vi < 0 {
+				continue
+			}
+			out := visibleNeighbors[vi]
+			for _, n := range nbrs {
+				vj := cellToVisible[n.Idx]
+				if vj < 0 {
+					continue
+				}
+				out = append(out, voxel.Neighbor{Idx: vj, Weight: n.Weight})
+			}
+			visibleNeighbors[vi] = out
+			nEdges += len(out)
+		}
+		adjElapsed := time.Since(tAdj).Seconds()
+		sliceElapsed := tAdj.Sub(tSlice).Seconds()
+
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.1fs adj=%.1fs",
+			len(slabs), nCells, len(cells), nEdges/2,
+			cellSize, layerH, sliceElapsed, adjElapsed)
 
 		return &voxelizeOutput{
 			Cells:         cells,
 			CellSlabs:     slabs,
 			CellSamples:   samples,
-			Neighbors:     nil, // Phase 3: derive from rasterized cell map.
+			Neighbors:     visibleNeighbors,
 			VisibleToCell: visibleToCell,
 			LayerH:        layerH,
 			CellSize:      cellSize,
