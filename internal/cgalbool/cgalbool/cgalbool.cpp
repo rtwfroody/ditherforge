@@ -10,6 +10,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Polygon_mesh_processing/corefinement.h>
+#include <CGAL/Polygon_mesh_processing/clip.h>
 #include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
 #include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
 #include <CGAL/Polygon_mesh_processing/repair.h>
@@ -95,7 +96,7 @@ bool mesh_to_cresult(const Mesh &mesh, struct CResult &r) {
     return true;
 }
 
-enum BooleanOp { OP_UNION, OP_DIFFERENCE };
+enum BooleanOp { OP_UNION, OP_DIFFERENCE, OP_INTERSECTION };
 
 struct CResult run_boolean(
     const float *a_vertices, int a_num_vertices,
@@ -117,6 +118,9 @@ struct CResult run_boolean(
             break;
         case OP_DIFFERENCE:
             ok = PMP::corefine_and_compute_difference(A, B, out);
+            break;
+        case OP_INTERSECTION:
+            ok = PMP::corefine_and_compute_intersection(A, B, out);
             break;
         }
         if (!ok) {
@@ -159,6 +163,83 @@ struct CResult cb_difference(
     return run_boolean(a_vertices, a_num_vertices, a_faces, a_num_faces,
                        b_vertices, b_num_vertices, b_faces, b_num_faces,
                        OP_DIFFERENCE);
+}
+
+struct CResult cb_intersection(
+    const float *a_vertices, int a_num_vertices,
+    const int *a_faces, int a_num_faces,
+    const float *b_vertices, int b_num_vertices,
+    const int *b_faces, int b_num_faces)
+{
+    return run_boolean(a_vertices, a_num_vertices, a_faces, a_num_faces,
+                       b_vertices, b_num_vertices, b_faces, b_num_faces,
+                       OP_INTERSECTION);
+}
+
+// cb_clip_surface clips an open triangle-soup `a` against a closed
+// clipper `b` and returns the part of a's surface that lies inside
+// b (i.e. PMP::clip(a, b, clip_volume(false))). Unlike cb_intersection,
+// `a` does NOT need to be closed; the clipper `b` must be closed and
+// orientable. The output is an open mesh (no caps added on the cut).
+//
+// Built for the cellslicer Phase 4 path: per-cell candidate triangles
+// are NOT a closed mesh, so corefine_and_compute_intersection can't
+// be used. Surface-only clip handles this case directly and is
+// substantially faster per call because the input mesh is tiny.
+struct CResult cb_clip_surface(
+    const float *a_vertices, int a_num_vertices,
+    const int *a_faces, int a_num_faces,
+    const float *b_vertices, int b_num_vertices,
+    const int *b_faces, int b_num_faces)
+{
+    struct CResult r = {};
+    try {
+        // Build A as an open polygon-soup mesh. Skip orient_polygon_soup
+        // here — the caller already provides triangles with consistent
+        // winding (they came from the same model), and orienting a
+        // small soup that includes only one side of a manifold often
+        // fails. If A is non-manifold along its boundary that's
+        // expected: PMP::clip with clip_volume(false) handles it.
+        std::vector<Point_3> aPts;
+        aPts.reserve(a_num_vertices);
+        for (int i = 0; i < a_num_vertices; i++) {
+            aPts.emplace_back(a_vertices[i*3], a_vertices[i*3+1], a_vertices[i*3+2]);
+        }
+        std::vector<std::array<std::size_t, 3>> aTris;
+        aTris.reserve(a_num_faces);
+        for (int i = 0; i < a_num_faces; i++) {
+            aTris.push_back({(std::size_t)a_faces[i*3],
+                             (std::size_t)a_faces[i*3+1],
+                             (std::size_t)a_faces[i*3+2]});
+        }
+        Mesh A;
+        PMP::polygon_soup_to_polygon_mesh(aPts, aTris, A);
+
+        Mesh B;
+        if (!soup_to_mesh(b_vertices, b_num_vertices, b_faces, b_num_faces, B, &r.error)) {
+            return r;
+        }
+
+        PMP::clip(A, B, CGAL::parameters::clip_volume(false));
+
+        if (A.number_of_faces() == 0) {
+            // Empty result is legitimate (cell missed any triangle) —
+            // signal via num_faces=0, not via .error, so callers can
+            // skip without logging.
+            return r;
+        }
+        if (!mesh_to_cresult(A, r)) {
+            return r;
+        }
+    } catch (const std::exception &e) {
+        free(r.vertices); free(r.faces);
+        r.vertices = NULL; r.faces = NULL;
+        r.num_vertices = 0; r.num_faces = 0;
+        r.error = strdup(e.what());
+    } catch (...) {
+        r.error = strdup("unknown C++ exception in clip_surface");
+    }
+    return r;
 }
 
 void cb_free(struct CResult r) {

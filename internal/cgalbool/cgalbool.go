@@ -44,6 +44,35 @@ func Difference(a, b *loader.LoadedModel) (*loader.LoadedModel, error) {
 	return run(a, b, cgalbool.Difference)
 }
 
+// Intersection returns a ∩ b as a geometry-only LoadedModel.
+func Intersection(a, b *loader.LoadedModel) (*loader.LoadedModel, error) {
+	return run(a, b, cgalbool.Intersection)
+}
+
+// ClipSurface clips the surface of (open) mesh a against the closed
+// clipper b. Returns the part of a's surface inside b as a geometry-
+// only LoadedModel; returns nil with no error when the result is
+// empty (no candidate triangles fell inside b).
+func ClipSurface(a, b *loader.LoadedModel) (*loader.LoadedModel, error) {
+	if a == nil || len(a.Faces) == 0 {
+		return nil, nil
+	}
+	if b == nil || len(b.Faces) == 0 {
+		return nil, fmt.Errorf("cgalbool: clipper is empty")
+	}
+	verts, faces, err := cgalbool.Compute(a.Vertices, a.Faces, b.Vertices, b.Faces, cgalbool.ClipSurface)
+	if err != nil {
+		return nil, err
+	}
+	if len(faces) == 0 {
+		return nil, nil
+	}
+	return &loader.LoadedModel{
+		Vertices: verts,
+		Faces:    faces,
+	}, nil
+}
+
 func run(a, b *loader.LoadedModel, op cgalbool.Op) (*loader.LoadedModel, error) {
 	if a == nil || len(a.Faces) == 0 {
 		return nil, fmt.Errorf("cgalbool: input A is empty")
