@@ -1,16 +1,13 @@
 // Package cellslicer partitions a sliced model into per-slab cells:
 // small 2D polygons that tile each slab's footprint. Cells are the
 // unit of color sampling and dithering in the cellslicer pipeline;
-// the original mesh is later Boolean-cut along each cell's prism so
+// the original mesh is later 2D-clipped against each cell's prism so
 // triangle fragments inherit the enclosing cell's color.
 //
-// The package owns slab partition and cell polygon generation. It
-// reuses internal/minislicer for the Z-plane slicing primitive
-// (SliceMesh, Loop, Point2). Once the minislicer pipeline is
-// retired, those primitives will be inlined here.
+// The package owns Z-plane slicing (SliceMesh + Loop + Point2),
+// slab partition, cell polygon generation, adjacency, sampling, and
+// the per-cell 2D Clip stage.
 package cellslicer
-
-import "github.com/rtwfroody/ditherforge/internal/minislicer"
 
 // CellKind distinguishes ring cells (along the slab's boundary) from
 // hex cells (filling the slab's interior).
@@ -33,7 +30,7 @@ const (
 // than the original ring/hex).
 type Cell struct {
 	// Outer is the cell's outer boundary, CCW, no closing duplicate.
-	Outer []minislicer.Point2
+	Outer []Point2
 	Kind  CellKind
 }
 
@@ -48,8 +45,8 @@ type Slab struct {
 	// BotLayer / TopLayer are the slicer's per-Z contour layers at
 	// ZBot and ZTop. Retained so downstream code can look up source
 	// triangles for color sampling without re-slicing.
-	BotLayer *minislicer.Layer
-	TopLayer *minislicer.Layer
+	BotLayer *Layer
+	TopLayer *Layer
 	// Footprint is the Clipper union of bot + top loops. Cells lie
 	// inside it.
 	Footprint *Footprint

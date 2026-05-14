@@ -1,4 +1,4 @@
-package minislicer
+package cellslicer
 
 import (
 	"math"
@@ -208,26 +208,6 @@ func classifyHoles(loops []Loop) {
 		}
 		loops[i].IsHole = (depth & 1) == 1
 	}
-	// Per-outer: is any hole contained in me? Same vertex-based
-	// containment test as classification.
-	for i := range loops {
-		if loops[i].IsHole {
-			continue
-		}
-		for j := range loops {
-			if i == j || !loops[j].IsHole {
-				continue
-			}
-			if len(loops[j].Points) < 1 {
-				continue
-			}
-			x, y := loops[j].Points[0][0], loops[j].Points[0][1]
-			if loops[i].Contains(x, y) {
-				loops[i].HasHoleChild = true
-				break
-			}
-		}
-	}
 }
 
 // lerpEdge returns the XY of the point on the line through pa and pb
@@ -339,10 +319,10 @@ func chainSegments(segs []segment, z float32) []Loop {
 		if len(points) < 3 {
 			continue
 		}
+		_ = edgeTris // discarded: cellslicer doesn't need per-edge source-triangle provenance
 		l := Loop{
-			Points:   points,
-			EdgeTris: edgeTris,
-			Z:        z,
+			Points: points,
+			Z:      z,
 		}
 		l.RefreshDerived()
 		loops = append(loops, l)

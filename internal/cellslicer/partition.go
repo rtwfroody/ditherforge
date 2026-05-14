@@ -3,12 +3,11 @@ package cellslicer
 import (
 	"math"
 
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // boundaryMark marks an arc-length position on a FootprintLoop.
 type boundaryMark struct {
-	point   minislicer.Point2
+	point   Point2
 	edgeIdx int
 	edgeT   float32
 }
@@ -52,7 +51,7 @@ func walkLoopAtCellSize(loop *FootprintLoop, cellSize float32) []boundaryMark {
 		a := loop.Points[edge]
 		b := loop.Points[(edge+1)%n]
 		marks[i] = boundaryMark{
-			point: minislicer.Point2{
+			point: Point2{
 				a[0] + t*(b[0]-a[0]),
 				a[1] + t*(b[1]-a[1]),
 			},
@@ -65,9 +64,9 @@ func walkLoopAtCellSize(loop *FootprintLoop, cellSize float32) []boundaryMark {
 
 // extractArc returns the polyline along loop from mA to mB in the
 // forward (CCW) direction, including endpoints.
-func extractArc(loop *FootprintLoop, mA, mB boundaryMark) []minislicer.Point2 {
+func extractArc(loop *FootprintLoop, mA, mB boundaryMark) []Point2 {
 	n := len(loop.Points)
-	out := []minislicer.Point2{mA.point}
+	out := []Point2{mA.point}
 	if mA.edgeIdx == mB.edgeIdx && mA.edgeT <= mB.edgeT {
 		out = append(out, mB.point)
 		return out
@@ -124,16 +123,16 @@ func GenerateRingCells(fp *Footprint, cellSize float32) []Cell {
 			mB := marks[(k+1)%len(marks)]
 			nA := inwardNormal(loop, mA)
 			nB := inwardNormal(loop, mB)
-			innerB := minislicer.Point2{
+			innerB := Point2{
 				mB.point[0] + depth*nB[0],
 				mB.point[1] + depth*nB[1],
 			}
-			innerA := minislicer.Point2{
+			innerA := Point2{
 				mA.point[0] + depth*nA[0],
 				mA.point[1] + depth*nA[1],
 			}
 			arc := extractArc(loop, mA, mB)
-			raw := make([]minislicer.Point2, 0, len(arc)+2)
+			raw := make([]Point2, 0, len(arc)+2)
 			raw = append(raw, arc...)
 			raw = append(raw, innerB, innerA)
 			if len(raw) < 3 {
@@ -184,11 +183,11 @@ func GenerateHexCells(inner *Footprint, cellSize float32) []Cell {
 	return cells
 }
 
-func hexagonAt(cx, cy, r float32) []minislicer.Point2 {
-	pts := make([]minislicer.Point2, 6)
+func hexagonAt(cx, cy, r float32) []Point2 {
+	pts := make([]Point2, 6)
 	for k := 0; k < 6; k++ {
 		angle := math.Pi/6 + float64(k)*math.Pi/3
-		pts[k] = minislicer.Point2{
+		pts[k] = Point2{
 			cx + r*float32(math.Cos(angle)),
 			cy + r*float32(math.Sin(angle)),
 		}
@@ -199,7 +198,7 @@ func hexagonAt(cx, cy, r float32) []minislicer.Point2 {
 // PartitionSlab partitions a single slab's footprint (derived from
 // bot+top loops) into ring + hex cells. Convenience wrapper used
 // when slicing is driven by the caller.
-func PartitionSlab(bot, top []minislicer.Loop, cellSize float32) ([]Cell, *Footprint) {
+func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 	fp := ComputeFootprint(bot, top)
 	inner := OffsetFootprint(fp, -cellSize)
 	cells := GenerateRingCells(fp, cellSize)

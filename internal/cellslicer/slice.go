@@ -4,7 +4,6 @@ import (
 	"math"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // SlabBoundaryPlanes returns nSlabs+1 Z planes at uniform layerH
@@ -37,7 +36,7 @@ func PartitionModel(model *loader.LoadedModel, layerH, cellSize float32) []Slab 
 		return nil
 	}
 	planes := SlabBoundaryPlanes(zMin, zMax, layerH)
-	layers := minislicer.SliceMesh(model, planes)
+	layers := SliceMesh(model, planes)
 	nSlabs := len(layers) - 1
 	if nSlabs < 1 {
 		return nil

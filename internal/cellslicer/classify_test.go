@@ -1,4 +1,4 @@
-package minislicer
+package cellslicer
 
 import "testing"
 
@@ -47,30 +47,6 @@ func TestClassifyHolesTwoIslands(t *testing.T) {
 }
 
 // TestClassifyHolesPerOuterChild verifies HasHoleChild: in a layer
-// with two separate outers where only one contains a hole, that
-// outer alone has HasHoleChild=true (so the smokestack-with-no-cavity
-// outer next to a hull-with-cavity outer still emits its cap fan).
-func TestClassifyHolesPerOuterChild(t *testing.T) {
-	hullOuter := []Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
-	hullHole := []Point2{{2, 2}, {8, 2}, {8, 8}, {2, 8}}
-	smokestack := []Point2{{20, 0}, {22, 0}, {22, 2}, {20, 2}}
-	loops := []Loop{
-		newTestLoop(hullOuter),
-		newTestLoop(hullHole),
-		newTestLoop(smokestack),
-	}
-	classifyHoles(loops)
-	if !loops[0].HasHoleChild {
-		t.Errorf("hull outer should have HasHoleChild=true")
-	}
-	if loops[1].HasHoleChild {
-		t.Errorf("hole shouldn't have HasHoleChild")
-	}
-	if loops[2].HasHoleChild {
-		t.Errorf("smokestack outer (no cavity) should have HasHoleChild=false")
-	}
-}
-
 // TestClassifyHolesNestedTwice verifies even-odd: outer (depth 0,
 // outer) → hole (depth 1, hole) → island (depth 2, outer again).
 func TestClassifyHolesNestedTwice(t *testing.T) {

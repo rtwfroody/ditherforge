@@ -2,7 +2,6 @@ package cellslicer
 
 import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // BuildPrismMesh extrudes outer (a CCW XY polygon, possibly non-
@@ -10,14 +9,14 @@ import (
 // suitable for CGAL Boolean ops. Caps are earcut-triangulated so
 // non-convex cells don't produce self-intersecting fans. Returns
 // nil for degenerate inputs.
-func BuildPrismMesh(outer []minislicer.Point2, zBot, zTop float32) *loader.LoadedModel {
+func BuildPrismMesh(outer []Point2, zBot, zTop float32) *loader.LoadedModel {
 	n := len(outer)
 	if n < 3 || zTop <= zBot {
 		return nil
 	}
 	// Earcut the outer once; we'll reuse the triangulation for both
 	// the bottom and top cap (re-oriented as needed).
-	earVerts, capTris := minislicer.Earcut(outer, nil)
+	earVerts, capTris := Earcut(outer, nil)
 	if len(capTris) == 0 {
 		return nil
 	}

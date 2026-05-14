@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // DebugPNGOptions controls the per-slab cell visualization rendered
@@ -200,7 +199,7 @@ func rasterizeCellsForDebug(cells []Cell, minX, minY, pxSize float32, padPx, w, 
 	return cellIDs
 }
 
-func pointInPolygonDebug(pts []minislicer.Point2, x, y float32) bool {
+func pointInPolygonDebug(pts []Point2, x, y float32) bool {
 	inside := false
 	n := len(pts)
 	for i, j := 0, n-1; i < n; j, i = i, i+1 {

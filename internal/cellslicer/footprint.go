@@ -4,14 +4,13 @@ import (
 	"math"
 
 	clipper "github.com/ctessum/go.clipper"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // FootprintLoop is one outer or hole loop inside a Footprint. Points
 // are CCW for outers / CW for holes after Clipper non-zero union,
 // no closing duplicate.
 type FootprintLoop struct {
-	Points []minislicer.Point2
+	Points []Point2
 	IsHole bool
 	// MinX..MaxY is the XY bounding box of Points. Set by
 	// computeBbox; consulted by Contains for an O(1) reject before
@@ -29,7 +28,7 @@ type Footprint struct {
 
 // ComputeFootprint returns the union of the bot and top contour
 // loops as a Footprint. Loops with fewer than 3 points are dropped.
-func ComputeFootprint(bot, top []minislicer.Loop) *Footprint {
+func ComputeFootprint(bot, top []Loop) *Footprint {
 	paths := make(clipper.Paths, 0, len(bot)+len(top))
 	for _, l := range bot {
 		if len(l.Points) >= 3 {
@@ -180,21 +179,8 @@ func (fp *Footprint) Bounds() (minX, minY, maxX, maxY float32, ok bool) {
 	return minX, minY, maxX, maxY, true
 }
 
-// signedArea is the shoelace signed area; positive = CCW.
-func signedArea(pts []minislicer.Point2) float32 {
-	if len(pts) < 3 {
-		return 0
-	}
-	var s float64
-	for i := range pts {
-		j := (i + 1) % len(pts)
-		s += float64(pts[i][0])*float64(pts[j][1]) - float64(pts[j][0])*float64(pts[i][1])
-	}
-	return float32(s * 0.5)
-}
-
 // pointInPolygon is even-odd ray cast along +X.
-func pointInPolygon(pts []minislicer.Point2, x, y float32) bool {
+func pointInPolygon(pts []Point2, x, y float32) bool {
 	inside := false
 	n := len(pts)
 	for i, j := 0, n-1; i < n; j, i = i, i+1 {
@@ -210,7 +196,7 @@ func pointInPolygon(pts []minislicer.Point2, x, y float32) bool {
 
 // polyBounds returns the XY bounding box of pts. Caller must ensure
 // pts is non-empty.
-func polyBounds(pts []minislicer.Point2) (minX, minY, maxX, maxY float32) {
+func polyBounds(pts []Point2) (minX, minY, maxX, maxY float32) {
 	minX, minY = pts[0][0], pts[0][1]
 	maxX, maxY = pts[0][0], pts[0][1]
 	for _, p := range pts[1:] {

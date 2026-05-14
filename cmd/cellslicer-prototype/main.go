@@ -27,7 +27,6 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 func main() {
@@ -269,7 +268,7 @@ func rasterizeCells(cells []cellslicer.Cell, minX, minY, pxSize float32, padPx, 
 	return cellIDs
 }
 
-func polyBounds(pts []minislicer.Point2) (float32, float32, float32, float32) {
+func polyBounds(pts []cellslicer.Point2) (float32, float32, float32, float32) {
 	minX, minY := pts[0][0], pts[0][1]
 	maxX, maxY := pts[0][0], pts[0][1]
 	for _, p := range pts[1:] {
@@ -289,7 +288,7 @@ func polyBounds(pts []minislicer.Point2) (float32, float32, float32, float32) {
 	return minX, minY, maxX, maxY
 }
 
-func pointInPolygon(pts []minislicer.Point2, x, y float32) bool {
+func pointInPolygon(pts []cellslicer.Point2, x, y float32) bool {
 	inside := false
 	n := len(pts)
 	for i, j := 0, n-1; i < n; j, i = i, i+1 {

@@ -16,7 +16,6 @@ import (
 
 	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // slabTri is a triangle that lies entirely within a slab's Z range.
@@ -272,7 +271,7 @@ func lerpAtZ(a, b [3]float32, z float32) [3]float32 {
 // extrapolated barycentric weights would otherwise blow up the Z.
 // Caller is responsible for concatenating per-cell results into the
 // global mesh.
-func clipCellTris(tris []slabTri, cell []minislicer.Point2, zBot, zTop float32) ([][3]float32, [][3]uint32) {
+func clipCellTris(tris []slabTri, cell []Point2, zBot, zTop float32) ([][3]float32, [][3]uint32) {
 	cellMinX, cellMinY, cellMaxX, cellMaxY := polyBoundsP2(cell)
 	cellPath := pointsToClipperPath(cell)
 	var verts [][3]float32
@@ -315,7 +314,7 @@ func clipCellTris(tris []slabTri, cell []minislicer.Point2, zBot, zTop float32) 
 			}
 			// Earcut the polygon piece (cell × triangle clip can
 			// produce non-convex pieces near the boundary).
-			earVerts, earTris := minislicer.Earcut(pts, nil)
+			earVerts, earTris := Earcut(pts, nil)
 			if len(earTris) == 0 || len(earVerts) != len(pts) {
 				continue
 			}
@@ -349,7 +348,7 @@ func clipCellTris(tris []slabTri, cell []minislicer.Point2, zBot, zTop float32) 
 	return verts, faces
 }
 
-func polyBoundsP2(pts []minislicer.Point2) (minX, minY, maxX, maxY float32) {
+func polyBoundsP2(pts []Point2) (minX, minY, maxX, maxY float32) {
 	minX, minY = pts[0][0], pts[0][1]
 	maxX, maxY = pts[0][0], pts[0][1]
 	for _, p := range pts[1:] {

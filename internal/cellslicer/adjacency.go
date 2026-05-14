@@ -5,7 +5,6 @@ import (
 	"sort"
 
 	clipper "github.com/ctessum/go.clipper"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -176,7 +175,7 @@ func addCrossSlabAdjacency(a *Slab, baseA int, b *Slab, baseB int, neighbors [][
 
 // polyOverlapArea returns the Clipper intersection area of two
 // closed polygons in mm². Returns 0 on failure or no overlap.
-func polyOverlapArea(a, b []minislicer.Point2) float64 {
+func polyOverlapArea(a, b []Point2) float64 {
 	c := clipper.NewClipper(clipper.IoNone)
 	c.AddPaths(clipper.Paths{pointsToClipperPath(a)}, clipper.PtSubject, true)
 	c.AddPaths(clipper.Paths{pointsToClipperPath(b)}, clipper.PtClip, true)

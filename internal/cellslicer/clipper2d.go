@@ -4,7 +4,6 @@ import (
 	"math"
 
 	clipper "github.com/ctessum/go.clipper"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 )
 
 // clipperScale converts mm (float32) to Clipper's integer
@@ -15,10 +14,10 @@ const clipperScale = 1000.0
 
 const invClipperScale = 1.0 / clipperScale
 
-// loopToClipperPath converts a minislicer.Loop into a Clipper path,
+// loopToClipperPath converts a Loop into a Clipper path,
 // reorienting so outer loops are CCW and holes are CW (Clipper's
 // PtSubject convention with PftNonZero fill).
-func loopToClipperPath(loop minislicer.Loop) clipper.Path {
+func loopToClipperPath(loop Loop) clipper.Path {
 	pts := loop.Points
 	isCCW := loop.SignedArea > 0
 	wantCCW := !loop.IsHole
@@ -27,7 +26,7 @@ func loopToClipperPath(loop minislicer.Loop) clipper.Path {
 
 // pointsToClipperPath converts a closed XY polyline (no closing
 // duplicate) into a Clipper path with the orientation of the input.
-func pointsToClipperPath(pts []minislicer.Point2) clipper.Path {
+func pointsToClipperPath(pts []Point2) clipper.Path {
 	path := make(clipper.Path, len(pts))
 	for i, p := range pts {
 		path[i] = &clipper.IntPoint{
@@ -40,7 +39,7 @@ func pointsToClipperPath(pts []minislicer.Point2) clipper.Path {
 
 // point2sToClipperPathOriented converts pts to a Clipper path; if
 // keepDir is false it reverses the order while building.
-func point2sToClipperPathOriented(pts []minislicer.Point2, keepDir bool) clipper.Path {
+func point2sToClipperPathOriented(pts []Point2, keepDir bool) clipper.Path {
 	n := len(pts)
 	path := make(clipper.Path, 0, n)
 	if keepDir {
@@ -64,10 +63,10 @@ func point2sToClipperPathOriented(pts []minislicer.Point2, keepDir bool) clipper
 
 // clipperPathToPoints converts a Clipper path back to mm-coordinate
 // XY points, dropping any closing duplicate.
-func clipperPathToPoints(path clipper.Path) []minislicer.Point2 {
-	out := make([]minislicer.Point2, 0, len(path))
+func clipperPathToPoints(path clipper.Path) []Point2 {
+	out := make([]Point2, 0, len(path))
 	for _, ip := range path {
-		p := minislicer.Point2{
+		p := Point2{
 			float32(float64(ip.X) * invClipperScale),
 			float32(float64(ip.Y) * invClipperScale),
 		}
@@ -86,7 +85,7 @@ func clipperPathToPoints(path clipper.Path) []minislicer.Point2 {
 // footprint via Clipper non-zero fill. Returns the (one or more)
 // component polygons of the result. Used by both ring-cell trapezoid
 // clipping and hex-cell tile clipping.
-func clipPolygonToFootprint(poly []minislicer.Point2, fp *Footprint) [][]minislicer.Point2 {
+func clipPolygonToFootprint(poly []Point2, fp *Footprint) [][]Point2 {
 	c := clipper.NewClipper(clipper.IoNone)
 	c.AddPaths(clipper.Paths{pointsToClipperPath(poly)}, clipper.PtSubject, true)
 	c.AddPaths(footprintToClipperPaths(fp), clipper.PtClip, true)
@@ -94,7 +93,7 @@ func clipPolygonToFootprint(poly []minislicer.Point2, fp *Footprint) [][]minisli
 	if !ok || len(result) == 0 {
 		return nil
 	}
-	out := make([][]minislicer.Point2, 0, len(result))
+	out := make([][]Point2, 0, len(result))
 	for _, path := range result {
 		pts := clipperPathToPoints(path)
 		if len(pts) >= 3 {

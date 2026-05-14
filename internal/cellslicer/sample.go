@@ -4,7 +4,6 @@ import (
 	"math"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
-	"github.com/rtwfroody/ditherforge/internal/minislicer"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -115,7 +114,7 @@ func SampleCells(
 // polyCentroid returns the signed-area-weighted centroid of pts and
 // the polygon's unsigned area. Falls back to bbox center for
 // degenerate (zero-area) polygons.
-func polyCentroid(pts []minislicer.Point2) (cx, cy, area float32) {
+func polyCentroid(pts []Point2) (cx, cy, area float32) {
 	n := len(pts)
 	if n < 3 {
 		if n == 0 {

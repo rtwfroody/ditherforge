@@ -1,4 +1,4 @@
-package minislicer
+package cellslicer
 
 import (
 	"math"
