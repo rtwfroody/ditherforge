@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
@@ -617,13 +618,18 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		// its own slabs[i] and perSlabSamples[i] slots, so no locks
 		// are needed. We need the per-slab cell counts to compute
 		// global offsets before adjacency, so this completes first.
+		// partitionNs / sampleNs are atomically-accumulated per-worker
+		// busy time, summed to a CPU-time total — handy for spotting
+		// which substep dominates the parallel wall time.
 		tSlab := time.Now()
+		var partitionNs, sampleNs atomic.Int64
 		slabs := make([]cellslicer.Slab, nSlabs)
 		perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
 		runParallel(nWorkers, nSlabs, func(workerID int) any {
 			return voxel.NewSearchBuf(len(colorModel.Faces))
 		}, func(i int, state any) {
 			buf := state.(*voxel.SearchBuf)
+			t0 := time.Now()
 			cells, fp := cellslicer.PartitionSlab(layers[i].Loops, layers[i+1].Loops, cellSize)
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
@@ -634,9 +640,14 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 				Footprint: fp,
 				Cells:     cells,
 			}
+			t1 := time.Now()
+			partitionNs.Add(int64(t1.Sub(t0)))
 			perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cellSize, 0, nil, nil, buf)
+			sampleNs.Add(int64(time.Since(t1)))
 		})
 		slabElapsed := time.Since(tSlab).Seconds()
+		partitionCPU := time.Duration(partitionNs.Load()).Seconds()
+		sampleCPU := time.Duration(sampleNs.Load()).Seconds()
 
 		nCells := 0
 		for i := range slabs {
@@ -655,9 +666,12 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		tAdj := time.Now()
 		globalOffsets := cellslicer.SlabGlobalOffsets(slabs)
 		globalNeighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
+		tWithin := time.Now()
 		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
 			cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSize, 0, globalNeighbors)
 		})
+		withinElapsed := time.Since(tWithin).Seconds()
+		tCross := time.Now()
 		for parity := 0; parity < 2; parity++ {
 			pairs := make([]int, 0, nSlabs/2+1)
 			for i := parity; i < nSlabs-1; i += 2 {
@@ -668,6 +682,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 				cellslicer.AddCrossSlabAdjacency(&slabs[i], globalOffsets[i], &slabs[i+1], globalOffsets[i+1], globalNeighbors)
 			})
 		}
+		crossElapsed := time.Since(tCross).Seconds()
 		adjElapsed := time.Since(tAdj).Seconds()
 
 		// Build ActiveCells: one per visible cell. Hidden
@@ -718,9 +733,9 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nEdges += len(out)
 		}
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.1fs slab=%.1fs adj=%.1fs (workers=%d)",
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
 			len(slabs), nCells, len(cells), nEdges/2,
-			cellSize, layerH, sliceElapsed, slabElapsed, adjElapsed, nWorkers)
+			cellSize, layerH, sliceElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
 
 		return &voxelizeOutput{
 			Cells:         cells,
