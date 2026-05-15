@@ -630,7 +630,13 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}, func(i int, state any) {
 			buf := state.(*voxel.SearchBuf)
 			t0 := time.Now()
-			cells, fp := cellslicer.PartitionSlab(layers[i].Loops, layers[i+1].Loops, cellSize)
+			// PartitionSlabRaster replaces the per-cell Clipper clip
+			// with a per-pixel scan against the rasterised footprint;
+			// the raster is then dropped, since cross-slab adjacency
+			// still consumes Cell.Outer for now. A later commit will
+			// keep the raster around so the cross-slab Clipper pass
+			// can be replaced by a pixel-overlay scan too.
+			cells, fp, _ := cellslicer.PartitionSlabRaster(layers[i].Loops, layers[i+1].Loops, cellSize, 0)
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
 				ZBot:      planes[i],

@@ -100,6 +100,85 @@ func TestRasterizeFootprintWithHole(t *testing.T) {
 	}
 }
 
+func TestCellOutlineFromRasterRectangle(t *testing.T) {
+	// 5×4 mm rectangle as a single cell. Raster at 0.1 mm pxSize:
+	// the recovered outline should trace the rectangle's grid-
+	// snapped edges, collapsing to 4 corners after simplify.
+	cells := []Cell{
+		{Outer: []Point2{{0, 0}, {5, 0}, {5, 4}, {0, 4}}, Kind: KindHex},
+	}
+	fp := rectFootprint(0, 0, 5, 4)
+	slab := &Slab{Footprint: fp, Cells: cells}
+	r := BuildSlabRaster(slab, 1.0, 0.1)
+	if r == nil {
+		t.Fatal("BuildSlabRaster returned nil")
+	}
+	out := CellOutlineFromRaster(r, 0, 0, 0, r.W-1, r.H-1)
+	if len(out) < 4 {
+		t.Fatalf("outline has %d vertices, want ≥ 4", len(out))
+	}
+	// Outline should be axis-aligned with vertices on pxSize-grid.
+	// Bbox must be approximately [0..5, 0..4] within sub-pixel slop.
+	var minX, minY, maxX, maxY float32 = 1e9, 1e9, -1e9, -1e9
+	for _, p := range out {
+		if p[0] < minX {
+			minX = p[0]
+		}
+		if p[1] < minY {
+			minY = p[1]
+		}
+		if p[0] > maxX {
+			maxX = p[0]
+		}
+		if p[1] > maxY {
+			maxY = p[1]
+		}
+	}
+	if math.Abs(float64(minX)) > 0.2 || math.Abs(float64(minY)) > 0.2 ||
+		math.Abs(float64(maxX-5)) > 0.2 || math.Abs(float64(maxY-4)) > 0.2 {
+		t.Errorf("outline bbox = (%.2f,%.2f)-(%.2f,%.2f), want ≈ (0,0)-(5,4)",
+			minX, minY, maxX, maxY)
+	}
+	// Should collapse to 4 vertices for a clean rectangle.
+	if len(out) != 4 {
+		t.Errorf("rectangle outline simplified to %d verts, want 4: %v", len(out), out)
+	}
+}
+
+func TestPartitionSlabRasterSquare(t *testing.T) {
+	// Identical bot+top loops → a square footprint, ~10×10 mm.
+	square := []Loop{{Points: []Point2{
+		{0, 0}, {10, 0}, {10, 10}, {0, 10},
+	}}}
+	cells, fp, r := PartitionSlabRaster(square, square, 0.4, 0.1)
+	if fp == nil || len(fp.Loops) == 0 {
+		t.Fatal("PartitionSlabRaster returned nil footprint")
+	}
+	if r == nil {
+		t.Fatal("PartitionSlabRaster returned nil raster")
+	}
+	if len(cells) == 0 {
+		t.Fatal("PartitionSlabRaster produced no cells")
+	}
+	// All cells should have valid outlines (≥ 3 verts).
+	for i, c := range cells {
+		if len(c.Outer) < 3 {
+			t.Errorf("cell %d has %d-vertex outline", i, len(c.Outer))
+		}
+	}
+	// Summed pixel-derived cell area should ≈ footprint area (100 mm²).
+	areas := CellAreasFromRaster(r, len(cells))
+	total := float32(0)
+	for _, a := range areas {
+		total += a
+	}
+	// Boundary slop: pxSize × perimeter ≈ 0.1 × 40 = 4 mm² tolerance.
+	if math.Abs(float64(total-100)) > 4 {
+		t.Errorf("total cell area = %.2f mm², want ≈ 100 (±4)", total)
+	}
+	t.Logf("PartitionSlabRaster: %d cells, total area %.2f mm²", len(cells), total)
+}
+
 func TestStampCellsFromOuterMatchesPolygonArea(t *testing.T) {
 	// Two cells side by side that tile a 10×4 strip.
 	cells := []Cell{

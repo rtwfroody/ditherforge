@@ -59,11 +59,22 @@ func TestSampledMatchesInput(t *testing.T) {
 		// switch: per-cell sampling drifts ~2–3 MAE units from the
 		// per-section sampling the test was originally calibrated
 		// against, while remaining visually indistinguishable.
+		//
+		// The persp tile limit was widened from 12 → 18 with the
+		// raster-based partition switch: Cell.Outer comes from
+		// marching-squares on the cellID grid, so the silhouette of
+		// the sphere is rectilinear-staircase to pxSize precision
+		// (0.1 mm) rather than the Clipper-clipped curves of before.
+		// Front/side/top see roughly the same MAE as before; persp
+		// is the most sensitive to silhouette detail and lands at
+		// ~16, comfortably under 18 but above the old 12.
 		{
 			"earth",
 			filepath.Join("objects", "earth.glb"),
 			viewLimits{avg: 22, tile: 12},
-			nil,
+			map[string]viewLimits{
+				"persp": {avg: 22, tile: 18},
+			},
 			false,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +

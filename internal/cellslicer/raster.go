@@ -133,69 +133,220 @@ func RasterizeFootprint(fp *Footprint, originX, originY, pxSize float32, w, h in
 	}
 }
 
-// StampCellsFromOuter fills r.CellID by point-in-polygon-testing
-// each cell's Outer polygon against every pixel in the cell's bbox.
-// In-footprint pixels that aren't covered by any cell keep NoCellID
-// (these are the gaps between cells along the footprint boundary,
-// usually a 1-pixel-wide band).
-//
-// Pixels outside the footprint are forced to NoCellID, so a stale
-// CellID buffer is safely overwritten.
-//
-// This is the validation path: it consumes existing exact polygon
-// data and produces a raster equivalent we can compare against. The
-// production path (next commit) will stamp directly from cell
-// centres without ever touching polygons.
+// StampCellsFromOuter clears CellID and stamps every cell's polygon
+// into r. Same algorithm as StampCellByPolygon called in a loop.
+// Pre-existed for validation; kept as a convenience wrapper.
 func StampCellsFromOuter(cells []Cell, r *SlabRaster) {
 	for i := range r.CellID {
 		r.CellID[i] = NoCellID
 	}
 	for ci := range cells {
-		pts := cells[ci].Outer
-		if len(pts) < 3 {
-			continue
-		}
-		minX, minY, maxX, maxY := polyBounds(pts)
-		// Cell-bbox → pixel range (inclusive, by pixel centre).
-		px0 := intCeil((minX-r.OriginX)/r.PxSize - 0.5)
-		px1 := intFloor((maxX-r.OriginX)/r.PxSize - 0.5)
-		py0 := intCeil((minY-r.OriginY)/r.PxSize - 0.5)
-		py1 := intFloor((maxY-r.OriginY)/r.PxSize - 0.5)
-		if px0 < 0 {
-			px0 = 0
-		}
-		if py0 < 0 {
-			py0 = 0
-		}
-		if px1 >= r.W {
-			px1 = r.W - 1
-		}
-		if py1 >= r.H {
-			py1 = r.H - 1
-		}
-		for py := py0; py <= py1; py++ {
-			y := r.OriginY + (float32(py)+0.5)*r.PxSize
-			rowBase := py * r.W
-			for px := px0; px <= px1; px++ {
-				idx := rowBase + px
-				// In-footprint AND not already claimed: claim it
-				// only if the polygon contains the pixel centre.
-				// (Pre-cleared to NoCellID, so the "not already
-				// claimed" branch is the common one.)
-				bitWord := r.InFootprint[idx>>6]
-				if bitWord&(uint64(1)<<uint(idx&63)) == 0 {
-					continue
-				}
-				if r.CellID[idx] != NoCellID {
-					continue
-				}
-				x := r.OriginX + (float32(px)+0.5)*r.PxSize
-				if pointInPolygon(pts, x, y) {
-					r.CellID[idx] = int32(ci)
-				}
+		StampCellByPolygon(cells[ci].Outer, int32(ci), r)
+	}
+}
+
+// StampCellByPolygon stamps cellIdx into r.CellID for every in-
+// footprint pixel whose centre lies inside poly. Pixels already
+// owned by another cell are not overwritten — earlier cells in the
+// stamping order "win" overlapping regions.
+//
+// poly does NOT need to lie inside r's footprint; the InFootprint
+// mask gates writes. The caller is responsible for clearing the
+// CellID buffer beforehand (StampCellsFromOuter does it once, then
+// streams cells through).
+func StampCellByPolygon(poly []Point2, cellIdx int32, r *SlabRaster) {
+	StampCellByPolygonMasked(poly, cellIdx, r, r.InFootprint)
+}
+
+// StampCellByPolygonMasked is StampCellByPolygon with a caller-
+// supplied gate bitmap in place of r.InFootprint. Used by the
+// PartitionSlabRaster path to confine hex stamping to the inner
+// footprint mask while ring stamping uses the outer footprint —
+// without that distinction, the raw ring trapezoids (which extend
+// inward by depth = 3 × cellSize as scratch space for the old
+// Clipper clip) would re-claim pixels that hex cells should own.
+func StampCellByPolygonMasked(poly []Point2, cellIdx int32, r *SlabRaster, gate []uint64) {
+	if len(poly) < 3 {
+		return
+	}
+	minX, minY, maxX, maxY := polyBounds(poly)
+	px0 := intCeil((minX-r.OriginX)/r.PxSize - 0.5)
+	px1 := intFloor((maxX-r.OriginX)/r.PxSize - 0.5)
+	py0 := intCeil((minY-r.OriginY)/r.PxSize - 0.5)
+	py1 := intFloor((maxY-r.OriginY)/r.PxSize - 0.5)
+	if px0 < 0 {
+		px0 = 0
+	}
+	if py0 < 0 {
+		py0 = 0
+	}
+	if px1 >= r.W {
+		px1 = r.W - 1
+	}
+	if py1 >= r.H {
+		py1 = r.H - 1
+	}
+	for py := py0; py <= py1; py++ {
+		y := r.OriginY + (float32(py)+0.5)*r.PxSize
+		rowBase := py * r.W
+		for px := px0; px <= px1; px++ {
+			idx := rowBase + px
+			if gate[idx>>6]&(uint64(1)<<uint(idx&63)) == 0 {
+				continue
+			}
+			if r.CellID[idx] != NoCellID {
+				continue
+			}
+			x := r.OriginX + (float32(px)+0.5)*r.PxSize
+			if pointInPolygon(poly, x, y) {
+				r.CellID[idx] = cellIdx
 			}
 		}
 	}
+}
+
+// CellOutlineFromRaster recovers a closed boundary polygon for the
+// cell with index cellIdx by walking the pixel-grid edges between
+// cell-pixels and non-cell-pixels. The returned polygon's vertices
+// land on pixel corners (i.e. integer multiples of PxSize off
+// OriginX/Y); collinear runs are NOT collapsed by this function —
+// pass through simplifyCollinear if you want a shorter vertex list.
+//
+// Returns nil if the cell has no pixels in r. Returns the outer
+// loop only — interior holes are ignored on the assumption that
+// cells are simply connected (true for well-formed hex / ring
+// partitions). bbox is the inclusive pixel-coordinate bbox of the
+// cell's pixels; pass {0, 0, r.W-1, r.H-1} to scan the whole grid.
+//
+// Edge-walk convention: for each in-cell pixel, emit a unit-length
+// boundary edge along any side whose neighbor is NOT in the cell.
+// Edge direction is consistent (CCW around cell pixels), so all
+// emitted edges form one or more closed loops that share no
+// endpoints. We then chain the edges from any starting endpoint and
+// return the first closed loop.
+func CellOutlineFromRaster(r *SlabRaster, cellIdx int32, bboxPxMinX, bboxPxMinY, bboxPxMaxX, bboxPxMaxY int) []Point2 {
+	if bboxPxMinX < 0 {
+		bboxPxMinX = 0
+	}
+	if bboxPxMinY < 0 {
+		bboxPxMinY = 0
+	}
+	if bboxPxMaxX >= r.W {
+		bboxPxMaxX = r.W - 1
+	}
+	if bboxPxMaxY >= r.H {
+		bboxPxMaxY = r.H - 1
+	}
+	if bboxPxMinX > bboxPxMaxX || bboxPxMinY > bboxPxMaxY {
+		return nil
+	}
+	inCell := func(px, py int) bool {
+		if px < 0 || py < 0 || px >= r.W || py >= r.H {
+			return false
+		}
+		return r.CellID[py*r.W+px] == cellIdx
+	}
+	// Each edge connects two grid-corner points (integer (x, y) at
+	// pixel boundaries). For chaining we store one edge per `from`
+	// corner — at well-formed boundaries each corner has exactly
+	// one out-edge, so a single-keyed map works.
+	//
+	// Edge directions (CCW around each in-cell pixel):
+	//   bottom side (neighbor y-1 out): (px,   py)   → (px+1, py)
+	//   right  side (neighbor x+1 out): (px+1, py)   → (px+1, py+1)
+	//   top    side (neighbor y+1 out): (px+1, py+1) → (px,   py+1)
+	//   left   side (neighbor x-1 out): (px,   py+1) → (px,   py)
+	out := make(map[[2]int][2]int)
+	for py := bboxPxMinY; py <= bboxPxMaxY; py++ {
+		for px := bboxPxMinX; px <= bboxPxMaxX; px++ {
+			if !inCell(px, py) {
+				continue
+			}
+			if !inCell(px, py-1) {
+				out[[2]int{px, py}] = [2]int{px + 1, py}
+			}
+			if !inCell(px+1, py) {
+				out[[2]int{px + 1, py}] = [2]int{px + 1, py + 1}
+			}
+			if !inCell(px, py+1) {
+				out[[2]int{px + 1, py + 1}] = [2]int{px, py + 1}
+			}
+			if !inCell(px-1, py) {
+				out[[2]int{px, py + 1}] = [2]int{px, py}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	// Pick a start: leftmost-then-bottom-most corner ensures we
+	// start on the outer boundary, not an inner hole. (Cells are
+	// assumed simply connected, but this is robust either way.)
+	var start [2]int
+	first := true
+	for k := range out {
+		if first || k[0] < start[0] || (k[0] == start[0] && k[1] < start[1]) {
+			start = k
+			first = false
+		}
+	}
+	poly := make([]Point2, 0, len(out))
+	cur := start
+	for {
+		x := r.OriginX + float32(cur[0])*r.PxSize
+		y := r.OriginY + float32(cur[1])*r.PxSize
+		poly = append(poly, Point2{x, y})
+		nxt, ok := out[cur]
+		if !ok {
+			// Open loop — shouldn't happen for well-formed input,
+			// bail out with what we have.
+			break
+		}
+		if nxt == start {
+			break
+		}
+		cur = nxt
+		if len(poly) > len(out)+1 {
+			// Cycle guard: walked more edges than exist.
+			break
+		}
+	}
+	return simplifyCollinear(poly)
+}
+
+// simplifyCollinear removes vertices that lie on the straight
+// segment between their neighbours. The marching-squares output is
+// inherently rectilinear, so this collapses horizontal/vertical
+// staircases that share an axis into single segments. A hex cell's
+// stairstep outline (~24 vertices) collapses to ~12 vertices that
+// trace the staircase corners; for clip2d that's still up from the
+// pre-raster 6-vertex hex, but the cost stays linear in the
+// boundary pixel count.
+func simplifyCollinear(poly []Point2) []Point2 {
+	n := len(poly)
+	if n < 3 {
+		return poly
+	}
+	out := poly[:0:0]
+	for i := 0; i < n; i++ {
+		prev := poly[(i-1+n)%n]
+		cur := poly[i]
+		next := poly[(i+1)%n]
+		// Cross product of (cur-prev) × (next-cur). Zero ⇒ collinear.
+		cx := (cur[0] - prev[0]) * (next[1] - cur[1])
+		cy := (cur[1] - prev[1]) * (next[0] - cur[0])
+		if cx == cy {
+			continue
+		}
+		out = append(out, cur)
+	}
+	if len(out) < 3 {
+		return poly
+	}
+	// Need a fresh backing array — out aliases poly.
+	cp := make([]Point2, len(out))
+	copy(cp, out)
+	return cp
 }
 
 // CellPixelCounts returns the number of raster pixels owned by each
