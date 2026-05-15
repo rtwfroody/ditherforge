@@ -6,6 +6,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -585,25 +586,95 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		geomModel := lo.Model
 		colorModel := lo.ColorModel
 
+		// Slice once and build the spatial index once — both feed
+		// every per-slab worker below. Each slab is then independent,
+		// so we fan out NumCPU workers over the slab list and have
+		// each one own its own SearchBuf (the only piece of voxel
+		// state that isn't safe to share).
 		tSlice := time.Now()
-		slabs := cellslicer.PartitionModel(geomModel, layerH, cellSize)
-		if len(slabs) == 0 {
+		zMin, zMax := modelZRange(geomModel)
+		if zMax <= zMin {
+			return nil, fmt.Errorf("cellslicer: degenerate Z range")
+		}
+		planes := cellslicer.SlabBoundaryPlanes(zMin, zMax, layerH)
+		layers := cellslicer.SliceMesh(geomModel, planes)
+		nSlabs := len(layers) - 1
+		if nSlabs < 1 {
 			return nil, fmt.Errorf("cellslicer: no slabs produced")
 		}
+		spatial := voxel.NewSpatialIndex(colorModel, cellSize)
+		sliceElapsed := time.Since(tSlice).Seconds()
+
+		nWorkers := runtime.NumCPU()
+		if nWorkers < 1 {
+			nWorkers = 1
+		}
+		if nWorkers > nSlabs {
+			nWorkers = nSlabs
+		}
+
+		// Per-slab phase: partition + sample. Each worker writes only
+		// its own slabs[i] and perSlabSamples[i] slots, so no locks
+		// are needed. We need the per-slab cell counts to compute
+		// global offsets before adjacency, so this completes first.
+		tSlab := time.Now()
+		slabs := make([]cellslicer.Slab, nSlabs)
+		perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
+		runParallel(nWorkers, nSlabs, func(workerID int) any {
+			return voxel.NewSearchBuf(len(colorModel.Faces))
+		}, func(i int, state any) {
+			buf := state.(*voxel.SearchBuf)
+			cells, fp := cellslicer.PartitionSlab(layers[i].Loops, layers[i+1].Loops, cellSize)
+			slabs[i] = cellslicer.Slab{
+				Index:     i,
+				ZBot:      planes[i],
+				ZTop:      planes[i+1],
+				BotLayer:  &layers[i],
+				TopLayer:  &layers[i+1],
+				Footprint: fp,
+				Cells:     cells,
+			}
+			perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cellSize, 0, nil, nil, buf)
+		})
+		slabElapsed := time.Since(tSlab).Seconds()
+
 		nCells := 0
 		for i := range slabs {
 			nCells += len(slabs[i].Cells)
 		}
+		samples := make([]cellslicer.CellSample, 0, nCells)
+		for i := range perSlabSamples {
+			samples = append(samples, perSlabSamples[i]...)
+		}
 
-		spatial := voxel.NewSpatialIndex(colorModel, cellSize)
-		samples := cellslicer.SampleCells(slabs, colorModel, spatial, cellSize, 0, nil, nil)
+		// Adjacency phase. Within-slab is fully independent per slab.
+		// Cross-slab pair (i,i+1) writes to both slab i and slab i+1's
+		// neighbor rows, so neighboring pairs collide on the shared
+		// slab; we split pairs into even and odd parities to keep the
+		// two phases lock-free.
+		tAdj := time.Now()
+		globalOffsets := cellslicer.SlabGlobalOffsets(slabs)
+		globalNeighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
+		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
+			cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSize, 0, globalNeighbors)
+		})
+		for parity := 0; parity < 2; parity++ {
+			pairs := make([]int, 0, nSlabs/2+1)
+			for i := parity; i < nSlabs-1; i += 2 {
+				pairs = append(pairs, i)
+			}
+			runParallel(nWorkers, len(pairs), nil, func(k int, _ any) {
+				i := pairs[k]
+				cellslicer.AddCrossSlabAdjacency(&slabs[i], globalOffsets[i], &slabs[i+1], globalOffsets[i+1], globalNeighbors)
+			})
+		}
+		adjElapsed := time.Since(tAdj).Seconds()
 
 		// Build ActiveCells: one per visible cell. Hidden
 		// (Alpha == false) cells are dropped so palette selection
-		// and dither operate only on visible color. Layer/Row/Col
-		// encode SlabIdx / CellIdx-within-slab so CellKey lookups
-		// stay unique. cellToVisible maps global cell index → visible
-		// index, used to reindex the adjacency graph below.
+		// and dither operate only on visible color. cellToVisible
+		// maps global cell index → visible index, used to reindex
+		// the adjacency graph below.
 		cells := make([]voxel.ActiveCell, 0, len(samples))
 		visibleToCell := make([]int, 0, len(samples))
 		cellToVisible := make([]int, len(samples))
@@ -628,13 +699,6 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 				Area:  s.Area,
 			})
 		}
-
-		// Build the cell adjacency graph (within-slab via raster,
-		// cross-slab via Clipper polygon overlap) and reindex from
-		// global cell index to visible cell index, dropping hidden
-		// cells.
-		tAdj := time.Now()
-		globalNeighbors := cellslicer.BuildAdjacency(slabs, cellSize, 0)
 		visibleNeighbors := make([][]voxel.Neighbor, len(cells))
 		nEdges := 0
 		for gi, nbrs := range globalNeighbors {
@@ -653,12 +717,10 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			visibleNeighbors[vi] = out
 			nEdges += len(out)
 		}
-		adjElapsed := time.Since(tAdj).Seconds()
-		sliceElapsed := tAdj.Sub(tSlice).Seconds()
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.1fs adj=%.1fs",
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.1fs slab=%.1fs adj=%.1fs (workers=%d)",
 			len(slabs), nCells, len(cells), nEdges/2,
-			cellSize, layerH, sliceElapsed, adjElapsed)
+			cellSize, layerH, sliceElapsed, slabElapsed, adjElapsed, nWorkers)
 
 		return &voxelizeOutput{
 			Cells:         cells,

@@ -25,38 +25,67 @@ import (
 // (mm). Pass 0 to default to cellSize / 4 — fine resolution to
 // distinguish hex cells of radius cellSize/√3.
 func BuildAdjacency(slabs []Slab, cellSize, pxSize float32) [][]voxel.Neighbor {
-	if pxSize <= 0 {
-		pxSize = cellSize / 4
-	}
-	// Global cell offsets per slab: globalOffsets[i] = cumulative
-	// cell count before slab i; globalIdx = globalOffsets[i] + cellInSlab.
-	globalOffsets := make([]int, len(slabs)+1)
-	for i := range slabs {
-		globalOffsets[i+1] = globalOffsets[i] + len(slabs[i].Cells)
-	}
-	totalCells := globalOffsets[len(slabs)]
-	neighbors := make([][]voxel.Neighbor, totalCells)
+	pxSize = resolveAdjPxSize(pxSize, cellSize)
+	globalOffsets := SlabGlobalOffsets(slabs)
+	neighbors := make([][]voxel.Neighbor, globalOffsets[len(slabs)])
 
 	// Within-slab adjacency.
 	for si := range slabs {
-		s := &slabs[si]
-		if len(s.Cells) == 0 {
-			continue
-		}
-		addWithinSlabAdjacency(s, globalOffsets[si], cellSize, pxSize, neighbors)
+		AddWithinSlabAdjacency(&slabs[si], globalOffsets[si], cellSize, pxSize, neighbors)
 	}
 
 	// Cross-slab adjacency.
 	for si := 0; si < len(slabs)-1; si++ {
-		a := &slabs[si]
-		b := &slabs[si+1]
-		if len(a.Cells) == 0 || len(b.Cells) == 0 {
-			continue
-		}
-		addCrossSlabAdjacency(a, globalOffsets[si], b, globalOffsets[si+1], neighbors)
+		AddCrossSlabAdjacency(&slabs[si], globalOffsets[si], &slabs[si+1], globalOffsets[si+1], neighbors)
 	}
 
 	return neighbors
+}
+
+// SlabGlobalOffsets returns globalOffsets where globalOffsets[i] is
+// the cumulative cell count in slabs[0..i) and globalOffsets[len] is
+// the total cell count. Useful for converting per-slab local cell
+// indices into the global adjacency indexing.
+func SlabGlobalOffsets(slabs []Slab) []int {
+	off := make([]int, len(slabs)+1)
+	for i := range slabs {
+		off[i+1] = off[i] + len(slabs[i].Cells)
+	}
+	return off
+}
+
+// AddWithinSlabAdjacency is the per-slab within-cell adjacency pass
+// exposed for callers that schedule slabs across goroutines. The
+// neighbors slice must be sized for the full global cell count;
+// this call only writes into the [baseGlobal, baseGlobal+len(s.Cells))
+// range, so concurrent calls on different slabs are race-free.
+//
+// pxSize <= 0 picks the cellSize/4 default that BuildAdjacency uses.
+func AddWithinSlabAdjacency(s *Slab, baseGlobal int, cellSize, pxSize float32, neighbors [][]voxel.Neighbor) {
+	if len(s.Cells) == 0 {
+		return
+	}
+	pxSize = resolveAdjPxSize(pxSize, cellSize)
+	addWithinSlabAdjacency(s, baseGlobal, cellSize, pxSize, neighbors)
+}
+
+// AddCrossSlabAdjacency is the per-pair cross-slab adjacency pass.
+// neighbors must be sized for the full global cell count; this call
+// writes into both slabs' index ranges, so concurrent calls on
+// overlapping pairs (i,i+1) and (i+1,i+2) are NOT safe without
+// external synchronization on the shared slab's neighbor rows.
+func AddCrossSlabAdjacency(a *Slab, baseA int, b *Slab, baseB int, neighbors [][]voxel.Neighbor) {
+	if len(a.Cells) == 0 || len(b.Cells) == 0 {
+		return
+	}
+	addCrossSlabAdjacency(a, baseA, b, baseB, neighbors)
+}
+
+func resolveAdjPxSize(pxSize, cellSize float32) float32 {
+	if pxSize > 0 {
+		return pxSize
+	}
+	return cellSize / 4
 }
 
 // addWithinSlabAdjacency rasterizes cells at pxSize, scans the grid
