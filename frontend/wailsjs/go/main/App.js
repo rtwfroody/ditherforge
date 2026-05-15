@@ -6,8 +6,8 @@ export function CreateCollection(arg1) {
   return window['go']['main']['App']['CreateCollection'](arg1);
 }
 
-export function DebugCellsSlabPNG(arg1) {
-  return window['go']['main']['App']['DebugCellsSlabPNG'](arg1);
+export function DebugCellsSlabSVG(arg1) {
+  return window['go']['main']['App']['DebugCellsSlabSVG'](arg1);
 }
 
 export function DefaultSettingsPath(arg1) {

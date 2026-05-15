@@ -62,3 +62,25 @@ func CellsSlabPNG(cache *StageCache, opts Options, slabIdx int) (data []byte, sl
 	}
 	return buf.Bytes(), slabCount, nil
 }
+
+// CellsSlabSVG renders a single slab's cell partition (colored by
+// each cell's sampled RGB) to an SVG document. Returns the total
+// slab count alongside the markup so the GUI can drive a Z slider
+// without a separate round-trip. The Voxelize stage for opts must
+// have run; otherwise returns an error. Empty slabs return an empty
+// string with no error — the slabCount return tells callers which
+// indices have geometry.
+func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, slabCount int, err error) {
+	cache.WaitForDiskWrites()
+	vo := cache.getVoxelize(opts)
+	if vo == nil {
+		return "", 0, fmt.Errorf("voxelize stage has not run yet — run the pipeline first")
+	}
+	slabCount = len(vo.CellSlabs)
+	svg = cellslicer.RenderSlabDebugSVG(vo.CellSlabs, vo.CellSamples, slabIdx, cellslicer.DebugSVGOptions{
+		CellSizeMM:          vo.CellSize,
+		FillBackgroundWhite: true,
+		DrawEdges:           true,
+	})
+	return svg, slabCount, nil
+}
