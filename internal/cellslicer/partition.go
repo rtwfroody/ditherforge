@@ -277,30 +277,36 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 	return cells
 }
 
-// PartitionSlabRaster is the raster-first equivalent of
-// PartitionSlab. It generates raw (unclipped) ring + hex polygons,
-// rasterises the footprint into a SlabRaster, stamps each raw
-// polygon into the cellID grid (the InFootprint bitmap gates
-// writes), then recovers each surviving cell's outline via marching
-// squares.
+// PartitionSlabRaster is the raster-first partition pass. It needs
+// fpCur for the slab itself plus fpBelow / fpAbove for neighbouring
+// slabs so it can compute cap masks; pass nil for either neighbour
+// at the top/bottom of the model.
 //
-// pxSize <= 0 picks cellSize/4 to match the adjacency raster
-// resolution. The returned cells are reindexed densely (zero-pixel
-// raw cells are dropped), and r.CellID is rewritten to use the
-// dense indices so downstream consumers can read the raster
-// directly as the authoritative cell partition.
-func PartitionSlabRaster(bot, top []Loop, cellSize, pxSize float32) ([]Cell, *Footprint, *SlabRaster) {
-	fp := ComputeFootprint(bot, top)
-	if fp == nil || len(fp.Loops) == 0 {
-		return nil, fp, nil
+// Cell generation:
+//
+//   - Ring cells along the boundary band (raw trapezoids stamped
+//     into the inFootprint mask), as before.
+//   - Hex cells gated by capMask = (cap_top ∪ cap_bottom) ∩ inner,
+//     where cap_top = inFootprint − inAbove and cap_bottom =
+//     inFootprint − inBelow. Pure wall slabs have empty capMask and
+//     produce no interior cells; cap slabs (top/bottom of model
+//     or interior horizontal feature) get a full hex tiling over
+//     the cap region.
+//
+// Each surviving cell's Outer is recovered via marching squares on
+// the cellID grid. The dense raster is dropped on return — callers
+// see polygons only.
+func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize float32) ([]Cell, *SlabRaster) {
+	if fpCur == nil || len(fpCur.Loops) == 0 {
+		return nil, nil
 	}
-	inner := OffsetFootprint(fp, -cellSize)
+	inner := OffsetFootprint(fpCur, -cellSize)
 	if pxSize <= 0 {
 		pxSize = cellSize / 4
 	}
-	minX, minY, maxX, maxY, ok := fp.Bounds()
+	minX, minY, maxX, maxY, ok := fpCur.Bounds()
 	if !ok {
-		return nil, fp, nil
+		return nil, nil
 	}
 	margin := pxSize
 	minX -= margin
@@ -310,7 +316,7 @@ func PartitionSlabRaster(bot, top []Loop, cellSize, pxSize float32) ([]Cell, *Fo
 	w := intCeil((maxX - minX) / pxSize)
 	h := intCeil((maxY - minY) / pxSize)
 	if w < 1 || h < 1 {
-		return nil, fp, nil
+		return nil, nil
 	}
 	r := &SlabRaster{
 		OriginX:     minX,
@@ -321,41 +327,70 @@ func PartitionSlabRaster(bot, top []Loop, cellSize, pxSize float32) ([]Cell, *Fo
 		InFootprint: make([]uint64, BitsForPixels(w, h)),
 		CellID:      make([]int32, w*h),
 	}
-	RasterizeFootprint(fp, minX, minY, pxSize, w, h, r.InFootprint)
+	RasterizeFootprint(fpCur, minX, minY, pxSize, w, h, r.InFootprint)
 	for i := range r.CellID {
 		r.CellID[i] = NoCellID
 	}
 
-	// Rasterise the inner footprint separately. Hex cells stamp
-	// only into this mask; ring cells stamp into the outer
-	// footprint mask but only claim pixels not already taken. The
-	// effect: hex cells own the inner-footprint area, ring cells
-	// own the (outer − inner) boundary band — matching what the
-	// Clipper-clipped path produced, without any per-cell Clipper
-	// call. Without the inner mask, raw ring trapezoids (depth =
-	// 3×cellSize scratch overshoot) overrun the hex territory and
-	// shift cell centroids enough to break sampling on textured
-	// boundaries.
+	// Inner footprint mask. Used both to compute the cap-and-
+	// interior region and (when no cap exists) as the historical
+	// hex-stamping gate.
+	wordCount := BitsForPixels(w, h)
 	var innerMask []uint64
 	if inner != nil && len(inner.Loops) > 0 {
-		innerMask = make([]uint64, BitsForPixels(w, h))
+		innerMask = make([]uint64, wordCount)
 		RasterizeFootprint(inner, minX, minY, pxSize, w, h, innerMask)
-	} else {
-		// No inner region (very small footprint): hex cells share
-		// the outer footprint mask. Ring cells will fill anyway.
-		innerMask = r.InFootprint
 	}
 
-	rawRing := generateRingCellsRaw(fp, cellSize)
-	rawHex := generateHexCellsRaw(inner, cellSize)
-	// Stamping order is hex-first / ring-second so that hex cells
-	// claim the inner-footprint pixels uncontested; ring cells
-	// then fill the remaining boundary-band pixels.
+	// Neighbour footprints → cap masks. cap_top = inFootprint
+	// minus the slab-above footprint; cap_bottom likewise. Open
+	// boundaries (no slab above/below) contribute the entire
+	// inFootprint as a cap, so the model's top and bottom slabs
+	// get full interior coverage automatically.
+	belowMask := neighborMaskOrNil(fpBelow, minX, minY, pxSize, w, h)
+	aboveMask := neighborMaskOrNil(fpAbove, minX, minY, pxSize, w, h)
+	capMask := make([]uint64, wordCount)
+	if innerMask != nil {
+		copy(capMask, innerMask)
+	} else {
+		copy(capMask, r.InFootprint)
+	}
+	// capMask &= ((inFootprint &^ belowMask) | (inFootprint &^ aboveMask))
+	// i.e. keep only inner pixels that have either no slab below
+	// them or no slab above them at the same (x, y).
+	for i := 0; i < wordCount; i++ {
+		inFp := r.InFootprint[i]
+		below := uint64(0)
+		if belowMask != nil {
+			below = belowMask[i]
+		}
+		above := uint64(0)
+		if aboveMask != nil {
+			above = aboveMask[i]
+		}
+		capMask[i] &= (inFp &^ below) | (inFp &^ above)
+	}
+
+	// Hex stamping gate. If there's no inner region at all (a very
+	// thin footprint) we fall back to the outer mask so cell
+	// generation doesn't silently empty out.
+	hexGate := capMask
+	if innerMask == nil {
+		hexGate = r.InFootprint
+	}
+
+	rawRing := generateRingCellsRaw(fpCur, cellSize)
+	var rawHex []Cell
+	if inner != nil {
+		rawHex = generateHexCellsRaw(inner, cellSize)
+	}
+	// Hex-first / ring-second so hex owns the cap interior; ring
+	// then fills the boundary band that hex didn't claim.
 	rawCells := make([]Cell, 0, len(rawHex)+len(rawRing))
 	rawCells = append(rawCells, rawHex...)
 	rawCells = append(rawCells, rawRing...)
 	for ci := range rawHex {
-		StampCellByPolygonMasked(rawCells[ci].Outer, int32(ci), r, innerMask)
+		StampCellByPolygonMasked(rawCells[ci].Outer, int32(ci), r, hexGate)
 	}
 	hexOffset := len(rawHex)
 	for k := range rawRing {
@@ -428,5 +463,19 @@ func PartitionSlabRaster(bot, top []Loop, cellSize, pxSize float32) ([]Cell, *Fo
 		}
 		cells = append(cells, Cell{Outer: outline, Kind: rawCells[ci].Kind})
 	}
-	return cells, fp, r
+	return cells, r
+}
+
+// neighborMaskOrNil rasterises a neighbouring slab's footprint into
+// the same (origin, pxSize, w, h) frame as the slab being
+// partitioned, or returns nil if the neighbour is absent (top /
+// bottom of the model) — a nil mask is treated as the empty set by
+// the cap-mask combinator.
+func neighborMaskOrNil(fp *Footprint, originX, originY, pxSize float32, w, h int) []uint64 {
+	if fp == nil || len(fp.Loops) == 0 {
+		return nil
+	}
+	mask := make([]uint64, BitsForPixels(w, h))
+	RasterizeFootprint(fp, originX, originY, pxSize, w, h, mask)
+	return mask
 }

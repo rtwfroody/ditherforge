@@ -614,6 +614,19 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nWorkers = nSlabs
 		}
 
+		// Footprint phase: compute the planar footprint for every
+		// slab up front. Used twice each — once for the slab itself
+		// and once when its neighbours look at it to decide where
+		// caps lie. ComputeFootprint is a small Clipper Union per
+		// slab; doing it once cleanly is cheaper than the 3× per-
+		// slab recompute pattern that grouping it inline would force.
+		tFp := time.Now()
+		footprints := make([]*cellslicer.Footprint, nSlabs)
+		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
+			footprints[i] = cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+		})
+		fpElapsed := time.Since(tFp).Seconds()
+
 		// Per-slab phase: partition + sample. Each worker writes only
 		// its own slabs[i] and perSlabSamples[i] slots, so no locks
 		// are needed. We need the per-slab cell counts to compute
@@ -630,20 +643,28 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}, func(i int, state any) {
 			buf := state.(*voxel.SearchBuf)
 			t0 := time.Now()
-			// PartitionSlabRaster replaces the per-cell Clipper clip
-			// with a per-pixel scan against the rasterised footprint;
-			// the raster is then dropped, since cross-slab adjacency
-			// still consumes Cell.Outer for now. A later commit will
-			// keep the raster around so the cross-slab Clipper pass
-			// can be replaced by a pixel-overlay scan too.
-			cells, fp, _ := cellslicer.PartitionSlabRaster(layers[i].Loops, layers[i+1].Loops, cellSize, 0)
+			// PartitionSlabRaster takes the slab's own footprint plus
+			// its neighbours' (or nil at the model's top/bottom). It
+			// emits ring cells along the lateral band, hex cells only
+			// where the slab's footprint differs from its neighbours
+			// (cap surfaces). Wall slabs — by far the common case —
+			// produce only ring cells. The dense raster is dropped
+			// on return; downstream consumers see polygons.
+			var fpBelow, fpAbove *cellslicer.Footprint
+			if i > 0 {
+				fpBelow = footprints[i-1]
+			}
+			if i+1 < nSlabs {
+				fpAbove = footprints[i+1]
+			}
+			cells, _ := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cellSize, 0)
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
 				ZBot:      planes[i],
 				ZTop:      planes[i+1],
 				BotLayer:  &layers[i],
 				TopLayer:  &layers[i+1],
-				Footprint: fp,
+				Footprint: footprints[i],
 				Cells:     cells,
 			}
 			t1 := time.Now()
@@ -739,9 +760,9 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nEdges += len(out)
 		}
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
 			len(slabs), nCells, len(cells), nEdges/2,
-			cellSize, layerH, sliceElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
+			cellSize, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
 
 		return &voxelizeOutput{
 			Cells:         cells,

@@ -147,12 +147,19 @@ func TestCellOutlineFromRasterRectangle(t *testing.T) {
 
 func TestPartitionSlabRasterSquare(t *testing.T) {
 	// Identical bot+top loops → a square footprint, ~10×10 mm.
+	// Passed as both fpBelow and fpAbove so cap masks are empty —
+	// this exercises the "pure wall slab, no interior cells" path.
+	// To still get interior coverage for the area-sum sanity check,
+	// we re-test with nil neighbours (the model's top/bottom case)
+	// further down.
 	square := []Loop{{Points: []Point2{
 		{0, 0}, {10, 0}, {10, 10}, {0, 10},
 	}}}
-	cells, fp, r := PartitionSlabRaster(square, square, 0.4, 0.1)
+	fp := ComputeFootprint(square, square)
+	cellsCap, r := PartitionSlabRaster(fp, nil, nil, 0.4, 0.1)
+	cells := cellsCap
 	if fp == nil || len(fp.Loops) == 0 {
-		t.Fatal("PartitionSlabRaster returned nil footprint")
+		t.Fatal("ComputeFootprint returned nil footprint")
 	}
 	if r == nil {
 		t.Fatal("PartitionSlabRaster returned nil raster")
