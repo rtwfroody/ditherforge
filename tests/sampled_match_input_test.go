@@ -36,6 +36,13 @@ func TestSampledMatchesInput(t *testing.T) {
 
 	type viewLimits struct {
 		avg, tile float64
+		// silh is the minimum acceptable Jaccard index of the
+		// opaque-pixel silhouettes (input ∩ sampled / input ∪
+		// sampled). Catches the case where the sampled mesh has
+		// large missing regions — e.g. dropped Z-slabs that show
+		// as horizontal stripes of transparency — which the
+		// color-only MAE blindly skips. 1.0 is a perfect fit.
+		silh float64
 	}
 	cases := []struct {
 		name string
@@ -71,28 +78,31 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			"earth",
 			filepath.Join("objects", "earth.glb"),
-			viewLimits{avg: 22, tile: 12},
+			viewLimits{avg: 22, tile: 12, silh: 0.97},
 			map[string]viewLimits{
-				"persp": {avg: 22, tile: 18},
+				"persp": {avg: 22, tile: 18, silh: 0.97},
 			},
 			false,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +
-		// walls + windows + roof) needing alpha-wrap. The wrap
-		// replaces the detailed roof texture with a smoothed
-		// surface that samples a quite different color than the
-		// original — top-down and persp views are dominated by
-		// that fabrication, so their limits are loosened just
-		// enough to accept it. Front/side don't see the roof,
-		// so they get tight wall-sampling limits that catch
-		// multi-object regressions.
+		// walls + windows + roof) without a face on the bottom,
+		// so alpha-wrap is needed to make it watertight for the
+		// cellslicer. The wrap mostly adds a hull on the bottom
+		// face and otherwise leaves the rendered surface alone
+		// — top, front, side and persp all see roughly the
+		// original geometry, so they get tight wall-sampling
+		// limits that catch multi-object regressions.
 		{
 			"building",
 			filepath.Join("objects", "low_poly_building.glb"),
-			viewLimits{avg: 30, tile: 30},
+			viewLimits{avg: 30, tile: 30, silh: 0.93},
 			map[string]viewLimits{
-				"top":   {avg: 75, tile: 128},
-				"persp": {avg: 30, tile: 125},
+				// Top: the persp tile threshold stays generous to
+				// absorb shading differences on the roof's small
+				// vent / chimney features that the 0.4mm cell grid
+				// can't resolve at full fidelity.
+				"top":   {avg: 30, tile: 60, silh: 0.90},
+				"persp": {avg: 30, tile: 125, silh: 0.93},
 			},
 			true,
 		},
@@ -150,6 +160,22 @@ func TestSampledMatchesInput(t *testing.T) {
 			t.Logf("input  +Y side mean RGB: (%3d,%3d,%3d)  -Y side mean RGB: (%3d,%3d,%3d)", iyp[0], iyp[1], iyp[2], iyn[0], iyn[1], iyn[2])
 			t.Logf("sampled +Y side mean RGB: (%3d,%3d,%3d)  -Y side mean RGB: (%3d,%3d,%3d)", syp[0], syp[1], syp[2], syn[0], syn[1], syn[2])
 
+			// Normal-direction balance: ≥ 95% of faces with normals
+			// pointing in one cardinal half-space (±X/±Y/±Z) is a
+			// strong signal that the Clip stage lost source-triangle
+			// winding — every down-facing source becomes up-facing in
+			// the output, then back-face culling in the GUI hides
+			// half the surface. Threshold 0.5 is generous (the
+			// building has many parallel walls, so a single bucket
+			// hitting ~0.4 is normal) but well below the 0.99 the
+			// bug produces.
+			normShare := maxNormalDirectionShare(pr.OutputMesh)
+			t.Logf("%s: largest normal-direction bucket = %.3f (limit 0.50)", tc.name, normShare)
+			if normShare > 0.5 {
+				t.Errorf("%s: %.1f%% of output faces share a single normal direction — likely a Clip-stage winding bug (source-triangle winding dropped, all faces wound CCW-XY)",
+					tc.name, normShare*100)
+			}
+
 			const res = 256
 			// When DF_TEST_DUMP_DIR is set, also dump PNGs there
 			// for visual inspection (t.TempDir() is cleaned up
@@ -173,8 +199,9 @@ func TestSampledMatchesInput(t *testing.T) {
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("sampled_%s.png", v.Name)), sampledImg)
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
 				maxTileMAE, tileGrid, worstTileDesc := tileMeanMAE(inputImg, sampledImg, 8)
-				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid) %s",
-					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, worstTileDesc)
+				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque px) %s",
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -187,6 +214,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				if maxTileMAE > limits.tile {
 					t.Errorf("%s/%s: worst-tile mean color diverges (tile mae=%.2f > %.1f); features in wrong screen positions; PNGs in %s",
 						tc.name, v.Name, maxTileMAE, limits.tile, dumpDir)
+				}
+				if limits.silh > 0 && iou < limits.silh {
+					t.Errorf("%s/%s: sampled silhouette diverges from input (IoU=%.3f < %.2f); sampled mesh is missing geometry where the input is opaque (input %d / sampled %d opaque px); PNGs in %s",
+						tc.name, v.Name, iou, limits.silh, inputOpaque, sampledOpaque, dumpDir)
 				}
 			}
 		})
@@ -419,6 +450,148 @@ func absDiff(a, b int) int {
 		return b - a
 	}
 	return a - b
+}
+
+// silhouetteIoU returns the Jaccard index of the opaque-pixel
+// sets of two same-bounded images: |A ∩ B| / |A ∪ B|. 1.0 means
+// the two silhouettes match exactly; 0.0 means they don't overlap
+// at all. Also returns the opaque-pixel counts of each image so
+// callers can log absolute coverage alongside the ratio.
+//
+// This is the sibling check to meanAbsoluteRGBError, which only
+// looks at pixels opaque in both images. Without an IoU floor a
+// sampled mesh that drops every other Z-slab — showing as
+// horizontal stripes of transparent pixels — slips past the MAE
+// check because the missing pixels are excluded from the average.
+//
+// The pixel-center orthographic rasterizer in internal/render
+// drops triangles whose interior contains no pixel center; for
+// dense quilted output meshes like the cellslicer's per-cell
+// fragments that's a substantial slice of every cell, showing as
+// regular sub-pixel stripes through both renders. To distinguish
+// "render has aliasing" from "mesh is actually missing
+// geometry", silhouetteIoU aggregates over 2×2 tiles: a tile is
+// opaque if any of its 4 pixels is opaque. That smooths over the
+// rasterizer's single-pixel dropouts while still catching
+// catastrophic missing-chunk regressions (a winding/clipping bug
+// that drops a 4-pixel-wide region still leaves whole tiles
+// transparent).
+func silhouetteIoU(a, b *image.RGBA) (iou float64, opaqueA, opaqueB int) {
+	if a.Bounds() != b.Bounds() {
+		return 0, 0, 0
+	}
+	bounds := a.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	tileSize := 4
+	tw := w / tileSize
+	th := h / tileSize
+	var inter, union int
+	for ty := 0; ty < th; ty++ {
+		for tx := 0; tx < tw; tx++ {
+			aTile, bTile := false, false
+			for dy := 0; dy < tileSize && !(aTile && bTile); dy++ {
+				for dx := 0; dx < tileSize && !(aTile && bTile); dx++ {
+					x := tx*tileSize + dx + bounds.Min.X
+					y := ty*tileSize + dy + bounds.Min.Y
+					ai := (y-bounds.Min.Y)*a.Stride + (x-bounds.Min.X)*4
+					bi := (y-bounds.Min.Y)*b.Stride + (x-bounds.Min.X)*4
+					if !aTile && a.Pix[ai+3] != 0 {
+						aTile = true
+					}
+					if !bTile && b.Pix[bi+3] != 0 {
+						bTile = true
+					}
+				}
+			}
+			if aTile {
+				opaqueA++
+			}
+			if bTile {
+				opaqueB++
+			}
+			if aTile && bTile {
+				inter++
+				union++
+			} else if aTile || bTile {
+				union++
+			}
+		}
+	}
+	if union == 0 {
+		return 1, opaqueA, opaqueB
+	}
+	return float64(inter) / float64(union), opaqueA, opaqueB
+}
+
+// maxNormalDirectionShare reports the largest single share of
+// face-normal direction in the mesh, bucketed into the 6 cardinal
+// half-spaces (±X, ±Y, ±Z) by the dominant axis of each face's
+// 3D normal. For a roughly isotropic closed surface (a sphere) we
+// expect each cardinal half-space to hold ~1/6 of the faces, with
+// the largest bucket well under 0.5. The Clip stage's winding bug
+// — Earcut returns CCW-XY triangles regardless of source-triangle
+// winding — flips every down-facing source triangle's normal, so
+// after clipping, +Z dominates and the share climbs to ~1.0. A
+// cap of 0.5 catches the bug without false-positiving on
+// genuinely anisotropic models.
+func maxNormalDirectionShare(md *pipeline.MeshData) float64 {
+	if md == nil || len(md.Faces) < 3 {
+		return 0
+	}
+	var buckets [6]int
+	nFaces := len(md.Faces) / 3
+	for fi := 0; fi < nFaces; fi++ {
+		a := md.Faces[3*fi+0]
+		b := md.Faces[3*fi+1]
+		c := md.Faces[3*fi+2]
+		v0 := [3]float32{md.Vertices[3*a+0], md.Vertices[3*a+1], md.Vertices[3*a+2]}
+		v1 := [3]float32{md.Vertices[3*b+0], md.Vertices[3*b+1], md.Vertices[3*b+2]}
+		v2 := [3]float32{md.Vertices[3*c+0], md.Vertices[3*c+1], md.Vertices[3*c+2]}
+		nx := (v1[1]-v0[1])*(v2[2]-v0[2]) - (v1[2]-v0[2])*(v2[1]-v0[1])
+		ny := (v1[2]-v0[2])*(v2[0]-v0[0]) - (v1[0]-v0[0])*(v2[2]-v0[2])
+		nz := (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0])
+		ax := nx
+		if ax < 0 {
+			ax = -ax
+		}
+		ay := ny
+		if ay < 0 {
+			ay = -ay
+		}
+		az := nz
+		if az < 0 {
+			az = -az
+		}
+		var b6 int
+		if ax >= ay && ax >= az {
+			if nx >= 0 {
+				b6 = 0
+			} else {
+				b6 = 1
+			}
+		} else if ay >= az {
+			if ny >= 0 {
+				b6 = 2
+			} else {
+				b6 = 3
+			}
+		} else {
+			if nz >= 0 {
+				b6 = 4
+			} else {
+				b6 = 5
+			}
+		}
+		buckets[b6]++
+	}
+	var max int
+	for _, c := range buckets {
+		if c > max {
+			max = c
+		}
+	}
+	return float64(max) / float64(nFaces)
 }
 
 // meanAbsoluteRGBError walks two same-sized RGBA images and

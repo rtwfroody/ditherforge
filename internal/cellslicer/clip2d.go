@@ -340,8 +340,24 @@ func clipCellTris(tris []slabTri, cell []Point2, zBot, zTop float32) ([][3]float
 				}
 				verts = append(verts, [3]float32{p[0], p[1], z})
 			}
-			for _, tri := range earTris {
-				faces = append(faces, [3]uint32{base + tri[0], base + tri[1], base + tri[2]})
+			// Preserve the source triangle's facing direction.
+			// Earcut emits CCW-XY triangles regardless of input
+			// winding, but the source triangle may have been CW in
+			// XY (signed areaXY < 0, equivalently InvAreaXY < 0),
+			// meaning its 3D normal has a -Z component. Without this
+			// swap, every down-facing source triangle gets a flipped
+			// normal in the output, so back-face-culling viewers
+			// (e.g. the Three.js GUI) drop them — the symptom is a
+			// half-missing surface on Y-up-rotated-to-Z-up models
+			// like earth.glb.
+			if t.InvAreaXY < 0 {
+				for _, tri := range earTris {
+					faces = append(faces, [3]uint32{base + tri[0], base + tri[2], base + tri[1]})
+				}
+			} else {
+				for _, tri := range earTris {
+					faces = append(faces, [3]uint32{base + tri[0], base + tri[1], base + tri[2]})
+				}
 			}
 		}
 	}
