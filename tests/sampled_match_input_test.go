@@ -155,8 +155,8 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "earth",
 			path:              filepath.Join("objects", "earth.glb"),
-			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004, silhPx: 0.95},
-			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004, silhPx: 0.95}},
+			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97},
+			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97}},
 			showSampledColors: true,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +
