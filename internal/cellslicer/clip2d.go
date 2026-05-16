@@ -221,9 +221,35 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) ([]slabTri, *sl
 	// Route it to the vertical-clip path instead — every per-fan
 	// triangle would otherwise fail the same area check and the
 	// surface would vanish from the output.
+	//
+	// The relative threshold uses max(xRange, yRange)² as the scale,
+	// not bbox-area, so it survives the axis-aligned case: a
+	// triangle on a Y=constant or X=constant plane (a flat cube
+	// wall) collapses its XY bbox to zero area in one dimension,
+	// which would otherwise zero out a bbox-relative threshold and
+	// let float-precision noise (~3e-5 from shoelace cancellation
+	// on a 20-unit polygon) slip past, dropping every wall fragment
+	// in that slab. Found 2026-05-15 on the cube's -Y face.
 	polyAreaXY := polygonXYSignedArea(poly)
-	polyBboxXY := polygonXYBboxArea(poly)
-	if absf(polyAreaXY) < 1e-6*polyBboxXY || absf(polyAreaXY) < 1e-12 {
+	xMin, yMin := poly[0][0], poly[0][1]
+	xMax, yMax := xMin, yMin
+	for _, p := range poly[1:] {
+		if p[0] < xMin {
+			xMin = p[0]
+		} else if p[0] > xMax {
+			xMax = p[0]
+		}
+		if p[1] < yMin {
+			yMin = p[1]
+		} else if p[1] > yMax {
+			yMax = p[1]
+		}
+	}
+	scale := xMax - xMin
+	if yr := yMax - yMin; yr > scale {
+		scale = yr
+	}
+	if absf(polyAreaXY) < 1e-6*scale*scale || absf(polyAreaXY) < 1e-12 {
 		return nil, &slabVerticalPoly{
 			Pts:    poly,
 			Normal: triangleNormal(a, b, c),

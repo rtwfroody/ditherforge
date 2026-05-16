@@ -162,33 +162,6 @@ func triangleNormal(a, b, c [3]float32) [3]float32 {
 	}
 }
 
-// polygonXYBboxArea returns the XY bounding-box area of poly.
-// Used as the scale reference for "is this polygon's XY area
-// degenerate?" — same check as the per-triangle area filter, but
-// applied to the slab-clipped sub-polygon as a whole.
-func polygonXYBboxArea(poly [][3]float32) float32 {
-	if len(poly) == 0 {
-		return 0
-	}
-	minX, maxX := poly[0][0], poly[0][0]
-	minY, maxY := poly[0][1], poly[0][1]
-	for _, p := range poly[1:] {
-		if p[0] < minX {
-			minX = p[0]
-		}
-		if p[0] > maxX {
-			maxX = p[0]
-		}
-		if p[1] < minY {
-			minY = p[1]
-		}
-		if p[1] > maxY {
-			maxY = p[1]
-		}
-	}
-	return (maxX - minX) * (maxY - minY)
-}
-
 // polygonXYSignedArea returns 2× the signed XY area of poly.
 func polygonXYSignedArea(poly [][3]float32) float32 {
 	if len(poly) < 3 {
