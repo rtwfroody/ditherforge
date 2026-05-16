@@ -57,8 +57,20 @@ func (r *SlabRaster) PixelCenter(px, py int) (float32, float32) {
 }
 
 // RasterizeFootprint scan-converts fp into the destination bitmap.
-// Each pixel whose centre lies inside fp (odd number of containing
-// loops by even-odd fill) gets its bit set.
+// Conservative coverage: a pixel's bit is set iff any part of the
+// pixel's square overlaps fp — equivalently, fp dilated by half a
+// pixel on each axis using the pixel-center test. Achieved by
+// running two scanlines per pixel row (at the top and bottom edges)
+// and taking the union of crossings against the pixel's full x
+// extent.
+//
+// Pixel-center membership is what an earlier version used; that
+// dropped sliver pixels at the footprint's boundary whose centers
+// fell just outside fp even though the pixel's interior contained
+// source surface. The downstream ring-cell stamp then left those
+// pixels unassigned, so source triangles clipped to them vanished
+// from the output mesh — visible as thin gaps tangent to the
+// silhouette on curved models like spheres or the earth.
 //
 // inFootprint must already be sized to BitsForPixels(w, h); it is
 // fully overwritten — cleared on entry, set per-scanline. Loops are
@@ -74,8 +86,15 @@ func RasterizeFootprint(fp *Footprint, originX, originY, pxSize float32, w, h in
 	// Working buffer reused across scanlines; capacity grows to
 	// fit the worst-case intersection count.
 	xs := make([]float32, 0, 32)
-	for py := 0; py < h; py++ {
-		y := originY + (float32(py)+0.5)*pxSize
+	// Sample two scanlines per pixel row — at the pixel's top edge
+	// (y0 = originY + py*pxSize) and bottom edge (y1 = originY +
+	// (py+1)*pxSize) — and mark any pixel whose [pxLeft, pxRight]
+	// overlaps an [x0, x1] interval on either scanline. This is the
+	// conservative "any-overlap" rasterization: a pixel is in iff
+	// fp ∩ pixelSquare is non-empty, modulo loops thin enough to fit
+	// entirely between two pixel rows (negligible for our use case
+	// where fp loops are at least cellSize-scaled features).
+	scanRow := func(y float32, py int) {
 		xs = xs[:0]
 		for li := range fp.Loops {
 			pts := fp.Loops[li].Points
@@ -83,18 +102,12 @@ func RasterizeFootprint(fp *Footprint, originX, originY, pxSize float32, w, h in
 			if n < 3 {
 				continue
 			}
-			// Bbox reject the loop against this scanline.
 			if y < fp.Loops[li].MinY || y > fp.Loops[li].MaxY {
 				continue
 			}
 			for i, j := 0, n-1; i < n; j, i = i, i+1 {
 				yi := pts[i][1]
 				yj := pts[j][1]
-				// Half-open rule: edge counts iff exactly one
-				// endpoint is strictly above y. This is the
-				// standard even-odd convention; it correctly
-				// skips horizontal edges and avoids double-
-				// counting at vertex meetings.
 				if (yi > y) == (yj > y) {
 					continue
 				}
@@ -104,21 +117,25 @@ func RasterizeFootprint(fp *Footprint, originX, originY, pxSize float32, w, h in
 			}
 		}
 		if len(xs) < 2 {
-			continue
+			return
 		}
 		sort.Slice(xs, func(a, b int) bool { return xs[a] < xs[b] })
 		rowBase := py * w
-		// Fill between consecutive pairs.
 		for k := 0; k+1 < len(xs); k += 2 {
 			x0, x1 := xs[k], xs[k+1]
-			// Map world x to pixel index by pixel CENTRE:
-			//   pxCentre = originX + (px+0.5)*pxSize ≥ x0
-			//   ⇒ px ≥ (x0 - originX)/pxSize - 0.5
-			//   ⇒ smallest such px = ceil((x0 - originX)/pxSize - 0.5)
-			f0 := (x0-originX)/pxSize - 0.5
-			f1 := (x1-originX)/pxSize - 0.5
-			px0 := intCeil(f0)
-			px1 := intFloor(f1)
+			// Mark any pixel whose [pxLeft, pxRight) overlaps
+			// (x0, x1). Pixel px covers [originX + px*pxSize,
+			// originX + (px+1)*pxSize].
+			// Smallest px with right > x0:
+			//   originX + (px+1)*pxSize > x0
+			//   px > (x0 - originX)/pxSize - 1
+			//   px = floor((x0 - originX)/pxSize)  (gives ≥)
+			// Largest px with left < x1:
+			//   originX + px*pxSize < x1
+			//   px < (x1 - originX)/pxSize
+			//   px = ceil((x1 - originX)/pxSize) - 1
+			px0 := intFloor((x0 - originX) / pxSize)
+			px1 := intCeil((x1-originX)/pxSize) - 1
 			if px0 < 0 {
 				px0 = 0
 			}
@@ -130,6 +147,12 @@ func RasterizeFootprint(fp *Footprint, originX, originY, pxSize float32, w, h in
 				inFootprint[idx>>6] |= uint64(1) << uint(idx&63)
 			}
 		}
+	}
+	for py := 0; py < h; py++ {
+		// Top edge.
+		scanRow(originY+float32(py)*pxSize, py)
+		// Bottom edge.
+		scanRow(originY+float32(py+1)*pxSize, py)
 	}
 }
 

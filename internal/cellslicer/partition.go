@@ -398,6 +398,19 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		StampCellByPolygon(rawCells[ci].Outer, int32(ci), r)
 	}
 
+	// Backfill any in-footprint pixel that no cell polygon claimed
+	// to a 4-connected neighbour's cellID. The pixel-centre point-
+	// in-polygon test in StampCellByPolygon misses pixels whose
+	// centres fall just outside the smooth fp boundary even though
+	// the pixel's interior overlaps fp — RasterizeFootprint marks
+	// those pixels in (conservative-overlap rasterisation), but no
+	// trapezoid/hex contains the pixel centre, so the pixel stays
+	// unassigned and any source-triangle surface there gets dropped
+	// at clip time (visible as thin tangent-to-silhouette gaps on
+	// curved models). Backfill propagates ownership outward until
+	// every in-footprint pixel belongs to a cell.
+	backfillUnassigned(r)
+
 	// Count pixels per raw cell. Cells with zero pixels are dropped
 	// — they're slivers smaller than a pixel, identical to what
 	// Clipper would have rejected as empty intersections.
@@ -464,6 +477,83 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		cells = append(cells, Cell{Outer: outline, Kind: rawCells[ci].Kind})
 	}
 	return cells, r
+}
+
+// backfillUnassigned assigns any unowned in-footprint pixel that
+// sits on the footprint boundary (has a non-footprint 4-neighbour)
+// to a 4-connected in-cell neighbour. Interior pixels (no non-fp
+// neighbour) stay unassigned — cellslicer cells must be surface-
+// only, and surface only lives along the fp boundary for wall
+// slabs. Without restricting to boundary pixels, the backfill
+// would spread cells through the entire footprint interior,
+// leaking visible-surface dither error into invisible volume.
+//
+// The backfill targets the failure mode of conservative
+// RasterizeFootprint: it includes pixels whose centres fall just
+// outside the smooth fp boundary, but the ring/hex stamps (which
+// use pixel-centre point-in-polygon against the smooth-edged
+// polygons) don't claim those pixels. Those pixels carry source-
+// triangle surface, so leaving them unowned drops the surface
+// at clip time — the visible "thin tangent gap" on curved silhouettes.
+func backfillUnassigned(r *SlabRaster) {
+	isBoundary := func(px, py int) bool {
+		if py > 0 && !r.PixelInFootprint(px, py-1) {
+			return true
+		}
+		if py < r.H-1 && !r.PixelInFootprint(px, py+1) {
+			return true
+		}
+		if px > 0 && !r.PixelInFootprint(px-1, py) {
+			return true
+		}
+		if px < r.W-1 && !r.PixelInFootprint(px+1, py) {
+			return true
+		}
+		return px == 0 || px == r.W-1 || py == 0 || py == r.H-1
+	}
+	pickNeighbour := func(px, py int) int32 {
+		if py > 0 {
+			if v := r.CellID[(py-1)*r.W+px]; v >= 0 {
+				return v
+			}
+		}
+		if py < r.H-1 {
+			if v := r.CellID[(py+1)*r.W+px]; v >= 0 {
+				return v
+			}
+		}
+		if px > 0 {
+			if v := r.CellID[py*r.W+px-1]; v >= 0 {
+				return v
+			}
+		}
+		if px < r.W-1 {
+			if v := r.CellID[py*r.W+px+1]; v >= 0 {
+				return v
+			}
+		}
+		return NoCellID
+	}
+	// Single pass: each unowned boundary pixel claims any assigned
+	// 4-neighbour. The conservative-rasterisation gap is at most one
+	// pixel wide at the fp boundary, so one pass suffices.
+	for py := 0; py < r.H; py++ {
+		for px := 0; px < r.W; px++ {
+			idx := py*r.W + px
+			if r.CellID[idx] != NoCellID {
+				continue
+			}
+			if !r.PixelInFootprint(px, py) {
+				continue
+			}
+			if !isBoundary(px, py) {
+				continue
+			}
+			if v := pickNeighbour(px, py); v >= 0 {
+				r.CellID[idx] = v
+			}
+		}
+	}
 }
 
 // neighborMaskOrNil rasterises a neighbouring slab's footprint into
