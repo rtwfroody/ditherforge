@@ -71,6 +71,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	// is cheaper than a per-slab XY query (no extra spatial filter
 	// payoff since we want every Z-overlapping tri).
 	slabTris := make([][]slabTri, len(slabs))
+	slabVerticals := make([][]slabVerticalPoly, len(slabs))
 	for ti := range model.Faces {
 		f := model.Faces[ti]
 		a := model.Vertices[f[0]]
@@ -93,8 +94,13 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				continue
 			}
 			s := &slabs[si]
-			pieces := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop)
-			slabTris[si] = append(slabTris[si], pieces...)
+			pieces, vpoly := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop)
+			if len(pieces) > 0 {
+				slabTris[si] = append(slabTris[si], pieces...)
+			}
+			if vpoly != nil {
+				slabVerticals[si] = append(slabVerticals[si], *vpoly)
+			}
 		}
 	}
 	_ = triIdx
@@ -121,10 +127,27 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				s := &slabs[j.slabIdx]
 				cell := &s.Cells[j.cellIdx]
 				tris := slabTris[j.slabIdx]
-				if len(tris) == 0 {
+				verticals := slabVerticals[j.slabIdx]
+				if len(tris) == 0 && len(verticals) == 0 {
 					continue
 				}
 				verts, faces := clipCellTris(tris, cell.Outer, s.ZBot, s.ZTop)
+				// Append vertical-wall contributions (clipped in 3D
+				// against the cell prism). These come from source
+				// triangles whose XY projection had near-zero area;
+				// without this path the cube's walls (and similarly
+				// any flat vertical surface) would not appear in
+				// the output mesh.
+				if len(verticals) > 0 {
+					vVerts, vFaces := clipCellVerticals(verticals, cell.Outer)
+					if len(vFaces) > 0 {
+						base := uint32(len(verts))
+						verts = append(verts, vVerts...)
+						for _, f := range vFaces {
+							faces = append(faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
+						}
+					}
+				}
 				if len(faces) == 0 {
 					continue
 				}
@@ -163,27 +186,48 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 }
 
 // sliceTriangleToSlab clips triangle (a,b,c) against the half-spaces
-// z >= zBot and z <= zTop and returns the resulting pieces as
-// slabTris. The result is a triangle fan over the sub-polygon (1–3
-// triangles). Triangles whose XY projection has zero area
-// (perfectly vertical) are dropped — they can't contribute to a
-// cap-style fragment, and their barycentric coords are undefined.
-func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) []slabTri {
+// z >= zBot and z <= zTop and returns the resulting pieces split by
+// type:
+//
+//   - slabTris: pieces with non-degenerate XY projection. Each one
+//     is a triangle of a fan over the sub-polygon; later code lifts
+//     Z via barycentric weights on the XY projection.
+//   - slabVerticalPoly (zero or one entry): the whole slab-clipped
+//     sub-polygon when its XY projection has effectively zero area
+//     (a near-vertical source triangle). XY-barycentric lift is
+//     ill-defined for these, so a separate path clips them in 3D
+//     against each cell's prism — see clip2d_vertical.go.
+func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) ([]slabTri, *slabVerticalPoly) {
 	// Drop fully outside.
 	zMin := minf3(a[2], b[2], c[2])
 	zMax := maxf3(a[2], b[2], c[2])
 	if zMax < zBot || zMin > zTop {
-		return nil
+		return nil, nil
 	}
 	// Build the sub-polygon by clipping against z >= zBot then z <= zTop.
 	poly := [][3]float32{a, b, c}
 	poly = clipPolygonByZHalfSpace(poly, zBot, true /* keep z >= zBot */)
 	if len(poly) < 3 {
-		return nil
+		return nil, nil
 	}
 	poly = clipPolygonByZHalfSpace(poly, zTop, false /* keep z <= zTop */)
 	if len(poly) < 3 {
-		return nil
+		return nil, nil
+	}
+	// Whole-polygon XY area check. If the slab-clipped sub-polygon
+	// has near-zero XY projection it came from a near-vertical
+	// source triangle (e.g. the side wall of a cube), and the
+	// barycentric Z-lift used by slabTri/clipCellTris is unstable.
+	// Route it to the vertical-clip path instead — every per-fan
+	// triangle would otherwise fail the same area check and the
+	// surface would vanish from the output.
+	polyAreaXY := polygonXYSignedArea(poly)
+	polyBboxXY := polygonXYBboxArea(poly)
+	if absf(polyAreaXY) < 1e-6*polyBboxXY || absf(polyAreaXY) < 1e-12 {
+		return nil, &slabVerticalPoly{
+			Pts:    poly,
+			Normal: triangleNormal(a, b, c),
+		}
 	}
 	// Fan-triangulate (the slabbed sub-polygon is convex — Z-plane
 	// clipping of a triangle produces a convex polygon). Drop any
@@ -211,7 +255,7 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) []slabTri {
 			InvAreaXY: 1.0 / areaXY,
 		})
 	}
-	return tris
+	return tris, nil
 }
 
 // clipPolygonByZHalfSpace clips polygon by a Z half-space.

@@ -10,6 +10,14 @@ import (
 // spacing covering [zMin, zMax]. A tiny per-plane offset shifts each
 // plane off the integer slab grid so on-plane vertices don't fall
 // exactly on a slicing plane (matches the prototype's nudge).
+//
+// Plane 0 is pulled BELOW zMin by a small epsilon so the model's
+// bottommost triangles (which sit exactly at z=zMin after loader
+// normalization) are unambiguously inside slab 0. Without this,
+// a flat-bottomed model (e.g. cube) loses its entire bottom face:
+// every other plane has a positive nudge, so slab 0's ZBot would
+// be > zMin and the bottom triangles' zMax (= zMin) falls outside
+// every slab's [ZBot, ZTop] range.
 func SlabBoundaryPlanes(zMin, zMax, layerH float32) []float32 {
 	nSlabs := int(math.Ceil(float64((zMax - zMin) / layerH)))
 	if nSlabs < 1 {
@@ -19,6 +27,7 @@ func SlabBoundaryPlanes(zMin, zMax, layerH float32) []float32 {
 	for i := 0; i <= nSlabs; i++ {
 		planes[i] = zMin + float32(i)*layerH + float32((i+1)*53)*1e-6
 	}
+	planes[0] = zMin - 53e-6
 	return planes
 }
 

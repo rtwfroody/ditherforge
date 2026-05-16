@@ -43,6 +43,12 @@ func TestSampledMatchesInput(t *testing.T) {
 		// as horizontal stripes of transparency — which the
 		// color-only MAE blindly skips. 1.0 is a perfect fit.
 		silh float64
+		// outlierFrac is the maximum allowed fraction of overlap
+		// pixels whose per-pixel RGB deviation exceeds 80 (out of
+		// 255). Catches small localized clusters of clearly-wrong
+		// colour (e.g. the cap-plane "white arc" bug on earth's
+		// top view) that the per-tile MAE averages away.
+		outlierFrac float64
 	}
 	cases := []struct {
 		name string
@@ -75,12 +81,26 @@ func TestSampledMatchesInput(t *testing.T) {
 		// Front/side/top see roughly the same MAE as before; persp
 		// is the most sensitive to silhouette detail and lands at
 		// ~16, comfortably under 18 but above the old 12.
+		// 20mm cube is the simplest possible test case: 12 flat
+		// triangles, no texture, uniform colour. The output should
+		// reproduce all six faces of the cube; if only the top
+		// shows, the cellslicer's per-face winding/normal handling
+		// is broken on flat geometry. Side and front views should
+		// have IoU ~ 1.0 because the cube's silhouette is a
+		// 20×20 mm square that the cellslicer can't fail to fill.
+		{
+			"cube",
+			filepath.Join("objects", "cube.stl"),
+			viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01},
+			nil,
+			false,
+		},
 		{
 			"earth",
 			filepath.Join("objects", "earth.glb"),
-			viewLimits{avg: 22, tile: 12, silh: 0.97},
+			viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004},
 			map[string]viewLimits{
-				"persp": {avg: 22, tile: 18, silh: 0.97},
+				"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004},
 			},
 			false,
 		},
@@ -95,14 +115,14 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			"building",
 			filepath.Join("objects", "low_poly_building.glb"),
-			viewLimits{avg: 30, tile: 30, silh: 0.93},
+			viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003},
 			map[string]viewLimits{
 				// Top: the persp tile threshold stays generous to
 				// absorb shading differences on the roof's small
 				// vent / chimney features that the 0.4mm cell grid
 				// can't resolve at full fidelity.
-				"top":   {avg: 30, tile: 60, silh: 0.90},
-				"persp": {avg: 30, tile: 125, silh: 0.93},
+				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003},
+				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003},
 			},
 			true,
 		},
@@ -169,6 +189,9 @@ func TestSampledMatchesInput(t *testing.T) {
 			// building has many parallel walls, so a single bucket
 			// hitting ~0.4 is normal) but well below the 0.99 the
 			// bug produces.
+			// (outlier-pixel check is computed inside the per-view
+			// loop below; declared up here so it shares scope.)
+
 			normShare := maxNormalDirectionShare(pr.OutputMesh)
 			t.Logf("%s: largest normal-direction bucket = %.3f (limit 0.50)", tc.name, normShare)
 			if normShare > 0.5 {
@@ -200,8 +223,9 @@ func TestSampledMatchesInput(t *testing.T) {
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
 				maxTileMAE, tileGrid, worstTileDesc := tileMeanMAE(inputImg, sampledImg, 8)
 				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
-				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque px) %s",
-					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, worstTileDesc)
+				outFrac, outOverlap, nOut := outlierPixelFraction(inputImg, sampledImg, 150)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f) %s",
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, nOut, outOverlap, outFrac, limits.outlierFrac, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -218,6 +242,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				if limits.silh > 0 && iou < limits.silh {
 					t.Errorf("%s/%s: sampled silhouette diverges from input (IoU=%.3f < %.2f); sampled mesh is missing geometry where the input is opaque (input %d / sampled %d opaque px); PNGs in %s",
 						tc.name, v.Name, iou, limits.silh, inputOpaque, sampledOpaque, dumpDir)
+				}
+				if limits.outlierFrac > 0 && outFrac > limits.outlierFrac {
+					t.Errorf("%s/%s: %d/%d=%.4f overlap pixels deviate by >150/channel from input (limit %.4f); localized colour failure — sample-cap, palette fallback, or cap-plane fill bug; PNGs in %s",
+						tc.name, v.Name, nOut, outOverlap, outFrac, limits.outlierFrac, dumpDir)
 				}
 			}
 		})
@@ -592,6 +620,53 @@ func maxNormalDirectionShare(md *pipeline.MeshData) float64 {
 		}
 	}
 	return float64(max) / float64(nFaces)
+}
+
+// outlierPixelFraction reports the fraction of pixels (out of
+// pixels opaque in both images) whose per-pixel mean RGB
+// deviation exceeds devThresh. Catches localized colour failures
+// that the global MAE and 8×8 tile MAE average away — a small
+// cluster of pure-white pixels in an otherwise correct ocean
+// view (the "white arc" cap-plane bug on earth.glb's top view)
+// raises this metric sharply while leaving the global mean under
+// the limit.
+//
+// devThresh is the per-channel mean deviation cutoff in 0–255
+// units: |Δr|+|Δg|+|Δb| divided by 3. 80 picks up "clearly wrong
+// colour" (e.g. white where the input is dark blue gives 200+)
+// without flagging plausible palette quantization.
+func outlierPixelFraction(a, b *image.RGBA, devThresh int) (frac float64, overlap, outliers int) {
+	if a.Bounds() != b.Bounds() {
+		return 0, 0, 0
+	}
+	bounds := a.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			ai := (y-bounds.Min.Y)*a.Stride + (x-bounds.Min.X)*4
+			bi := (y-bounds.Min.Y)*b.Stride + (x-bounds.Min.X)*4
+			if a.Pix[ai+3] == 0 || b.Pix[bi+3] == 0 {
+				continue
+			}
+			overlap++
+			var sum int
+			for k := 0; k < 3; k++ {
+				d := int(a.Pix[ai+k]) - int(b.Pix[bi+k])
+				if d < 0 {
+					d = -d
+				}
+				sum += d
+			}
+			if sum/3 > devThresh {
+				outliers++
+			}
+		}
+	}
+	if overlap == 0 {
+		return 0, 0, 0
+	}
+	return float64(outliers) / float64(overlap), overlap, outliers
 }
 
 // meanAbsoluteRGBError walks two same-sized RGBA images and
