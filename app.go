@@ -460,6 +460,7 @@ func (a *App) processOne(req pipelineRequest) {
 
 	plog.Printf("Pipeline gen %d starting: %s (reloadSeq=%d)",
 		req.gen, req.opts.Input, req.opts.ReloadSeq)
+	plog.Printf("Pipeline gen %d opts: %+v", req.gen, req.opts)
 
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelMu.Lock()
@@ -547,6 +548,8 @@ func (a *App) processOne(req pipelineRequest) {
 			a.meshes.Remove(a.lastOutputID)
 		}
 		a.lastOutputID = a.meshes.Store(result.OutputMesh)
+		plog.Printf("Pipeline gen %d output mesh: %d verts, %d faces",
+			req.gen, len(result.OutputMesh.Vertices)/3, len(result.OutputMesh.Faces)/3)
 		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastOutputID})
 	}
 
