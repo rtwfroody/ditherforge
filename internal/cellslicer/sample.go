@@ -82,24 +82,37 @@ func SampleSlab(
 	for ci := range s.Cells {
 		c := &s.Cells[ci]
 		cx, cy, area := polyCentroid(c.Outer)
-		off := cellSize / 4
+		// Span the full cell footprint with the jitter grid — the
+		// ±off range below is the cell's half-width, not a quarter,
+		// so a 5×5 grid lands evenly across the polygon. The old
+		// quarter-width offset clustered all samples in the middle
+		// 25% of the cell and could miss the rest of the surface
+		// that contributes to the cell's volume.
+		off := cellSize / 2
 		if off <= 0 {
 			// Per-cell fallback: bbox-derived offset.
 			minX, minY, maxX, maxY := polyBounds(c.Outer)
 			w := maxX - minX
 			h := maxY - minY
 			if w < h {
-				off = w / 4
+				off = w / 2
 			} else {
-				off = h / 4
+				off = h / 2
 			}
 		}
-		points := [5][3]float32{
-			{cx, cy, midZ},
-			{cx + off, cy, midZ},
-			{cx - off, cy, midZ},
-			{cx, cy + off, midZ},
-			{cx, cy - off, midZ},
+		// 5×5 jitter grid spanning ±off in X and Y. The earlier 5-
+		// point "+ pattern" was undersampling the texture: for the
+		// production earth.glb at cellSize=0.4 mm, each cell
+		// projects to ~2–3 texture pixels, and a single point
+		// sample can land on an outlier texel.
+		const grid = 5
+		points := make([][3]float32, 0, grid*grid)
+		for gj := 0; gj < grid; gj++ {
+			for gi := 0; gi < grid; gi++ {
+				gx := -off + 2*off*float32(gi)/float32(grid-1)
+				gy := -off + 2*off*float32(gj)/float32(grid-1)
+				points = append(points, [3]float32{cx + gx, cy + gy, midZ})
+			}
 		}
 		var rSum, gSum, bSum, wSum float32
 		anyAlpha := false
