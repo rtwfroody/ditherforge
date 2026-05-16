@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,11 +34,30 @@ type View struct {
 
 // DefaultViews lists the four views the debug renderer writes when
 // no explicit set is given. Front / side / top are axis-aligned;
-// persp is a moderate-elevation 3/4 view.
+// persp is a moderate-elevation 3/4 view. The opposite-half-space
+// views (back / otherside / bottom) are intentionally excluded:
+// they're useful for hunting per-face bugs (see AllAxisViews) but
+// add noise on models whose far side is uninteresting or
+// intentionally open (alpha-wrapped meshes' bottom hull, etc.).
 var DefaultViews = []View{
 	{"front", 0, 0},
 	{"side", 90, 0},
 	{"top", 0, 90},
+	{"persp", 45, 25},
+}
+
+// AllAxisViews adds the three opposite-face directions to
+// DefaultViews. Use this for models where bugs can hide on any face
+// (cubes, sphere caps, dithered geometry whose winding can flip per
+// slab). The 2026-05-15 cube-cap winding bug only shows on -Y/-X;
+// the +Y/+X DefaultViews pass it cleanly.
+var AllAxisViews = []View{
+	{"front", 0, 0},
+	{"back", 180, 0},
+	{"side", 90, 0},
+	{"otherside", -90, 0},
+	{"top", 0, 90},
+	{"bottom", 0, -90},
 	{"persp", 45, 25},
 }
 
@@ -253,16 +273,38 @@ func FaceCentroidColor(m *loader.LoadedModel, fi int) [3]uint8 {
 }
 
 // RenderInput renders an InputMesh as an RGBA image with a
-// transparent background, using the provided view.
+// transparent background, using the provided view. No back-face
+// culling: imported models can come in with arbitrary winding, so
+// culling the input would falsely report missing geometry on
+// otherwise-valid meshes. Diagnostic-only — assertions should compare
+// the input against the *culled* sampled render via
+// RenderInputCulled, so both sides are in the same frame as the GUI.
 func RenderInput(m *InputMesh, v View, res int) *image.RGBA {
 	bounds := render.ProjectedBounds(m.Vertices, v.Azimuth, v.Elev)
 	ci := render.RenderColor(m.Vertices, m.Faces, v.Azimuth, v.Elev, res, bounds, m.ColorAt)
 	return ci.ToRGBA()
 }
 
+// RenderInputCulled is RenderInput with THREE.FrontSide-style
+// back-face culling: only faces whose world-space normal projects
+// toward the camera are drawn. Used as the apples-to-apples
+// comparand for the culled sampled-mesh render so the test sees
+// what the GUI sees.
+func RenderInputCulled(m *InputMesh, v View, res int) *image.RGBA {
+	faces, faceOrigIdx := cullFaces(m.Vertices, m.Faces, v)
+	bounds := render.ProjectedBounds(m.Vertices, v.Azimuth, v.Elev)
+	ci := render.RenderColor(m.Vertices, faces, v.Azimuth, v.Elev, res, bounds,
+		func(fi int, u, vv float64) [3]uint8 {
+			return m.ColorAt(faceOrigIdx[fi], u, vv)
+		})
+	return ci.ToRGBA()
+}
+
 // RenderPipelineMesh renders a pipeline output MeshData using its
 // per-face FaceColors (which the ShowSampledColors override
-// rewrites in sampled mode).
+// rewrites in sampled mode). No back-face culling — diagnostic
+// companion to RenderPipelineMeshCulled, useful when chasing a
+// winding bug to see what's behind a hidden front face.
 func RenderPipelineMesh(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
 	nVerts := len(mesh.Vertices) / 3
 	verts := make([][3]float32, nVerts)
@@ -295,6 +337,85 @@ func RenderPipelineMesh(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
 			}
 		})
 	return ci.ToRGBA()
+}
+
+// RenderPipelineMeshCulled is RenderPipelineMesh with THREE.FrontSide
+// back-face culling. This is the version test assertions should use:
+// the GUI culls back faces, so any winding/missing-front-face bug
+// must be caught against a culled render or it'll pass silently.
+func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
+	nVerts := len(mesh.Vertices) / 3
+	verts := make([][3]float32, nVerts)
+	for i := 0; i < nVerts; i++ {
+		verts[i] = [3]float32{
+			mesh.Vertices[3*i], mesh.Vertices[3*i+1], mesh.Vertices[3*i+2],
+		}
+	}
+	nFacesAll := len(mesh.Faces) / 3
+	facesAll := make([][3]uint32, nFacesAll)
+	for i := 0; i < nFacesAll; i++ {
+		facesAll[i] = [3]uint32{
+			mesh.Faces[3*i], mesh.Faces[3*i+1], mesh.Faces[3*i+2],
+		}
+	}
+	faces, faceOrigIdx := cullFaces(verts, facesAll, v)
+	bounds := render.ProjectedBounds(verts, v.Azimuth, v.Elev)
+	ci := render.RenderColor(verts, faces, v.Azimuth, v.Elev, res, bounds,
+		func(fi int, u, vv float64) [3]uint8 {
+			orig := faceOrigIdx[fi]
+			if orig*3+2 >= len(mesh.FaceColors) {
+				return [3]uint8{128, 128, 128}
+			}
+			return [3]uint8{
+				uint8(mesh.FaceColors[3*orig+0]),
+				uint8(mesh.FaceColors[3*orig+1]),
+				uint8(mesh.FaceColors[3*orig+2]),
+			}
+		})
+	return ci.ToRGBA()
+}
+
+// cullFaces returns the subset of faces whose world-space normal
+// projects toward the camera under the given view (i.e. front-facing
+// under THREE.FrontSide convention), along with each kept face's
+// original index in the input slice. The depth direction matches
+// internal/render's rotationMatrix: depth = cos(el)*sin(az+90)*x +
+// cos(el)*cos(az+90)*y - sin(el)*z. A face is back-facing if its
+// world normal projects to +depth (away from camera).
+func cullFaces(verts [][3]float32, faces [][3]uint32, v View) ([][3]uint32, []int) {
+	depthDir := depthDirection(v.Azimuth, v.Elev)
+	kept := make([][3]uint32, 0, len(faces))
+	origIdx := make([]int, 0, len(faces))
+	for i, f := range faces {
+		v0 := verts[f[0]]
+		v1 := verts[f[1]]
+		v2 := verts[f[2]]
+		ux, uy, uz := v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
+		vx, vy, vz := v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]
+		nx := uy*vz - uz*vy
+		ny := uz*vx - ux*vz
+		nz := ux*vy - uy*vx
+		if float64(nx)*depthDir[0]+float64(ny)*depthDir[1]+float64(nz)*depthDir[2] >= 0 {
+			continue // back-facing or edge-on
+		}
+		kept = append(kept, f)
+		origIdx = append(origIdx, i)
+	}
+	return kept, origIdx
+}
+
+// depthDirection returns the world-space direction along which the
+// render package's projection assigns +depth (away from camera).
+// Mirrors row 1 of rotationMatrix in internal/render. Kept in sync
+// with that file's az+90° offset and Rx(el)*Rz(az+90°) composition.
+func depthDirection(azimuthDeg, elevDeg float64) [3]float64 {
+	az := (azimuthDeg + 90) * math.Pi / 180
+	el := elevDeg * math.Pi / 180
+	return [3]float64{
+		math.Cos(el) * math.Sin(az),
+		math.Cos(el) * math.Cos(az),
+		-math.Sin(el),
+	}
 }
 
 // WritePNG saves an RGBA image to disk.

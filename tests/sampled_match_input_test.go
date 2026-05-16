@@ -59,9 +59,34 @@ func TestSampledMatchesInput(t *testing.T) {
 		// limitations produce known wider divergence on one
 		// specific camera (typically top / persp) while the
 		// other views stay tight.
-		def       viewLimits
-		perView   map[string]viewLimits
-		alphaWrap bool
+		def     viewLimits
+		perView map[string]viewLimits
+		// alphaWrap and showSampledColors are passed straight
+		// through to pipeline.Options. Sampled-colors=true
+		// bypasses the Merge stage (faces colored from raw
+		// per-section samples on the Clip output); =false runs
+		// the full dithered Merge path the GUI uses by default.
+		// Bugs in Merge only show with =false, so a sampled-only
+		// test will pass through them silently.
+		alphaWrap         bool
+		showSampledColors bool
+		// scaleOnly skips the 50mm Size normalization and runs
+		// the model at its native scale via Scale=1. Use this
+		// when reproducing a GUI repro that uses sizeMode=scale.
+		scaleOnly bool
+		// allAxisViews uses the 7-view set including back /
+		// otherside / bottom, for cases where per-face bugs can
+		// hide on a face DefaultViews doesn't render. Leave
+		// false for cases whose opposite faces are uninteresting
+		// (open models, alpha-wrapped bottoms).
+		allAxisViews bool
+		// res overrides the default 256x256 render resolution.
+		// Bump for cases where the bug-detection metric needs
+		// sub-cell pixel granularity (the cube-cap winding bug's
+		// stripe regions span ~0.2mm; at 256 px on a 20mm cube
+		// the missing-pixel ratio sits at 1.5%, below the
+		// silhouette IoU floor; at 512 it's 6.7% and trips).
+		res int
 	}{
 		// earth.glb is a clean single-mesh model; per-tile
 		// sampling matches the input UVs closely on every view.
@@ -89,20 +114,39 @@ func TestSampledMatchesInput(t *testing.T) {
 		// have IoU ~ 1.0 because the cube's silhouette is a
 		// 20×20 mm square that the cellslicer can't fail to fill.
 		{
-			"cube",
-			filepath.Join("objects", "cube.stl"),
-			viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01},
-			nil,
-			false,
+			name:              "cube",
+			path:              filepath.Join("objects", "cube.stl"),
+			def:               viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01},
+			showSampledColors: true,
+			scaleOnly:         true, // 20mm native — the bug's repro scale
+			allAxisViews:      true, // cube-cap winding bug only shows on -Y / -X
+			res:               512,  // sub-cell granularity for stripe detection
+		},
+		// cube_dither runs the same input through the default
+		// dithered path the GUI uses, exercising the Merge stage
+		// the sampled-colors case bypasses. Catches the
+		// 2026-05-15 cube-cap winding bug: post-merge faces on
+		// the cap fill end up CW under FrontSide culling, leaving
+		// white-stripe gaps along the cube faces in the GUI.
+		// Same geometric coverage as "cube"; only the colour
+		// source differs, so the silhouette/IoU floors do the
+		// real work and the colour MAE limits stay loose to
+		// absorb palette quantisation against the test inventory.
+		{
+			name:              "cube_dither",
+			path:              filepath.Join("objects", "cube.stl"),
+			def:               viewLimits{avg: 60, tile: 60, silh: 0.95, outlierFrac: 0.01},
+			showSampledColors: false,
+			scaleOnly:         true, // reproduce GUI's sizeMode=scale, scale=1.0 — native 20mm cube
+			allAxisViews:      true,
+			res:               512,
 		},
 		{
-			"earth",
-			filepath.Join("objects", "earth.glb"),
-			viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004},
-			map[string]viewLimits{
-				"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004},
-			},
-			false,
+			name:              "earth",
+			path:              filepath.Join("objects", "earth.glb"),
+			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004},
+			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004}},
+			showSampledColors: true,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +
 		// walls + windows + roof) without a face on the bottom,
@@ -113,10 +157,10 @@ func TestSampledMatchesInput(t *testing.T) {
 		// original geometry, so they get tight wall-sampling
 		// limits that catch multi-object regressions.
 		{
-			"building",
-			filepath.Join("objects", "low_poly_building.glb"),
-			viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003},
-			map[string]viewLimits{
+			name: "building",
+			path: filepath.Join("objects", "low_poly_building.glb"),
+			def:  viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003},
+			perView: map[string]viewLimits{
 				// Top: the persp tile threshold stays generous to
 				// absorb shading differences on the roof's small
 				// vent / chimney features that the 0.4mm cell grid
@@ -124,7 +168,8 @@ func TestSampledMatchesInput(t *testing.T) {
 				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003},
 				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003},
 			},
-			true,
+			alphaWrap:         true,
+			showSampledColors: true,
 		},
 	}
 
@@ -141,11 +186,15 @@ func TestSampledMatchesInput(t *testing.T) {
 				LayerHeight:       0.2,
 				Dither:            "riemersma",
 				ColorSnap:         5,
-				Size:              &size,
 				Force:             true,
-				ShowSampledColors: true,
+				ShowSampledColors: tc.showSampledColors,
 				Scale:             1,
 				AlphaWrap:         tc.alphaWrap,
+			}
+			var sizeArg *float32
+			if !tc.scaleOnly {
+				opts.Size = &size
+				sizeArg = &size
 			}
 			cache := pipeline.NewStageCache()
 			pr, err := pipeline.RunCached(context.Background(), cache, opts, nil)
@@ -156,7 +205,7 @@ func TestSampledMatchesInput(t *testing.T) {
 				t.Fatalf("OutputMesh is nil")
 			}
 
-			inputMesh, err := debugrender.LoadInputMesh(tc.path, &size)
+			inputMesh, err := debugrender.LoadInputMesh(tc.path, sizeArg)
 			if err != nil {
 				t.Fatalf("LoadInputMesh: %v", err)
 			}
@@ -199,7 +248,10 @@ func TestSampledMatchesInput(t *testing.T) {
 					tc.name, normShare*100)
 			}
 
-			const res = 256
+			res := 256
+			if tc.res > 0 {
+				res = tc.res
+			}
 			// When DF_TEST_DUMP_DIR is set, also dump PNGs there
 			// for visual inspection (t.TempDir() is cleaned up
 			// even on failure). The CI / normal `go test` run
@@ -211,15 +263,31 @@ func TestSampledMatchesInput(t *testing.T) {
 				_ = os.MkdirAll(extra, 0o755)
 				dumpDir = extra
 			}
-			for _, v := range debugrender.DefaultViews {
+			views := debugrender.DefaultViews
+			if tc.allAxisViews {
+				views = debugrender.AllAxisViews
+			}
+			for _, v := range views {
 				limits, ok := tc.perView[v.Name]
 				if !ok {
 					limits = tc.def
 				}
-				inputImg := debugrender.RenderInput(inputMesh, v, res)
-				sampledImg := debugrender.RenderPipelineMesh(pr.OutputMesh, v, res)
+				// Assertions run against THREE.FrontSide-culled renders
+				// so a winding/missing-front-face bug can't pass silently
+				// by being hidden behind a back-facing twin in the
+				// unculled render (the cube-cap winding bug found
+				// 2026-05-15). Unculled renders are still dumped as
+				// diagnostic companions — if the culled assertion fires,
+				// the unculled twin shows whether the geometry is missing
+				// or merely wrong-wound.
+				inputImg := debugrender.RenderInputCulled(inputMesh, v, res)
+				sampledImg := debugrender.RenderPipelineMeshCulled(pr.OutputMesh, v, res)
+				inputUnculled := debugrender.RenderInput(inputMesh, v, res)
+				sampledUnculled := debugrender.RenderPipelineMesh(pr.OutputMesh, v, res)
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("input_%s.png", v.Name)), inputImg)
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("sampled_%s.png", v.Name)), sampledImg)
+				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("input_unculled_%s.png", v.Name)), inputUnculled)
+				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("sampled_unculled_%s.png", v.Name)), sampledUnculled)
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
 				maxTileMAE, tileGrid, worstTileDesc := tileMeanMAE(inputImg, sampledImg, 8)
 				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
