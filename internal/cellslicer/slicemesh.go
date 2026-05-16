@@ -350,7 +350,21 @@ func collapseCollinearKeepTris(points []Point2, edgeTris []int32) ([]Point2, []i
 	if n < 3 {
 		return points, edgeTris
 	}
-	const crossEps = 1e-7
+	// Relative-angle collinearity threshold. We drop a vertex when the
+	// turning angle there is below ~sin⁻¹(1e-4) ≈ 0.006° — i.e. the
+	// incoming and outgoing edges are essentially the same direction.
+	//
+	// Earlier this used an absolute cross-product threshold (1e-7).
+	// That broke when a slice plane landed within ~10⁻⁴ of a vertex
+	// row of a fine sphere mesh: the standard 720-point contour
+	// degenerates into a zigzag of one short tangential edge and one
+	// 100-nm radial edge per vertex, the cross product of those two
+	// edges sits at ~4e-8 (below the absolute threshold) even though
+	// the turning angle is ~0.7°. collapseCollinearKeepTris stripped
+	// every vertex, chainSegments returned no loops, and the slab's
+	// footprint silently lost its true outer contour — visible as a
+	// concentric ring gap around the pole of the earth/top render.
+	const sinEps2 = 1e-8 // sin² of the cutoff turning angle
 	outPts := make([]Point2, 0, n)
 	var outTris []int32
 	if edgeTris != nil {
@@ -365,7 +379,15 @@ func collapseCollinearKeepTris(points []Point2, edgeTris []int32) ([]Point2, []i
 		dx1 := float64(next[0] - cur[0])
 		dy1 := float64(next[1] - cur[1])
 		cross := dx0*dy1 - dy0*dx1
-		if math.Abs(cross) < crossEps && (dx0*dx1+dy0*dy1) > 0 {
+		dot := dx0*dx1 + dy0*dy1
+		// |sin(turn)|² = cross² / (|e0|² · |e1|²). Drop the vertex
+		// only when sin² is below threshold (collinear) AND dot > 0
+		// (edges point the same way — i.e. a flat continuation, not
+		// a U-turn).
+		l0sq := dx0*dx0 + dy0*dy0
+		l1sq := dx1*dx1 + dy1*dy1
+		dropped := dot > 0 && cross*cross < sinEps2*l0sq*l1sq
+		if dropped {
 			continue
 		}
 		outPts = append(outPts, cur)
