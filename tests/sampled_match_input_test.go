@@ -49,6 +49,17 @@ func TestSampledMatchesInput(t *testing.T) {
 		// colour (e.g. the cap-plane "white arc" bug on earth's
 		// top view) that the per-tile MAE averages away.
 		outlierFrac float64
+		// silhPx is the minimum acceptable PIXEL-level Jaccard
+		// index. silh aggregates over 4×4 tiles to absorb the
+		// pixel-center rasterizer's single-pixel dropouts; silhPx
+		// is the un-aggregated counterpart, which catches the
+		// thin (1–2 px tall) horizontal-stripe transparency gaps
+		// the tile-level check smooths over. The cube hits ~0.9997
+		// on every view (essentially-pixel-perfect axis-aligned
+		// geometry); curved / detailed models legitimately lose
+		// a few percent to silhouette aliasing. 0 disables the
+		// per-case check.
+		silhPx float64
 	}
 	cases := []struct {
 		name string
@@ -116,7 +127,7 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "cube",
 			path:              filepath.Join("objects", "cube.stl"),
-			def:               viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01},
+			def:               viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99},
 			showSampledColors: true,
 			scaleOnly:         true, // 20mm native — the bug's repro scale
 			allAxisViews:      true, // cube-cap winding bug only shows on -Y / -X
@@ -135,7 +146,7 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "cube_dither",
 			path:              filepath.Join("objects", "cube.stl"),
-			def:               viewLimits{avg: 60, tile: 60, silh: 0.95, outlierFrac: 0.01},
+			def:               viewLimits{avg: 60, tile: 60, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99},
 			showSampledColors: false,
 			scaleOnly:         true, // reproduce GUI's sizeMode=scale, scale=1.0 — native 20mm cube
 			allAxisViews:      true,
@@ -144,8 +155,8 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "earth",
 			path:              filepath.Join("objects", "earth.glb"),
-			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004},
-			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004}},
+			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004, silhPx: 0.95},
+			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004, silhPx: 0.95}},
 			showSampledColors: true,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +
@@ -159,14 +170,14 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name: "building",
 			path: filepath.Join("objects", "low_poly_building.glb"),
-			def:  viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003},
+			def:  viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95},
 			perView: map[string]viewLimits{
 				// Top: the persp tile threshold stays generous to
 				// absorb shading differences on the roof's small
 				// vent / chimney features that the 0.4mm cell grid
 				// can't resolve at full fidelity.
-				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003},
-				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003},
+				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003, silhPx: 0.95},
+				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95},
 			},
 			alphaWrap:         true,
 			showSampledColors: true,
@@ -291,9 +302,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				mae, overlap := meanAbsoluteRGBError(inputImg, sampledImg)
 				maxTileMAE, tileGrid, worstTileDesc := tileMeanMAE(inputImg, sampledImg, 8)
 				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
+				iouPx, inputPx, sampledPx := silhouettePixelIoU(inputImg, sampledImg)
 				outFrac, outOverlap, nOut := outlierPixelFraction(inputImg, sampledImg, 150)
-				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f) %s",
-					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, nOut, outOverlap, outFrac, limits.outlierFrac, worstTileDesc)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f) %s",
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -310,6 +322,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				if limits.silh > 0 && iou < limits.silh {
 					t.Errorf("%s/%s: sampled silhouette diverges from input (IoU=%.3f < %.2f); sampled mesh is missing geometry where the input is opaque (input %d / sampled %d opaque px); PNGs in %s",
 						tc.name, v.Name, iou, limits.silh, inputOpaque, sampledOpaque, dumpDir)
+				}
+				if limits.silhPx > 0 && iouPx < limits.silhPx {
+					t.Errorf("%s/%s: sampled pixel-level silhouette diverges from input (pix-IoU=%.4f < %.2f); sampled mesh is dropping individual pixels — typically thin (1-2 px) transparent stripes the tile-IoU smooths over (input %d / sampled %d opaque px); PNGs in %s",
+						tc.name, v.Name, iouPx, limits.silhPx, inputPx, sampledPx, dumpDir)
 				}
 				if limits.outlierFrac > 0 && outFrac > limits.outlierFrac {
 					t.Errorf("%s/%s: %d/%d=%.4f overlap pixels deviate by >150/channel from input (limit %.4f); localized colour failure — sample-cap, palette fallback, or cap-plane fill bug; PNGs in %s",
@@ -610,6 +626,48 @@ func silhouetteIoU(a, b *image.RGBA) (iou float64, opaqueA, opaqueB int) {
 				inter++
 				union++
 			} else if aTile || bTile {
+				union++
+			}
+		}
+	}
+	if union == 0 {
+		return 1, opaqueA, opaqueB
+	}
+	return float64(inter) / float64(union), opaqueA, opaqueB
+}
+
+// silhouettePixelIoU returns the pixel-level Jaccard index of the
+// opaque pixel sets of two same-bounded images. Unlike silhouetteIoU
+// it does NOT aggregate to tiles, so it catches thin (1–2 px tall)
+// transparent stripes the 4×4 tile-IoU smooths over. Discovered
+// 2026-05-16 on the earth model: tile-IoU = 1.000 while 19% of
+// individual pixels in the sphere silhouette were transparent in
+// the sampled render — slabs are producing wall fragments that
+// leave per-pixel gaps the renderer can't fill.
+func silhouettePixelIoU(a, b *image.RGBA) (iou float64, opaqueA, opaqueB int) {
+	if a.Bounds() != b.Bounds() {
+		return 0, 0, 0
+	}
+	bounds := a.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	var inter, union int
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			ai := (y-bounds.Min.Y)*a.Stride + (x-bounds.Min.X)*4
+			bi := (y-bounds.Min.Y)*b.Stride + (x-bounds.Min.X)*4
+			aIn := a.Pix[ai+3] != 0
+			bIn := b.Pix[bi+3] != 0
+			if aIn {
+				opaqueA++
+			}
+			if bIn {
+				opaqueB++
+			}
+			if aIn && bIn {
+				inter++
+				union++
+			} else if aIn || bIn {
 				union++
 			}
 		}
