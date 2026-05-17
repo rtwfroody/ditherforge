@@ -24,8 +24,15 @@ frontend/vite.config.d.ts
 # Test cache (remesh outputs keyed by source hash)
 tests/cache/
 
-# Local scripts
-devscripts/
+# Local scripts. devscripts/ is its own Go submodule (see
+# devscripts/go.mod) so the parent's `go mod tidy` and `wails dev`
+# skip it regardless of what scripts a developer has laid down.
+# Pattern is devscripts/* (not devscripts/) so the un-ignore for
+# go.mod/go.sum below can take effect — git won't re-include
+# anything beneath a fully-ignored directory.
+devscripts/*
+!devscripts/go.mod
+!devscripts/go.sum
 
 # Claude Code harness runtime files
 .claude/scheduled_tasks.lock
