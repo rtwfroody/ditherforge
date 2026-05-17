@@ -2,9 +2,12 @@ package pipeline
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/png"
+	"os"
+	"path/filepath"
 
 	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 )
@@ -81,6 +84,97 @@ func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, sla
 		CellSizeMM:          vo.CellSize,
 		FillBackgroundWhite: true,
 		DrawEdges:           true,
+		DrawFootprint:       true,
+		DrawContours:        true,
+		HighlightUncovered:  true,
 	})
+	dumpSlabIfRequested(vo.CellSlabs, slabIdx)
 	return svg, slabCount, nil
+}
+
+// dumpSlabIfRequested writes a JSON snapshot of slab `slabIdx` to the
+// path given by env $CELLSLICER_DUMP_PATH, but only when the env
+// $CELLSLICER_DUMP_SLAB matches the current slabIdx as a decimal int.
+// Used to capture polar slabs from the GUI for isolated unit tests.
+func dumpSlabIfRequested(slabs []cellslicer.Slab, slabIdx int) {
+	want := os.Getenv("CELLSLICER_DUMP_SLAB")
+	if want == "" {
+		return
+	}
+	var wantIdx int
+	if _, err := fmt.Sscanf(want, "%d", &wantIdx); err != nil || wantIdx != slabIdx {
+		return
+	}
+	if slabIdx < 0 || slabIdx >= len(slabs) {
+		return
+	}
+	out := os.Getenv("CELLSLICER_DUMP_PATH")
+	if out == "" {
+		out = filepath.Join(os.TempDir(), fmt.Sprintf("slab_%d.json", slabIdx))
+	}
+	s := slabs[slabIdx]
+	type loopJSON struct {
+		Points [][2]float32 `json:"points"`
+		IsHole bool         `json:"is_hole"`
+		Z      float32      `json:"z,omitempty"`
+	}
+	type fpJSON struct {
+		Loops []loopJSON `json:"loops"`
+	}
+	dumpLoops := func(loops []cellslicer.Loop) []loopJSON {
+		ls := make([]loopJSON, 0, len(loops))
+		for _, lp := range loops {
+			ll := loopJSON{IsHole: lp.IsHole, Z: lp.Z}
+			ll.Points = make([][2]float32, len(lp.Points))
+			for i, p := range lp.Points {
+				ll.Points[i] = [2]float32{p[0], p[1]}
+			}
+			ls = append(ls, ll)
+		}
+		return ls
+	}
+	dumpFP := func(fp *cellslicer.Footprint) *fpJSON {
+		if fp == nil {
+			return nil
+		}
+		out := &fpJSON{}
+		for _, lp := range fp.Loops {
+			ll := loopJSON{IsHole: lp.IsHole}
+			ll.Points = make([][2]float32, len(lp.Points))
+			for i, p := range lp.Points {
+				ll.Points[i] = [2]float32{p[0], p[1]}
+			}
+			out.Loops = append(out.Loops, ll)
+		}
+		return out
+	}
+	payload := struct {
+		SlabIndex   int       `json:"slab_index"`
+		ZBot        float32   `json:"z_bot"`
+		ZTop        float32   `json:"z_top"`
+		BotLoops    []loopJSON `json:"bot_loops"`
+		TopLoops    []loopJSON `json:"top_loops"`
+		Footprint   *fpJSON   `json:"footprint"`
+		FpBelow     *fpJSON   `json:"fp_below"`
+		FpAbove     *fpJSON   `json:"fp_above"`
+	}{
+		SlabIndex: s.Index,
+		ZBot:      s.ZBot,
+		ZTop:      s.ZTop,
+		Footprint: dumpFP(s.Footprint),
+	}
+	if s.BotLayer != nil {
+		payload.BotLoops = dumpLoops(s.BotLayer.Loops)
+	}
+	if s.TopLayer != nil {
+		payload.TopLoops = dumpLoops(s.TopLayer.Loops)
+	}
+	if slabIdx > 0 && slabs[slabIdx-1].Footprint != nil {
+		payload.FpBelow = dumpFP(slabs[slabIdx-1].Footprint)
+	}
+	if slabIdx+1 < len(slabs) && slabs[slabIdx+1].Footprint != nil {
+		payload.FpAbove = dumpFP(slabs[slabIdx+1].Footprint)
+	}
+	data, _ := json.MarshalIndent(payload, "", "  ")
+	_ = os.WriteFile(out, data, 0644)
 }

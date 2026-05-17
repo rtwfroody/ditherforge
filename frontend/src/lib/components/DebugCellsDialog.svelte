@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as Dialog from '$lib/components/ui/dialog';
+  import { untrack } from 'svelte';
   import { DebugCellsSlabSVG } from '../../../wailsjs/go/main/App';
   import type { main } from '../../../wailsjs/go/models';
 
@@ -80,6 +81,164 @@
       fetchSlab(slabIdx);
     }
   });
+
+  // --- Pan / zoom / scale-bar -------------------------------------------
+  //
+  // The SVG comes from the Go backend with a viewBox in mm. We mutate
+  // that viewBox in place on wheel / drag, and track host element size
+  // so the scale bar can show the on-screen length of N mm.
+
+  type ViewBox = { x: number; y: number; w: number; h: number };
+
+  let hostDiv: HTMLDivElement | undefined = $state();
+  let svgEl: SVGSVGElement | null = null;
+  let viewBox = $state<ViewBox | null>(null);
+  let baseViewBox: ViewBox | null = null;
+  let hostSize = $state<{ w: number; h: number }>({ w: 1, h: 1 });
+
+  function parseViewBox(s: string): ViewBox | null {
+    const parts = s.trim().split(/[\s,]+/).map(Number);
+    if (parts.length !== 4 || parts.some(Number.isNaN)) return null;
+    return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
+  }
+
+  function applyViewBox(vb: ViewBox) {
+    if (!svgEl) return;
+    svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    viewBox = vb;
+  }
+
+  // Convert a client (mouse) position to SVG user coords, accounting
+  // for `preserveAspectRatio="xMidYMid meet"` letterboxing.
+  function clientToSvg(clientX: number, clientY: number): { x: number; y: number } | null {
+    if (!hostDiv || !viewBox) return null;
+    const rect = hostDiv.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const vb = viewBox;
+    const scale = Math.min(rect.width / vb.w, rect.height / vb.h);
+    const visW = rect.width / scale;
+    const visH = rect.height / scale;
+    const offX = vb.x - (visW - vb.w) / 2;
+    const offY = vb.y - (visH - vb.h) / 2;
+    return {
+      x: offX + ((clientX - rect.left) / rect.width) * visW,
+      y: offY + ((clientY - rect.top) / rect.height) * visH,
+    };
+  }
+
+  function onWheel(e: WheelEvent) {
+    if (!viewBox) return;
+    e.preventDefault();
+    const vb = viewBox;
+    const factor = Math.exp(e.deltaY * 0.0015);
+    const pt = clientToSvg(e.clientX, e.clientY);
+    if (!pt) return;
+    applyViewBox({
+      x: pt.x - (pt.x - vb.x) * factor,
+      y: pt.y - (pt.y - vb.y) * factor,
+      w: vb.w * factor,
+      h: vb.h * factor,
+    });
+  }
+
+  let dragging = $state(false);
+  let dragStart: { clientX: number; clientY: number; vbX: number; vbY: number } | null = null;
+
+  function onPointerDown(e: PointerEvent) {
+    if (!viewBox || e.button !== 0) return;
+    dragging = true;
+    dragStart = { clientX: e.clientX, clientY: e.clientY, vbX: viewBox.x, vbY: viewBox.y };
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!dragging || !dragStart || !viewBox || !hostDiv) return;
+    const rect = hostDiv.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const vb = viewBox;
+    // Use the same letterbox-aware scaling as clientToSvg so 1 client
+    // pixel of drag maps to the same number of SVG units regardless of
+    // which axis is letterboxed.
+    const scale = Math.min(rect.width / vb.w, rect.height / vb.h);
+    const dx = (e.clientX - dragStart.clientX) / scale;
+    const dy = (e.clientY - dragStart.clientY) / scale;
+    applyViewBox({ x: dragStart.vbX - dx, y: dragStart.vbY - dy, w: vb.w, h: vb.h });
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    dragging = false;
+    dragStart = null;
+    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+  }
+
+  function onDoubleClick() {
+    if (baseViewBox) applyViewBox({ ...baseViewBox });
+  }
+
+  // Re-bind to the freshly-injected SVG whenever markup changes.
+  $effect(() => {
+    void svgMarkup;
+    if (!hostDiv) return;
+    untrack(() => {
+      const found = hostDiv!.querySelector('svg') as SVGSVGElement | null;
+      svgEl = found;
+      if (!found) {
+        viewBox = null;
+        baseViewBox = null;
+        return;
+      }
+      const vb = parseViewBox(found.getAttribute('viewBox') ?? '');
+      if (vb) {
+        baseViewBox = { ...vb };
+        applyViewBox(vb);
+      }
+    });
+  });
+
+  // Track host size for the scale bar.
+  $effect(() => {
+    if (!hostDiv) return;
+    const el = hostDiv;
+    const update = () => {
+      hostSize = { w: el.clientWidth, h: el.clientHeight };
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
+  // px-per-mm depends on the current viewBox and host size, using the
+  // same `min` scaling as the SVG's preserveAspectRatio="xMidYMid meet".
+  let pxPerMM = $derived.by(() => {
+    if (!viewBox || hostSize.w <= 0 || hostSize.h <= 0) return 0;
+    return Math.min(hostSize.w / viewBox.w, hostSize.h / viewBox.h);
+  });
+
+  // Pick a "nice" mm length (1/2/5 * 10^k) that renders 60–180 px wide.
+  let scaleMM = $derived.by(() => {
+    if (pxPerMM <= 0) return 1;
+    const targetMM = 120 / pxPerMM;
+    const exp = Math.floor(Math.log10(targetMM));
+    const base = Math.pow(10, exp);
+    const choices = [1 * base, 2 * base, 5 * base, 10 * base];
+    let best = choices[0];
+    let bestDiff = Math.abs(Math.log(choices[0] / targetMM));
+    for (const c of choices) {
+      const d = Math.abs(Math.log(c / targetMM));
+      if (d < bestDiff) {
+        best = c;
+        bestDiff = d;
+      }
+    }
+    return best;
+  });
+
+  function formatMM(v: number): string {
+    if (v >= 1) return `${Number.isInteger(v) ? v : v.toFixed(1)} mm`;
+    if (v >= 0.1) return `${v.toFixed(1)} mm`;
+    return `${v.toFixed(2)} mm`;
+  }
 </script>
 
 <Dialog.Root bind:open>
@@ -89,6 +248,9 @@
       <Dialog.Description>
         Per-slab view of the cellslicer partition. Each cell is filled
         with its raw sampled RGB before dither.
+        <span class="block text-xs text-muted-foreground mt-1">
+          Drag to pan · scroll to zoom · double-click to reset
+        </span>
       </Dialog.Description>
     </Dialog.Header>
 
@@ -116,15 +278,34 @@
         </span>
       </div>
 
-      <div class="border border-border rounded bg-checkerboard flex items-center justify-center min-h-[300px] overflow-hidden">
-        {#if svgMarkup}
-          <div class="w-full max-h-[60vh] svg-host">
+      <div class="border border-border rounded bg-checkerboard relative overflow-hidden min-h-[300px]">
+        <div
+          bind:this={hostDiv}
+          role="img"
+          aria-label="Per-slab cell partition (pan, zoom, double-click to reset)"
+          class="w-full max-h-[60vh] svg-host"
+          class:grabbing={dragging}
+          onwheel={onWheel}
+          onpointerdown={onPointerDown}
+          onpointermove={onPointerMove}
+          onpointerup={onPointerUp}
+          onpointercancel={onPointerUp}
+          ondblclick={onDoubleClick}
+        >
+          {#if svgMarkup}
             {@html svgMarkup}
+          {:else if loading}
+            <div class="flex items-center justify-center h-[300px] text-sm text-muted-foreground">Loading…</div>
+          {:else}
+            <div class="flex items-center justify-center h-[300px] text-sm text-muted-foreground">No data</div>
+          {/if}
+        </div>
+
+        {#if viewBox && pxPerMM > 0}
+          <div class="scale-bar">
+            <div class="scale-bar-line" style:width="{Math.max(1, scaleMM * pxPerMM)}px"></div>
+            <span class="scale-bar-label">{formatMM(scaleMM)}</span>
           </div>
-        {:else if loading}
-          <span class="text-sm text-muted-foreground">Loading…</span>
-        {:else}
-          <span class="text-sm text-muted-foreground">No data</span>
         {/if}
       </div>
     {/if}
@@ -146,7 +327,40 @@
   :global(.svg-host svg) {
     display: block;
     width: 100%;
-    height: auto;
+    height: 100%;
     max-height: 60vh;
+    touch-action: none;
+  }
+  .svg-host {
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+  }
+  .svg-host.grabbing {
+    cursor: grabbing;
+  }
+  .scale-bar {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.85);
+    color: #111;
+    font-size: 11px;
+    line-height: 1;
+    pointer-events: none;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  }
+  .scale-bar-line {
+    height: 3px;
+    background: #111;
+  }
+  .scale-bar-label {
+    font-variant-numeric: tabular-nums;
   }
 </style>

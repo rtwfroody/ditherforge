@@ -2,7 +2,6 @@ package cellslicer
 
 import (
 	"math"
-
 )
 
 // boundaryMark marks an arc-length position on a FootprintLoop.
@@ -370,7 +369,6 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		}
 		capMask[i] &= (inFp &^ below) | (inFp &^ above)
 	}
-
 	// Hex stamping gate. If there's no inner region at all (a very
 	// thin footprint) we fall back to the outer mask so cell
 	// generation doesn't silently empty out.
@@ -410,6 +408,15 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 	// curved models). Backfill propagates ownership outward until
 	// every in-footprint pixel belongs to a cell.
 	backfillUnassigned(r)
+
+	// Split any cell whose pixel ownership ended up in multiple
+	// disconnected components into one cell per component. Without
+	// this, CellOutlineFromRaster only returns the outline of the
+	// first walked loop, leaving the other component's pixels
+	// invisible to downstream renderers and to clip2d's per-cell
+	// polygon — manifesting as red coverage gaps in capMask on
+	// near-pole slabs of curved models.
+	rawCells = splitDisconnectedCells(r, rawCells)
 
 	// Count pixels per raw cell. Cells with zero pixels are dropped
 	// — they're slivers smaller than a pixel, identical to what
@@ -477,6 +484,61 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		cells = append(cells, Cell{Outer: outline, Kind: rawCells[ci].Kind})
 	}
 	return cells, r
+}
+
+// splitDisconnectedCells finds cells in r.CellID whose pixel sets
+// form more than one 4-connected component. The first component
+// (the one containing the leftmost-bottommost pixel, matching
+// CellOutlineFromRaster's start-corner pick) keeps the original
+// cell ID; each subsequent component gets a fresh ID appended to
+// rawCells. The returned rawCells slice is the input extended by
+// one placeholder Cell per new component (Kind copied from the
+// donor cell; Outer is unused — outline gets recovered from the
+// raster downstream).
+func splitDisconnectedCells(r *SlabRaster, rawCells []Cell) []Cell {
+	visited := make([]bool, r.W*r.H)
+	seen := make([]bool, len(rawCells))
+	for i := 0; i < r.W*r.H; i++ {
+		id := r.CellID[i]
+		if id < 0 || visited[i] {
+			continue
+		}
+		px0 := i % r.W
+		py0 := i / r.W
+		var assignID int32
+		if int(id) < len(seen) && !seen[id] {
+			seen[id] = true
+			assignID = id
+		} else {
+			assignID = int32(len(rawCells))
+			rawCells = append(rawCells, Cell{Kind: rawCells[id].Kind})
+		}
+		stack := [][2]int{{px0, py0}}
+		visited[i] = true
+		if assignID != id {
+			r.CellID[i] = assignID
+		}
+		for len(stack) > 0 {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, d := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				nx, ny := top[0]+d[0], top[1]+d[1]
+				if nx < 0 || ny < 0 || nx >= r.W || ny >= r.H {
+					continue
+				}
+				nidx := ny*r.W + nx
+				if visited[nidx] || r.CellID[nidx] != id {
+					continue
+				}
+				visited[nidx] = true
+				if assignID != id {
+					r.CellID[nidx] = assignID
+				}
+				stack = append(stack, [2]int{nx, ny})
+			}
+		}
+	}
+	return rawCells
 }
 
 // backfillUnassigned assigns any unowned in-footprint pixel that
