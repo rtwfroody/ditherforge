@@ -1,0 +1,52 @@
+{
+  "_ditherforge": {
+    "url": "https://github.com/rtwfroody/ditherforge",
+    "version": "ditherforge 0.9.26"
+  },
+  "settings": {
+    "inputFile": "low_poly_building.glb",
+    "objectIndex": -1,
+    "sizeMode": "size",
+    "sizeValue": "50",
+    "scaleValue": "1.0",
+    "printer": "snapmaker_u1",
+    "nozzleDiameter": "0.4",
+    "layerHeight": "0.20",
+    "baseMaterialXTileMM": 10,
+    "baseMaterialXTriplanarSharpness": 4,
+    "baseColorMode": "solid",
+    "colorSlots": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "inventoryCollection": "Inventory",
+    "brightness": 0,
+    "contrast": 0,
+    "saturation": 0,
+    "warpPins": [],
+    "dither": "riemersma",
+    "riemersmaBias": 0.85,
+    "blueNoiseTol": 20,
+    "colorSnap": 5,
+    "noMerge": false,
+    "noSimplify": false,
+    "stats": false,
+    "alphaWrap": true,
+    "alphaWrapAlpha": "",
+    "alphaWrapOffset": "",
+    "layer0AdhesionXYScale": 2,
+    "upperLayerXYScale": 1.25,
+    "splitEnabled": false,
+    "splitAxis": 2,
+    "splitOffset": 0,
+    "splitConnectorStyle": "pegs",
+    "splitConnectorCount": 0,
+    "splitConnectorDiamMM": 3,
+    "splitConnectorDepthMM": 2,
+    "splitClearanceMM": 0.15,
+    "splitOrientationA": "original",
+    "splitOrientationB": "original"
+  }
+}

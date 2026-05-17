@@ -37,3 +37,4 @@ devscripts/*
 
 # Claude Code harness runtime files
 .claude/scheduled_tasks.lock
+.claude/agent-memory/
