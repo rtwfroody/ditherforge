@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
 // makeCircleFootprint builds a 1-loop Footprint with `n` CCW vertices
@@ -345,6 +348,141 @@ func TestPartitionDumpedSlab(t *testing.T) {
 
 	if notEnclosedInCap > 0 {
 		t.Fatalf("%d capMask pixels owned but rendered uncovered by cell.Outer", notEnclosedInCap)
+	}
+}
+
+// TestPartitionEarthPolarSlabs loads earth.glb, partitions every
+// slab, and asserts that no pixel in the analytic cap region (in fp
+// polygon AND not in fpAbove polygon, via pixel-centre point-in-
+// polygon) ends up unowned. This was the failure mode that produced
+// concentric white ring artifacts near the apex on the rendered
+// earth top view: conservative rasterisation of fpAbove marked
+// pixels straddling the (coarse 32-gon) polygon edge as in-
+// neighbour, so the cap mask lost a ribbon of pixels at the inner
+// cap boundary on near-pole slabs — and those pixels dropped out of
+// the output mesh because no cell claimed them.
+//
+// Skipped when tests/objects/earth.glb is absent (a clean-clone CI
+// without test fixtures).
+func TestPartitionEarthPolarSlabs(t *testing.T) {
+	// Locate earth.glb relative to the module root. Tests run from
+	// the package directory, so walk up two levels (internal/cellslicer
+	// → repo root) and look in tests/objects.
+	candidates := []string{
+		filepath.Join("..", "..", "tests", "objects", "earth.glb"),
+		filepath.Join("tests", "objects", "earth.glb"),
+	}
+	var meshPath string
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			meshPath = p
+			break
+		}
+	}
+	if meshPath == "" {
+		t.Skip("earth.glb not present; skipping polar-slab regression test")
+	}
+	model, err := loader.LoadGLB(meshPath, -1)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Match the production pipeline's scale (size=50mm via the test
+	// suite default) so the partition reproduces the polar regime
+	// where fpAbove is a coarse 32-gon significantly smaller than fp.
+	const target = float32(50)
+	mn, mx := model.Vertices[0], model.Vertices[0]
+	for _, v := range model.Vertices[1:] {
+		for i := 0; i < 3; i++ {
+			if v[i] < mn[i] {
+				mn[i] = v[i]
+			}
+			if v[i] > mx[i] {
+				mx[i] = v[i]
+			}
+		}
+	}
+	ext := mx[0] - mn[0]
+	for i := 1; i < 3; i++ {
+		if d := mx[i] - mn[i]; d > ext {
+			ext = d
+		}
+	}
+	if ext > 0 {
+		loader.ScaleModel(model, target/ext)
+	}
+
+	const (
+		cellSize = float32(0.4)
+		layerH   = float32(0.2)
+	)
+	zMin, zMax := model.Vertices[0][2], model.Vertices[0][2]
+	for _, v := range model.Vertices[1:] {
+		if v[2] < zMin {
+			zMin = v[2]
+		}
+		if v[2] > zMax {
+			zMax = v[2]
+		}
+	}
+	planes := SlabBoundaryPlanes(zMin, zMax, layerH)
+	layers := SliceMesh(model, planes)
+	nSlabs := len(layers) - 1
+	footprints := make([]*Footprint, nSlabs)
+	for i := 0; i < nSlabs; i++ {
+		footprints[i] = ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+	}
+
+	// Check the very-polar slabs of earth specifically — those are
+	// the ones where the cap annulus is wide AND fpAbove is much
+	// smaller than fp, so the rasterisation ribbon bug surfaces.
+	// Slabs picked to match the user-visible artifact: at the
+	// production scale the top ~5 slabs of earth show the polar
+	// ring(s) when this code path regresses. nSlabs-1 (the very
+	// top, fpAbove == nil) is skipped because the cap pixel
+	// definition used below requires fpAbove to be present.
+	polarSlabs := []int{nSlabs - 5, nSlabs - 4, nSlabs - 3, nSlabs - 2}
+	for _, si := range polarSlabs {
+		if si < 0 || si >= nSlabs {
+			continue
+		}
+		var fpBelow, fpAbove *Footprint
+		if si > 0 {
+			fpBelow = footprints[si-1]
+		}
+		if si+1 < nSlabs {
+			fpAbove = footprints[si+1]
+		}
+		_, raster := PartitionSlabRaster(footprints[si], fpBelow, fpAbove, cellSize, 0)
+		if raster == nil {
+			t.Fatalf("slab %d: nil raster", si)
+		}
+		// Count analytic-cap pixels that no cell claimed. These are
+		// pixels whose pixel-centre falls in fp and out of fpAbove,
+		// i.e. the visible cap surface for this slab.
+		totalCap := 0
+		unowned := 0
+		for py := 0; py < raster.H; py++ {
+			y := raster.OriginY + (float32(py)+0.5)*raster.PxSize
+			for px := 0; px < raster.W; px++ {
+				x := raster.OriginX + (float32(px)+0.5)*raster.PxSize
+				if !footprints[si].Contains(x, y) {
+					continue
+				}
+				if fpAbove != nil && fpAbove.Contains(x, y) {
+					continue
+				}
+				totalCap++
+				if raster.CellID[py*raster.W+px] == NoCellID {
+					unowned++
+				}
+			}
+		}
+		if unowned > 0 {
+			t.Errorf("slab %d: %d / %d analytic cap pixels unowned — see ring artifact regression",
+				si, unowned, totalCap)
+		} else {
+			t.Logf("slab %d: cap=%d pixels, all owned", si, totalCap)
+		}
 	}
 }
 

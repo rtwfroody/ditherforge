@@ -396,6 +396,10 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		StampCellByPolygon(rawCells[ci].Outer, int32(ci), r)
 	}
 
+	// Recover pixels lost to the conservative-rasterisation ribbon
+	// at the inner cap boundary. See [[backfillAnalyticCap]].
+	backfillAnalyticCap(r, fpCur, fpAbove, fpBelow, rawCells, aboveMask, belowMask)
+
 	// Backfill any in-footprint pixel that no cell polygon claimed
 	// to a 4-connected neighbour's cellID. The pixel-centre point-
 	// in-polygon test in StampCellByPolygon misses pixels whose
@@ -539,6 +543,114 @@ func splitDisconnectedCells(r *SlabRaster, rawCells []Cell) []Cell {
 		}
 	}
 	return rawCells
+}
+
+// backfillAnalyticCap fills any unowned pixel whose centre lies in
+// the analytic cap region — inside fpCur and outside both fpAbove
+// and fpBelow (each tested by pixel-centre point-in-polygon, ignoring
+// the rasterised masks) — from a 4-connected hex-cell neighbour.
+//
+// Why only hex neighbours: conservative rasterisation of fpAbove
+// over-claims pixels straddling the polygon's edge, so the cap mask
+// loses a one-pixel-wide ribbon at the inner cap boundary. Hex
+// cells (which stamp through the cap mask) cover the cap interior
+// up to that lost ribbon; the analytic-cap pixels we want to recover
+// are the ones immediately outside the rasterised cap interior,
+// adjacent to a hex cell whose colour was sampled from the cap
+// surface. Filling from ring cells instead would pull wall-band
+// colours into the cap on slabs where ring polygons abut a different
+// surface (e.g. a building's recessed sub-roof, where the wall
+// cells along the building's perimeter are nearer to the recess's
+// fpAbove-edge ribbon than any hex cell is).
+func backfillAnalyticCap(r *SlabRaster, fpCur, fpAbove, fpBelow *Footprint, rawCells []Cell, aboveMask, belowMask []uint64) {
+	if fpCur == nil {
+		return
+	}
+	maskHit := func(mask []uint64, px, py int) bool {
+		if mask == nil || px < 0 || py < 0 || px >= r.W || py >= r.H {
+			return false
+		}
+		idx := py*r.W + px
+		return mask[idx>>6]&(uint64(1)<<uint(idx&63)) != 0
+	}
+	// adjacentToNeighbour confines the fill to the polygon-edge
+	// ribbon of a rasterised neighbour. On open boundaries (top or
+	// bottom of the model) both masks are nil and this predicate is
+	// uniformly false — no ribbon to recover, which is correct
+	// since the open boundary's cap is the entire footprint and was
+	// already stamped by hex.
+	adjacentToNeighbour := func(px, py int) bool {
+		for _, d := range [4][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+			nx, ny := px+d[0], py+d[1]
+			if maskHit(aboveMask, nx, ny) || maskHit(belowMask, nx, ny) {
+				return true
+			}
+		}
+		return false
+	}
+	// A pixel is in the analytic cap if *any part* of its square
+	// extent is in the cap region. A point is in cap iff it lies
+	// in fpCur and is uncapped by at least one of fpAbove/fpBelow
+	// — matching the slab-level capMask definition
+	// `inFp & ~(above & below)` applied at a single point. We
+	// approximate "any part overlaps" by sampling 5 points: the
+	// pixel centre plus its 4 corners. This is symmetric with the
+	// OUTER fp's conservative any-overlap rasterisation. Without
+	// it the cap mask is over-eroded along the neighbour's polygon
+	// edge by up to a pixel-diagonal, leaving a sawtooth ribbon of
+	// unowned "missing geometry" pixels visible as polar rings
+	// near the apex of curved models.
+	half := r.PxSize / 2
+	inCap := func(cx, cy float32) bool {
+		points := [5][2]float32{
+			{cx, cy},
+			{cx - half, cy - half},
+			{cx + half, cy - half},
+			{cx - half, cy + half},
+			{cx + half, cy + half},
+		}
+		for _, p := range points {
+			if !fpCur.Contains(p[0], p[1]) {
+				continue
+			}
+			if fpAbove != nil && fpAbove.Contains(p[0], p[1]) {
+				if fpBelow == nil || fpBelow.Contains(p[0], p[1]) {
+					continue
+				}
+			}
+			return true
+		}
+		return false
+	}
+	pickHexNeighbour := func(px, py int) int32 {
+		for _, d := range [4][2]int{{0, -1}, {0, 1}, {-1, 0}, {1, 0}} {
+			nx, ny := px+d[0], py+d[1]
+			if nx < 0 || ny < 0 || nx >= r.W || ny >= r.H {
+				continue
+			}
+			v := r.CellID[ny*r.W+nx]
+			if v >= 0 && int(v) < len(rawCells) && rawCells[v].Kind == KindHex {
+				return v
+			}
+		}
+		return NoCellID
+	}
+	for py := 0; py < r.H; py++ {
+		y := r.OriginY + (float32(py)+0.5)*r.PxSize
+		for px := 0; px < r.W; px++ {
+			idx := py*r.W + px
+			if r.CellID[idx] != NoCellID || !r.PixelInFootprint(px, py) {
+				continue
+			}
+			x := r.OriginX + (float32(px)+0.5)*r.PxSize
+			if !inCap(x, y) || !adjacentToNeighbour(px, py) {
+				continue
+			}
+			if v := pickHexNeighbour(px, py); v >= 0 {
+				r.CellID[idx] = v
+			}
+		}
+	}
 }
 
 // backfillUnassigned assigns any unowned in-footprint pixel that
