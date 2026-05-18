@@ -13,38 +13,10 @@
 
 package cellslicer
 
-// clipCellVerticals clips each vertical sub-polygon against the
-// cell's prism and fan-triangulates the surviving polygon. Output
-// triangle winding is chosen so each triangle's 3D normal has a
-// non-negative dot product with the source triangle's stored
-// Normal — i.e. the wall faces the same way as the original mesh
-// surface it came from. Without that step, back-face culling in
-// downstream viewers (Three.js GUI) hides half of every wall.
-//
-// Returns (verts, faces) suitable for concatenation onto a cell's
-// 2D-clip output (the caller offsets face indices appropriately).
-func clipCellVerticals(verticals []slabVerticalPoly, cellOuter []Point2) ([][3]float32, [][3]uint32) {
-	var verts [][3]float32
-	var faces [][3]uint32
-	for _, vp := range verticals {
-		clipped := clipVerticalPolyToCell(vp.Pts, cellOuter)
-		if len(clipped) < 3 {
-			continue
-		}
-		base := uint32(len(verts))
-		verts = append(verts, clipped...)
-		for i := 1; i < len(clipped)-1; i++ {
-			triN := triangleNormal(clipped[0], clipped[i], clipped[i+1])
-			dot := triN[0]*vp.Normal[0] + triN[1]*vp.Normal[1] + triN[2]*vp.Normal[2]
-			if dot >= 0 {
-				faces = append(faces, [3]uint32{base, base + uint32(i), base + uint32(i+1)})
-			} else {
-				faces = append(faces, [3]uint32{base, base + uint32(i+1), base + uint32(i)})
-			}
-		}
-	}
-	return verts, faces
-}
+import (
+	"math"
+	"sort"
+)
 
 // slabVerticalPoly is a sub-polygon of a vertical (or near-vertical)
 // source triangle whose XY projection has near-zero area. The
@@ -61,41 +33,160 @@ type slabVerticalPoly struct {
 }
 
 // clipVerticalPolyToCell clips a vertical sub-polygon against the
-// cell's outer polygon (extruded vertically). Returns the clipped
-// polygon (still planar in the source triangle's plane) or nil if
-// nothing survives.
+// cell's outer polygon (extruded vertically). Returns one piece per
+// disjoint interval where the wall line lies inside cell.Outer
+// (typically one interval; multiple appear when the wall grazes a
+// non-convex cell's concavity).
 //
-// cellOuter winding can be CCW or CW; the function detects via signed
-// area so the per-edge inward normal points consistently into the
-// cell interior.
-func clipVerticalPolyToCell(poly [][3]float32, cellOuter []Point2) [][3]float32 {
+// Why a scan-based approach: Sutherland-Hodgman against every
+// cell.Outer edge is only correct when cell.Outer is convex.
+// Polyomino cells routinely kink concavely, and the L-shape corner
+// cell at the cube's (X=0, Y=-20) wedge wrongly truncated the wall
+// (found 2026-05-17 when snapmaker orca refused the first layer).
+// Triangulating cell.Outer and clipping per triangle worked but
+// introduced *bridge* vertices on the wall plane that the bottom
+// cap's separate cell clip didn't have — creating fresh T-junctions
+// between cap and wall at Y=-20, Z=0.
+//
+// The scan approach treats the wall plane as a line in XY, walks the
+// cell.Outer boundary, and pairs the crossings into u-intervals where
+// the line is inside the cell. Each interval becomes one wall-strip
+// rectangle, clipped against the wall polygon via Sutherland-Hodgman
+// against the strip's two parallel sides (those are convex by
+// construction). The crossings are the EXACT cell.Outer/wall-line
+// intersections — the same points the cap clip computes — so wall
+// and cap share matching vertices on their seam.
+func clipVerticalPolyToCell(poly [][3]float32, cellOuter []Point2) [][][3]float32 {
 	if len(poly) < 3 || len(cellOuter) < 3 {
 		return nil
 	}
-	// Detect cell winding via signed area.
-	var twiceSignedArea float32
-	for i := 0; i < len(cellOuter); i++ {
-		j := (i + 1) % len(cellOuter)
-		twiceSignedArea += cellOuter[i][0]*cellOuter[j][1] - cellOuter[j][0]*cellOuter[i][1]
-	}
-	sign := float32(1)
-	if twiceSignedArea < 0 {
-		sign = -1
-	}
-	out := poly
-	n := len(cellOuter)
-	for i := 0; i < n && len(out) >= 3; i++ {
-		xa, ya := cellOuter[i][0], cellOuter[i][1]
-		xb, yb := cellOuter[(i+1)%n][0], cellOuter[(i+1)%n][1]
-		// Outward normal w.r.t. cell interior. For CCW winding,
-		// (yb-ya, -(xb-xa)) points outward; for CW, flip via sign.
-		nx := sign * (yb - ya)
-		ny := sign * -(xb - xa)
-		d := nx*xa + ny*ya
-		out = clipPolyByPlaneXY(out, nx, ny, d)
-	}
-	if len(out) < 3 {
+	// Wall plane normal in XY: pick two XY-distinct wall vertices and
+	// build the perpendicular. The wall is vertical so its plane has
+	// a well-defined XY normal (the source-tri's XY normal direction).
+	nx, ny, ok := wallXYNormal(poly)
+	if !ok {
 		return nil
+	}
+	// d: signed offset such that nx*x + ny*y == d for points on the wall.
+	d := nx*poly[0][0] + ny*poly[0][1]
+	// Tangent direction (along the wall in XY).
+	ux, uy := -ny, nx
+	intervals := cellOuterScanIntervals(cellOuter, nx, ny, d, ux, uy)
+	if len(intervals) == 0 {
+		return nil
+	}
+	pieces := make([][][3]float32, 0, len(intervals))
+	for _, iv := range intervals {
+		// Clip wall polygon to u∈[iv[0], iv[1]] via two half-spaces.
+		clipped := poly
+		// Keep u >= iv[0]: -(ux*x + uy*y) <= -iv[0]
+		clipped = clipPolyByPlaneXY(clipped, -ux, -uy, -iv[0])
+		if len(clipped) < 3 {
+			continue
+		}
+		// Keep u <= iv[1]: ux*x + uy*y <= iv[1]
+		clipped = clipPolyByPlaneXY(clipped, ux, uy, iv[1])
+		if len(clipped) >= 3 {
+			pieces = append(pieces, clipped)
+		}
+	}
+	return pieces
+}
+
+// wallXYNormal computes a unit-length XY normal for a vertical wall
+// polygon. Picks the first pair of vertices with distinct XY and
+// returns the rotated direction. Returns ok=false if no such pair
+// exists (degenerate input).
+func wallXYNormal(poly [][3]float32) (float32, float32, bool) {
+	if len(poly) < 2 {
+		return 0, 0, false
+	}
+	for i := 1; i < len(poly); i++ {
+		dx := poly[i][0] - poly[0][0]
+		dy := poly[i][1] - poly[0][1]
+		l2 := dx*dx + dy*dy
+		if l2 <= 1e-20 {
+			continue
+		}
+		inv := float32(1) / float32(sqrt32(l2))
+		dx *= inv
+		dy *= inv
+		// Normal perpendicular to tangent (dx, dy): rotate 90° CW.
+		return dy, -dx, true
+	}
+	return 0, 0, false
+}
+
+func sqrt32(x float32) float32 {
+	return float32(math.Sqrt(float64(x)))
+}
+
+func sortFloat32s(xs []float32) {
+	sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+}
+
+// cellOuterScanIntervals walks cellOuter (a simple polygon) and
+// returns the sorted u-intervals where the wall line (nx*x+ny*y=d)
+// lies inside the polygon. The u coordinate is u(x,y) = ux*x+uy*y;
+// (ux, uy) must be perpendicular to (nx, ny).
+//
+// Counts each polygon boundary crossing once: proper sign-change
+// crossings, plus on-line vertices that are transversal (preceding
+// and following sides are opposite), plus the endpoints of any
+// edge that lies entirely on the line.
+func cellOuterScanIntervals(cellOuter []Point2, nx, ny, d, ux, uy float32) [][2]float32 {
+	n := len(cellOuter)
+	if n < 3 {
+		return nil
+	}
+	const eps = float32(1e-6)
+	sides := make([]int8, n)
+	for i := 0; i < n; i++ {
+		s := nx*cellOuter[i][0] + ny*cellOuter[i][1] - d
+		if s > eps {
+			sides[i] = 1
+		} else if s < -eps {
+			sides[i] = -1
+		}
+	}
+	uOf := func(p Point2) float32 { return ux*p[0] + uy*p[1] }
+	var crossings []float32
+	for i := 0; i < n; i++ {
+		a := cellOuter[i]
+		b := cellOuter[(i+1)%n]
+		sa := sides[i]
+		sb := sides[(i+1)%n]
+		switch {
+		case sa == 0 && sb == 0:
+			// Edge lies on the wall line: both endpoints are on-line
+			// boundary contributions.
+			crossings = append(crossings, uOf(a), uOf(b))
+		case sa > 0 && sb < 0, sa < 0 && sb > 0:
+			da := nx*a[0] + ny*a[1] - d
+			db := nx*b[0] + ny*b[1] - d
+			t := da / (da - db)
+			x := a[0] + t*(b[0]-a[0])
+			y := a[1] + t*(b[1]-a[1])
+			crossings = append(crossings, ux*x+uy*y)
+		case sa == 0 && sb != 0:
+			// Vertex a on line; transversal iff preceding-vertex
+			// side is opposite to sb.
+			prev := sides[(i-1+n)%n]
+			if prev != 0 && prev != sb {
+				crossings = append(crossings, uOf(a))
+			}
+		}
+		// sa != 0 && sb == 0: picked up on next iteration as a-on-line.
+	}
+	if len(crossings) < 2 {
+		return nil
+	}
+	sortFloat32s(crossings)
+	var out [][2]float32
+	for i := 0; i+1 < len(crossings); i += 2 {
+		if crossings[i+1]-crossings[i] > eps {
+			out = append(out, [2]float32{crossings[i], crossings[i+1]})
+		}
 	}
 	return out
 }

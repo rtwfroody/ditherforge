@@ -10,17 +10,15 @@
 package cellslicer
 
 import (
-	"math"
 	"runtime"
 	"sync"
 
-	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
 // slabTri is a triangle that lies entirely within a slab's Z range.
 // Vertices are stored in mesh coords; Z lifting from a 2D (x, y) is
-// done via barycentric interpolation in clipCellTris, which is
+// done via barycentric interpolation in emitCapPiece, which is
 // numerically stable for any non-degenerate XY projection (avoiding
 // the divide-by-near-zero that the plane equation suffers on
 // near-vertical triangles). Triangles whose XY projection has zero
@@ -43,33 +41,12 @@ type slabTri struct {
 // Per-cell work is run in parallel across runtime.NumCPU() worker
 // goroutines (safe — pure Go, no CGAL).
 func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex) (ClipResult, error) {
-	// Pre-flatten cell jobs with global indices.
-	type job struct {
-		globalIdx int
-		slabIdx   int
-		cellIdx   int
-	}
-	type result struct {
-		globalIdx int
-		verts     [][3]float32
-		faces     [][3]uint32
-	}
-	var jobs []job
 	offsets := make([]int, len(slabs)+1)
 	for si := range slabs {
 		offsets[si+1] = offsets[si] + len(slabs[si].Cells)
-		for ci := range slabs[si].Cells {
-			jobs = append(jobs, job{globalIdx: offsets[si] + ci, slabIdx: si, cellIdx: ci})
-		}
 	}
-	results := make([]result, len(jobs))
 
-	// Pre-slice every model triangle into per-slab pieces, keyed by
-	// slab index. Each piece's Z range is bounded by the slab.
-	// We iterate every model triangle once and assign its pieces
-	// to whichever slab Z-overlaps it; for the building scale this
-	// is cheaper than a per-slab XY query (no extra spatial filter
-	// payoff since we want every Z-overlapping tri).
+	// Pre-slice every model triangle into per-slab pieces.
 	slabTris := make([][]slabTri, len(slabs))
 	slabVerticals := make([][]slabVerticalPoly, len(slabs))
 	for ti := range model.Faces {
@@ -79,8 +56,6 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		c := model.Vertices[f[2]]
 		zMin := minf3(a[2], b[2], c[2])
 		zMax := maxf3(a[2], b[2], c[2])
-		// Find the slab range this triangle's Z spans. Slabs are
-		// uniform in Z, so binary-search bounds.
 		siLo := 0
 		siHi := len(slabs) - 1
 		for siLo <= siHi && slabs[siLo].ZTop < zMin {
@@ -105,16 +80,35 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	}
 	_ = triIdx
 
+	// Per-slab cell-bbox indices, built once. Re-used by every slab
+	// triangle (and vertical) during candidate-cell lookup.
+	cellIndices := make([]*slabCellIndex, len(slabs))
+	for si := range slabs {
+		if len(slabs[si].Cells) > 0 {
+			cellIndices[si] = buildSlabCellIndex(&slabs[si])
+		}
+	}
+
+	// Per-slab parallelism: each slab's per-tri subdivision is
+	// independent and produces its own verts/faces/cellIdx slices
+	// that the reducer concatenates in slab order.
+	type slabResult struct {
+		verts        [][3]float32
+		faces        [][3]uint32
+		localCellIdx []int32 // slab-local cell idx for each face
+	}
+	results := make([]slabResult, len(slabs))
+
 	nWorkers := runtime.NumCPU()
-	if nWorkers > len(jobs) {
-		nWorkers = len(jobs)
+	if nWorkers > len(slabs) {
+		nWorkers = len(slabs)
 	}
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
-	jobCh := make(chan int, len(jobs))
-	for i := range jobs {
-		jobCh <- i
+	jobCh := make(chan int, len(slabs))
+	for si := range slabs {
+		jobCh <- si
 	}
 	close(jobCh)
 	var wg sync.WaitGroup
@@ -122,40 +116,57 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for ji := range jobCh {
-				j := jobs[ji]
-				s := &slabs[j.slabIdx]
-				cell := &s.Cells[j.cellIdx]
-				tris := slabTris[j.slabIdx]
-				verticals := slabVerticals[j.slabIdx]
-				if len(tris) == 0 && len(verticals) == 0 {
+			var candidates []int
+			for si := range jobCh {
+				idx := cellIndices[si]
+				if idx == nil {
 					continue
 				}
-				verts, faces := clipCellTris(tris, cell.Outer, s.ZBot, s.ZTop)
-				// Append vertical-wall contributions (clipped in 3D
-				// against the cell prism). These come from source
-				// triangles whose XY projection had near-zero area;
-				// without this path the cube's walls (and similarly
-				// any flat vertical surface) would not appear in
-				// the output mesh.
-				if len(verticals) > 0 {
-					vVerts, vFaces := clipCellVerticals(verticals, cell.Outer)
-					if len(vFaces) > 0 {
-						base := uint32(len(verts))
-						verts = append(verts, vVerts...)
-						for _, f := range vFaces {
-							faces = append(faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
-						}
-					}
+				zBot := slabs[si].ZBot
+				zTop := slabs[si].ZTop
+
+				// Phase 1: clip all source tris/verticals against
+				// candidate cells, collecting boundary vertices into
+				// slab-wide splice sets. The slab-wide sets eliminate
+				// T-junctions across source-tri boundaries (e.g. the
+				// cube cap's STL diagonal where both source tris
+				// meet — without the slab-wide union, each tri's
+				// splice only saw its own cells' vertices and the
+				// diagonal subdivision didn't match between sides).
+				seen2D := make(map[intPt]struct{}, 64)
+				seen3D := make(map[int3D]struct{}, 16)
+				var capPieces []capPiece
+				var wallPieces []wallPiece
+				for _, t := range slabTris[si] {
+					capPieces, candidates = clipSlabTriPieces(t, si, slabs, idx, capPieces, seen2D, candidates)
 				}
-				if len(faces) == 0 {
+				for _, vp := range slabVerticals[si] {
+					wallPieces, candidates = clipSlabVerticalPieces(vp, si, slabs, idx, wallPieces, seen3D, candidates)
+				}
+				if len(capPieces) == 0 && len(wallPieces) == 0 {
 					continue
 				}
-				results[ji] = result{
-					globalIdx: j.globalIdx,
-					verts:     verts,
-					faces:     faces,
+
+				// Promote slab-wide sets to slices.
+				splice2D := make([]intPt, 0, len(seen2D))
+				for p := range seen2D {
+					splice2D = append(splice2D, p)
 				}
+				splice3D := make([]int3D, 0, len(seen3D))
+				for p := range seen3D {
+					splice3D = append(splice3D, p)
+				}
+
+				// Phase 2: splice each piece against the slab-wide
+				// union and emit.
+				var res slabResult
+				for _, pc := range capPieces {
+					res.verts, res.faces, res.localCellIdx = appendCapPiece(pc, splice2D, zBot, zTop, res.verts, res.faces, res.localCellIdx)
+				}
+				for _, pc := range wallPieces {
+					res.verts, res.faces, res.localCellIdx = appendWallPiece(pc, splice3D, res.verts, res.faces, res.localCellIdx)
+				}
+				results[si] = res
 			}
 		}()
 	}
@@ -171,15 +182,16 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		Faces:       make([][3]uint32, 0, totalF),
 		FaceCellIdx: make([]int32, 0, totalF),
 	}
-	for _, r := range results {
+	for si, r := range results {
 		if len(r.faces) == 0 {
 			continue
 		}
 		base := uint32(len(cr.Verts))
+		off := int32(offsets[si])
 		cr.Verts = append(cr.Verts, r.verts...)
-		for _, f := range r.faces {
+		for i, f := range r.faces {
 			cr.Faces = append(cr.Faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
-			cr.FaceCellIdx = append(cr.FaceCellIdx, int32(r.globalIdx))
+			cr.FaceCellIdx = append(cr.FaceCellIdx, off+r.localCellIdx[i])
 		}
 	}
 	return cr, nil
@@ -217,7 +229,7 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) ([]slabTri, *sl
 	// Whole-polygon XY area check. If the slab-clipped sub-polygon
 	// has near-zero XY projection it came from a near-vertical
 	// source triangle (e.g. the side wall of a cube), and the
-	// barycentric Z-lift used by slabTri/clipCellTris is unstable.
+	// barycentric Z-lift used by slabTri/emitCapPiece is unstable.
 	// Route it to the vertical-clip path instead — every per-fan
 	// triangle would otherwise fail the same area check and the
 	// surface would vanish from the output.
@@ -330,108 +342,6 @@ func lerpAtZ(a, b [3]float32, z float32) [3]float32 {
 		a[1] + t*(b[1]-a[1]),
 		z,
 	}
-}
-
-// clipCellTris clips every triangle's XY projection against the
-// cell polygon and emits 3D triangles whose Z is barycentric-
-// interpolated on each source triangle. Lifted Z is clamped to
-// [zBot, zTop] to absorb floating-point fuzz at the cell/triangle
-// boundary — Clipper's integer rounding can push intersection
-// points a hair outside the triangle's XY projection, where
-// extrapolated barycentric weights would otherwise blow up the Z.
-// Caller is responsible for concatenating per-cell results into the
-// global mesh.
-func clipCellTris(tris []slabTri, cell []Point2, zBot, zTop float32) ([][3]float32, [][3]uint32) {
-	cellMinX, cellMinY, cellMaxX, cellMaxY := polyBoundsP2(cell)
-	cellPath := pointsToClipperPath(cell)
-	var verts [][3]float32
-	var faces [][3]uint32
-	for _, t := range tris {
-		// Triangle XY bbox prefilter.
-		tMinX := minf3(t.V0[0], t.V1[0], t.V2[0])
-		tMaxX := maxf3(t.V0[0], t.V1[0], t.V2[0])
-		tMinY := minf3(t.V0[1], t.V1[1], t.V2[1])
-		tMaxY := maxf3(t.V0[1], t.V1[1], t.V2[1])
-		if tMaxX < cellMinX || tMinX > cellMaxX || tMaxY < cellMinY || tMinY > cellMaxY {
-			continue
-		}
-		// Clip triangle's XY against the cell polygon via Clipper.
-		triPath := clipper.Path{
-			&clipper.IntPoint{
-				X: clipper.CInt(math.Round(float64(t.V0[0]) * clipperScale)),
-				Y: clipper.CInt(math.Round(float64(t.V0[1]) * clipperScale)),
-			},
-			&clipper.IntPoint{
-				X: clipper.CInt(math.Round(float64(t.V1[0]) * clipperScale)),
-				Y: clipper.CInt(math.Round(float64(t.V1[1]) * clipperScale)),
-			},
-			&clipper.IntPoint{
-				X: clipper.CInt(math.Round(float64(t.V2[0]) * clipperScale)),
-				Y: clipper.CInt(math.Round(float64(t.V2[1]) * clipperScale)),
-			},
-		}
-		c := clipper.NewClipper(clipper.IoNone)
-		c.AddPaths(clipper.Paths{triPath}, clipper.PtSubject, true)
-		c.AddPaths(clipper.Paths{cellPath}, clipper.PtClip, true)
-		result, ok := c.Execute1(clipper.CtIntersection, clipper.PftNonZero, clipper.PftNonZero)
-		if !ok {
-			continue
-		}
-		for _, path := range result {
-			pts := clipperPathToPoints(path)
-			if len(pts) < 3 {
-				continue
-			}
-			// Earcut the polygon piece (cell × triangle clip can
-			// produce non-convex pieces near the boundary).
-			earVerts, earTris := Earcut(pts, nil)
-			if len(earTris) == 0 || len(earVerts) != len(pts) {
-				continue
-			}
-			base := uint32(len(verts))
-			for _, p := range pts {
-				// Lift to 3D via barycentric interpolation of Z on
-				// the source triangle's XY projection. Stable for
-				// any triangle whose XY area is non-zero.
-				// areaA / area = bary weight for V0 (opposite edge V1V2)
-				areaA := ((t.V1[0]-p[0])*(t.V2[1]-p[1]) - (t.V2[0]-p[0])*(t.V1[1]-p[1])) * t.InvAreaXY
-				areaB := ((t.V2[0]-p[0])*(t.V0[1]-p[1]) - (t.V0[0]-p[0])*(t.V2[1]-p[1])) * t.InvAreaXY
-				areaC := 1 - areaA - areaB
-				z := areaA*t.V0[2] + areaB*t.V1[2] + areaC*t.V2[2]
-				// Clamp to slab Z range — Clipper integer rounding
-				// can push intersection points slightly outside the
-				// triangle's XY projection, where extrapolated
-				// barycentric weights would otherwise produce a Z
-				// orders of magnitude outside the cell's prism.
-				if z < zBot {
-					z = zBot
-				} else if z > zTop {
-					z = zTop
-				}
-				verts = append(verts, [3]float32{p[0], p[1], z})
-			}
-			// Preserve the source triangle's facing direction.
-			// Earcut emits CCW-XY triangles regardless of input
-			// winding, but the source triangle may have been CW in
-			// XY (signed areaXY < 0, equivalently InvAreaXY < 0),
-			// meaning its 3D normal has a -Z component. Without this
-			// swap, every down-facing source triangle gets a flipped
-			// normal in the output, so back-face-culling viewers
-			// (e.g. the Three.js GUI) drop them — the symptom is a
-			// half-missing surface on Y-up-rotated-to-Z-up models
-			// like earth.glb.
-			if t.InvAreaXY < 0 {
-				for _, tri := range earTris {
-					faces = append(faces, [3]uint32{base + tri[0], base + tri[2], base + tri[1]})
-				}
-			} else {
-				for _, tri := range earTris {
-					faces = append(faces, [3]uint32{base + tri[0], base + tri[1], base + tri[2]})
-				}
-			}
-		}
-	}
-	return verts, faces
 }
 
 func polyBoundsP2(pts []Point2) (minX, minY, maxX, maxY float32) {
