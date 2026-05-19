@@ -18,8 +18,10 @@ import (
 //
 // The mesh is open (clip_volume=false) — faces are the part of the
 // source mesh's surface that falls inside each cell's prism. Output
-// vertices are NOT deduplicated across cells; producers/consumers
-// can run a coplanar/duplicate merge later if compactness matters.
+// vertices are deduplicated across cells by ClipMeshToCells2D (1µm
+// Clipper-integer quantization via int3DOf). The CGAL-based
+// ClipMeshToCells does NOT dedup across cells — its consumers can
+// run a coplanar/duplicate merge later if compactness matters.
 type ClipResult struct {
 	Verts       [][3]float32
 	Faces       [][3]uint32

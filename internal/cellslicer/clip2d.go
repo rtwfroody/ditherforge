@@ -202,6 +202,42 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 			cr.FaceCellIdx = append(cr.FaceCellIdx, off+r.localCellIdx[i])
 		}
 	}
+
+	// Cross-piece vertex dedup. appendCapPiece/appendWallPiece emit
+	// fresh vertex IDs per cell-fragment, so adjacent fragments sharing
+	// a boundary vertex (guaranteed coincident by the slab-wide
+	// seen2D/seen3D splice in Clipper integer space) end up with
+	// distinct vertex IDs. Without dedup, downstream slicing reads
+	// each wall fragment in isolation and the first-layer cross-section
+	// comes out as N disconnected segments → Orca reports "empty
+	// initial layer". Dedup by int3DOf (1µm-quantized Clipper-integer
+	// 3D position) — same key the splice sets use, so coincident-coord
+	// verts hash equal. Cross-slab dedup works for free because
+	// slabs[k].ZTop and slabs[k+1].ZBot come from the same planes[k+1]
+	// float32.
+	if len(cr.Verts) > 0 {
+		seen := make(map[int3D]uint32, len(cr.Verts)/3)
+		remap := make([]uint32, len(cr.Verts))
+		// In-place compaction: kept aliases cr.Verts. Safe because
+		// len(kept) <= i+1 throughout, so the append's write at
+		// kept[len(kept)] never overtakes the range loop's read at
+		// cr.Verts[i+1].
+		kept := cr.Verts[:0]
+		for i, v := range cr.Verts {
+			key := int3DOf(v)
+			id, ok := seen[key]
+			if !ok {
+				id = uint32(len(kept))
+				seen[key] = id
+				kept = append(kept, v)
+			}
+			remap[i] = id
+		}
+		cr.Verts = kept
+		for i, f := range cr.Faces {
+			cr.Faces[i] = [3]uint32{remap[f[0]], remap[f[1]], remap[f[2]]}
+		}
+	}
 	return cr, nil
 }
 

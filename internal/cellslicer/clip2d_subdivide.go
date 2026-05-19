@@ -340,6 +340,13 @@ func appendCapPiece(
 	}
 	base := uint32(len(verts))
 	t := pc.t
+	// Z is recomputed per-cell via barycentric lift on pc.t. Two cells
+	// touching the same XY on a slanted source-tri can produce Z values
+	// that differ by ~1 ULP. The 1µm int3DOf quantization used by the
+	// cross-piece dedup in ClipMeshToCells2D absorbs this for normal
+	// scales (1 ULP at z=100mm is ~6µm). If cap-wall T-junctions
+	// reappear on slanted geometry, snap z to the matching seen3D
+	// entry's Z here.
 	for _, p := range floatPoly {
 		areaA := ((t.V1[0]-p[0])*(t.V2[1]-p[1]) - (t.V2[0]-p[0])*(t.V1[1]-p[1])) * t.InvAreaXY
 		areaB := ((t.V2[0]-p[0])*(t.V0[1]-p[1]) - (t.V0[0]-p[0])*(t.V2[1]-p[1])) * t.InvAreaXY
