@@ -30,9 +30,9 @@ import (
 	clipper "github.com/ctessum/go.clipper"
 )
 
-// intPt is a Clipper-integer XY point. Used as a dedup key when
-// merging boundary vertex sets across per-cell clip pieces of one
-// source triangle.
+// intPt is a Clipper-integer XY point. Used as a dedup key in the
+// slab-wide seen2D set so boundary vertices contributed by any cell
+// and any source triangle in the slab compare exactly.
 type intPt struct {
 	X, Y int64
 }
@@ -75,12 +75,13 @@ func clipperPathToIntPts(path clipper.Path) []intPt {
 // the collinearity test is exact: an inserted vertex is geometrically
 // on the edge, not just within a tolerance.
 //
-// Used per-source-tri after computing per-cell Clipper intersections
-// against every candidate cell: adjacent cells' outlines can have
-// unequal vertex sets along their shared boundary (one straight, the
-// other kinked at a polyomino corner). Splicing each piece's edges
-// with the union vertex set produces matching subdivisions on both
-// sides — no T-junctions within the source triangle's coverage.
+// Called in Phase 2 with the slab-wide seen2D union set produced by
+// Phase 1. Adjacent cells' outlines can have unequal vertex sets
+// along their shared boundary (one straight, the other kinked at a
+// polyomino corner); two source triangles meeting on a shared edge
+// can also contribute mismatched vertex chains. Splicing every
+// piece against the slab-wide union produces matching subdivisions
+// on both sides — no T-junctions inside the slab.
 func splicePolyIntEdges(poly []intPt, set []intPt) []intPt {
 	if len(poly) < 2 || len(set) == 0 {
 		return poly

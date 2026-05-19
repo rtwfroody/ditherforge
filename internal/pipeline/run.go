@@ -549,10 +549,10 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 }
 
 // Voxelize partitions the geometry mesh into cellslicer slabs and
-// cells, then samples a color per cell from the texture-bearing
-// color mesh. Output cells feed ColorAdjust / ColorWarp / Palette /
-// Dither. The cell-adjacency graph (vo.Neighbors) is left empty in
-// Phase 2 — Phase 3 will derive it from the rasterized cell map.
+// cells, samples a color per cell from the texture-bearing color
+// mesh, and builds the cell-adjacency graph used by Dither. Output
+// cells (visible only) feed ColorAdjust → Dither; the full per-slab
+// cell polygons (vo.CellSlabs) feed Clip.
 func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 	return runStage(r, StageVoxelize, &r.voxelize, func() (*voxelizeOutput, error) {
 		lo, err := r.Load()
@@ -1036,17 +1036,14 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 	})
 }
 
-// Clip is a holdover stage name for the minislicer's Mesh3D phase:
-// it extrudes each per-layer prism from the section partition,
-// painting wall faces with their dithered palette index. Cap
-// (top/bottom) faces are tagged -1 by BuildPrintableMesh and remapped
-// here to the most common visible color for the cached
-// ShellAssignments slice (downstream Merge is color-agnostic).
-// Clip runs per-cell CGAL surface clipping of the geometry mesh
-// against each cell's 3D prism. Each output face carries the
-// dithered palette index of its source cell. The geometry mesh
-// must be closed and orientable — the alpha-wrap path produces this
-// directly; for raw meshes the pipeline relies on opts.AlphaWrap.
+// Clip cuts the geometry mesh into per-cell fragments via
+// cellslicer.ClipMeshToCells2D (pure Go, per-slab parallel; see
+// clip2d.go). Each output face is tagged with the dithered palette
+// index of its source cell; faces from cells with no dither
+// assignment fall back to the mesh's most-common palette index.
+// The geometry mesh must be closed and orientable — the alpha-wrap
+// path produces this directly; for raw meshes the pipeline relies
+// on opts.AlphaWrap.
 func (r *pipelineRun) Clip() (*clipOutput, error) {
 	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
 		do, err := r.Dither()

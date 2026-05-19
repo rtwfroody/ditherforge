@@ -1,11 +1,17 @@
-// 2D per-slab Clipper-based clip: bypasses CGAL by exploiting the fact
-// that each slab bounds Z so 3D Boolean degenerates to a 2D polygon
-// intersection between each model triangle (projected onto XY) and
-// each cell's XY polygon, lifted back to 3D via the triangle's plane.
+// 2D per-slab clip: cuts each model triangle into per-cell fragments
+// without any 3D boolean. The work is two cheap plane clips per
+// (triangle, slab, cell) tuple:
 //
-// Replaces the per-cell CGAL clip_surface path in clip.go for
-// production scale: a 1.2M-cell pipeline runs in seconds instead of
-// hours, with no CGAL setup amortization or thread-safety concerns.
+//  1. Sutherland-Hodgman against the slab's z=zBot / z=zTop planes
+//     (clipPolygonByZHalfSpace) — the triangle becomes a sub-polygon
+//     living in [zBot, zTop].
+//  2. Clipper 2D polygon intersection of that sub-polygon's XY
+//     projection with the cell's Outer polygon, then lift the result
+//     back to 3D via barycentric weights on the source triangle.
+//
+// Replaces the per-cell CGAL clip_surface path that used to live in
+// clip.go: a 1.2M-cell pipeline runs in seconds instead of hours,
+// with no CGAL setup amortization or thread-safety concerns.
 
 package cellslicer
 
@@ -31,15 +37,17 @@ type slabTri struct {
 	InvAreaXY float32
 }
 
-// ClipMeshToCells2D produces a per-cell-tagged mesh fragment in the
-// same shape as ClipMeshToCells, but without CGAL: for each slab,
-// each model triangle is clipped to the slab's Z range and then
-// each cell's XY polygon clips the triangle's XY projection, with
-// resulting 2D polygons lifted back to 3D via the triangle's plane
-// equation.
+// ClipMeshToCells2D returns a mesh whose faces are fragments of the
+// input model, each tagged with the global cell index it falls in.
+// For each slab, every model triangle is Z-clipped to the slab and
+// then 2D-clipped against each candidate cell's outer polygon, and
+// the result is lifted back to 3D via barycentric weights on the
+// source triangle.
 //
-// Per-cell work is run in parallel across runtime.NumCPU() worker
-// goroutines (safe — pure Go, no CGAL).
+// Parallelized per slab (runtime.NumCPU() workers). Within a slab
+// the work is serial because Phase 1 and Phase 2 share slab-wide
+// vertex sets (seen2D / seen3D) used to eliminate T-junctions
+// across cells and across source triangles — see clip2d_subdivide.go.
 func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex) (ClipResult, error) {
 	offsets := make([]int, len(slabs)+1)
 	for si := range slabs {
