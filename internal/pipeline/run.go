@@ -1084,8 +1084,15 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			cellAssign[gi] = do.Assignments[vi]
 		}
 
-		triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
-		clipped, cerr := cellslicer.ClipMeshToCells2D(lo.Model, vo.CellSlabs, triIdx)
+		var clipped cellslicer.ClipResult
+		var cerr error
+		if os.Getenv("DITHERFORGE_CLIP_MODE") == "horizontal" {
+			plog.Printf("  Clip: DITHERFORGE_CLIP_MODE=horizontal (no per-cell XY clip)")
+			clipped, cerr = cellslicer.ClipMeshHorizontally(lo.Model, vo.CellSlabs)
+		} else {
+			triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
+			clipped, cerr = cellslicer.ClipMeshToCells2D(lo.Model, vo.CellSlabs, triIdx)
+		}
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
 		}

@@ -720,8 +720,12 @@ type ditherSettings struct {
 	BlueNoiseTolerance float64
 }
 
-// clipSettings has no fields: clip is invalidated only by dependency cascade.
-type clipSettings struct{}
+// clipSettings only carries the experimental DITHERFORGE_CLIP_MODE
+// switch; otherwise the clip stage is invalidated only by dependency
+// cascade.
+type clipSettings struct {
+	HorizontalOnly bool
+}
 
 type mergeSettings struct {
 	NoMerge bool
@@ -836,7 +840,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
 	case StageClip:
-		return clipSettings{}
+		return clipSettings{HorizontalOnly: os.Getenv("DITHERFORGE_CLIP_MODE") == "horizontal"}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
 	}
@@ -998,7 +1002,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat64(h, v.RiemersmaInputBias)
 		writeFloat64(h, v.BlueNoiseTolerance)
 	case clipSettings:
-		// No independent settings.
+		writeBool(h, v.HorizontalOnly)
 	case mergeSettings:
 		writeBool(h, v.NoMerge)
 	}
