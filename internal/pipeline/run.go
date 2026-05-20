@@ -569,9 +569,22 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			return nil, err
 		}
 
-		cellSize := r.opts.NozzleDiameter
-		if cellSize <= 0 {
-			cellSize = 0.4
+		voxelSizes := voxelCellSizes(r.opts)
+		cellSizeUpper := voxelSizes.UpperXY
+		if cellSizeUpper <= 0 {
+			cellSizeUpper = 0.4
+		}
+		cellSizeLayer0 := voxelSizes.Layer0XY
+		if cellSizeLayer0 <= 0 {
+			cellSizeLayer0 = cellSizeUpper
+		}
+		// Single policy point: layer 0 = the bottom slab. Used by
+		// PartitionSlabRaster, SampleSlab, and AddWithinSlabAdjacency.
+		cellSizeForSlab := func(i int) float32 {
+			if i == 0 {
+				return cellSizeLayer0
+			}
+			return cellSizeUpper
 		}
 		layerH := r.opts.LayerHeight
 		if layerH <= 0 {
@@ -603,7 +616,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if nSlabs < 1 {
 			return nil, fmt.Errorf("cellslicer: no slabs produced")
 		}
-		spatial := voxel.NewSpatialIndex(colorModel, cellSize)
+		spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
 		sliceElapsed := time.Since(tSlice).Seconds()
 
 		nWorkers := runtime.NumCPU()
@@ -657,7 +670,8 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			if i+1 < nSlabs {
 				fpAbove = footprints[i+1]
 			}
-			cells, _ := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cellSize, 0)
+			cs := cellSizeForSlab(i)
+			cells, _ := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cs, 0)
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
 				ZBot:      planes[i],
@@ -669,7 +683,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			}
 			t1 := time.Now()
 			partitionNs.Add(int64(t1.Sub(t0)))
-			perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cellSize, 0, nil, nil, buf)
+			perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, nil, nil, buf)
 			sampleNs.Add(int64(time.Since(t1)))
 		})
 		slabElapsed := time.Since(tSlab).Seconds()
@@ -695,7 +709,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		globalNeighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
 		tWithin := time.Now()
 		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
-			cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSize, 0, globalNeighbors)
+			cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSizeForSlab(i), 0, globalNeighbors)
 		})
 		withinElapsed := time.Since(tWithin).Seconds()
 		tCross := time.Now()
@@ -760,9 +774,9 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nEdges += len(out)
 		}
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3fmm layerH=%.3fmm slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
+		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
 			len(slabs), nCells, len(cells), nEdges/2,
-			cellSize, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
+			cellSizeLayer0, cellSizeUpper, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
 
 		return &voxelizeOutput{
 			Cells:         cells,
@@ -771,7 +785,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			Neighbors:     visibleNeighbors,
 			VisibleToCell: visibleToCell,
 			LayerH:        layerH,
-			CellSize:      cellSize,
+			CellSize:      cellSizeUpper,
 		}, nil
 	})
 }

@@ -95,15 +95,17 @@ type Options struct {
 	AlphaWrap          bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
 	AlphaWrapAlpha     float32   // mm; 0 = auto (5 × NozzleDiameter)
 	AlphaWrapOffset    float32   // mm; 0 = auto (alpha / 30)
-	// Layer0AdhesionXYScale enlarges layer-0 voxel cells in XY beyond
-	// the slicer's first-layer line width so heavily dithered first
-	// layers print as larger plastic blobs that stick to the bed.
-	// 0 (zero value) or negative falls back to
-	// squarevoxel.Layer0AdhesionXYScale; 1 = no enlargement.
+	// Layer0AdhesionXYScale multiplies the layer-0 minimum feature
+	// size — the printer-profile InitialLayerLineWidth when a profile
+	// is resolved, else the bare nozzle diameter. >1 enlarges first-
+	// layer cells for bed adhesion (heavily dithered first layers
+	// print as larger plastic blobs that stick). 0 / negative treats
+	// as 1.
 	Layer0AdhesionXYScale float32
-	// UpperLayerXYScale multiplies upper-layer voxel cell XY size
-	// relative to the slicer's line width. 0 (zero value) or negative
-	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
+	// UpperLayerXYScale multiplies the upper-layer minimum feature
+	// size — the printer-profile LineWidth when a profile is
+	// resolved, else the bare nozzle diameter. >1 gives coarser
+	// color detail with fewer primitives. 0 / negative treats as 1.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
 
@@ -682,15 +684,30 @@ var offGridWarned sync.Map
 // In fallback mode Layer0Z = UpperZ = opts.LayerHeight so the grid
 // stays uniform — there's no slicer setting available to derive a
 // taller first-layer height from.
-func voxelCellSizes(opts Options) (cells voxelCells) {
-	// Post-rearchitecture: the minislicer derives geometry directly
-	// from opts.NozzleDiameter and opts.LayerHeight; the named-return
-	// + defer pattern below is preserved so the printer-profile path
-	// keeps overriding when present, but the legacy nozzle×constant
-	// fallback now uses the bare nozzle diameter (no Layer0CellScale
-	// inflation, no AdhesionScale, no UpperLayerXYScale). The values
-	// flow into stage cache keys; the actual slice/section sizes come
-	// from the Voxelize body using opts directly.
+func voxelCellSizes(opts Options) voxelCells {
+	// Resolve the unscaled minimum-feature-size base from the printer
+	// profile (or nozzle fallback), then multiply by the user-facing
+	// XY scale knobs. Two-step split so future early returns in the
+	// base resolver can't accidentally bypass the scales.
+	cells := voxelCellSizesBase(opts)
+	layer0Scale := opts.Layer0AdhesionXYScale
+	if layer0Scale <= 0 {
+		layer0Scale = 1
+	}
+	upperScale := opts.UpperLayerXYScale
+	if upperScale <= 0 {
+		upperScale = 1
+	}
+	cells.Layer0XY *= layer0Scale
+	cells.UpperXY *= upperScale
+	return cells
+}
+
+// voxelCellSizesBase resolves the unscaled minimum-feature sizes:
+// printer-profile InitialLayerLineWidth / LineWidth when a profile
+// matches, else the bare nozzle diameter. Caller (voxelCellSizes)
+// applies the XY scale multipliers on top.
+func voxelCellSizesBase(opts Options) (cells voxelCells) {
 	cells = voxelCells{
 		Layer0XY: opts.NozzleDiameter,
 		UpperXY:  opts.NozzleDiameter,
