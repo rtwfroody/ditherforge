@@ -809,10 +809,10 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 	}
 }
 
-// applyBaseColor resets lo.ColorModel / lo.SampleModel FaceBaseColor from the
-// pristine parse output and reapplies the active base-color override, then
-// rebuilds lo.InputMesh so the preview reflects the new colors. Idempotent —
-// a no-op when the applied state already matches opts.
+// applyBaseColor resets lo.ColorModel.FaceBaseColor from the pristine parse
+// output and reapplies the active base-color override, then rebuilds
+// lo.InputMesh so the preview reflects the new colors. Idempotent — a no-op
+// when the applied state already matches opts.
 //
 // Two override sources are supported, mutually exclusive at apply time:
 //   - opts.BaseColorMaterialX (with TileMM): per-face centroid sample of the
@@ -823,12 +823,11 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 //   - opts.BaseColor: legacy uniform hex override.
 //
 // This intentionally violates the cache's "outputs are immutable after set"
-// contract for loadOutput: ColorModel.FaceBaseColor and SampleModel.FaceBaseColor
-// are mutated in place every run. Safe today because (a) the pipeline runs
-// single-threaded under app.pipelineWorker, so no other reader is active when
-// this runs; (b) the base-color settings are excluded from loadSettings, so
-// multiple cached loadOutput entries don't exist for the same load key with
-// different colors.
+// contract for loadOutput: ColorModel.FaceBaseColor is mutated in place every
+// run. Safe today because (a) the pipeline runs single-threaded under
+// app.pipelineWorker, so no other reader is active when this runs; (b) the
+// base-color settings are excluded from loadSettings, so multiple cached
+// loadOutput entries don't exist for the same load key with different colors.
 //
 // Invariant: whenever lo is present, parse output is reachable via
 // cache.getParse — but only when an override was previously applied do we
@@ -853,9 +852,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 			panic("applyBaseColor: parse output missing but load cache mutated")
 		}
 		copy(lo.ColorModel.FaceBaseColor, raw.FaceBaseColor)
-		if lo.SampleModel != lo.ColorModel {
-			copy(lo.SampleModel.FaceBaseColor, raw.FaceBaseColor)
-		}
 	}
 	lo.BaseColorAtlas = nil
 	switch {
@@ -873,9 +869,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 		)
 		if err == nil && override != nil {
 			bakeMaterialXBaseColor(lo.ColorModel, override)
-			if lo.SampleModel != lo.ColorModel {
-				bakeMaterialXBaseColor(lo.SampleModel, override)
-			}
 			// Per-triangle atlas bake for the input preview. Each
 			// face's patch dims (W × H) come from a 2D tier
 			// classification (longest-edge bbox extent × third-
@@ -900,9 +893,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 		_ = err // baseColorOverride already routed the warning through tracker.
 	case opts.BaseColor != "":
 		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
-		if lo.SampleModel != lo.ColorModel {
-			applyBaseColorOverride(lo.SampleModel, opts.BaseColor)
-		}
 	}
 	lo.InputMesh = buildInputMeshData(lo.ColorModel)
 	lo.InputMesh.BaseColorAtlas = lo.BaseColorAtlas

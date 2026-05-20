@@ -398,12 +398,6 @@ type loadOutput struct {
 	// materials. Used for color sampling and sticker placement. When
 	// alpha-wrap is disabled, Model == ColorModel.
 	ColorModel *loader.LoadedModel
-	// SampleModel is the mesh used for per-voxel color sampling. When the
-	// geometry mesh (Model) has been grown by a step like alpha-wrap,
-	// SampleModel is the original mesh inflated along vertex normals so its
-	// surface roughly matches Model's. Otherwise SampleModel aliases
-	// ColorModel.
-	SampleModel  *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
@@ -414,8 +408,8 @@ type loadOutput struct {
 	// override is active.
 	BaseColorAtlas *BaseColorAtlas
 	// appliedBaseColor / appliedBaseColorMaterialX{,TileMM,TriplanarSharpness}
-	// track the base-color override currently baked into ColorModel /
-	// SampleModel FaceBaseColor. The tuple is the cache key for the
+	// track the base-color override currently baked into
+	// ColorModel.FaceBaseColor. The tuple is the cache key for the
 	// in-place mutation: when any field diverges from the corresponding
 	// opts.* value, applyBaseColor resets from the parse cache and re-bakes.
 	// All empty/zero means pristine.

@@ -200,7 +200,6 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
 		geomModel := model
-		sampleModel := model
 		if r.opts.AlphaWrap {
 			alpha := r.opts.AlphaWrapAlpha
 			if alpha <= 0 {
@@ -218,8 +217,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			// downstream, so it's safe to discard before alpha-wrap.
 			// NullTracker avoids colliding with the dedicated
 			// StageDecimate event later. Only the alpha-wrap input is
-			// decimated -- `model` stays intact for the inflate calc and
-			// for ColorModel / SampleModel below.
+			// decimated -- `model` stays intact for ColorModel below.
 			wrapInput := model
 			if !r.opts.NoSimplify {
 				cellSize := voxelCellSizes(r.opts).UpperXY
@@ -247,20 +245,6 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
 				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
 			geomModel = wrapped
-
-			// Compute the inflate offset from the wrap envelope before
-			// post-decimation runs: post-decimate can nudge the bbox
-			// slightly and the inflate amount must reflect what
-			// alpha-wrap actually expanded, not the decimated
-			// approximation of it. Kept inside the AlphaWrap block so
-			// the dependency on `wrapped` is explicit and can't be
-			// silently broken by a future refactor.
-			origExt := modelMaxExtent(model)
-			inflateOffset := (modelMaxExtent(geomModel) - origExt) / 2
-			if inflateOffset > 1e-4 {
-				plog.Printf("  Inflating color-sample mesh by %.3f mm", inflateOffset)
-				sampleModel = loader.InflateAlongNormals(model, inflateOffset)
-			}
 
 			// Post-wrap decimation: alpha-wrap output is dense (~one face
 			// per α² of surface area), but downstream stages (Sticker,
@@ -291,7 +275,6 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		return &loadOutput{
 			Model:        geomModel,
 			ColorModel:   model,
-			SampleModel:  sampleModel,
 			InputMesh:    buildInputMeshData(model),
 			PreviewScale: unitScale / totalScale,
 			ExtentMM:     nativeExtentMM,

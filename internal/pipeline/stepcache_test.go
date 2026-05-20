@@ -105,9 +105,9 @@ func writeMtlxTempFile(t *testing.T, body string) string {
 // TestStickerStageKeyDependsOnBaseColor guards a cache-coherency contract:
 // the Sticker stage body deep-clones lo.ColorModel into so.Model, including
 // FaceBaseColor. The per-run applyBaseColor reapplies the override to
-// lo.ColorModel/lo.SampleModel but not to so.Model. So a base-color change
-// must invalidate the sticker stage; otherwise voxelize samples colors from
-// a stale so.Model.FaceBaseColor.
+// lo.ColorModel but not to so.Model. So a base-color change must invalidate
+// the sticker stage; otherwise voxelize samples colors from a stale
+// so.Model.FaceBaseColor.
 func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 	c := NewStageCache()
 	base := Options{
@@ -129,7 +129,7 @@ func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 // TestLoadAndDecimateStageKeysIndependentOfBaseColor protects the design
 // intent stated in voxelizeSettings's doc comment: load/decimate caches
 // survive base-color changes because applyBaseColor patches the cached
-// ColorModel/SampleModel in place.
+// ColorModel in place.
 func TestLoadAndDecimateStageKeysIndependentOfBaseColor(t *testing.T) {
 	c := NewStageCache()
 	base := Options{Input: "model.glb", BaseColor: "#FF0000"}
