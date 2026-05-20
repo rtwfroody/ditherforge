@@ -176,7 +176,14 @@ type Callbacks struct {
 	// alpha-wrap is off (the overlay is already baked into the input
 	// mesh's StickerUVs in that case).
 	OnStickerOverlay func(*MeshData, float32)
-	OnPalette        func([][3]uint8, []string)
+	// OnAlphaWrappedMesh fires after the load stage when alpha-wrap
+	// is enabled, carrying the wrapped geometry mesh (flat-shaded,
+	// no UVs or textures) so the frontend can offer a "show wrapped"
+	// toggle in the Input Model panel. Called with mesh=nil when
+	// alpha-wrap is off so the frontend can drop any stale wrapped
+	// mesh and force the toggle back to the input view.
+	OnAlphaWrappedMesh func(*MeshData, float32)
+	OnPalette          func([][3]uint8, []string)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -316,12 +323,14 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Extract callbacks, using safe defaults for nil.
 	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
+	var onAlphaWrappedMesh func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
 		onInputMesh = cb.OnInputMesh
 		onStickerOverlay = cb.OnStickerOverlay
+		onAlphaWrappedMesh = cb.OnAlphaWrappedMesh
 		onPalette = cb.OnPalette
 		onWarning = cb.OnWarning
 		if cb.Progress != nil {
@@ -407,6 +416,15 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			}
 		}
 		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
+
+		if onAlphaWrappedMesh != nil {
+			var wrapped *MeshData
+			if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+				wrapped = buildWrappedMeshData(lo.Model)
+				wrapped = scalePreviewMesh(wrapped, lo.PreviewScale)
+			}
+			onAlphaWrappedMesh(wrapped, lo.PreviewScale)
+		}
 
 		if onStickerOverlay != nil {
 			var overlay *MeshData

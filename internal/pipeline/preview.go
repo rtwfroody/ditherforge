@@ -77,6 +77,16 @@ func flattenMesh(model *loader.LoadedModel, colorFn func(fi int) (uint8, uint8, 
 	}
 }
 
+// buildWrappedMeshData creates a MeshData from the alpha-wrapped
+// geometry mesh for the "Show wrapped" preview toggle. The wrap has
+// no UVs, textures, or per-face colour, so faces are filled with a
+// neutral grey — the user is inspecting topology, not appearance.
+func buildWrappedMeshData(model *loader.LoadedModel) *MeshData {
+	return flattenMesh(model, func(fi int) (uint8, uint8, uint8) {
+		return defaultGray, defaultGray, defaultGray
+	})
+}
+
 // buildInputMeshData creates a MeshData from a loaded model, including texture
 // and UV data when available for proper texture-mapped rendering.
 func buildInputMeshData(model *loader.LoadedModel) *MeshData {

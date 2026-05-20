@@ -401,6 +401,21 @@
   // Optional alpha-wrap sticker overlay. Rendered just outside the input
   // mesh in the input viewer; carries decals when alpha-wrap is on.
   let inputOverlayMeshUrl: string | undefined = $state(undefined);
+  // Alpha-wrapped geometry preview (untextured, flat-shaded). Set when
+  // alpha-wrap is enabled; cleared on the next clear/disable event.
+  let wrappedMeshUrl: string | undefined = $state(undefined);
+  // 'input' = show the textured input mesh; 'wrapped' = show the
+  // alpha-wrapped geometry. Toggle disabled when alpha-wrap is off.
+  let inputViewMode: 'input' | 'wrapped' = $state('input');
+  // Overlay "View" popup state for the Input Model viewer.
+  let viewMenuOpen = $state(false);
+  let viewMenuRef: HTMLDivElement | undefined = $state(undefined);
+  function handleViewMenuOutside(e: MouseEvent) {
+    if (!viewMenuOpen) return;
+    if (viewMenuRef && e.target instanceof Node && !viewMenuRef.contains(e.target)) {
+      viewMenuOpen = false;
+    }
+  }
   let outputMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
   // Pipeline error from a backend stage failure. Rendered as a final
@@ -501,6 +516,15 @@
     // Empty url means the pipeline explicitly told us there's no overlay
     // (e.g. alpha-wrap turned off). Clear the previous overlay if any.
     inputOverlayMeshUrl = event.url || undefined;
+  });
+  EventsOn('wrapped-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen < latestGen) return;
+    // Empty url = alpha-wrap is off; drop the wrapped preview and
+    // force the toggle back to the input view.
+    wrappedMeshUrl = event.url || undefined;
+    if (!wrappedMeshUrl && inputViewMode === 'wrapped') {
+      inputViewMode = 'input';
+    }
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
@@ -823,6 +847,8 @@
   function clearViewportMesh() {
     inputMeshUrl = undefined;
     inputOverlayMeshUrl = undefined;
+    wrappedMeshUrl = undefined;
+    inputViewMode = 'input';
     outputMeshUrl = undefined;
     modelBBoxMin = null;
     modelBBoxMax = null;
@@ -1491,6 +1517,8 @@
   }
 </script>
 
+<svelte:window onclick={handleViewMenuOutside} />
+
 <Tooltip.Provider>
 
 <main class="h-screen flex flex-col">
@@ -2157,8 +2185,53 @@
 
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} cutPlane={cutPlanePreview} />
+    <div class="flex-1 min-h-0 relative">
+      <ModelViewer
+        meshUrl={inputViewMode === 'wrapped' && wrappedMeshUrl ? wrappedMeshUrl : inputMeshUrl}
+        overlayMeshUrl={inputViewMode === 'wrapped' ? undefined : inputOverlayMeshUrl}
+        label={inputFile ? `${inputViewMode === 'wrapped' ? 'Alpha-wrapped Model: ' : 'Input Model: '}${shortenPath(inputFile)}` : 'Input Model'}
+        viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation}
+        pickMode={inputViewMode === 'input' && pickingPinIndex >= 0}
+        stickerPlaceMode={inputViewMode === 'input' && placingStickerIndex >= 0}
+        stickerImage={placingSticker?.thumbnail ?? ''}
+        stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)}
+        stickerRotation={placingSticker?.rotation ?? 0}
+        onColorPick={handleColorPick}
+        onStickerPlace={handleStickerPlace}
+        warpPins={inputViewMode === 'input' && pickingPinIndex < 0 ? warpPins : []}
+        loading={inputFile ? inputFile.split('/').pop() ?? '' : ''}
+        errorMessage={inputError}
+        cutPlane={cutPlanePreview}
+      />
+      {#if wrappedMeshUrl}
+        <div
+          bind:this={viewMenuRef}
+          class="absolute top-2 right-2 z-10 text-xs"
+          onkeydown={(e) => { if (e.key === 'Escape') viewMenuOpen = false; }}
+        >
+          <button
+            type="button"
+            class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
+            aria-haspopup="true"
+            aria-expanded={viewMenuOpen}
+            onclick={() => { viewMenuOpen = !viewMenuOpen; }}
+          >View</button>
+          {#if viewMenuOpen}
+            <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+              <button
+                type="button"
+                class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'input' ? 'font-medium bg-muted/60' : ''}"
+                onclick={() => { inputViewMode = 'input'; viewMenuOpen = false; }}
+              >Input model</button>
+              <button
+                type="button"
+                class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'wrapped' ? 'font-medium bg-muted/60' : ''}"
+                onclick={() => { inputViewMode = 'wrapped'; viewMenuOpen = false; }}
+              >Alpha-wrapped</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
     <div class="flex-1 min-h-0">
       <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} />

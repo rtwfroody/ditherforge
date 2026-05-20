@@ -46,6 +46,7 @@ type App struct {
 	meshes       *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
 	lastOverlayID string              // mesh handler ID for the alpha-wrap sticker overlay
+	lastWrappedID string              // mesh handler ID for the alpha-wrapped geometry preview
 	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
 	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
 	collections   *collection.Manager    // filament collection manager
@@ -483,6 +484,22 @@ func (a *App) processOne(req pipelineRequest) {
 				BBoxMin:      bboxMin,
 				BBoxMax:      bboxMax,
 			})
+		},
+		OnAlphaWrappedMesh: func(mesh *pipeline.MeshData, pvScale float32) {
+			// Mirrors OnStickerOverlay: mesh=nil clears the wrapped
+			// preview so the frontend can fall back to the input view
+			// when alpha-wrap is toggled off.
+			if a.lastWrappedID != "" {
+				a.meshes.Remove(a.lastWrappedID)
+				a.lastWrappedID = ""
+			}
+			url := ""
+			if mesh != nil {
+				a.lastWrappedID = a.meshes.Store(mesh)
+				url = "/mesh/" + a.lastWrappedID
+			}
+			wailsRuntime.EventsEmit(a.ctx, "wrapped-mesh",
+				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
 		},
 		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Alpha-wrap mode: stickers are carried by a separate mesh
