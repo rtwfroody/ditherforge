@@ -86,7 +86,7 @@ func TestPartitionPolarAnnulus(t *testing.T) {
 	fp := makeCircleFootprint(0, 0, rOuter, nPts)
 	fpAbove := makeCircleFootprint(0, 0, rInner, nPts)
 
-	_, raster := PartitionSlabRaster(fp, nil, fpAbove, cellSize, pxSize)
+	_, raster, _ := PartitionSlabRaster(fp, nil, fpAbove, cellSize, pxSize)
 	if raster == nil {
 		t.Fatal("partition returned nil raster")
 	}
@@ -194,7 +194,7 @@ func TestPartitionDumpedSlab(t *testing.T) {
 	}
 	const cellSize float32 = 0.4
 	const pxSize float32 = 0.1
-	cells, raster := PartitionSlabRaster(fp, fpBelow, fpAbove, cellSize, pxSize)
+	cells, raster, _ := PartitionSlabRaster(fp, fpBelow, fpAbove, cellSize, pxSize)
 	if raster == nil {
 		t.Fatal("partition returned nil raster")
 	}
@@ -452,7 +452,7 @@ func TestPartitionEarthPolarSlabs(t *testing.T) {
 		if si+1 < nSlabs {
 			fpAbove = footprints[si+1]
 		}
-		_, raster := PartitionSlabRaster(footprints[si], fpBelow, fpAbove, cellSize, 0)
+		_, raster, _ := PartitionSlabRaster(footprints[si], fpBelow, fpAbove, cellSize, 0)
 		if raster == nil {
 			t.Fatalf("slab %d: nil raster", si)
 		}
@@ -501,7 +501,7 @@ func TestPartitionPolarAnnulus_Noisy(t *testing.T) {
 	fp := makeNoisyCircleFootprint(0, 0, rOuter, nPts, jitter, 1)
 	fpAbove := makeNoisyCircleFootprint(0, 0, rInner, nPts, jitter, 2)
 
-	_, raster := PartitionSlabRaster(fp, nil, fpAbove, cellSize, pxSize)
+	_, raster, _ := PartitionSlabRaster(fp, nil, fpAbove, cellSize, pxSize)
 	if raster == nil {
 		t.Fatal("partition returned nil raster")
 	}

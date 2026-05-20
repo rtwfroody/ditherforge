@@ -156,7 +156,7 @@ func TestPartitionSlabRasterSquare(t *testing.T) {
 		{0, 0}, {10, 0}, {10, 10}, {0, 10},
 	}}}
 	fp := ComputeFootprint(square, square)
-	cellsCap, r := PartitionSlabRaster(fp, nil, nil, 0.4, 0.1)
+	cellsCap, r, _ := PartitionSlabRaster(fp, nil, nil, 0.4, 0.1)
 	cells := cellsCap
 	if fp == nil || len(fp.Loops) == 0 {
 		t.Fatal("ComputeFootprint returned nil footprint")

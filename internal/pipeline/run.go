@@ -651,6 +651,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		var partitionNs, sampleNs atomic.Int64
 		slabs := make([]cellslicer.Slab, nSlabs)
 		perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
+		perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
 		runParallel(nWorkers, nSlabs, func(workerID int) any {
 			return voxel.NewSearchBuf(len(colorModel.Faces))
 		}, func(i int, state any) {
@@ -671,7 +672,8 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 				fpAbove = footprints[i+1]
 			}
 			cs := cellSizeForSlab(i)
-			cells, _ := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cs, 0)
+			cells, _, stats := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cs, 0)
+			perSlabStats[i] = stats
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
 				ZBot:      planes[i],
@@ -777,6 +779,30 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
 			len(slabs), nCells, len(cells), nEdges/2,
 			cellSizeLayer0, cellSizeUpper, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
+
+		// Aggregate per-slab partition stats. RawRing+RawHex are pre-
+		// split, pre-drop generator output; SplitAdded counts extra
+		// cells emitted by splitDisconnectedCells; DroppedZeroPx counts
+		// raw cells whose pixel mask ended up empty (slivers below the
+		// pxSize=cellSize/4 raster). Final is the surviving cell count
+		// per slab. PxHist buckets surviving cells by pixel count —
+		// the [1,2-4] buckets are the suspects for "missing geometry"
+		// dropouts: a 1-pixel cell has a single-quad outline whose
+		// clip footprint is one cellSize/4 square.
+		var agg cellslicer.PartitionStats
+		for _, s := range perSlabStats {
+			agg.RawRing += s.RawRing
+			agg.RawHex += s.RawHex
+			agg.SplitAdded += s.SplitAdded
+			agg.DroppedZeroPx += s.DroppedZeroPx
+			agg.Final += s.Final
+			for k := range agg.PxHist {
+				agg.PxHist[k] += s.PxHist[k]
+			}
+		}
+		plog.Printf("  Partition: ring=%d hex=%d split+%d drop0px=%d final=%d pxHist=[1:%d 2-4:%d 5-16:%d 17-64:%d 65+:%d]",
+			agg.RawRing, agg.RawHex, agg.SplitAdded, agg.DroppedZeroPx, agg.Final,
+			agg.PxHist[0], agg.PxHist[1], agg.PxHist[2], agg.PxHist[3], agg.PxHist[4])
 
 		return &voxelizeOutput{
 			Cells:         cells,
@@ -1130,6 +1156,111 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 
 		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
 			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
+
+		// Per-cell face-count cross-tab against partition pixel
+		// bucket. Identifies the "missing geometry" suspects:
+		// small cells whose outline is too thin for any source-tri
+		// fragment to land inside, producing 0 faces in the clip
+		// output. A high zero-face fraction in the 1-px / 2-4 px
+		// buckets means surface area visible in the input mesh is
+		// silently dropped at clip time.
+		facesPerCell := make([]int, nGlobal)
+		for _, gi := range clipped.FaceCellIdx {
+			if gi >= 0 && int(gi) < nGlobal {
+				facesPerCell[gi]++
+			}
+		}
+		bucketOf := func(px int) int {
+			switch {
+			case px <= 1:
+				return 0
+			case px <= 4:
+				return 1
+			case px <= 16:
+				return 2
+			case px <= 64:
+				return 3
+			default:
+				return 4
+			}
+		}
+		// [kind][bucket]: [0]=ring [1]=hex
+		var totalByBucket, zeroByBucket [2][5]int
+		// Per-slab counters: ring/hex × total/zero-face.
+		type slabStat struct {
+			ringTotal, ringZero int
+			hexTotal, hexZero   int
+		}
+		perSlab := make([]slabStat, len(vo.CellSlabs))
+		gi := 0
+		for si := range vo.CellSlabs {
+			for ci := range vo.CellSlabs[si].Cells {
+				c := &vo.CellSlabs[si].Cells[ci]
+				k := 0
+				if c.Kind == cellslicer.KindHex {
+					k = 1
+				}
+				b := bucketOf(c.Pixels)
+				totalByBucket[k][b]++
+				zero := facesPerCell[gi] == 0
+				if zero {
+					zeroByBucket[k][b]++
+				}
+				if k == 0 {
+					perSlab[si].ringTotal++
+					if zero {
+						perSlab[si].ringZero++
+					}
+				} else {
+					perSlab[si].hexTotal++
+					if zero {
+						perSlab[si].hexZero++
+					}
+				}
+				gi++
+			}
+		}
+		plog.Printf("  Clip cell→face ring: 1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
+			zeroByBucket[0][0], totalByBucket[0][0],
+			zeroByBucket[0][1], totalByBucket[0][1],
+			zeroByBucket[0][2], totalByBucket[0][2],
+			zeroByBucket[0][3], totalByBucket[0][3],
+			zeroByBucket[0][4], totalByBucket[0][4])
+		plog.Printf("  Clip cell→face hex:  1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
+			zeroByBucket[1][0], totalByBucket[1][0],
+			zeroByBucket[1][1], totalByBucket[1][1],
+			zeroByBucket[1][2], totalByBucket[1][2],
+			zeroByBucket[1][3], totalByBucket[1][3],
+			zeroByBucket[1][4], totalByBucket[1][4])
+		// Top 10 slabs by zero-face cell count. Includes Z range so
+		// we can correlate with what's at that height in the input
+		// (caps vs walls, horizontal trim features, etc.).
+		type slabIdxStat struct {
+			si    int
+			total int
+			zero  int
+			ring  int // zero-face ring count
+			hex   int // zero-face hex count
+		}
+		ranked := make([]slabIdxStat, 0, len(perSlab))
+		for si, s := range perSlab {
+			z := s.ringZero + s.hexZero
+			if z == 0 {
+				continue
+			}
+			ranked = append(ranked, slabIdxStat{si: si, total: s.ringTotal + s.hexTotal, zero: z, ring: s.ringZero, hex: s.hexZero})
+		}
+		sort.Slice(ranked, func(i, j int) bool { return ranked[i].zero > ranked[j].zero })
+		topN := len(ranked)
+		if topN > 10 {
+			topN = 10
+		}
+		for k := 0; k < topN; k++ {
+			entry := ranked[k]
+			s := &vo.CellSlabs[entry.si]
+			plog.Printf("    zero-face slab %d Z=[%.2f..%.2f]mm: %d/%d cells (ring=%d hex=%d)",
+				entry.si, s.ZBot, s.ZTop, entry.zero, entry.total, entry.ring, entry.hex)
+		}
 
 		return &clipOutput{
 			ShellVerts:       clipped.Verts,

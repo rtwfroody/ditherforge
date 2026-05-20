@@ -32,6 +32,13 @@ type Cell struct {
 	// Outer is the cell's outer boundary, CCW, no closing duplicate.
 	Outer []Point2
 	Kind  CellKind
+	// Pixels is the cell's pixel-count in the partition raster
+	// (pxSize = cellSize/4 by default). Useful for diagnosing
+	// missing-geometry dropouts: 1-px cells have an outline ~one
+	// raster pixel wide and frequently produce no faces in
+	// ClipMeshToCells2D. Zero when the cell was not built from a
+	// raster (e.g. legacy PartitionSlab path).
+	Pixels int
 }
 
 // Slab is one Z-stratum of the partitioned model. ZBot < ZTop. Cells
