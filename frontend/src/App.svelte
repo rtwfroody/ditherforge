@@ -410,10 +410,18 @@
   // Overlay "View" popup state for the Input Model viewer.
   let viewMenuOpen = $state(false);
   let viewMenuRef: HTMLDivElement | undefined = $state(undefined);
+  let outputViewMenuOpen = $state(false);
+  let outputViewMenuRef: HTMLDivElement | undefined = $state(undefined);
+  type ViewMode = 'solid' | 'wireframe' | 'hidden-line';
+  let inputViewStyle: ViewMode = $state('solid');
+  let outputViewStyle: ViewMode = $state('solid');
   function handleViewMenuOutside(e: MouseEvent) {
-    if (!viewMenuOpen) return;
-    if (viewMenuRef && e.target instanceof Node && !viewMenuRef.contains(e.target)) {
+    const target = e.target instanceof Node ? e.target : null;
+    if (viewMenuOpen && viewMenuRef && target && !viewMenuRef.contains(target)) {
       viewMenuOpen = false;
+    }
+    if (outputViewMenuOpen && outputViewMenuRef && target && !outputViewMenuRef.contains(target)) {
+      outputViewMenuOpen = false;
     }
   }
   let outputMeshUrl: string | undefined = $state(undefined);
@@ -2202,22 +2210,24 @@
         loading={inputFile ? inputFile.split('/').pop() ?? '' : ''}
         errorMessage={inputError}
         cutPlane={cutPlanePreview}
+        viewMode={inputViewStyle}
       />
-      {#if wrappedMeshUrl}
-        <div
-          bind:this={viewMenuRef}
-          class="absolute top-2 right-2 z-10 text-xs"
-          onkeydown={(e) => { if (e.key === 'Escape') viewMenuOpen = false; }}
-        >
-          <button
-            type="button"
-            class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
-            aria-haspopup="true"
-            aria-expanded={viewMenuOpen}
-            onclick={() => { viewMenuOpen = !viewMenuOpen; }}
-          >View</button>
-          {#if viewMenuOpen}
-            <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+      <div
+        bind:this={viewMenuRef}
+        class="absolute top-2 right-2 z-10 text-xs"
+        onkeydown={(e) => { if (e.key === 'Escape') viewMenuOpen = false; }}
+      >
+        <button
+          type="button"
+          class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
+          aria-haspopup="true"
+          aria-expanded={viewMenuOpen}
+          onclick={() => { viewMenuOpen = !viewMenuOpen; }}
+        >View</button>
+        {#if viewMenuOpen}
+          <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+            {#if wrappedMeshUrl}
+              <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Source</div>
               <button
                 type="button"
                 class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'input' ? 'font-medium bg-muted/60' : ''}"
@@ -2228,13 +2238,56 @@
                 class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'wrapped' ? 'font-medium bg-muted/60' : ''}"
                 onclick={() => { inputViewMode = 'wrapped'; viewMenuOpen = false; }}
               >Alpha-wrapped</button>
-            </div>
-          {/if}
-        </div>
-      {/if}
+              <div class="border-t border-border"></div>
+            {/if}
+            <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Style</div>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="solid" />
+              <span>Solid</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="wireframe" />
+              <span>Wireframe</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="hidden-line" />
+              <span>Hidden line</span>
+            </label>
+          </div>
+        {/if}
+      </div>
     </div>
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} />
+    <div class="flex-1 min-h-0 relative">
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} viewMode={outputViewStyle} />
+      <div
+        bind:this={outputViewMenuRef}
+        class="absolute top-2 right-2 z-10 text-xs"
+        onkeydown={(e) => { if (e.key === 'Escape') outputViewMenuOpen = false; }}
+      >
+        <button
+          type="button"
+          class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
+          aria-haspopup="true"
+          aria-expanded={outputViewMenuOpen}
+          onclick={() => { outputViewMenuOpen = !outputViewMenuOpen; }}
+        >View</button>
+        {#if outputViewMenuOpen}
+          <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="solid" />
+              <span>Solid</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="wireframe" />
+              <span>Wireframe</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="hidden-line" />
+              <span>Hidden line</span>
+            </label>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
   </div>

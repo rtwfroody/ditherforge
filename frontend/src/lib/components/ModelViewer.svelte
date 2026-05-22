@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { Canvas, T } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
   import Invalidator from './Invalidator.svelte';
@@ -61,6 +61,7 @@
     stageTick = 0,
     cutPlane = null,
     pipelineError = '',
+    viewMode = 'solid',
   }: {
     meshUrl?: string;
     overlayMeshUrl?: string;
@@ -84,7 +85,32 @@
     stageTick?: number;
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
+    viewMode?: 'solid' | 'wireframe' | 'hidden-line';
   } = $props();
+
+  // Non-solid view modes use dedicated materials rather than mutating the
+  // colored scene materials in place — keeps lifecycle simple (the scene's
+  // materials own their textures/uniforms and shouldn't be toggled out from
+  // under their build path).
+  //   Wireframe mode: render just `viewWireMat` so all triangle edges show,
+  //     including back-facing ones (nothing writes depth to occlude them).
+  //   Hidden-line mode: render `viewSolidMat` first (white, with polygonOffset
+  //     to push it slightly back in z), then `viewWireMat` on top. The solid
+  //     pass's depth buffer hides the back edges.
+  const viewSolidMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
+  const viewWireMat = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    wireframe: true,
+  });
+  onDestroy(() => {
+    viewSolidMat.dispose();
+    viewWireMat.dispose();
+  });
 
   // Compute live elapsed time for a running stage. The _tick parameter
   // creates a Svelte reactive dependency so this re-evaluates on each tick.
@@ -1299,10 +1325,21 @@
         <T.AmbientLight intensity={0.2} />
 
         {#each scene.meshes as mesh}
-          <T.Mesh geometry={mesh.geometry} material={mesh.material} />
+          {#if viewMode === 'solid'}
+            <T.Mesh geometry={mesh.geometry} material={mesh.material} />
+          {:else if viewMode === 'wireframe'}
+            <T.Mesh geometry={mesh.geometry} material={viewWireMat} />
+          {:else}
+            <T.Mesh geometry={mesh.geometry} material={viewSolidMat} />
+            <T.Mesh geometry={mesh.geometry} material={viewWireMat} />
+          {/if}
         {/each}
 
-        {#if overlayScene}
+        <!-- Overlay is the alpha-wrap sticker carrier — translucent, designed
+             to layer onto a colored base mesh. In wireframe / hidden-line
+             modes it would just add black lines (or an opaque white shell)
+             that mask the base, so skip it entirely. -->
+        {#if overlayScene && viewMode === 'solid'}
           <T.Group bind:ref={overlayGroupRef}>
             {#each overlayScene.meshes as mesh}
               <T.Mesh geometry={mesh.geometry} material={mesh.material} />
@@ -1314,7 +1351,7 @@
           <T.Mesh geometry={cutPlaneGeo} material={cutPlaneMat} renderOrder={999} />
         {/if}
 
-        <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}`} />
+        <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}|vm${viewMode}`} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
         <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
