@@ -27,6 +27,7 @@
 package cellslicer
 
 import (
+	"math"
 	"runtime"
 	"sync"
 
@@ -54,10 +55,12 @@ type slabPoly struct {
 // For each slab, every model triangle is Z-clipped to the slab and
 // then 2D-clipped against each candidate cell's outer polygon.
 //
-// Parallelized per slab (runtime.NumCPU() workers). Within a slab
-// the work is serial because Phase 1 and Phase 2 share a slab-wide
-// vertex set (seen3D) used to eliminate T-junctions across cells and
-// across source triangles — see clip2d_subdivide.go.
+// Runs as two slab-parallel passes with a barrier between them:
+// Phase 1 (clip slabPolys, build per-slab seen3D) has no cross-slab
+// dependency; Phase 2 (splice + emit) needs every slab's Phase 1
+// seen3D in order to contribute neighbour boundary vertices on the
+// shared Z planes. Each pass uses runtime.NumCPU() workers; details
+// of the splice/triangulation are in clip2d_subdivide.go.
 func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex) (ClipResult, error) {
 	offsets := make([]int, len(slabs)+1)
 	for si := range slabs {
@@ -102,14 +105,40 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		}
 	}
 
-	// Per-slab parallelism: each slab's per-poly subdivision is
-	// independent and produces its own verts/faces/cellIdx slices
-	// that the reducer concatenates in slab order.
+	// Two-pass per-slab parallelism with a barrier between phases:
+	//
+	//   Phase 1 (all slabs concurrent): clip every slabPoly against
+	//   candidate cells, collecting cellPieces and a slab-wide seen3D
+	//   set. No cross-slab dependencies.
+	//
+	//   Phase 2 (all slabs concurrent, after barrier): splice each
+	//   cellPiece against (own seen3D) ∪ (neighbour-below's vertices
+	//   on the shared zBot plane) ∪ (neighbour-above's vertices on
+	//   the shared zTop plane), then Earcut and emit. Splice is read-
+	//   only against the frozen seen3D maps, so no synchronization is
+	//   needed once Phase 1 is done.
+	//
+	// The slab-wide seen3D eliminates within-slab T-junctions (e.g.
+	// cube cap's STL diagonal between two source tris). The cross-slab
+	// boundary contribution eliminates T-junctions on the shared Z
+	// plane between adjacent slabs, whose cell partitions differ.
+	type slabPhase1 struct {
+		pieces []cellPiece
+		seen3D map[int3D]struct{}
+	}
 	type slabResult struct {
 		verts        [][3]float32
 		faces        [][3]uint32
 		localCellIdx []int32 // slab-local cell idx for each face
 	}
+	// Memory note: every slab's Phase 1 result lives until the barrier
+	// completes (Phase 2 needs the neighbour seen3D maps). The old
+	// fused-worker code recycled each slab's intermediate immediately;
+	// this version's peak live set is roughly the sum across all slabs.
+	// Bounded by the eventual output mesh size, so not concerning for
+	// printable-object workloads — revisit if a memory regression
+	// shows up on a very large model.
+	phase1 := make([]slabPhase1, len(slabs))
 	results := make([]slabResult, len(slabs))
 
 	nWorkers := runtime.NumCPU()
@@ -119,57 +148,110 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
-	jobCh := make(chan int, len(slabs))
-	for si := range slabs {
-		jobCh <- si
+
+	// Phase 1 — clip slabPolys, build seen3D.
+	{
+		jobCh := make(chan int, len(slabs))
+		for si := range slabs {
+			jobCh <- si
+		}
+		close(jobCh)
+		var wg sync.WaitGroup
+		for w := 0; w < nWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var candidates []int
+				for si := range jobCh {
+					idx := cellIndices[si]
+					if idx == nil {
+						continue
+					}
+					seen3D := make(map[int3D]struct{}, 64)
+					var pieces []cellPiece
+					for _, p := range slabPolys[si] {
+						pieces, candidates = clipPolyToCells(p, si, slabs, idx, pieces, seen3D, candidates)
+					}
+					phase1[si] = slabPhase1{pieces: pieces, seen3D: seen3D}
+				}
+			}()
+		}
+		wg.Wait()
 	}
-	close(jobCh)
-	var wg sync.WaitGroup
-	for w := 0; w < nWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var candidates []int
-			for si := range jobCh {
-				idx := cellIndices[si]
-				if idx == nil {
-					continue
-				}
 
-				// Phase 1: clip every slabPoly against candidate cells,
-				// collecting boundary vertices into a slab-wide splice
-				// set. The slab-wide set eliminates T-junctions across
-				// source-triangle boundaries (e.g. the cube cap's STL
-				// diagonal where both source tris meet — without the
-				// slab-wide union, each tri's splice only saw its own
-				// cells' vertices and the diagonal subdivision didn't
-				// match between sides).
-				seen3D := make(map[int3D]struct{}, 64)
-				var pieces []cellPiece
-				for _, p := range slabPolys[si] {
-					pieces, candidates = clipPolyToCells(p, si, slabs, idx, pieces, seen3D, candidates)
-				}
-				if len(pieces) == 0 {
-					continue
-				}
-
-				// Promote slab-wide set to a slice.
-				splice3D := make([]int3D, 0, len(seen3D))
-				for p := range seen3D {
-					splice3D = append(splice3D, p)
-				}
-
-				// Phase 2: splice each piece against the slab-wide
-				// union and emit.
-				var res slabResult
-				for _, pc := range pieces {
-					res.verts, res.faces, res.localCellIdx = appendCellPiece(pc, splice3D, res.verts, res.faces, res.localCellIdx)
-				}
-				results[si] = res
-			}
-		}()
+	// Filter helper: returns the int3D Z value for a slab boundary
+	// plane, so Phase 2 workers can pick neighbour seen3D entries on
+	// the shared plane with an exact == on the 1µm-quantized Z.
+	//
+	// The exact-equality filter relies on:
+	//   - clipPolygonByZHalfSpace's lerpAtZ writes z = zPlane verbatim
+	//     (slab Z-clip output).
+	//   - clipPolyToCellsCap's zLift clamps to [zBot, zTop], so float
+	//     noise near the boundary rounds to the same int3D Z. Float32
+	//     1 ULP at z ≈ 4000mm is ≈1µm, so the filter is reliable for
+	//     model heights up to a few hundred mm with ~3 orders of
+	//     magnitude headroom; a model an order of magnitude taller
+	//     would need its own audit.
+	//   - clipPolyByPlaneXY's lerpAtPlaneXY interpolates Z linearly;
+	//     both endpoints on the slab plane → exact plane Z out.
+	//
+	// A vertex that drifts past 1µm and slips the filter would just
+	// fail to participate in the cross-slab splice for that neighbour
+	// (manifoldness degrades locally; geometry stays valid).
+	planeZInt := func(z float32) int64 {
+		return int64(math.Round(float64(z) * clipperScale))
 	}
-	wg.Wait()
+
+	// Phase 2 — splice + emit, with neighbour boundary contributions.
+	{
+		jobCh := make(chan int, len(slabs))
+		for si := range slabs {
+			jobCh <- si
+		}
+		close(jobCh)
+		var wg sync.WaitGroup
+		for w := 0; w < nWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for si := range jobCh {
+					p1 := phase1[si]
+					if len(p1.pieces) == 0 {
+						continue
+					}
+					splice3D := make([]int3D, 0, len(p1.seen3D))
+					for p := range p1.seen3D {
+						splice3D = append(splice3D, p)
+					}
+					// Neighbour below: vertices on slabs[si].ZBot.
+					if si > 0 {
+						zb := planeZInt(slabs[si].ZBot)
+						for p := range phase1[si-1].seen3D {
+							if p.Z == zb {
+								splice3D = append(splice3D, p)
+							}
+						}
+					}
+					// Neighbour above: vertices on slabs[si].ZTop.
+					if si+1 < len(slabs) {
+						zt := planeZInt(slabs[si].ZTop)
+						for p := range phase1[si+1].seen3D {
+							if p.Z == zt {
+								splice3D = append(splice3D, p)
+							}
+						}
+					}
+
+					var res slabResult
+					for _, pc := range p1.pieces {
+						res.verts, res.faces, res.localCellIdx = appendCellPiece(pc, splice3D, res.verts, res.faces, res.localCellIdx)
+					}
+					results[si] = res
+				}
+			}()
+		}
+		wg.Wait()
+	}
 
 	totalV, totalF := 0, 0
 	for _, r := range results {
