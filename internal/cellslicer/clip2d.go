@@ -1,13 +1,24 @@
 // 2D per-slab clip: cuts each model triangle into per-cell fragments
-// without any 3D boolean. The work is two cheap plane clips per
-// (triangle, slab, cell) tuple:
+// without any 3D boolean.
 //
-//  1. Sutherland-Hodgman against the slab's z=zBot / z=zTop planes
-//     (clipPolygonByZHalfSpace) — the triangle becomes a sub-polygon
-//     living in [zBot, zTop].
-//  2. Clipper 2D polygon intersection of that sub-polygon's XY
-//     projection with the cell's Outer polygon, then lift the result
-//     back to 3D via barycentric weights on the source triangle.
+// Pipeline (per source triangle):
+//
+//  1. sliceTriangleToSlab — Sutherland-Hodgman against the slab's
+//     z=zBot / z=zTop planes. Yields one planar 3D sub-polygon
+//     (3-to-7 vertices, convex) that lives in [zBot, zTop] and the
+//     source triangle's plane.
+//
+//  2. clipPolyToCells — intersect that sub-polygon against each
+//     candidate cell's outer polygon. Internally dispatches to a
+//     Clipper 2D path (when the sub-polygon has measurable XY area;
+//     Z is recovered from the source plane equation) or a vertical-
+//     scan path (when its XY projection is degenerate, i.e. the
+//     source triangle was near-vertical). Both paths emit cellPieces
+//     with full 3D vertices.
+//
+//  3. appendCellPiece — splice each cell-piece against the slab-wide
+//     3D vertex union (to eliminate T-junctions), triangulate, and
+//     emit faces tagged with the cell index.
 //
 // Replaces the per-cell CGAL clip_surface path that used to live in
 // clip.go: a 1.2M-cell pipeline runs in seconds instead of hours,
@@ -22,32 +33,31 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// slabTri is a triangle that lies entirely within a slab's Z range.
-// Vertices are stored in mesh coords; Z lifting from a 2D (x, y) is
-// done via barycentric interpolation in emitCapPiece, which is
-// numerically stable for any non-degenerate XY projection (avoiding
-// the divide-by-near-zero that the plane equation suffers on
-// near-vertical triangles). Triangles whose XY projection has zero
-// area are dropped at sliceTriangleToSlab time.
-type slabTri struct {
-	V0, V1, V2 [3]float32
-	// InvAreaXY is 1 / signed_area_xy(V0,V1,V2), precomputed so
-	// per-point barycentric weights are 3 multiplies + 3 cross-
-	// product evaluations.
-	InvAreaXY float32
+// slabPoly is one source triangle clipped against a slab's Z range.
+// Vertices are stored in mesh coords (full 3D), wound in the source
+// triangle's order. The polygon is planar (it lives in the source
+// triangle's plane) and convex (Z-clipping a triangle with two
+// half-spaces preserves convexity).
+//
+// Normal is the source triangle's facing direction, cross-product
+// of its edges. Not unit-normalized — only its direction is used
+// downstream (winding decisions in appendCellPiece, dominant-axis
+// pick for Earcut projection, and the cap Z-lift's plane equation,
+// which is invariant to a uniform scale of n).
+type slabPoly struct {
+	Pts    [][3]float32
+	Normal [3]float32
 }
 
 // ClipMeshToCells2D returns a mesh whose faces are fragments of the
 // input model, each tagged with the global cell index it falls in.
 // For each slab, every model triangle is Z-clipped to the slab and
-// then 2D-clipped against each candidate cell's outer polygon, and
-// the result is lifted back to 3D via barycentric weights on the
-// source triangle.
+// then 2D-clipped against each candidate cell's outer polygon.
 //
 // Parallelized per slab (runtime.NumCPU() workers). Within a slab
-// the work is serial because Phase 1 and Phase 2 share slab-wide
-// vertex sets (seen2D / seen3D) used to eliminate T-junctions
-// across cells and across source triangles — see clip2d_subdivide.go.
+// the work is serial because Phase 1 and Phase 2 share a slab-wide
+// vertex set (seen3D) used to eliminate T-junctions across cells and
+// across source triangles — see clip2d_subdivide.go.
 func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex) (ClipResult, error) {
 	offsets := make([]int, len(slabs)+1)
 	for si := range slabs {
@@ -55,8 +65,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	}
 
 	// Pre-slice every model triangle into per-slab pieces.
-	slabTris := make([][]slabTri, len(slabs))
-	slabVerticals := make([][]slabVerticalPoly, len(slabs))
+	slabPolys := make([][]slabPoly, len(slabs))
 	for ti := range model.Faces {
 		f := model.Faces[ti]
 		a := model.Vertices[f[0]]
@@ -77,19 +86,15 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				continue
 			}
 			s := &slabs[si]
-			pieces, vpoly := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop)
-			if len(pieces) > 0 {
-				slabTris[si] = append(slabTris[si], pieces...)
-			}
-			if vpoly != nil {
-				slabVerticals[si] = append(slabVerticals[si], *vpoly)
+			if poly := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop); poly != nil {
+				slabPolys[si] = append(slabPolys[si], *poly)
 			}
 		}
 	}
 	_ = triIdx
 
 	// Per-slab cell-bbox indices, built once. Re-used by every slab
-	// triangle (and vertical) during candidate-cell lookup.
+	// polygon during candidate-cell lookup.
 	cellIndices := make([]*slabCellIndex, len(slabs))
 	for si := range slabs {
 		if len(slabs[si].Cells) > 0 {
@@ -97,7 +102,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		}
 	}
 
-	// Per-slab parallelism: each slab's per-tri subdivision is
+	// Per-slab parallelism: each slab's per-poly subdivision is
 	// independent and produces its own verts/faces/cellIdx slices
 	// that the reducer concatenates in slab order.
 	type slabResult struct {
@@ -130,36 +135,25 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				if idx == nil {
 					continue
 				}
-				zBot := slabs[si].ZBot
-				zTop := slabs[si].ZTop
 
-				// Phase 1: clip all source tris/verticals against
-				// candidate cells, collecting boundary vertices into
-				// slab-wide splice sets. The slab-wide sets eliminate
-				// T-junctions across source-tri boundaries (e.g. the
-				// cube cap's STL diagonal where both source tris
-				// meet — without the slab-wide union, each tri's
-				// splice only saw its own cells' vertices and the
-				// diagonal subdivision didn't match between sides).
-				seen2D := make(map[intPt]struct{}, 64)
-				seen3D := make(map[int3D]struct{}, 16)
-				var capPieces []capPiece
-				var wallPieces []wallPiece
-				for _, t := range slabTris[si] {
-					capPieces, candidates = clipSlabTriPieces(t, si, slabs, idx, capPieces, seen2D, candidates)
+				// Phase 1: clip every slabPoly against candidate cells,
+				// collecting boundary vertices into a slab-wide splice
+				// set. The slab-wide set eliminates T-junctions across
+				// source-triangle boundaries (e.g. the cube cap's STL
+				// diagonal where both source tris meet — without the
+				// slab-wide union, each tri's splice only saw its own
+				// cells' vertices and the diagonal subdivision didn't
+				// match between sides).
+				seen3D := make(map[int3D]struct{}, 64)
+				var pieces []cellPiece
+				for _, p := range slabPolys[si] {
+					pieces, candidates = clipPolyToCells(p, si, slabs, idx, pieces, seen3D, candidates)
 				}
-				for _, vp := range slabVerticals[si] {
-					wallPieces, candidates = clipSlabVerticalPieces(vp, si, slabs, idx, wallPieces, seen3D, candidates)
-				}
-				if len(capPieces) == 0 && len(wallPieces) == 0 {
+				if len(pieces) == 0 {
 					continue
 				}
 
-				// Promote slab-wide sets to slices.
-				splice2D := make([]intPt, 0, len(seen2D))
-				for p := range seen2D {
-					splice2D = append(splice2D, p)
-				}
+				// Promote slab-wide set to a slice.
 				splice3D := make([]int3D, 0, len(seen3D))
 				for p := range seen3D {
 					splice3D = append(splice3D, p)
@@ -168,11 +162,8 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				// Phase 2: splice each piece against the slab-wide
 				// union and emit.
 				var res slabResult
-				for _, pc := range capPieces {
-					res.verts, res.faces, res.localCellIdx = appendCapPiece(pc, splice2D, zBot, zTop, res.verts, res.faces, res.localCellIdx)
-				}
-				for _, pc := range wallPieces {
-					res.verts, res.faces, res.localCellIdx = appendWallPiece(pc, splice3D, res.verts, res.faces, res.localCellIdx)
+				for _, pc := range pieces {
+					res.verts, res.faces, res.localCellIdx = appendCellPiece(pc, splice3D, res.verts, res.faces, res.localCellIdx)
 				}
 				results[si] = res
 			}
@@ -203,18 +194,17 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		}
 	}
 
-	// Cross-piece vertex dedup. appendCapPiece/appendWallPiece emit
-	// fresh vertex IDs per cell-fragment, so adjacent fragments sharing
-	// a boundary vertex (guaranteed coincident by the slab-wide
-	// seen2D/seen3D splice in Clipper integer space) end up with
-	// distinct vertex IDs. Without dedup, downstream slicing reads
-	// each wall fragment in isolation and the first-layer cross-section
-	// comes out as N disconnected segments → Orca reports "empty
-	// initial layer". Dedup by int3DOf (1µm-quantized Clipper-integer
-	// 3D position) — same key the splice sets use, so coincident-coord
-	// verts hash equal. Cross-slab dedup works for free because
-	// slabs[k].ZTop and slabs[k+1].ZBot come from the same planes[k+1]
-	// float32.
+	// Cross-piece vertex dedup. appendCellPiece emits fresh vertex
+	// IDs per cell-fragment, so adjacent fragments sharing a boundary
+	// vertex (guaranteed coincident by the slab-wide seen3D splice in
+	// Clipper integer space) end up with distinct vertex IDs. Without
+	// dedup, downstream slicing reads each fragment in isolation and
+	// the first-layer cross-section comes out as N disconnected
+	// segments → Orca reports "empty initial layer". Dedup by
+	// int3DOf (1µm-quantized 3D position) — same key the splice set
+	// uses, so coincident-coord verts hash equal. Cross-slab dedup
+	// works for free because slabs[k].ZTop and slabs[k+1].ZBot come
+	// from the same planes[k+1] float32.
 	if len(cr.Verts) > 0 {
 		seen := make(map[int3D]uint32, len(cr.Verts)/3)
 		remap := make([]uint32, len(cr.Verts))
@@ -242,54 +232,57 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 }
 
 // sliceTriangleToSlab clips triangle (a,b,c) against the half-spaces
-// z >= zBot and z <= zTop and returns the resulting pieces split by
-// type:
-//
-//   - slabTris: pieces with non-degenerate XY projection. Each one
-//     is a triangle of a fan over the sub-polygon; later code lifts
-//     Z via barycentric weights on the XY projection.
-//   - slabVerticalPoly (zero or one entry): the whole slab-clipped
-//     sub-polygon when its XY projection has effectively zero area
-//     (a near-vertical source triangle). XY-barycentric lift is
-//     ill-defined for these, so a separate path clips them in 3D
-//     against each cell's prism — see clip2d_vertical.go.
-func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) ([]slabTri, *slabVerticalPoly) {
+// z >= zBot and z <= zTop and returns the resulting planar 3D
+// sub-polygon, or nil if the triangle does not overlap the slab.
+// The output polygon's vertices stay in the source triangle's plane;
+// downstream code chooses how to project to 2D for cell clipping.
+func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) *slabPoly {
 	// Drop fully outside.
 	zMin := minf3(a[2], b[2], c[2])
 	zMax := maxf3(a[2], b[2], c[2])
 	if zMax < zBot || zMin > zTop {
-		return nil, nil
+		return nil
 	}
 	// Build the sub-polygon by clipping against z >= zBot then z <= zTop.
 	poly := [][3]float32{a, b, c}
 	poly = clipPolygonByZHalfSpace(poly, zBot, true /* keep z >= zBot */)
 	if len(poly) < 3 {
-		return nil, nil
+		return nil
 	}
 	poly = clipPolygonByZHalfSpace(poly, zTop, false /* keep z <= zTop */)
 	if len(poly) < 3 {
-		return nil, nil
+		return nil
 	}
-	// Whole-polygon XY area check. If the slab-clipped sub-polygon
-	// has near-zero XY projection it came from a near-vertical
-	// source triangle (e.g. the side wall of a cube), and the
-	// barycentric Z-lift used by slabTri/emitCapPiece is unstable.
-	// Route it to the vertical-clip path instead — every per-fan
-	// triangle would otherwise fail the same area check and the
-	// surface would vanish from the output.
-	//
-	// The relative threshold uses max(xRange, yRange)² as the scale,
-	// not bbox-area, so it survives the axis-aligned case: a
-	// triangle on a Y=constant or X=constant plane (a flat cube
-	// wall) collapses its XY bbox to zero area in one dimension,
-	// which would otherwise zero out a bbox-relative threshold and
-	// let float-precision noise (~3e-5 from shoelace cancellation
-	// on a 20-unit polygon) slip past, dropping every wall fragment
-	// in that slab. Found 2026-05-15 on the cube's -Y face.
-	polyAreaXY := polygonXYSignedArea(poly)
-	xMin, yMin := poly[0][0], poly[0][1]
+	return &slabPoly{
+		Pts:    poly,
+		Normal: triangleNormal(a, b, c),
+	}
+}
+
+// isPolyXYDegenerate reports whether the slab-clipped polygon's XY
+// projection has insufficient area for the Clipper-based cap clip
+// (which lifts Z from the source plane equation: z = (d - n.x*x -
+// n.y*y) / n.z, where n.z is proportional to the XY signed area).
+// For polygons that come from a near-vertical source triangle, n.z
+// is near zero and the lift is ill-conditioned; route to the
+// vertical-scan path instead.
+//
+// The relative threshold uses max(xRange, yRange)² as the scale, not
+// bbox-area, so it survives the axis-aligned case: a triangle on a
+// Y=constant or X=constant plane (a flat cube wall) collapses its
+// XY bbox to zero area in one dimension, which would otherwise zero
+// out a bbox-relative threshold and let float-precision noise (~3e-5
+// from shoelace cancellation on a 20-unit polygon) slip past,
+// dropping every wall fragment in that slab. Found 2026-05-15 on the
+// cube's -Y face.
+func isPolyXYDegenerate(pts [][3]float32) bool {
+	if len(pts) < 3 {
+		return true
+	}
+	areaXY := polygonXYSignedArea(pts)
+	xMin, yMin := pts[0][0], pts[0][1]
 	xMax, yMax := xMin, yMin
-	for _, p := range poly[1:] {
+	for _, p := range pts[1:] {
 		if p[0] < xMin {
 			xMin = p[0]
 		} else if p[0] > xMax {
@@ -305,39 +298,7 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) ([]slabTri, *sl
 	if yr := yMax - yMin; yr > scale {
 		scale = yr
 	}
-	if absf(polyAreaXY) < 1e-6*scale*scale || absf(polyAreaXY) < 1e-12 {
-		return nil, &slabVerticalPoly{
-			Pts:    poly,
-			Normal: triangleNormal(a, b, c),
-		}
-	}
-	// Fan-triangulate (the slabbed sub-polygon is convex — Z-plane
-	// clipping of a triangle produces a convex polygon). Drop any
-	// resulting sub-triangle whose XY projection has near-zero
-	// area; their barycentric-lift would be unstable.
-	tris := make([]slabTri, 0, len(poly)-2)
-	for i := 1; i < len(poly)-1; i++ {
-		v0 := poly[0]
-		v1 := poly[i]
-		v2 := poly[i+1]
-		areaXY := (v1[0]-v0[0])*(v2[1]-v0[1]) - (v2[0]-v0[0])*(v1[1]-v0[1])
-		// Threshold relative to the sub-triangle's XY bbox so the
-		// filter scales with the per-triangle size. A ratio of 1e-6
-		// catches degenerate cases without rejecting legitimate
-		// small slivers.
-		bboxXY := (maxf3(v0[0], v1[0], v2[0]) - minf3(v0[0], v1[0], v2[0])) *
-			(maxf3(v0[1], v1[1], v2[1]) - minf3(v0[1], v1[1], v2[1]))
-		if absf(areaXY) < 1e-6*absf(bboxXY) || absf(areaXY) < 1e-12 {
-			continue
-		}
-		tris = append(tris, slabTri{
-			V0:        v0,
-			V1:        v1,
-			V2:        v2,
-			InvAreaXY: 1.0 / areaXY,
-		})
-	}
-	return tris, nil
+	return absf(areaXY) < 1e-6*scale*scale || absf(areaXY) < 1e-12
 }
 
 // clipPolygonByZHalfSpace clips polygon by a Z half-space.

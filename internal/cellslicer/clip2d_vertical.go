@@ -1,15 +1,16 @@
-// Vertical (or near-vertical) source triangles can't be lifted via XY
-// barycentric interpolation — their XY-projected area is zero (or so
-// small that 1/area blows up), so the lifted Z would be NaN or wild.
-// The standard 2D clip path drops them, which makes flat-walled
-// models (e.g. a cube) lose every side face: only the top and bottom
-// caps reach the output mesh.
+// Vertical (or near-vertical) source triangles can't take the
+// Clipper 2D cap path: their XY-projected area is zero (or so small
+// that the plane-equation Z-lift's 1/nz blows up), and Clipper's
+// 2D intersection on a degenerate XY input either drops the piece
+// or produces a sliver. Without a parallel path, flat-walled models
+// (e.g. a cube) lose every side face — only top and bottom caps
+// reach the output mesh.
 //
-// This file provides a parallel path that handles those triangles
-// with a 3D Sutherland-Hodgman clip against the cell prism (cell.Outer
-// extruded vertically, capped at [zBot, zTop]). The slab Z-clip has
-// already run, so we only clip against the cell's outer edges and
-// the polygon stays planar in the source triangle's plane.
+// This file provides that parallel path: clip the vertical sub-
+// polygon against the cell's outer polygon (extruded vertically as
+// a prism) in 3D, keeping the polygon planar in the source triangle's
+// plane. The slab Z-clip has already run, so we only clip against
+// the cell's vertical walls.
 
 package cellslicer
 
@@ -17,20 +18,6 @@ import (
 	"math"
 	"sort"
 )
-
-// slabVerticalPoly is a sub-polygon of a vertical (or near-vertical)
-// source triangle whose XY projection has near-zero area. The
-// vertices are stored in mesh coords, in the source triangle's plane,
-// and already Z-clipped to the owning slab's [zBot, zTop] range.
-//
-// Normal is the source triangle's facing direction (cross of edges,
-// preserved so the output fan-triangulation can pick a winding that
-// matches the source). It is not unit-normalized — only its
-// direction is used downstream.
-type slabVerticalPoly struct {
-	Pts    [][3]float32
-	Normal [3]float32
-}
 
 // clipVerticalPolyToCell clips a vertical sub-polygon against the
 // cell's outer polygon (extruded vertically). Returns one piece per

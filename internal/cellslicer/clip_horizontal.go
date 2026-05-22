@@ -89,43 +89,28 @@ func ClipMeshHorizontally(model *loader.LoadedModel, slabs []Slab) (ClipResult, 
 				continue
 			}
 			s := &slabs[si]
-			pieces, vpoly := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop)
+			poly := sliceTriangleToSlab(a, b, c, s.ZBot, s.ZTop)
+			if poly == nil || len(poly.Pts) < 3 {
+				continue
+			}
 			idx := cellIndices[si]
-			for _, t := range pieces {
-				cx := (t.V0[0] + t.V1[0] + t.V2[0]) / 3
-				cy := (t.V0[1] + t.V1[1] + t.V2[1]) / 3
+			base := uint32(len(verts))
+			verts = append(verts, poly.Pts...)
+			// Fan-triangulate the convex slab-clipped sub-polygon,
+			// matching each fan triangle's winding to the source
+			// triangle's normal so outward facing is preserved.
+			for i := 1; i < len(poly.Pts)-1; i++ {
+				triN := triangleNormal(poly.Pts[0], poly.Pts[i], poly.Pts[i+1])
+				dot := triN[0]*poly.Normal[0] + triN[1]*poly.Normal[1] + triN[2]*poly.Normal[2]
+				cx := (poly.Pts[0][0] + poly.Pts[i][0] + poly.Pts[i+1][0]) / 3
+				cy := (poly.Pts[0][1] + poly.Pts[i][1] + poly.Pts[i+1][1]) / 3
 				ci := pickCell(s, idx, cx, cy)
-				base := uint32(len(verts))
-				verts = append(verts, t.V0, t.V1, t.V2)
-				// sliceTriangleToSlab fans the sub-polygon and tags
-				// each fan-triangle with InvAreaXY = 1 / signed_xy_area
-				// of (V0,V1,V2); flip winding when negative to keep
-				// outward-facing orientation.
-				if t.InvAreaXY < 0 {
-					faces = append(faces, [3]uint32{base, base + 2, base + 1})
+				if dot >= 0 {
+					faces = append(faces, [3]uint32{base, base + uint32(i), base + uint32(i+1)})
 				} else {
-					faces = append(faces, [3]uint32{base, base + 1, base + 2})
+					faces = append(faces, [3]uint32{base, base + uint32(i+1), base + uint32(i)})
 				}
 				faceCellIdx = appendCell(faceCellIdx, ci, offsets[si])
-			}
-			if vpoly != nil && len(vpoly.Pts) >= 3 {
-				base := uint32(len(verts))
-				for _, p := range vpoly.Pts {
-					verts = append(verts, p)
-				}
-				for i := 1; i < len(vpoly.Pts)-1; i++ {
-					triN := triangleNormal(vpoly.Pts[0], vpoly.Pts[i], vpoly.Pts[i+1])
-					dot := triN[0]*vpoly.Normal[0] + triN[1]*vpoly.Normal[1] + triN[2]*vpoly.Normal[2]
-					cx := (vpoly.Pts[0][0] + vpoly.Pts[i][0] + vpoly.Pts[i+1][0]) / 3
-					cy := (vpoly.Pts[0][1] + vpoly.Pts[i][1] + vpoly.Pts[i+1][1]) / 3
-					ci := pickCell(s, idx, cx, cy)
-					if dot >= 0 {
-						faces = append(faces, [3]uint32{base, base + uint32(i), base + uint32(i+1)})
-					} else {
-						faces = append(faces, [3]uint32{base, base + uint32(i+1), base + uint32(i)})
-					}
-					faceCellIdx = appendCell(faceCellIdx, ci, offsets[si])
-				}
 			}
 		}
 	}

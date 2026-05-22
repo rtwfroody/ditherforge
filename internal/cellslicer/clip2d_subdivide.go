@@ -1,20 +1,21 @@
-// Slab-wide two-phase subdivision used by ClipMeshToCells2D:
+// Slab-wide two-phase subdivision used by ClipMeshToCells2D.
 //
-// Phase 1 (clipSlabTriPieces, clipSlabVerticalPieces): for each
-// slab-clipped source-triangle piece (and each vertical source
-// sub-polygon), clip against every candidate cell's outer polygon
-// and collect the resulting per-cell integer polygons. Every
-// boundary vertex is added to a SLAB-WIDE union set (2D for cap
-// pieces, 3D for wall pieces).
+// Phase 1 (clipPolyToCells): for each slab-clipped source polygon
+// (slabPoly), clip against every candidate cell's outer polygon and
+// collect the resulting per-cell 3D fragments. Every boundary vertex
+// is added to a slab-wide union set (seen3D, Clipper-integer 3D
+// coords).
 //
-// Phase 2 (appendCapPiece, appendWallPiece): splice each per-cell
-// piece's edges with any union-set vertex that lies on the edge's
-// interior, then earcut (cap) or fan-triangulate (wall). The splice
-// is exact in Clipper integer space, so a kink that one cell's
-// outline introduces also appears as a vertex on the neighbour's
-// matching edge.
+// Phase 2 (appendCellPiece): splice each per-cell piece's edges with
+// any union-set vertex that lies on the edge's interior, then Earcut
+// the spliced polygon on the 2D plane perpendicular to the largest
+// |normal| component (so a near-vertical source projects to a
+// non-degenerate 2D polygon, not a thin XY sliver), and emit faces
+// tagged with the cell index. The splice is exact in Clipper integer
+// space, so a kink that one cell's outline introduces also appears
+// as a vertex on the neighbour's matching edge.
 //
-// A slab-wide (not per-source-triangle) splice set is required to
+// A slab-wide (not per-source-polygon) splice set is required to
 // cover the case where two source triangles share an edge: cells
 // straddling the source-edge contribute crossings that must appear
 // on both sides. The cube STL bottom-face diagonal between the two
@@ -30,9 +31,8 @@ import (
 	clipper "github.com/ctessum/go.clipper"
 )
 
-// intPt is a Clipper-integer XY point. Used as a dedup key in the
-// slab-wide seen2D set so boundary vertices contributed by any cell
-// and any source triangle in the slab compare exactly.
+// intPt is a Clipper-integer XY point. Used by intermediate
+// conversions to/from Clipper's integer space.
 type intPt struct {
 	X, Y int64
 }
@@ -69,368 +69,6 @@ func clipperPathToIntPts(path clipper.Path) []intPt {
 	return out
 }
 
-// splicePolyIntEdges walks each edge of poly and inserts any vertex
-// from set that lies strictly between the edge endpoints, ordered
-// along the edge direction. Operates entirely in integer space, so
-// the collinearity test is exact: an inserted vertex is geometrically
-// on the edge, not just within a tolerance.
-//
-// Called in Phase 2 with the slab-wide seen2D union set produced by
-// Phase 1. Adjacent cells' outlines can have unequal vertex sets
-// along their shared boundary (one straight, the other kinked at a
-// polyomino corner); two source triangles meeting on a shared edge
-// can also contribute mismatched vertex chains. Splicing every
-// piece against the slab-wide union produces matching subdivisions
-// on both sides — no T-junctions inside the slab.
-func splicePolyIntEdges(poly []intPt, set []intPt) []intPt {
-	if len(poly) < 2 || len(set) == 0 {
-		return poly
-	}
-	out := make([]intPt, 0, len(poly)+len(set))
-	n := len(poly)
-	type cand struct {
-		t int64
-		p intPt
-	}
-	for i := 0; i < n; i++ {
-		a := poly[i]
-		b := poly[(i+1)%n]
-		out = append(out, a)
-		bx := b.X - a.X
-		by := b.Y - a.Y
-		ab2 := bx*bx + by*by
-		if ab2 == 0 {
-			continue
-		}
-		var cands []cand
-		for _, p := range set {
-			if p == a || p == b {
-				continue
-			}
-			px := p.X - a.X
-			py := p.Y - a.Y
-			// Collinear: cross product == 0.
-			if px*by-py*bx != 0 {
-				continue
-			}
-			// Strictly between: 0 < t < ab2 (t = dot(p-a, b-a)).
-			t := px*bx + py*by
-			if t <= 0 || t >= ab2 {
-				continue
-			}
-			cands = append(cands, cand{t: t, p: p})
-		}
-		if len(cands) > 1 {
-			sort.Slice(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
-		}
-		for _, c := range cands {
-			if len(out) > 0 && out[len(out)-1] == c.p {
-				continue
-			}
-			out = append(out, c.p)
-		}
-	}
-	// Drop any final consecutive duplicate against the first vertex
-	// (closed polygon).
-	if n2 := len(out); n2 > 1 && out[0] == out[n2-1] {
-		out = out[:n2-1]
-	}
-	return out
-}
-
-// slabCellIndex is a simple per-slab spatial index over cell.Outer
-// bboxes. Linear scan is fine for cell counts in the thousands; if
-// the partition grows past 10⁴ cells per slab a uniform grid would
-// pay off.
-type slabCellIndex struct {
-	bbox []cellBBox
-}
-
-type cellBBox struct {
-	minX, minY, maxX, maxY float32
-}
-
-func buildSlabCellIndex(s *Slab) *slabCellIndex {
-	idx := &slabCellIndex{bbox: make([]cellBBox, len(s.Cells))}
-	for i := range s.Cells {
-		if len(s.Cells[i].Outer) == 0 {
-			continue
-		}
-		mn0, mn1, mx0, mx1 := polyBoundsP2(s.Cells[i].Outer)
-		idx.bbox[i] = cellBBox{mn0, mn1, mx0, mx1}
-	}
-	return idx
-}
-
-func (idx *slabCellIndex) candidates(xMin, yMin, xMax, yMax float32, out []int) []int {
-	out = out[:0]
-	for i, b := range idx.bbox {
-		if b.maxX < xMin || b.minX > xMax || b.maxY < yMin || b.minY > yMax {
-			continue
-		}
-		out = append(out, i)
-	}
-	return out
-}
-
-// capPiece is one Clipper-integer polygon produced by clipping a
-// cap-style (non-vertical) source-tri slab piece against one cell.
-// Phase 1 (clipSlabTriPieces) populates the slab-wide vertex set
-// from these pieces; phase 2 (emitCapPiece) splices each piece
-// against the slab-wide union and earcuts/emits. The slab-wide
-// splice eliminates T-junctions across source-tri boundaries —
-// e.g. the cube bottom-face's diagonal between two STL source
-// triangles.
-type capPiece struct {
-	cellIdx int32
-	poly    []intPt
-	t       slabTri // for Z-lift via barycentric
-}
-
-// wallPiece is the vertical-clip counterpart of capPiece.
-type wallPiece struct {
-	cellIdx int32
-	pts     [][3]float32
-	normal  [3]float32
-}
-
-// clipSlabTriPieces is phase 1 of the slab-wide subdivision: clip
-// source-tri t against every candidate cell and append the resulting
-// per-cell integer polygons to dst, while inserting every boundary
-// vertex into seen. The caller does splice/emit in phase 2 with a
-// slab-wide vertex set, so T-junctions across source-tri boundaries
-// (e.g. the cube's bottom-cap diagonal) are eliminated.
-func clipSlabTriPieces(
-	t slabTri,
-	slabIdx int,
-	slabs []Slab,
-	idx *slabCellIndex,
-	dst []capPiece,
-	seen map[intPt]struct{},
-	candidateBuf []int,
-) ([]capPiece, []int) {
-	tMinX := minf3(t.V0[0], t.V1[0], t.V2[0])
-	tMaxX := maxf3(t.V0[0], t.V1[0], t.V2[0])
-	tMinY := minf3(t.V0[1], t.V1[1], t.V2[1])
-	tMaxY := maxf3(t.V0[1], t.V1[1], t.V2[1])
-
-	candidates := idx.candidates(tMinX, tMinY, tMaxX, tMaxY, candidateBuf)
-	if len(candidates) == 0 {
-		return dst, candidates
-	}
-
-	triA := intPt{
-		X: int64(math.Round(float64(t.V0[0]) * clipperScale)),
-		Y: int64(math.Round(float64(t.V0[1]) * clipperScale)),
-	}
-	triB := intPt{
-		X: int64(math.Round(float64(t.V1[0]) * clipperScale)),
-		Y: int64(math.Round(float64(t.V1[1]) * clipperScale)),
-	}
-	triC := intPt{
-		X: int64(math.Round(float64(t.V2[0]) * clipperScale)),
-		Y: int64(math.Round(float64(t.V2[1]) * clipperScale)),
-	}
-	triPath := clipper.Path{
-		&clipper.IntPoint{X: clipper.CInt(triA.X), Y: clipper.CInt(triA.Y)},
-		&clipper.IntPoint{X: clipper.CInt(triB.X), Y: clipper.CInt(triB.Y)},
-		&clipper.IntPoint{X: clipper.CInt(triC.X), Y: clipper.CInt(triC.Y)},
-	}
-
-	for _, ci := range candidates {
-		cell := &slabs[slabIdx].Cells[ci]
-		cellPath := pointsToClipperPath(cell.Outer)
-		c := clipper.NewClipper(clipper.IoNone)
-		c.AddPaths(clipper.Paths{triPath}, clipper.PtSubject, true)
-		c.AddPaths(clipper.Paths{cellPath}, clipper.PtClip, true)
-		result, ok := c.Execute1(clipper.CtIntersection, clipper.PftNonZero, clipper.PftNonZero)
-		if !ok {
-			continue
-		}
-		for _, path := range result {
-			poly := clipperPathToIntPts(path)
-			if len(poly) < 3 {
-				continue
-			}
-			// No dedup pass: Clipper output is already free of
-			// consecutive duplicates (clipperPathToIntPts strips
-			// them and the closing duplicate). The wall path needs
-			// dedup3DPoly because clipPolyByPlaneXY can emit a
-			// vertex twice when an edge is flush with a clip plane.
-			dst = append(dst, capPiece{cellIdx: int32(ci), poly: poly, t: t})
-			for _, p := range poly {
-				seen[p] = struct{}{}
-			}
-		}
-	}
-	return dst, candidates
-}
-
-// clipSlabVerticalPieces is phase 1 for vertical source polys.
-func clipSlabVerticalPieces(
-	vp slabVerticalPoly,
-	slabIdx int,
-	slabs []Slab,
-	idx *slabCellIndex,
-	dst []wallPiece,
-	seen map[int3D]struct{},
-	candidateBuf []int,
-) ([]wallPiece, []int) {
-	if len(vp.Pts) < 3 {
-		return dst, candidateBuf
-	}
-	minX, minY := vp.Pts[0][0], vp.Pts[0][1]
-	maxX, maxY := minX, minY
-	for _, p := range vp.Pts[1:] {
-		if p[0] < minX {
-			minX = p[0]
-		} else if p[0] > maxX {
-			maxX = p[0]
-		}
-		if p[1] < minY {
-			minY = p[1]
-		} else if p[1] > maxY {
-			maxY = p[1]
-		}
-	}
-	candidates := idx.candidates(minX, minY, maxX, maxY, candidateBuf)
-	if len(candidates) == 0 {
-		return dst, candidates
-	}
-	for _, ci := range candidates {
-		cell := &slabs[slabIdx].Cells[ci]
-		cellPieces := clipVerticalPolyToCell(vp.Pts, cell.Outer)
-		for _, clipped := range cellPieces {
-			clipped = dedup3DPoly(clipped)
-			if len(clipped) < 3 {
-				continue
-			}
-			dst = append(dst, wallPiece{cellIdx: int32(ci), pts: clipped, normal: vp.Normal})
-			for _, p := range clipped {
-				seen[int3DOf(p)] = struct{}{}
-			}
-		}
-	}
-	return dst, candidates
-}
-
-// appendCapPiece splices pc against the slab-wide 2D splice set,
-// earcuts the result, Z-lifts each vertex via barycentric on pc.t,
-// and appends to (verts, faces, localIdx) — returning the updated
-// slices. Each emitted face is tagged with pc.cellIdx in localIdx.
-func appendCapPiece(
-	pc capPiece,
-	spliceSet []intPt,
-	zBot, zTop float32,
-	verts [][3]float32,
-	faces [][3]uint32,
-	localIdx []int32,
-) ([][3]float32, [][3]uint32, []int32) {
-	spliced := splicePolyIntEdges(pc.poly, spliceSet)
-	if len(spliced) < 3 {
-		return verts, faces, localIdx
-	}
-	floatPoly := make([]Point2, len(spliced))
-	for i, p := range spliced {
-		floatPoly[i] = intPtToPoint2(p)
-	}
-	earVerts, earTris := Earcut(floatPoly, nil)
-	if len(earTris) == 0 || len(earVerts) != len(floatPoly) {
-		return verts, faces, localIdx
-	}
-	base := uint32(len(verts))
-	t := pc.t
-	// Z is recomputed per-cell via barycentric lift on pc.t. Two cells
-	// touching the same XY on a slanted source-tri can produce Z values
-	// that differ by ~1 ULP. The 1µm int3DOf quantization used by the
-	// cross-piece dedup in ClipMeshToCells2D absorbs this for normal
-	// scales (1 ULP at z=100mm is ~6µm). If cap-wall T-junctions
-	// reappear on slanted geometry, snap z to the matching seen3D
-	// entry's Z here.
-	for _, p := range floatPoly {
-		areaA := ((t.V1[0]-p[0])*(t.V2[1]-p[1]) - (t.V2[0]-p[0])*(t.V1[1]-p[1])) * t.InvAreaXY
-		areaB := ((t.V2[0]-p[0])*(t.V0[1]-p[1]) - (t.V0[0]-p[0])*(t.V2[1]-p[1])) * t.InvAreaXY
-		areaC := 1 - areaA - areaB
-		z := areaA*t.V0[2] + areaB*t.V1[2] + areaC*t.V2[2]
-		if z < zBot {
-			z = zBot
-		} else if z > zTop {
-			z = zTop
-		}
-		verts = append(verts, [3]float32{p[0], p[1], z})
-	}
-	// Zero-area earcut tris are kept on purpose — they carry boundary-
-	// edge connectivity for collinear boundary vertices V_a-V_b-V_c
-	// (when the slab-wide splice inserts V_b on a straight edge that
-	// V_a→V_c already covered). Dropping them turns V_a-V_b / V_b-V_c
-	// into 1-use boundary edges and re-introduces the T-junctions the
-	// splice set was added to eliminate.
-	for _, tri := range earTris {
-		if t.InvAreaXY < 0 {
-			faces = append(faces, [3]uint32{base + tri[0], base + tri[2], base + tri[1]})
-		} else {
-			faces = append(faces, [3]uint32{base + tri[0], base + tri[1], base + tri[2]})
-		}
-		localIdx = append(localIdx, pc.cellIdx)
-	}
-	return verts, faces, localIdx
-}
-
-// appendWallPiece splices pc against the slab-wide 3D set, fan-
-// triangulates with winding matched to pc.normal, and appends to
-// (verts, faces, localIdx).
-func appendWallPiece(
-	pc wallPiece,
-	spliceSet []int3D,
-	verts [][3]float32,
-	faces [][3]uint32,
-	localIdx []int32,
-) ([][3]float32, [][3]uint32, []int32) {
-	spliced := splicePoly3DEdges(pc.pts, spliceSet)
-	if len(spliced) < 3 {
-		return verts, faces, localIdx
-	}
-	base := uint32(len(verts))
-	verts = append(verts, spliced...)
-	for i := 1; i < len(spliced)-1; i++ {
-		triN := triangleNormal(spliced[0], spliced[i], spliced[i+1])
-		dot := triN[0]*pc.normal[0] + triN[1]*pc.normal[1] + triN[2]*pc.normal[2]
-		if dot >= 0 {
-			faces = append(faces, [3]uint32{base, base + uint32(i), base + uint32(i+1)})
-		} else {
-			faces = append(faces, [3]uint32{base, base + uint32(i+1), base + uint32(i)})
-		}
-		localIdx = append(localIdx, pc.cellIdx)
-	}
-	return verts, faces, localIdx
-}
-
-// dedup3DPoly removes consecutive (in Clipper-integer space) duplicate
-// vertices and a trailing closing duplicate. Sutherland-Hodgman can
-// emit a vertex twice when the polygon's edge is flush with a clip
-// plane (or grazes a vertex), and the duplicates produce zero-area
-// triangles after fan-triangulation — those triangles show up as
-// shared edges on the wall (count=4 / count=6 boundary-edge buckets).
-func dedup3DPoly(poly [][3]float32) [][3]float32 {
-	if len(poly) == 0 {
-		return poly
-	}
-	out := make([][3]float32, 0, len(poly))
-	outInt := make([]int3D, 0, len(poly))
-	for _, p := range poly {
-		ip := int3DOf(p)
-		if n := len(outInt); n > 0 && outInt[n-1] == ip {
-			continue
-		}
-		out = append(out, p)
-		outInt = append(outInt, ip)
-	}
-	if n := len(outInt); n > 1 && outInt[0] == outInt[n-1] {
-		out = out[:n-1]
-	}
-	return out
-}
-
 // int3D is a Clipper-integer 3D point. Z uses the same 1µm scale.
 type int3D struct {
 	X, Y, Z int64
@@ -452,11 +90,17 @@ func int3DToFloat(p int3D) [3]float32 {
 	}
 }
 
-// splicePoly3DEdges is splicePolyIntEdges in 3D. The vertical-clip
-// pieces lie in the source triangle's plane (planar 3D polygons),
-// so a 3D collinearity test on each edge picks up cell-boundary
-// kinks that pose as T-junctions between adjacent cells along the
-// wall.
+// splicePoly3DEdges walks each edge of poly and inserts any vertex
+// from set that lies strictly between the edge endpoints (collinear
+// in Clipper-integer 3D space), ordered along the edge direction.
+//
+// Called in Phase 2 with the slab-wide seen3D union set produced by
+// Phase 1. Adjacent cells' outlines can have unequal vertex sets
+// along their shared boundary (one straight, the other kinked at a
+// polyomino corner); two source triangles meeting on a shared edge
+// can also contribute mismatched vertex chains. Splicing every
+// piece against the slab-wide union produces matching subdivisions
+// on both sides — no T-junctions inside the slab.
 //
 // Integer-overflow safety: the cross and dot products below are
 // O(coord²) in int64. clipperScale = 1000 gives coords ≤ ~1e8 in
@@ -528,4 +172,308 @@ func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 	return out
 }
 
+// slabCellIndex is a simple per-slab spatial index over cell.Outer
+// bboxes. Linear scan is fine for cell counts in the thousands; if
+// the partition grows past 10⁴ cells per slab a uniform grid would
+// pay off.
+type slabCellIndex struct {
+	bbox []cellBBox
+}
 
+type cellBBox struct {
+	minX, minY, maxX, maxY float32
+}
+
+func buildSlabCellIndex(s *Slab) *slabCellIndex {
+	idx := &slabCellIndex{bbox: make([]cellBBox, len(s.Cells))}
+	for i := range s.Cells {
+		if len(s.Cells[i].Outer) == 0 {
+			continue
+		}
+		mn0, mn1, mx0, mx1 := polyBoundsP2(s.Cells[i].Outer)
+		idx.bbox[i] = cellBBox{mn0, mn1, mx0, mx1}
+	}
+	return idx
+}
+
+func (idx *slabCellIndex) candidates(xMin, yMin, xMax, yMax float32, out []int) []int {
+	out = out[:0]
+	for i, b := range idx.bbox {
+		if b.maxX < xMin || b.minX > xMax || b.maxY < yMin || b.minY > yMax {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+// cellPiece is one fragment of a slabPoly that lies inside one cell.
+// Vertices are full 3D, in the source triangle's plane. normal
+// carries the source triangle's facing direction so phase 2 can
+// emit faces with matching winding.
+type cellPiece struct {
+	cellIdx int32
+	pts     [][3]float32
+	normal  [3]float32
+}
+
+// clipPolyToCells is phase 1 of the slab-wide subdivision: clip
+// slab-polygon p against every candidate cell and append the
+// resulting 3D per-cell fragments to dst, while inserting every
+// boundary vertex into seen.
+//
+// Dispatches internally: polygons with measurable XY area take the
+// Clipper-based 2D intersection path (clipPolyToCellsCap), with Z
+// recovered from the source plane equation; polygons whose XY
+// projection is degenerate (near-vertical source triangle) take the
+// vertical-scan path (clipPolyToCellsVertical), which keeps the
+// fragments in 3D throughout.
+func clipPolyToCells(
+	p slabPoly,
+	slabIdx int,
+	slabs []Slab,
+	idx *slabCellIndex,
+	dst []cellPiece,
+	seen map[int3D]struct{},
+	candidateBuf []int,
+) ([]cellPiece, []int) {
+	if len(p.Pts) < 3 {
+		return dst, candidateBuf
+	}
+	minX, minY := p.Pts[0][0], p.Pts[0][1]
+	maxX, maxY := minX, minY
+	for _, v := range p.Pts[1:] {
+		if v[0] < minX {
+			minX = v[0]
+		} else if v[0] > maxX {
+			maxX = v[0]
+		}
+		if v[1] < minY {
+			minY = v[1]
+		} else if v[1] > maxY {
+			maxY = v[1]
+		}
+	}
+	candidates := idx.candidates(minX, minY, maxX, maxY, candidateBuf)
+	if len(candidates) == 0 {
+		return dst, candidates
+	}
+	if isPolyXYDegenerate(p.Pts) {
+		return clipPolyToCellsVertical(p, slabIdx, slabs, candidates, dst, seen), candidates
+	}
+	return clipPolyToCellsCap(p, slabIdx, slabs, candidates, dst, seen), candidates
+}
+
+// clipPolyToCellsCap is the Clipper 2D intersection path. New
+// vertices introduced by the intersection get Z from the source
+// polygon's plane equation: z = (d - n.x*x - n.y*y) / n.z, with
+// (n.x, n.y, n.z) the source triangle's normal and d the plane
+// offset. The dispatcher's isPolyXYDegenerate check bounds n.z
+// away from zero.
+func clipPolyToCellsCap(
+	p slabPoly,
+	slabIdx int,
+	slabs []Slab,
+	candidates []int,
+	dst []cellPiece,
+	seen map[int3D]struct{},
+) []cellPiece {
+	// Source plane equation: n·X = d. Clamp the lifted Z to the
+	// slab range — Clipper output vertices on the cell.Outer interior
+	// can land at XYs where the source plane evaluates a hair outside
+	// [zBot, zTop] (float noise; mathematically the slabPoly's interior
+	// is bounded by the slab planes), and a clamp keeps cross-slab
+	// seams matching exactly.
+	zBot := slabs[slabIdx].ZBot
+	zTop := slabs[slabIdx].ZTop
+	nx, ny, nz := p.Normal[0], p.Normal[1], p.Normal[2]
+	d := nx*p.Pts[0][0] + ny*p.Pts[0][1] + nz*p.Pts[0][2]
+	zLift := func(x, y float32) float32 {
+		z := (d - nx*x - ny*y) / nz
+		if z < zBot {
+			z = zBot
+		} else if z > zTop {
+			z = zTop
+		}
+		return z
+	}
+
+	// Convert source polygon to Clipper integer XY path. Z is
+	// dropped for the intersection; we recover it for each output
+	// vertex via zLift.
+	triPath := make(clipper.Path, 0, len(p.Pts))
+	for _, v := range p.Pts {
+		triPath = append(triPath, &clipper.IntPoint{
+			X: clipper.CInt(math.Round(float64(v[0]) * clipperScale)),
+			Y: clipper.CInt(math.Round(float64(v[1]) * clipperScale)),
+		})
+	}
+
+	for _, ci := range candidates {
+		cell := &slabs[slabIdx].Cells[ci]
+		cellPath := pointsToClipperPath(cell.Outer)
+		c := clipper.NewClipper(clipper.IoNone)
+		c.AddPaths(clipper.Paths{triPath}, clipper.PtSubject, true)
+		c.AddPaths(clipper.Paths{cellPath}, clipper.PtClip, true)
+		result, ok := c.Execute1(clipper.CtIntersection, clipper.PftNonZero, clipper.PftNonZero)
+		if !ok {
+			continue
+		}
+		for _, path := range result {
+			ring := clipperPathToIntPts(path)
+			if len(ring) < 3 {
+				continue
+			}
+			pts := make([][3]float32, len(ring))
+			for i, ip := range ring {
+				p2 := intPtToPoint2(ip)
+				pts[i] = [3]float32{p2[0], p2[1], zLift(p2[0], p2[1])}
+				seen[int3DOf(pts[i])] = struct{}{}
+			}
+			dst = append(dst, cellPiece{
+				cellIdx: int32(ci),
+				pts:     pts,
+				normal:  p.Normal,
+			})
+		}
+	}
+	return dst
+}
+
+// clipPolyToCellsVertical is the vertical-scan path used when the
+// source slabPoly's XY projection is degenerate (near-vertical
+// source triangle). clipVerticalPolyToCell returns 3D fragments
+// directly — no Z re-lift needed.
+func clipPolyToCellsVertical(
+	p slabPoly,
+	slabIdx int,
+	slabs []Slab,
+	candidates []int,
+	dst []cellPiece,
+	seen map[int3D]struct{},
+) []cellPiece {
+	for _, ci := range candidates {
+		cell := &slabs[slabIdx].Cells[ci]
+		cellPieces := clipVerticalPolyToCell(p.Pts, cell.Outer)
+		for _, clipped := range cellPieces {
+			clipped = dedup3DPoly(clipped)
+			if len(clipped) < 3 {
+				continue
+			}
+			for _, v := range clipped {
+				seen[int3DOf(v)] = struct{}{}
+			}
+			dst = append(dst, cellPiece{
+				cellIdx: int32(ci),
+				pts:     clipped,
+				normal:  p.Normal,
+			})
+		}
+	}
+	return dst
+}
+
+// appendCellPiece splices pc against the slab-wide 3D splice set,
+// triangulates the spliced polygon, and appends to (verts, faces,
+// localIdx) — returning the updated slices. Each emitted face is
+// tagged with pc.cellIdx in localIdx.
+//
+// Triangulation: Earcut on a 2D projection of the spliced polygon.
+// The projection plane is chosen to drop the axis aligned with the
+// largest |pc.normal| component, which maximizes projected area and
+// keeps Earcut on non-degenerate input regardless of source-triangle
+// orientation. Without this, a slanted-near-vertical slabPoly's cell
+// fragment projects to a thin XY sliver and Earcut goes pathological
+// (observed: a 7-vertex Y-dominant-normal piece running for >10 min
+// on TestSampledMatchesInput/building before this fix).
+//
+// Cell outers can be non-convex, so the Clipper-intersection result
+// can also be non-convex; Earcut handles that. The 3D vertices are
+// preserved from spliced — Earcut only sees the 2D projection but
+// the emitted verts carry full 3D.
+//
+// Winding is decided per output triangle: compute the 3D triangle's
+// normal, dot against pc.normal, flip if they disagree. Robust to
+// whatever winding convention the input polygon and Earcut happen
+// to produce.
+func appendCellPiece(
+	pc cellPiece,
+	spliceSet []int3D,
+	verts [][3]float32,
+	faces [][3]uint32,
+	localIdx []int32,
+) ([][3]float32, [][3]uint32, []int32) {
+	spliced := splicePoly3DEdges(pc.pts, spliceSet)
+	if len(spliced) < 3 {
+		return verts, faces, localIdx
+	}
+
+	// Pick the 2D projection axes by dropping the dimension of the
+	// largest |pc.normal| component.
+	ax, ay, az := absf(pc.normal[0]), absf(pc.normal[1]), absf(pc.normal[2])
+	var u, v int
+	switch {
+	case az >= ax && az >= ay:
+		u, v = 0, 1
+	case ay >= ax:
+		u, v = 0, 2
+	default:
+		u, v = 1, 2
+	}
+
+	floatPoly := make([]Point2, len(spliced))
+	for i, p := range spliced {
+		floatPoly[i] = Point2{p[u], p[v]}
+	}
+	earVerts, earTris := Earcut(floatPoly, nil)
+	if len(earTris) == 0 || len(earVerts) != len(floatPoly) {
+		return verts, faces, localIdx
+	}
+	base := uint32(len(verts))
+	verts = append(verts, spliced...)
+	// Zero-area earcut tris are kept on purpose — they carry
+	// boundary-edge connectivity for collinear boundary vertices
+	// V_a-V_b-V_c (when the slab-wide splice inserts V_b on a
+	// straight edge that V_a→V_c already covered). Dropping them
+	// turns V_a-V_b / V_b-V_c into 1-use boundary edges and re-
+	// introduces the T-junctions the splice set was added to
+	// eliminate.
+	for _, tri := range earTris {
+		triN := triangleNormal(spliced[tri[0]], spliced[tri[1]], spliced[tri[2]])
+		dot := triN[0]*pc.normal[0] + triN[1]*pc.normal[1] + triN[2]*pc.normal[2]
+		if dot < 0 {
+			faces = append(faces, [3]uint32{base + tri[0], base + tri[2], base + tri[1]})
+		} else {
+			faces = append(faces, [3]uint32{base + tri[0], base + tri[1], base + tri[2]})
+		}
+		localIdx = append(localIdx, pc.cellIdx)
+	}
+	return verts, faces, localIdx
+}
+
+// dedup3DPoly removes consecutive (in Clipper-integer space)
+// duplicate vertices and a trailing closing duplicate. Sutherland-
+// Hodgman can emit a vertex twice when the polygon's edge is flush
+// with a clip plane (or grazes a vertex), and the duplicates produce
+// zero-area triangles after fan-triangulation — those triangles show
+// up as shared edges on the wall (count=4 / count=6 boundary-edge
+// buckets).
+func dedup3DPoly(poly [][3]float32) [][3]float32 {
+	if len(poly) == 0 {
+		return poly
+	}
+	out := make([][3]float32, 0, len(poly))
+	outInt := make([]int3D, 0, len(poly))
+	for _, p := range poly {
+		ip := int3DOf(p)
+		if n := len(outInt); n > 0 && outInt[n-1] == ip {
+			continue
+		}
+		out = append(out, p)
+		outInt = append(outInt, ip)
+	}
+	if n := len(outInt); n > 1 && outInt[0] == outInt[n-1] {
+		out = out[:n-1]
+	}
+	return out
+}
