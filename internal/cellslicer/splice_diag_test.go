@@ -31,7 +31,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
@@ -65,10 +67,58 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 	geom := loadOrBuildBuildingGeom(t)
 	t.Logf("geom: %d verts, %d faces", len(geom.Vertices), len(geom.Faces))
 
-	slabs := PartitionModel(geom, spliceDiagLayerH, spliceDiagCellSize)
+	// Mirror production's slab/footprint/partition setup (see
+	// internal/pipeline/run.go ~ L595-L658). The diag previously used
+	// PartitionModel — the old polygon path — which produced
+	// different cell shapes (notably more non-convex arcs) than the
+	// raster path the pipeline actually uses; orphan counts then
+	// reflected the wrong codepath.
+	zMin, zMax := modelZRange(geom)
+	if zMax <= zMin {
+		t.Fatal("degenerate Z range")
+	}
+	planes := SlabBoundaryPlanes(zMin, zMax, spliceDiagLayerH)
+	layers := SliceMesh(geom, planes)
+	nSlabs := len(layers) - 1
+	if nSlabs < 1 {
+		t.Fatal("no slabs produced")
+	}
+	footprints := make([]*Footprint, nSlabs)
+	for i := range footprints {
+		footprints[i] = ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+	}
+	slabs := make([]Slab, nSlabs)
+	for i := 0; i < nSlabs; i++ {
+		var fpBelow, fpAbove *Footprint
+		if i > 0 {
+			fpBelow = footprints[i-1]
+		}
+		if i+1 < nSlabs {
+			fpAbove = footprints[i+1]
+		}
+		cells, _, _ := PartitionSlabRaster(footprints[i], fpBelow, fpAbove, spliceDiagCellSize, 0)
+		slabs[i] = Slab{
+			Index:     i,
+			ZBot:      planes[i],
+			ZTop:      planes[i+1],
+			BotLayer:  &layers[i],
+			TopLayer:  &layers[i+1],
+			Footprint: footprints[i],
+			Cells:     cells,
+		}
+	}
 	t.Logf("partition: %d slabs", len(slabs))
 
 	phase1 := runPhase1ForDiag(geom, slabs)
+
+	// The collinearity check is O(orphans × pieces × edges) per
+	// boundary — fine when most cells emit a single cellPiece, but
+	// after the cap path switched to per-cell-triangle clipping for
+	// non-convex cells (clip2d_subdivide.go:clipSlabPolyToCellPrism3D)
+	// the piece count multiplies and a full run on the building model
+	// blows past 10 minutes. Opt in with SPLICE_DIAG_CHECK_EDGE=1 when
+	// you need that signal; orphan-count totals are always emitted.
+	checkEdge := os.Getenv("SPLICE_DIAG_CHECK_EDGE") != ""
 
 	planeZInt := func(z float32) int64 {
 		return int64(math.Round(float64(z) * clipperScale))
@@ -104,7 +154,7 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 				continue
 			}
 			bs.belowOnly++
-			if vertexLiesStrictlyOnAnyPlanarEdge(p, phase1[si+1].pieces, zi) {
+			if checkEdge && vertexLiesStrictlyOnAnyPlanarEdge(p, phase1[si+1].pieces, zi) {
 				bs.belowOnlyOnEdge++
 			}
 		}
@@ -113,7 +163,7 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 				continue
 			}
 			bs.aboveOnly++
-			if vertexLiesStrictlyOnAnyPlanarEdge(p, phase1[si].pieces, zi) {
+			if checkEdge && vertexLiesStrictlyOnAnyPlanarEdge(p, phase1[si].pieces, zi) {
 				bs.aboveOnlyOnEdge++
 			}
 		}
@@ -135,8 +185,12 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 	t.Logf("=== aggregate over %d non-empty boundaries ===", len(boundaries))
 	t.Logf("  total vertices on shared planes: below=%d above=%d intersection=%d", totBelow, totAbove, totIsec)
 	t.Logf("  orphans (symmetric diff):        %d  (belowOnly=%d aboveOnly=%d)", totOrphans, totBOnly, totAOnly)
-	t.Logf("  orphans collinear with neighbour edge (splice CAN fix):  %d", totSplicable)
-	t.Logf("  orphans NOT on any neighbour edge (splice CANNOT fix):   %d", totOrphans-totSplicable)
+	if checkEdge {
+		t.Logf("  orphans collinear with neighbour edge (splice CAN fix):  %d", totSplicable)
+		t.Logf("  orphans NOT on any neighbour edge (splice CANNOT fix):   %d", totOrphans-totSplicable)
+	} else {
+		t.Logf("  (per-orphan collinearity check skipped; set SPLICE_DIAG_CHECK_EDGE=1 to enable, but expect minutes on large models)")
+	}
 
 	sort.Slice(boundaries, func(i, j int) bool {
 		oi := boundaries[i].belowOnly + boundaries[i].aboveOnly
@@ -277,9 +331,10 @@ type slabPhase1Diag struct {
 	seen3D map[int3D]struct{}
 }
 
-// runPhase1ForDiag mirrors Phase 1 of ClipMeshToCells2D verbatim
-// (sequentially, for stable diagnostic output). Returns per-slab
-// pieces + seen3D maps.
+// runPhase1ForDiag mirrors Phase 1 of ClipMeshToCells2D, fanned out
+// across runtime.NumCPU() workers (same parallelism as production —
+// running sequentially on the building model takes >30 minutes vs ~3
+// in parallel, since slabs are independent in Phase 1).
 //
 // WARNING — load-bearing mirror: any change to Phase 1 in clip2d.go
 // (slabPoly pre-slice loop, cell-index build, clipPolyToCells call
@@ -322,19 +377,39 @@ func runPhase1ForDiag(model *loader.LoadedModel, slabs []Slab) []slabPhase1Diag 
 	}
 
 	out := make([]slabPhase1Diag, len(slabs))
-	var candidates []int
-	for si := range slabs {
-		idx := cellIndices[si]
-		if idx == nil {
-			continue
-		}
-		seen3D := make(map[int3D]struct{}, 64)
-		var pieces []cellPiece
-		for _, p := range slabPolys[si] {
-			pieces, candidates = clipPolyToCells(p, si, slabs, idx, pieces, seen3D, candidates)
-		}
-		out[si] = slabPhase1Diag{pieces: pieces, seen3D: seen3D}
+	nWorkers := runtime.NumCPU()
+	if nWorkers > len(slabs) {
+		nWorkers = len(slabs)
 	}
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+	jobCh := make(chan int, len(slabs))
+	for si := range slabs {
+		jobCh <- si
+	}
+	close(jobCh)
+	var wg sync.WaitGroup
+	for w := 0; w < nWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var candidates []int
+			for si := range jobCh {
+				idx := cellIndices[si]
+				if idx == nil {
+					continue
+				}
+				seen3D := make(map[int3D]struct{}, 64)
+				var pieces []cellPiece
+				for _, p := range slabPolys[si] {
+					pieces, candidates = clipPolyToCells(p, si, slabs, idx, pieces, seen3D, candidates)
+				}
+				out[si] = slabPhase1Diag{pieces: pieces, seen3D: seen3D}
+			}
+		}()
+	}
+	wg.Wait()
 	return out
 }
 
