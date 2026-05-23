@@ -150,6 +150,12 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	}
 
 	// Phase 1 — clip slabPolys, build seen3D.
+	//
+	// NOTE: splice_diag_test.go:runPhase1ForDiag mirrors this loop
+	// verbatim for the SPLICE_DIAG diagnostic. Any change here that
+	// affects slabPolys / cellIndices / clipPolyToCells / seen3D must
+	// be reflected there too, or the diagnostic will silently report
+	// against a stale algorithm.
 	{
 		jobCh := make(chan int, len(slabs))
 		for si := range slabs {
