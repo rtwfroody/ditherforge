@@ -7,7 +7,12 @@
 //   - intersection / symmetric-diff counts;
 //   - of the symmetric-diff orphans, how many lie *strictly interior*
 //     to some neighbour cellPiece edge in int64 collinearity space
-//     (the same test splicePoly3DEdges uses).
+//     (the same test splicePoly3DEdges uses). After commit 21b7b25 the
+//     cap path emits one cellPiece per earcut triangle for non-convex
+//     cells, so this set now includes earcut-diagonal edges as well
+//     as true cell-boundary edges. That matches what splice actually
+//     iterates over, but inflates the "splice CAN fix" count vs the
+//     prior diag's cell-boundary-only semantic.
 //
 // Interpretation:
 //
@@ -44,15 +49,32 @@ import (
 
 const (
 	spliceDiagModelPath = "../../tests/objects/low_poly_building.glb"
-	spliceDiagCellSize  = float32(0.42)
-	spliceDiagLayerH    = float32(0.2)
+	// Cell sizes mirror production for the building model's settings
+	// (tests/objects/low_poly_building.json): nozzle 0.4mm × upper
+	// scale 1.25 = 0.5mm for upper slabs; nozzle 0.4mm × layer0
+	// adhesion scale 2 = 0.8mm for slab 0. Production picks per-slab
+	// via cellSizeForSlab(i) in internal/pipeline/run.go; the diag
+	// applies the same policy.
+	spliceDiagCellSizeUpper  = float32(0.5)
+	spliceDiagCellSizeLayer0 = float32(0.8)
+	spliceDiagLayerH         = float32(0.2)
 	// Bump spliceDiagCacheVersion whenever any cached-pipeline-affecting
 	// constant or upstream code (alphawrap.Wrap, voxel.DecimateMesh,
 	// loader.ScaleModel, the scale/normalize policy) changes — the gob
 	// is path-keyed otherwise and a stale cache would silently feed
 	// the diagnostic the wrong mesh.
-	spliceDiagCacheVersion = "v1-cs042-lh02-alpha040"
+	spliceDiagCacheVersion = "v2-cs050-lh02-alpha040"
 )
+
+// spliceDiagCellSizeForSlab mirrors internal/pipeline/run.go's
+// cellSizeForSlab closure: slab 0 uses the layer-0 adhesion scale,
+// upper slabs use the regular scale.
+func spliceDiagCellSizeForSlab(i int) float32 {
+	if i == 0 {
+		return spliceDiagCellSizeLayer0
+	}
+	return spliceDiagCellSizeUpper
+}
 
 func spliceDiagCachePath() string {
 	return "/tmp/_splice_diag_building_geom_" + spliceDiagCacheVersion + ".gob"
@@ -62,8 +84,8 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 	if os.Getenv("SPLICE_DIAG") == "" {
 		t.Skip("set SPLICE_DIAG=1 to run (heavy: loads building, runs alpha-wrap+decimate; cached at " + spliceDiagCachePath() + ")")
 	}
-	t.Logf("diag params: cacheVersion=%s cellSize=%.3f layerH=%.3f model=%s",
-		spliceDiagCacheVersion, spliceDiagCellSize, spliceDiagLayerH, spliceDiagModelPath)
+	t.Logf("diag params: cacheVersion=%s cellSizeUpper=%.3f cellSizeLayer0=%.3f layerH=%.3f model=%s",
+		spliceDiagCacheVersion, spliceDiagCellSizeUpper, spliceDiagCellSizeLayer0, spliceDiagLayerH, spliceDiagModelPath)
 	geom := loadOrBuildBuildingGeom(t)
 	t.Logf("geom: %d verts, %d faces", len(geom.Vertices), len(geom.Faces))
 
@@ -96,7 +118,7 @@ func TestSpliceBoundaryDiag(t *testing.T) {
 		if i+1 < nSlabs {
 			fpAbove = footprints[i+1]
 		}
-		cells, _, _ := PartitionSlabRaster(footprints[i], fpBelow, fpAbove, spliceDiagCellSize, 0)
+		cells, _, _ := PartitionSlabRaster(footprints[i], fpBelow, fpAbove, spliceDiagCellSizeForSlab(i), 0)
 		slabs[i] = Slab{
 			Index:     i,
 			ZBot:      planes[i],
@@ -440,7 +462,10 @@ func loadOrBuildBuildingGeom(t *testing.T) *loader.LoadedModel {
 	loader.ScaleModel(model, totalScale)
 	normalizeZForDiag(model)
 
-	cellSize := spliceDiagCellSize
+	// Mirror production's decimate budget: pipeline/run.go's
+	// stage_decimate uses voxelCellSizes(opts).UpperXY, not the
+	// slab-0 size, for the budget that gates DecimateMesh.
+	cellSize := spliceDiagCellSizeUpper
 	budget := float64(cellSize/2) * float64(cellSize/2)
 
 	preDec, err := voxel.DecimateMesh(context.Background(), model, 1, cellSize, budget, false, progress.NullTracker{})
