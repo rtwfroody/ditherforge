@@ -27,47 +27,7 @@ package cellslicer
 import (
 	"math"
 	"sort"
-
-	clipper "github.com/ctessum/go.clipper"
 )
-
-// intPt is a Clipper-integer XY point. Used by intermediate
-// conversions to/from Clipper's integer space.
-type intPt struct {
-	X, Y int64
-}
-
-func intPtOf(p Point2) intPt {
-	return intPt{
-		X: int64(math.Round(float64(p[0]) * clipperScale)),
-		Y: int64(math.Round(float64(p[1]) * clipperScale)),
-	}
-}
-
-func intPtToPoint2(p intPt) Point2 {
-	return Point2{
-		float32(float64(p.X) * invClipperScale),
-		float32(float64(p.Y) * invClipperScale),
-	}
-}
-
-// clipperPathToIntPts converts a Clipper Path to []intPt, dropping
-// consecutive duplicates and the closing duplicate. The integer
-// coordinates are preserved exactly (no float roundtrip).
-func clipperPathToIntPts(path clipper.Path) []intPt {
-	out := make([]intPt, 0, len(path))
-	for _, ip := range path {
-		p := intPt{X: int64(ip.X), Y: int64(ip.Y)}
-		if n := len(out); n > 0 && out[n-1] == p {
-			continue
-		}
-		out = append(out, p)
-	}
-	if n := len(out); n > 1 && out[0] == out[n-1] {
-		out = out[:n-1]
-	}
-	return out
-}
 
 // int3D is a Clipper-integer 3D point. Z uses the same 1µm scale.
 type int3D struct {
@@ -264,12 +224,27 @@ func clipPolyToCells(
 	return clipPolyToCellsCap(p, slabIdx, slabs, candidates, dst, seen), candidates
 }
 
-// clipPolyToCellsCap is the Clipper 2D intersection path. New
-// vertices introduced by the intersection get Z from the source
-// polygon's plane equation: z = (d - n.x*x - n.y*y) / n.z, with
-// (n.x, n.y, n.z) the source triangle's normal and d the plane
-// offset. The dispatcher's isPolyXYDegenerate check bounds n.z
-// away from zero.
+// clipPolyToCellsCap clips slabPoly against each candidate cell's
+// vertical prism in 3D, preserving Z exactly through Sutherland-
+// Hodgman linear interpolation. Cell.Outer can be non-convex
+// (polyomino corners from raster partitioning), so it's earcut into
+// triangles and the slabPoly is clipped against each triangle's
+// prism — three vertical half-spaces per triangle. The collection
+// of non-empty piece results covers the slabPoly's intersection
+// with the cell.
+//
+// Replaces the prior Clipper-2D-then-re-lift-Z approach: that
+// re-lift's z = (d - n.x*x - n.y*y) / n.z amplifies Clipper's 1µm
+// XY-integer roundtrip by the source plane's |grad_xy(z)| =
+// |n_xy|/|n_z|. On slanted near-walls (e.g. low_poly_building.glb
+// at ~4° from vertical, gradient ≈ 14.5) drift reached ~2–15µm,
+// pushing vertices off the slab plane bucket and breaking the
+// cross-slab splice's exact-Z filter — visible as gaps and
+// T-junctions at slab boundaries.
+//
+// SH lerp blends Z linearly between segment endpoints, which is
+// exact for any point on the slabPoly's plane (it IS planar). No
+// re-lift, no gradient amplification, no clamp.
 func clipPolyToCellsCap(
 	p slabPoly,
 	slabIdx int,
@@ -278,66 +253,139 @@ func clipPolyToCellsCap(
 	dst []cellPiece,
 	seen map[int3D]struct{},
 ) []cellPiece {
-	// Source plane equation: n·X = d. Clamp the lifted Z to the
-	// slab range — Clipper output vertices on the cell.Outer interior
-	// can land at XYs where the source plane evaluates a hair outside
-	// [zBot, zTop] (float noise; mathematically the slabPoly's interior
-	// is bounded by the slab planes), and a clamp keeps cross-slab
-	// seams matching exactly.
-	zBot := slabs[slabIdx].ZBot
-	zTop := slabs[slabIdx].ZTop
-	nx, ny, nz := p.Normal[0], p.Normal[1], p.Normal[2]
-	d := nx*p.Pts[0][0] + ny*p.Pts[0][1] + nz*p.Pts[0][2]
-	zLift := func(x, y float32) float32 {
-		z := (d - nx*x - ny*y) / nz
-		if z < zBot {
-			z = zBot
-		} else if z > zTop {
-			z = zTop
-		}
-		return z
-	}
-
-	// Convert source polygon to Clipper integer XY path. Z is
-	// dropped for the intersection; we recover it for each output
-	// vertex via zLift.
-	triPath := make(clipper.Path, 0, len(p.Pts))
-	for _, v := range p.Pts {
-		triPath = append(triPath, &clipper.IntPoint{
-			X: clipper.CInt(math.Round(float64(v[0]) * clipperScale)),
-			Y: clipper.CInt(math.Round(float64(v[1]) * clipperScale)),
-		})
-	}
-
 	for _, ci := range candidates {
 		cell := &slabs[slabIdx].Cells[ci]
-		cellPath := pointsToClipperPath(cell.Outer)
-		c := clipper.NewClipper(clipper.IoNone)
-		c.AddPaths(clipper.Paths{triPath}, clipper.PtSubject, true)
-		c.AddPaths(clipper.Paths{cellPath}, clipper.PtClip, true)
-		result, ok := c.Execute1(clipper.CtIntersection, clipper.PftNonZero, clipper.PftNonZero)
-		if !ok {
-			continue
-		}
-		for _, path := range result {
-			ring := clipperPathToIntPts(path)
-			if len(ring) < 3 {
+		pieces := clipSlabPolyToCellPrism3D(p.Pts, cell.Outer)
+		for _, piece := range pieces {
+			piece = dedup3DPoly(piece)
+			if len(piece) < 3 {
 				continue
 			}
-			pts := make([][3]float32, len(ring))
-			for i, ip := range ring {
-				p2 := intPtToPoint2(ip)
-				pts[i] = [3]float32{p2[0], p2[1], zLift(p2[0], p2[1])}
-				seen[int3DOf(pts[i])] = struct{}{}
+			for _, v := range piece {
+				seen[int3DOf(v)] = struct{}{}
 			}
 			dst = append(dst, cellPiece{
 				cellIdx: int32(ci),
-				pts:     pts,
+				pts:     piece,
 				normal:  p.Normal,
 			})
 		}
 	}
 	return dst
+}
+
+// clipSlabPolyToCellPrism3D clips slabPolyPts (3D, planar in the
+// source-triangle plane) against the cell's vertical prism. Cell.Outer
+// can be non-convex (polyomino corners from raster partitioning), so
+// the routine dispatches:
+//
+//   - Convex cell.Outer (the common case — hex cells, simple ring
+//     trapezoids): one Sutherland-Hodgman pass per cell.Outer edge,
+//     producing a single output piece. O(slab × cellEdges) work.
+//
+//   - Non-convex cell.Outer: earcut into triangles, clip slabPolyPts
+//     against each triangle's prism (three half-spaces). Emits one
+//     piece per non-empty triangle clip — N-2 pieces in the worst
+//     case. The earcut diagonals become internal edges in the output;
+//     dedup3DPoly + the splice machinery in Phase 2 keep the seams
+//     topologically clean.
+//
+// Output piece vertex Z values come straight from clipPolyByPlaneXY's
+// linear lerp, which is exact for points on the source plane.
+func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][][3]float32 {
+	if len(slabPolyPts) < 3 || len(cellOuter) < 3 {
+		return nil
+	}
+	if isConvexCCW(cellOuter) {
+		clipped := slabPolyPts
+		n := len(cellOuter)
+		for i := 0; i < n; i++ {
+			a := cellOuter[i]
+			b := cellOuter[(i+1)%n]
+			clipped = clipPolyByCellEdge(clipped, a, b)
+			if len(clipped) < 3 {
+				return nil
+			}
+		}
+		return [][][3]float32{clipped}
+	}
+	earVerts, tris := Earcut(cellOuter, nil)
+	if len(tris) == 0 {
+		return nil
+	}
+	out := make([][][3]float32, 0, len(tris))
+	for _, tri := range tris {
+		a := earVerts[tri[0]]
+		b := earVerts[tri[1]]
+		c := earVerts[tri[2]]
+		// Earcut emits CCW triangles (it normalizes outer to CCW
+		// internally). For a CCW triangle the interior lies to the
+		// LEFT of each edge V_i→V_{i+1}, so the outward XY normal is
+		// the edge direction rotated 90° CW: (dy, -dx) where
+		// (dx, dy) = V_{i+1} - V_i. The interior half-space is then
+		// nx*x + ny*y <= d with d = nx*V_i.x + ny*V_i.y — the same
+		// convention clipPolyByPlaneXY uses (and it treats on-plane
+		// points as inside, so a slabPoly edge flush with a cell
+		// edge survives).
+		clipped := slabPolyPts
+		clipped = clipPolyByCellEdge(clipped, a, b)
+		if len(clipped) < 3 {
+			continue
+		}
+		clipped = clipPolyByCellEdge(clipped, b, c)
+		if len(clipped) < 3 {
+			continue
+		}
+		clipped = clipPolyByCellEdge(clipped, c, a)
+		if len(clipped) < 3 {
+			continue
+		}
+		out = append(out, clipped)
+	}
+	return out
+}
+
+// isConvexCCW reports whether poly is a convex CCW polygon (no
+// repeated points). Used to pick the cell-prism clip dispatch:
+// convex cells can be clipped directly with one Sutherland-Hodgman
+// pass per edge; concave cells need an earcut detour. A degenerate
+// run of collinear points along one edge is treated as convex (the
+// cross product is zero, which doesn't flip the running sign).
+func isConvexCCW(poly []Point2) bool {
+	n := len(poly)
+	if n < 3 {
+		return false
+	}
+	sign := float32(0)
+	for i := 0; i < n; i++ {
+		a := poly[i]
+		b := poly[(i+1)%n]
+		c := poly[(i+2)%n]
+		cross := (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
+		if cross == 0 {
+			continue
+		}
+		if sign == 0 {
+			sign = cross
+			continue
+		}
+		if (sign > 0) != (cross > 0) {
+			return false
+		}
+	}
+	return sign >= 0
+}
+
+// clipPolyByCellEdge clips poly against the inward half-space of a CCW
+// triangle edge a→b. See clipSlabPolyToCellPrism3D for the half-space
+// derivation.
+func clipPolyByCellEdge(poly [][3]float32, a, b Point2) [][3]float32 {
+	dx := b[0] - a[0]
+	dy := b[1] - a[1]
+	nx := dy
+	ny := -dx
+	d := nx*a[0] + ny*a[1]
+	return clipPolyByPlaneXY(poly, nx, ny, d)
 }
 
 // clipPolyToCellsVertical is the vertical-scan path used when the
