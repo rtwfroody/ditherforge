@@ -290,13 +290,29 @@ func clipPolyToCellsCap(
 //     dedup3DPoly + the splice machinery in Phase 2 keep the seams
 //     topologically clean.
 //
+// Orientation: both paths use the inward-half-space derivation
+// (nx, ny) = (dy, -dx), which is CCW-only — for a CW input the
+// half-space inverts and SH clips away the entire interior, silently
+// dropping the cell. Production cell producers all emit CCW (raster
+// path's marching-squares, the older ring/hex generators), but the
+// reversed-copy fallback below is cheap insurance against future
+// callers, and removes the "did anyone change cell winding?" failure
+// mode from a hot path that's hard to debug.
+//
 // Output piece vertex Z values come straight from clipPolyByPlaneXY's
 // linear lerp, which is exact for points on the source plane.
 func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][][3]float32 {
 	if len(slabPolyPts) < 3 || len(cellOuter) < 3 {
 		return nil
 	}
-	if isConvexCCW(cellOuter) {
+	if !isCCW(cellOuter) {
+		rev := make([]Point2, len(cellOuter))
+		for i, p := range cellOuter {
+			rev[len(cellOuter)-1-i] = p
+		}
+		cellOuter = rev
+	}
+	if isConvex(cellOuter) {
 		clipped := slabPolyPts
 		n := len(cellOuter)
 		for i := 0; i < n; i++ {
@@ -319,14 +335,14 @@ func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][
 		b := earVerts[tri[1]]
 		c := earVerts[tri[2]]
 		// Earcut emits CCW triangles (it normalizes outer to CCW
-		// internally). For a CCW triangle the interior lies to the
-		// LEFT of each edge V_i→V_{i+1}, so the outward XY normal is
-		// the edge direction rotated 90° CW: (dy, -dx) where
-		// (dx, dy) = V_{i+1} - V_i. The interior half-space is then
-		// nx*x + ny*y <= d with d = nx*V_i.x + ny*V_i.y — the same
-		// convention clipPolyByPlaneXY uses (and it treats on-plane
-		// points as inside, so a slabPoly edge flush with a cell
-		// edge survives).
+		// internally — see earcut.go's linkedList). For a CCW
+		// triangle the interior lies to the LEFT of each edge
+		// V_i→V_{i+1}, so the outward XY normal is the edge direction
+		// rotated 90° CW: (dy, -dx) where (dx, dy) = V_{i+1} - V_i.
+		// The interior half-space is then nx*x + ny*y <= d with
+		// d = nx*V_i.x + ny*V_i.y — the same convention
+		// clipPolyByPlaneXY uses (and it treats on-plane points as
+		// inside, so a slabPoly edge flush with a cell edge survives).
 		clipped := slabPolyPts
 		clipped = clipPolyByCellEdge(clipped, a, b)
 		if len(clipped) < 3 {
@@ -345,35 +361,43 @@ func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][
 	return out
 }
 
-// isConvexCCW reports whether poly is a convex CCW polygon (no
-// repeated points). Used to pick the cell-prism clip dispatch:
-// convex cells can be clipped directly with one Sutherland-Hodgman
-// pass per edge; concave cells need an earcut detour. A degenerate
-// run of collinear points along one edge is treated as convex (the
-// cross product is zero, which doesn't flip the running sign).
-func isConvexCCW(poly []Point2) bool {
+// isCCW reports whether poly winds counter-clockwise via signed area.
+// Zero area (collinear / degenerate) is reported as CCW so callers
+// reach a single decision branch; cell.Outer with zero XY area would
+// be filtered upstream anyway.
+func isCCW(poly []Point2) bool {
+	n := len(poly)
+	if n < 3 {
+		return true
+	}
+	var s float32
+	for i := 0; i < n; i++ {
+		j := (i + 1) % n
+		s += poly[i][0]*poly[j][1] - poly[j][0]*poly[i][1]
+	}
+	return s >= 0
+}
+
+// isConvex reports whether poly (assumed CCW; orient first via isCCW)
+// has no concave corners. Picks the convex fast path for the cell-
+// prism clip — concave cells take the earcut detour instead.
+// Collinear runs (cross == 0) are skipped so a polygon with an
+// extra-vertex straight edge counts as convex.
+func isConvex(poly []Point2) bool {
 	n := len(poly)
 	if n < 3 {
 		return false
 	}
-	sign := float32(0)
 	for i := 0; i < n; i++ {
 		a := poly[i]
 		b := poly[(i+1)%n]
 		c := poly[(i+2)%n]
 		cross := (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
-		if cross == 0 {
-			continue
-		}
-		if sign == 0 {
-			sign = cross
-			continue
-		}
-		if (sign > 0) != (cross > 0) {
+		if cross < 0 {
 			return false
 		}
 	}
-	return sign >= 0
+	return true
 }
 
 // clipPolyByCellEdge clips poly against the inward half-space of a CCW

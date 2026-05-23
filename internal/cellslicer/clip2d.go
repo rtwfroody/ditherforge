@@ -151,11 +151,12 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 
 	// Phase 1 — clip slabPolys, build seen3D.
 	//
-	// NOTE: splice_diag_test.go:runPhase1ForDiag mirrors this loop
-	// verbatim for the SPLICE_DIAG diagnostic. Any change here that
-	// affects slabPolys / cellIndices / clipPolyToCells / seen3D must
-	// be reflected there too, or the diagnostic will silently report
-	// against a stale algorithm.
+	// NOTE: splice_diag_test.go:runPhase1ForDiag mirrors this loop for
+	// the SPLICE_DIAG diagnostic — the inner clipPolyToCells call and
+	// the seen3D semantics AND the worker fan-out (NumCPU goroutines,
+	// jobCh, per-worker candidates buffer). Any change to either layer
+	// here must be reflected there or the diagnostic will silently
+	// report against a stale algorithm.
 	{
 		jobCh := make(chan int, len(slabs))
 		for si := range slabs {
@@ -192,12 +193,18 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	// The exact-equality filter relies on:
 	//   - clipPolygonByZHalfSpace's lerpAtZ writes z = zPlane verbatim
 	//     (slab Z-clip output).
-	//   - clipPolyToCellsCap's zLift clamps to [zBot, zTop], so float
-	//     noise near the boundary rounds to the same int3D Z. Float32
-	//     1 ULP at z ≈ 4000mm is ≈1µm, so the filter is reliable for
-	//     model heights up to a few hundred mm with ~3 orders of
-	//     magnitude headroom; a model an order of magnitude taller
-	//     would need its own audit.
+	//   - clipPolyToCellsCap clips slabPolys against cell prisms in 3D
+	//     via Sutherland-Hodgman (clipPolyByPlaneXY), whose lerp
+	//     interpolates Z linearly along an edge. The slabPoly is
+	//     planar; any new vertex from intersecting one of its edges
+	//     with a vertical cell face lies on that same plane, and
+	//     linear lerp between two on-plane endpoints stays on the
+	//     plane exactly. Combined with the slab Z-clip placing the
+	//     top/bottom slab-plane vertices at zPlane verbatim, no
+	//     boundary vertex drifts off the plane — no clamp needed.
+	//     (See commit 21b7b25 for context: the previous Clipper-2D-
+	//     then-re-lift cap path drifted by |grad_xy(z)| × 1µm on
+	//     slanted near-walls, which is what motivated dropping it.)
 	//   - clipPolyByPlaneXY's lerpAtPlaneXY interpolates Z linearly;
 	//     both endpoints on the slab plane → exact plane Z out.
 	//
