@@ -6,6 +6,7 @@
   import AxesGizmo from './AxesGizmo.svelte';
   import ColorPicker3D from './ColorPicker3D.svelte';
   import StickerPlacer from './StickerPlacer.svelte';
+  import TrianglePicker3D from './TrianglePicker3D.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -49,11 +50,13 @@
     contrast = 0,
     saturation = 0,
     pickMode = false,
+    pickTriangleMode = false,
     stickerPlaceMode = false,
     stickerImage = '',
     stickerSize = 1,
     stickerRotation = 0,
     onColorPick,
+    onTrianglePick,
     onStickerPlace,
     warpPins = [],
     loading = '',
@@ -73,11 +76,22 @@
     contrast?: number;
     saturation?: number;
     pickMode?: boolean;
+    pickTriangleMode?: boolean;
     stickerPlaceMode?: boolean;
     stickerImage?: string;
     stickerSize?: number;
     stickerRotation?: number;
     onColorPick?: (hex: string) => void;
+    onTrianglePick?: (hit: {
+      viewerId: string;
+      viewerLabel: string;
+      faceIndex: number;
+      vertices: [
+        [number, number, number],
+        [number, number, number],
+        [number, number, number],
+      ];
+    }) => void;
     onStickerPlace?: (point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) => void;
     warpPins?: WarpPin[];
     loading?: string;
@@ -1299,7 +1313,7 @@
             bind:ref={controlsRef}
             target={cameraSetup.target}
             enableDamping
-            enabled={!pickMode && !stickerPlaceMode}
+            enabled={!pickMode && !pickTriangleMode && !stickerPlaceMode}
             onchange={handleControlsChange}
           />
           <!-- Lights + target parented to the camera so lighting is view-space
@@ -1331,7 +1345,11 @@
             <T.Mesh geometry={mesh.geometry} material={viewWireMat} />
           {:else}
             <T.Mesh geometry={mesh.geometry} material={viewSolidMat} />
-            <T.Mesh geometry={mesh.geometry} material={viewWireMat} />
+            <!-- Wireframe pass shares the solid pass's geometry; opt it
+                 out of raycasting so the triangle picker (and color
+                 picker) hit the solid mesh deterministically rather
+                 than relying on Three.js iteration order. -->
+            <T.Mesh geometry={mesh.geometry} material={viewWireMat} raycast={() => {}} />
           {/if}
         {/each}
 
@@ -1354,6 +1372,7 @@
         <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}|vm${viewMode}`} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
+        <TrianglePicker3D pickMode={pickTriangleMode} onPick={(h) => onTrianglePick?.({ viewerId, viewerLabel: label, ...h })} />
         <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
       </Canvas>
     {:else if errorMessage}

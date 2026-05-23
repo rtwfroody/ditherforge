@@ -23,6 +23,7 @@
   import StickerPanel from '$lib/components/StickerPanel.svelte';
   import ObjectPicker from '$lib/components/ObjectPicker.svelte';
   import DebugCellsDialog from '$lib/components/DebugCellsDialog.svelte';
+  import TriangleInfoDialog from '$lib/components/TriangleInfoDialog.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
@@ -395,6 +396,32 @@
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
   let debugCellsDialogOpen = $state(false);
+  let triangleSelectMode = $state(false);
+  let triangleInfoDialogOpen = $state(false);
+  let pickedTriangle = $state<null | {
+    viewerId: string;
+    viewerLabel: string;
+    faceIndex: number;
+    vertices: [
+      [number, number, number],
+      [number, number, number],
+      [number, number, number],
+    ];
+  }>(null);
+  function handleTrianglePick(hit: {
+    viewerId: string;
+    viewerLabel: string;
+    faceIndex: number;
+    vertices: [
+      [number, number, number],
+      [number, number, number],
+      [number, number, number],
+    ];
+  }) {
+    pickedTriangle = hit;
+    triangleSelectMode = false;
+    triangleInfoDialogOpen = true;
+  }
 
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
@@ -1525,7 +1552,10 @@
   }
 </script>
 
-<svelte:window onclick={handleViewMenuOutside} />
+<svelte:window
+  onclick={handleViewMenuOutside}
+  onkeydown={(e) => { if (e.key === 'Escape' && triangleSelectMode) { triangleSelectMode = false; } }}
+/>
 
 <Tooltip.Provider>
 
@@ -1579,6 +1609,9 @@
       <Menubar.Content>
         <Menubar.Item onSelect={() => { debugCellsDialogOpen = true; }} disabled={!outputMeshUrl || running}>
           View Cells…
+        </Menubar.Item>
+        <Menubar.Item onSelect={() => { triangleSelectMode = true; }} disabled={!inputMeshUrl && !outputMeshUrl}>
+          Select Triangle…
         </Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
@@ -2200,11 +2233,13 @@
         label={inputFile ? `${inputViewMode === 'wrapped' ? 'Alpha-wrapped Model: ' : 'Input Model: '}${shortenPath(inputFile)}` : 'Input Model'}
         viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation}
         pickMode={inputViewMode === 'input' && pickingPinIndex >= 0}
+        pickTriangleMode={triangleSelectMode}
         stickerPlaceMode={inputViewMode === 'input' && placingStickerIndex >= 0}
         stickerImage={placingSticker?.thumbnail ?? ''}
         stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)}
         stickerRotation={placingSticker?.rotation ?? 0}
         onColorPick={handleColorPick}
+        onTrianglePick={handleTrianglePick}
         onStickerPlace={handleStickerPlace}
         warpPins={inputViewMode === 'input' && pickingPinIndex < 0 ? warpPins : []}
         loading={inputFile ? inputFile.split('/').pop() ?? '' : ''}
@@ -2258,7 +2293,7 @@
       </div>
     </div>
     <div class="flex-1 min-h-0 relative">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} viewMode={outputViewStyle} />
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"
@@ -2393,5 +2428,6 @@
 />
 
 <DebugCellsDialog bind:open={debugCellsDialogOpen} />
+<TriangleInfoDialog bind:open={triangleInfoDialogOpen} pick={pickedTriangle} />
 
 </Tooltip.Provider>
