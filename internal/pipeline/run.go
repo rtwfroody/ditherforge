@@ -23,6 +23,11 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
+// debugHoles is read once at init from DITHERFORGE_HOLE_REPORT —
+// matches the cellslicer package's identically-named flag. Used to
+// gate the reportHolesIfEnabled call below.
+var debugHoles = os.Getenv("DITHERFORGE_HOLE_REPORT") != ""
+
 // reportHolesIfEnabled, gated on DITHERFORGE_HOLE_REPORT=1, runs
 // voxel.CheckWatertight on a stage-output mesh and logs its boundary /
 // non-manifold counts. Used to bisect at which pipeline stage holes
@@ -34,7 +39,7 @@ import (
 // cellslicer before cross-piece dedup), use a position-keyed counter
 // instead.
 func reportHolesIfEnabled(stage string, faces [][3]uint32) {
-	if os.Getenv("DITHERFORGE_HOLE_REPORT") == "" {
+	if !debugHoles {
 		return
 	}
 	wr := voxel.CheckWatertight(faces)

@@ -7,13 +7,14 @@
 // coords).
 //
 // Phase 2 (appendCellPiece): splice each per-cell piece's edges with
-// any union-set vertex that lies on the edge's interior, then Earcut
-// the spliced polygon on the 2D plane perpendicular to the largest
-// |normal| component (so a near-vertical source projects to a
-// non-degenerate 2D polygon, not a thin XY sliver), and emit faces
-// tagged with the cell index. The splice is exact in Clipper integer
-// space, so a kink that one cell's outline introduces also appears
-// as a vertex on the neighbour's matching edge.
+// any union-set vertex that lies within 1µm of the edge's interior,
+// then fan-triangulate the spliced polygon on the 2D plane
+// perpendicular to the largest |normal| component (so a near-
+// vertical source projects to a non-degenerate 2D polygon) and emit
+// faces tagged with the cell index. cellPieces are convex by
+// construction so fan-tri is O(n) and correct; the splice's float
+// tolerance lets it bridge slanted-segment cell-boundary crossings
+// that strict int64 collinearity would reject.
 //
 // A slab-wide (not per-source-polygon) splice set is required to
 // cover the case where two source triangles share an edge: cells
@@ -141,37 +142,67 @@ func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 	if len(poly) < 2 || len(set) == 0 {
 		return poly
 	}
-	// Tolerance in mm: 1 Clipper bucket. Squared since the check
-	// uses |cross|²/|b-a|² ≤ tol² to avoid a sqrt.
+	// Tolerance: 1 Clipper bucket = 1µm in model coords. Squared
+	// since the check uses |cross|² ≤ tol² × |b-a|² to avoid a sqrt.
 	const tol = float64(invClipperScale)
 	const tol2 = tol * tol
 
+	// Pre-compute the int3D bucket of every polygon vertex. Used
+	// to reject candidates equal to ANY polygon vertex, not just
+	// the current edge's endpoints — without this, a candidate
+	// that lies on edge i AND coincides (in bucket) with vertex
+	// i+2 would get inserted on edge i and then re-emitted as
+	// poly[i+2], creating a consecutive same-bucket pair in
+	// outInt. After cross-piece dedup (clip2d.go), that pair
+	// collapses to one global vertex and fan triangulation emits
+	// degenerate triangles whose half-edges blow up the
+	// non-manifold count.
+	polyKey := make(map[int3D]struct{}, len(poly))
+	for _, p := range poly {
+		polyKey[int3DOf(p)] = struct{}{}
+	}
+
 	// Pre-convert set to float64 once for the per-candidate math,
 	// keeping the int3D parallel for endpoint-equality + insert
-	// dedup. Set sizes are small enough (per-slab, typically a few
-	// thousand) that the conversion is cheap.
+	// dedup. Drop candidates that match any polygon vertex up-front
+	// (see polyKey rationale above).
 	type candPt struct {
 		ip int3D
 		x  float64
 		y  float64
 		z  float64
 	}
-	pts := make([]candPt, len(set))
-	for i, p := range set {
-		pts[i] = candPt{
+	pts := make([]candPt, 0, len(set))
+	for _, p := range set {
+		if _, ok := polyKey[p]; ok {
+			continue
+		}
+		pts = append(pts, candPt{
 			ip: p,
 			x:  float64(p.X) * invClipperScale,
 			y:  float64(p.Y) * invClipperScale,
 			z:  float64(p.Z) * invClipperScale,
-		}
+		})
 	}
 
-	out := make([][3]float32, 0, len(poly)+len(set))
+	out := make([][3]float32, 0, len(poly)+len(pts))
 	// outInt is the parallel int3D log of what's been appended,
 	// used to suppress consecutive duplicate inserts (two near-
 	// coincident candidates that round to the same bucket).
-	outInt := make([]int3D, 0, len(poly)+len(set))
+	outInt := make([]int3D, 0, len(poly)+len(pts))
 	n := len(poly)
+	// emitVertex appends v/vi to out/outInt but only if vi differs
+	// from the immediately-prior emitted bucket. Centralising the
+	// dedup means the polygon-vertex append at the top of every
+	// edge iteration also gets it — without that, a sequence
+	// `[..., insertOnEdgeI=X, poly[i+1]=X]` would slip through.
+	emitVertex := func(v [3]float32, vi int3D) {
+		if len(outInt) > 0 && outInt[len(outInt)-1] == vi {
+			return
+		}
+		out = append(out, v)
+		outInt = append(outInt, vi)
+	}
 	type cand struct {
 		t  float64
 		ip int3D
@@ -186,18 +217,13 @@ func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 		bx, by, bz := float64(bf[0])-ax, float64(bf[1])-ay, float64(bf[2])-az
 		ab2 := bx*bx + by*by + bz*bz
 		ai := int3DOf(af)
-		bi := int3DOf(bf)
-		out = append(out, af)
-		outInt = append(outInt, ai)
+		emitVertex(af, ai)
 		if ab2 == 0 {
 			continue
 		}
 		tolAb2 := tol2 * ab2
 		var cands []cand
 		for _, c := range pts {
-			if c.ip == ai || c.ip == bi {
-				continue
-			}
 			px := c.x - ax
 			py := c.y - ay
 			pz := c.z - az
@@ -222,11 +248,7 @@ func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 			sort.Slice(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
 		}
 		for _, c := range cands {
-			if len(outInt) > 0 && outInt[len(outInt)-1] == c.ip {
-				continue
-			}
-			outInt = append(outInt, c.ip)
-			out = append(out, [3]float32{float32(c.x), float32(c.y), float32(c.z)})
+			emitVertex([3]float32{float32(c.x), float32(c.y), float32(c.z)}, c.ip)
 		}
 	}
 	if n2 := len(outInt); n2 > 1 && outInt[0] == outInt[n2-1] {
@@ -549,28 +571,22 @@ func clipPolyToCellsVertical(
 }
 
 // appendCellPiece splices pc against the slab-wide 3D splice set,
-// triangulates the spliced polygon, and appends to (verts, faces,
+// fan-triangulates the spliced polygon, and appends to (verts, faces,
 // localIdx) — returning the updated slices. Each emitted face is
 // tagged with pc.cellIdx in localIdx.
 //
-// Triangulation: Earcut on a 2D projection of the spliced polygon.
-// The projection plane is chosen to drop the axis aligned with the
+// Triangulation: fan-from-vertex-0 on a 2D projection of the spliced
+// polygon. The projection axis dropped is the one aligned with the
 // largest |pc.normal| component, which maximizes projected area and
-// keeps Earcut on non-degenerate input regardless of source-triangle
-// orientation. Without this, a slanted-near-vertical slabPoly's cell
-// fragment projects to a thin XY sliver and Earcut goes pathological
-// (observed: a 7-vertex Y-dominant-normal piece running for >10 min
-// on TestSampledMatchesInput/building before this fix).
-//
-// Cell outers can be non-convex, so the Clipper-intersection result
-// can also be non-convex; Earcut handles that. The 3D vertices are
-// preserved from spliced — Earcut only sees the 2D projection but
-// the emitted verts carry full 3D.
+// keeps a near-vertical source's piece from collapsing to a thin XY
+// sliver. cellPieces are convex by construction (see the dispatch
+// notes in the triangulation block below), so fan-tri is O(n) and
+// covers the polygon exactly.
 //
 // Winding is decided per output triangle: compute the 3D triangle's
 // normal, dot against pc.normal, flip if they disagree. Robust to
-// whatever winding convention the input polygon and Earcut happen
-// to produce.
+// the projected polygon's winding (which depends on which axis was
+// dropped) and to sub-bucket wobble from splice insertions.
 func appendCellPiece(
 	pc cellPiece,
 	spliceSet []int3D,

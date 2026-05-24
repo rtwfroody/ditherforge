@@ -59,7 +59,7 @@ var debugHoles = os.Getenv("DITHERFORGE_HOLE_REPORT") != ""
 // distinguish cross-slab mismatch (splice's job) from in-slab cell-
 // fragmentation mismatch.
 func reportHolesByPos(stage string, verts [][3]float32, faces [][3]uint32, slabZSet map[int64]struct{}) {
-	if os.Getenv("DITHERFORGE_HOLE_REPORT") == "" {
+	if !debugHoles {
 		return
 	}
 	type ek struct{ A, B int3D }
@@ -115,8 +115,9 @@ func reportHolesByPos(stage string, verts [][3]float32, faces [][3]uint32, slabZ
 }
 
 // fanTriangulate returns a triangle list for a polygon via a fan from
-// vertex 0. Only used by reportHolesByPos to triangulate cellPieces
-// for counting; not for any production geometry.
+// vertex 0. Used by appendCellPiece (cellPieces are convex by
+// construction) and by reportHolesByPos to triangulate intermediate-
+// stage cellPieces for counting.
 func fanTriangulate(n int) [][3]uint32 {
 	if n < 3 {
 		return nil
@@ -137,7 +138,7 @@ func fanTriangulate(n int) [][3]uint32 {
 // Normal is the source triangle's facing direction, cross-product
 // of its edges. Not unit-normalized — only its direction is used
 // downstream (winding decisions in appendCellPiece, dominant-axis
-// pick for Earcut projection, and the cap Z-lift's plane equation,
+// pick for fan-triangulation projection axis, and the cap Z-lift's plane equation,
 // which is invariant to a uniform scale of n).
 type slabPoly struct {
 	Pts    [][3]float32
@@ -240,7 +241,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	//   Phase 2 (all slabs concurrent, after barrier): splice each
 	//   cellPiece against (own seen3D) ∪ (neighbour-below's vertices
 	//   on the shared zBot plane) ∪ (neighbour-above's vertices on
-	//   the shared zTop plane), then Earcut and emit. Splice is read-
+	//   the shared zTop plane), then fan-triangulate and emit. Splice is read-
 	//   only against the frozen seen3D maps, so no synchronization is
 	//   needed once Phase 1 is done.
 	//
@@ -377,7 +378,10 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	workerSlab := make([]int64, nWorkers)
 	workerPieceIdx := make([]int64, nWorkers)
 	workerPieceN := make([]int64, nWorkers)
-	// workerStep: 0=idle, 1=grid.query, 2=splice, 3=earcut/fan, 4=emit-tris
+	// workerStep: 0=idle, 2=splice, 3=fan-tri, 4=emit-tris. (Slot 1
+	// previously meant grid.query, now unused since the per-piece
+	// grid lookup was reverted along with the earlier spatial-filter
+	// attempt; gap kept so existing diag dumps stay readable.)
 	workerStep := make([]int64, nWorkers)
 	// workerSplicedN: post-splice polygon size (if known).
 	workerSplicedN := make([]int64, nWorkers)
@@ -416,7 +420,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 						atomic.LoadUint64(&phase2NPathological),
 						hist)
 					// Per-worker: who's still active and on what.
-					stepName := []string{"idle", "grid.query", "splice", "earcut/fan", "emit-tris"}
+					stepName := []string{"idle", "(unused)", "splice", "fan-tri", "emit-tris"}
 					for w := 0; w < nWorkers; w++ {
 						si := atomic.LoadInt64(&workerSlab[w])
 						if si < 0 {
@@ -619,7 +623,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 				phase2Faces = append(phase2Faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
 			}
 		}
-		reportHolesByPos("phase2 (post-splice, post-Earcut, pre-dedup)", phase2Verts, phase2Faces, slabZSet)
+		reportHolesByPos("phase2 (post-splice, post-fan-tri, pre-dedup)", phase2Verts, phase2Faces, slabZSet)
 	}
 
 	totalV, totalF := 0, 0
