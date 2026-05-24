@@ -111,8 +111,8 @@ func int3DToFloat(p int3D) [3]float32 {
 }
 
 // splicePoly3DEdges walks each edge of poly and inserts any vertex
-// from set that lies strictly between the edge endpoints (collinear
-// in Clipper-integer 3D space), ordered along the edge direction.
+// from set that lies within 1µm of the edge's interior, in order
+// along the edge.
 //
 // Called in Phase 2 with the slab-wide seen3D union set produced by
 // Phase 1. Adjacent cells' outlines can have unequal vertex sets
@@ -122,68 +122,111 @@ func int3DToFloat(p int3D) [3]float32 {
 // piece against the slab-wide union produces matching subdivisions
 // on both sides — no T-junctions inside the slab.
 //
-// Integer-overflow safety: the cross and dot products below are
-// O(coord²) in int64. clipperScale = 1000 gives coords ≤ ~1e8 in
-// the worst-case 100m-side model, so individual products stay
-// under ~3e16 and the int64 (max ~9.2e18) cross/dot sums never
-// wrap. The cube test sits comfortably at ~2.5e9.
+// Float math. The math used to be int64 cross-product == 0
+// collinearity, which is mathematically exact but operates on
+// int3D values that came from float→int rounding upstream. For
+// slanted source segments, a cell-boundary crossing computed in
+// float and rounded to 1µm ends up within a bucket of the line but
+// not *exactly* collinear in int64 — splice rejected those, leaving
+// the cross-slab seams it was designed to fix unfixed. The float-
+// tolerance check matches what the comparison actually means
+// (perpendicular distance ≤ one 1µm bucket).
+//
+// The set is keyed by int3D for hash dedup, but the splice math
+// itself is float64; we convert each candidate via int3DToFloat for
+// the comparison. The inserted point is the bucket-position
+// (int3DToFloat-rounded float) so coincident splices across cells
+// hash-equal in the downstream cross-piece dedup.
 func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 	if len(poly) < 2 || len(set) == 0 {
 		return poly
 	}
-	polyInt := make([]int3D, len(poly))
-	for i, p := range poly {
-		polyInt[i] = int3DOf(p)
+	// Tolerance in mm: 1 Clipper bucket. Squared since the check
+	// uses |cross|²/|b-a|² ≤ tol² to avoid a sqrt.
+	const tol = float64(invClipperScale)
+	const tol2 = tol * tol
+
+	// Pre-convert set to float64 once for the per-candidate math,
+	// keeping the int3D parallel for endpoint-equality + insert
+	// dedup. Set sizes are small enough (per-slab, typically a few
+	// thousand) that the conversion is cheap.
+	type candPt struct {
+		ip int3D
+		x  float64
+		y  float64
+		z  float64
 	}
+	pts := make([]candPt, len(set))
+	for i, p := range set {
+		pts[i] = candPt{
+			ip: p,
+			x:  float64(p.X) * invClipperScale,
+			y:  float64(p.Y) * invClipperScale,
+			z:  float64(p.Z) * invClipperScale,
+		}
+	}
+
 	out := make([][3]float32, 0, len(poly)+len(set))
+	// outInt is the parallel int3D log of what's been appended,
+	// used to suppress consecutive duplicate inserts (two near-
+	// coincident candidates that round to the same bucket).
 	outInt := make([]int3D, 0, len(poly)+len(set))
-	n := len(polyInt)
+	n := len(poly)
 	type cand struct {
-		t int64
-		p int3D
+		t  float64
+		ip int3D
+		x  float64
+		y  float64
+		z  float64
 	}
 	for i := 0; i < n; i++ {
-		a := polyInt[i]
-		b := polyInt[(i+1)%n]
-		out = append(out, poly[i])
-		outInt = append(outInt, a)
-		bx := b.X - a.X
-		by := b.Y - a.Y
-		bz := b.Z - a.Z
+		af := poly[i]
+		bf := poly[(i+1)%n]
+		ax, ay, az := float64(af[0]), float64(af[1]), float64(af[2])
+		bx, by, bz := float64(bf[0])-ax, float64(bf[1])-ay, float64(bf[2])-az
 		ab2 := bx*bx + by*by + bz*bz
+		ai := int3DOf(af)
+		bi := int3DOf(bf)
+		out = append(out, af)
+		outInt = append(outInt, ai)
 		if ab2 == 0 {
 			continue
 		}
+		tolAb2 := tol2 * ab2
 		var cands []cand
-		for _, p := range set {
-			if p == a || p == b {
+		for _, c := range pts {
+			if c.ip == ai || c.ip == bi {
 				continue
 			}
-			px := p.X - a.X
-			py := p.Y - a.Y
-			pz := p.Z - a.Z
-			// Collinear: (p-a) × (b-a) == 0.
+			px := c.x - ax
+			py := c.y - ay
+			pz := c.z - az
+			// Cross (p−a) × (b−a). |cross|² ≤ tol² × |b−a|²
+			// iff perpendicular distance from p to the line ≤ tol.
 			cx := py*bz - pz*by
 			cy := pz*bx - px*bz
 			cz := px*by - py*bx
-			if cx != 0 || cy != 0 || cz != 0 {
+			cross2 := cx*cx + cy*cy + cz*cz
+			if cross2 > tolAb2 {
 				continue
 			}
+			// Project p onto the edge: t = (p−a)·(b−a). Strictly
+			// between the endpoints means 0 < t < |b−a|².
 			t := px*bx + py*by + pz*bz
 			if t <= 0 || t >= ab2 {
 				continue
 			}
-			cands = append(cands, cand{t: t, p: p})
+			cands = append(cands, cand{t: t, ip: c.ip, x: c.x, y: c.y, z: c.z})
 		}
 		if len(cands) > 1 {
 			sort.Slice(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
 		}
 		for _, c := range cands {
-			if len(outInt) > 0 && outInt[len(outInt)-1] == c.p {
+			if len(outInt) > 0 && outInt[len(outInt)-1] == c.ip {
 				continue
 			}
-			outInt = append(outInt, c.p)
-			out = append(out, int3DToFloat(c.p))
+			outInt = append(outInt, c.ip)
+			out = append(out, [3]float32{float32(c.x), float32(c.y), float32(c.z)})
 		}
 	}
 	if n2 := len(outInt); n2 > 1 && outInt[0] == outInt[n2-1] {
@@ -567,9 +610,27 @@ func appendCellPiece(
 		floatPoly[i] = Point2{p[u], p[v]}
 	}
 	if stepPtr != nil {
-		atomic.StoreInt64(stepPtr, 3) // earcut
+		atomic.StoreInt64(stepPtr, 3) // triangulate
 	}
-	earVerts, earTris := Earcut(floatPoly, nil)
+	// cellPieces are convex by construction:
+	//   - cap path (clipSlabPolyToCellPrism3D): convex slabPoly
+	//     intersected with a convex cell (or convex earcut sub-
+	//     triangle for non-convex cell.Outer) → convex.
+	//   - vertical path (clipVerticalPolyToCell): wall strips, each
+	//     a rectangle → convex.
+	// Splice inserts vertices within 1µm of an existing boundary
+	// edge — the post-splice polygon stays convex within bucket
+	// tolerance. Fan-triangulate in O(n) directly; per-triangle
+	// winding is fixed below via the (triN · pc.normal) test, so
+	// any tiny orientation flip from a sub-bucket bump corrects.
+	//
+	// (Was Earcut, which hung on the building model — the ear-search
+	// inner loop spent unbounded time on small (≤42 vert) polygons
+	// whose vertices were near-collinear from splice insertions.
+	// See commit 3411f97's diagnostic infrastructure for the
+	// goroutine-stack evidence.)
+	earVerts := floatPoly
+	earTris := fanTriangulate(len(floatPoly))
 	if stepPtr != nil {
 		atomic.StoreInt64(stepPtr, 4) // emit-tris
 	}
