@@ -27,7 +27,67 @@ package cellslicer
 import (
 	"math"
 	"sort"
+	"sync/atomic"
 )
+
+// Diagnostic counters used by ClipMeshToCells2D's hole-report mode.
+// Only meaningful while DITHERFORGE_HOLE_REPORT=1; unconditional
+// AddUint64 is cheap and avoids gating the inner loop.
+var (
+	// Histogram buckets for post-splice polygon vertex counts. Bucket
+	// boundaries: [≤8, ≤16, ≤32, ≤64, ≤128, ≤256, ≤512, ≤1024, >1024].
+	// Lets us see whether a hang/blowup is "many small polygons" or
+	// "a handful of pathological huge ones".
+	phase2NHist [9]uint64
+	// Max polygon size ever seen (after splice), and the number of
+	// pieces with N > 100 — pathological-piece sentinel.
+	phase2NMaxSeen      uint64
+	phase2NPathological uint64
+)
+
+// bumpNHist updates the histogram bucket for one polygon size n.
+// No-op when DITHERFORGE_HOLE_REPORT is unset (gated via the
+// package-level debugHoles flag in clip2d.go) — keeps the three
+// atomics out of the production inner loop.
+func bumpNHist(n int) {
+	if !debugHoles {
+		return
+	}
+	var idx int
+	switch {
+	case n <= 8:
+		idx = 0
+	case n <= 16:
+		idx = 1
+	case n <= 32:
+		idx = 2
+	case n <= 64:
+		idx = 3
+	case n <= 128:
+		idx = 4
+	case n <= 256:
+		idx = 5
+	case n <= 512:
+		idx = 6
+	case n <= 1024:
+		idx = 7
+	default:
+		idx = 8
+	}
+	atomic.AddUint64(&phase2NHist[idx], 1)
+	un := uint64(n)
+	// CAS-loop max update so we don't lose the high-water under
+	// concurrent workers.
+	for {
+		cur := atomic.LoadUint64(&phase2NMaxSeen)
+		if un <= cur || atomic.CompareAndSwapUint64(&phase2NMaxSeen, cur, un) {
+			break
+		}
+	}
+	if n > 100 {
+		atomic.AddUint64(&phase2NPathological, 1)
+	}
+}
 
 // int3D is a Clipper-integer 3D point. Z uses the same 1µm scale.
 type int3D struct {
@@ -474,10 +534,19 @@ func appendCellPiece(
 	verts [][3]float32,
 	faces [][3]uint32,
 	localIdx []int32,
+	stepPtr *int64,
+	splicedNPtr *int64,
 ) ([][3]float32, [][3]uint32, []int32) {
+	if stepPtr != nil {
+		atomic.StoreInt64(stepPtr, 2) // splice
+	}
 	spliced := splicePoly3DEdges(pc.pts, spliceSet)
 	if len(spliced) < 3 {
 		return verts, faces, localIdx
+	}
+	bumpNHist(len(spliced))
+	if splicedNPtr != nil {
+		atomic.StoreInt64(splicedNPtr, int64(len(spliced)))
 	}
 
 	// Pick the 2D projection axes by dropping the dimension of the
@@ -497,7 +566,13 @@ func appendCellPiece(
 	for i, p := range spliced {
 		floatPoly[i] = Point2{p[u], p[v]}
 	}
+	if stepPtr != nil {
+		atomic.StoreInt64(stepPtr, 3) // earcut
+	}
 	earVerts, earTris := Earcut(floatPoly, nil)
+	if stepPtr != nil {
+		atomic.StoreInt64(stepPtr, 4) // emit-tris
+	}
 	if len(earTris) == 0 || len(earVerts) != len(floatPoly) {
 		return verts, faces, localIdx
 	}

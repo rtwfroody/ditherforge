@@ -23,6 +23,24 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
+// reportHolesIfEnabled, gated on DITHERFORGE_HOLE_REPORT=1, runs
+// voxel.CheckWatertight on a stage-output mesh and logs its boundary /
+// non-manifold counts. Used to bisect at which pipeline stage holes
+// appear that aren't present in the alpha-wrap input. No-op when the
+// env var is unset, so a normal run pays nothing.
+//
+// Vertex indices must be properly shared across faces — for meshes
+// emitted with per-fragment duplicate vertices (e.g. inside the
+// cellslicer before cross-piece dedup), use a position-keyed counter
+// instead.
+func reportHolesIfEnabled(stage string, faces [][3]uint32) {
+	if os.Getenv("DITHERFORGE_HOLE_REPORT") == "" {
+		return
+	}
+	wr := voxel.CheckWatertight(faces)
+	plog.Printf("  [hole-report] %s: %d faces, %s", stage, len(faces), wr)
+}
+
 // pipelineRun is a demand-driven driver for one pipeline invocation.
 // Each stage is a method that:
 //
@@ -245,6 +263,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
 				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
 			geomModel = wrapped
+			reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
 
 			// Post-wrap decimation: alpha-wrap output is dense (~one face
 			// per α² of surface area), but downstream stages (Sticker,
@@ -266,6 +285,7 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 						len(geomModel.Faces), len(postDec.Faces), cellSize)
 					geomModel = postDec
 				}
+				reportHolesIfEnabled("post-wrap decimate output", geomModel.Faces)
 				if err := r.checkCancel(); err != nil {
 					return nil, err
 				}
@@ -417,6 +437,7 @@ func (r *pipelineRun) Decimate() (*decimateOutput, error) {
 		if derr != nil {
 			return nil, fmt.Errorf("decimate: %w", derr)
 		}
+		reportHolesIfEnabled("stage-decimate output", decimModel.Faces)
 		return &decimateOutput{DecimModel: decimModel}, nil
 	})
 }
@@ -1139,6 +1160,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 
 		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
 			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
+		reportHolesIfEnabled("clip output", clipped.Faces)
 
 		// Per-cell face-count cross-tab against partition pixel
 		// bucket. Identifies the "missing geometry" suspects:
