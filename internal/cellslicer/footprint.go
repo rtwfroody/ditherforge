@@ -130,15 +130,16 @@ func FootprintIntersect(a, b *Footprint) *Footprint {
 	return footprintBoolean(a, b, clipper.CtIntersection)
 }
 
-// FootprintDifference returns a \ b. b == nil treats b as empty (so
-// the result is just a).
+// FootprintDifference returns a \ b. Empty b (nil or zero loops)
+// yields a deep-copy of a — the result is independent of a, so the
+// caller can safely mutate either side. The deep-copy goes via a
+// no-op Clipper union; replace with a hand-rolled copy if this path
+// becomes hot.
 func FootprintDifference(a, b *Footprint) *Footprint {
 	if a == nil || len(a.Loops) == 0 {
 		return &Footprint{}
 	}
 	if b == nil || len(b.Loops) == 0 {
-		// Defensive clone via a Boolean against an empty clip (returns
-		// a normalised polytree with the canonical orientation).
 		return footprintBoolean(a, &Footprint{}, clipper.CtUnion)
 	}
 	return footprintBoolean(a, b, clipper.CtDifference)

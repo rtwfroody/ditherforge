@@ -7,14 +7,13 @@
 // coords).
 //
 // Phase 2 (appendCellPiece): splice each per-cell piece's edges with
-// any union-set vertex that lies within 1µm of the edge's interior,
-// then fan-triangulate the spliced polygon on the 2D plane
-// perpendicular to the largest |normal| component (so a near-
-// vertical source projects to a non-degenerate 2D polygon) and emit
-// faces tagged with the cell index. cellPieces are convex by
-// construction so fan-tri is O(n) and correct; the splice's float
-// tolerance lets it bridge slanted-segment cell-boundary crossings
-// that strict int64 collinearity would reject.
+// any union-set vertex that lies on the edge's interior (strict int64
+// collinearity test against the snapped polygon vertices — see
+// splicePoly3DEdges), then fan-triangulate the spliced polygon on
+// the 2D plane perpendicular to the largest |normal| component (so a
+// near-vertical source projects to a non-degenerate 2D polygon) and
+// emit faces tagged with the cell index. cellPieces are convex by
+// construction so fan-tri is O(n) and correct.
 //
 // A slab-wide (not per-source-polygon) splice set is required to
 // cover the case where two source triangles share an edge: cells
@@ -142,7 +141,16 @@ func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 	out := make([][3]float32, 0, len(poly)+len(cands))
 	outInt := make([]int3D, 0, len(poly)+len(cands))
 	emit := func(v [3]float32, vi int3D) {
-		if n := len(outInt); n > 0 && outInt[n-1] == vi {
+		// Drop immediately-prior duplicates (two same-bucket
+		// candidates on one edge) and head wraparound (last insert
+		// on the final edge equals poly[0]). Without the head check,
+		// a configuration like [A, B, …, A] would slip through to
+		// fan-triangulation as a zero-area sliver.
+		n := len(outInt)
+		if n > 0 && outInt[n-1] == vi {
+			return
+		}
+		if n >= 2 && outInt[0] == vi {
 			return
 		}
 		out = append(out, v)

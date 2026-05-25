@@ -90,6 +90,60 @@ var watertightFixtures = []watertightFixture{
 	},
 }
 
+// TestCountHoleEdges exercises the countHoleEdges helper on three
+// hand-rolled meshes so the test scaffolding has guaranteed coverage
+// even while every TestWatertightAfterClip subtest is t.Skip'd
+// pending the plan's later steps. If this regresses, the watertight
+// assertion would silently report wrong counts on the real fixtures
+// when they're unskipped.
+func TestCountHoleEdges(t *testing.T) {
+	// A single closed tetrahedron: 4 faces, 6 edges, each shared by
+	// exactly 2 triangles. Zero boundary, zero non-manifold.
+	tetVerts := [][3]float32{
+		{0, 0, 0},
+		{1, 0, 0},
+		{0, 1, 0},
+		{0, 0, 1},
+	}
+	tetFaces := [][3]uint32{
+		{0, 2, 1}, // base z=0 (CW from above so the outward normal points down)
+		{0, 1, 3}, // y=0 wall
+		{1, 2, 3}, // slanted wall
+		{0, 3, 2}, // x=0 wall
+	}
+	b, nm := countHoleEdges(tetVerts, tetFaces)
+	if b != 0 || nm != 0 {
+		t.Errorf("closed tetrahedron: boundary=%d nonManifold=%d, want 0,0", b, nm)
+	}
+
+	// Drop one face — the tetrahedron now has a hole. The three edges
+	// of the dropped face become single-use boundary edges.
+	openFaces := tetFaces[:3]
+	b, nm = countHoleEdges(tetVerts, openFaces)
+	if b != 3 || nm != 0 {
+		t.Errorf("open tetrahedron: boundary=%d nonManifold=%d, want 3,0", b, nm)
+	}
+
+	// Two coplanar triangles sharing an edge, plus a third triangle
+	// duplicating one of those edges — the shared edge appears in
+	// three faces, i.e. non-manifold.
+	dupVerts := [][3]float32{
+		{0, 0, 0},
+		{1, 0, 0},
+		{0, 1, 0},
+		{1, 1, 0},
+	}
+	dupFaces := [][3]uint32{
+		{0, 1, 2}, // edge 1→2
+		{1, 3, 2}, // edge 1→2 reverse (manifold pair so far)
+		{2, 1, 0}, // edge 1→2 again (third use → non-manifold)
+	}
+	b, nm = countHoleEdges(dupVerts, dupFaces)
+	if nm == 0 {
+		t.Errorf("triple-edge mesh: nonManifold=%d, want >0", nm)
+	}
+}
+
 func TestWatertightAfterClip(t *testing.T) {
 	for _, fx := range watertightFixtures {
 		fx := fx

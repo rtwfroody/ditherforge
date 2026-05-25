@@ -79,7 +79,6 @@ func SampleSlab(
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	out := make([]CellSample, 0, len(s.Cells))
 	midZ := 0.5 * (s.ZBot + s.ZTop)
-	_ = cellSize // sample point count is polygon-driven; cellSize is kept for future per-cell tuning
 	for ci := range s.Cells {
 		c := &s.Cells[ci]
 		cx, cy, area := polyCentroid(c.Outer)
@@ -125,76 +124,77 @@ func SampleSlab(
 	return out
 }
 
-// cellInteriorSamplePoints returns a small set of (x, y, midZ) sample
-// points that all lie strictly inside the polygon outer (CCW). Every
-// returned point passes pointInPolygon(outer, x, y) — adjacent cells
-// can't pull their colour into this cell's sample average.
+// cellInteriorSamplePoints returns up to maxSamples (x, y, midZ)
+// sample points that all lie strictly inside the polygon outer (CCW).
+// Every returned point passes pointInPolygon(outer, x, y), so
+// adjacent cells can't pull their colour into this cell's sample
+// average.
 //
-// Strategy:
+// Candidate order (deterministic; first hit wins on bucket equality):
 //
-//   - Start with the signed-area centroid and four bbox-inset points
-//     (corners pulled 30% toward the centroid). For convex / mostly-
-//     convex cells, these are all inside and we're done.
-//   - For non-convex cells (L-shapes from diagonal partition corners,
-//     thin slivers), points that landed outside the polygon are
-//     replaced by rejection-sampled grid points; we sweep a small
-//     deterministic grid over the bbox, keeping points that pass
-//     pointInPolygon, until we have at least minSamples or run out of
-//     candidates.
+//  1. Signed-area centroid.
+//  2. Four bbox-inset points (corners pulled 30% toward the centroid)
+//     — convex cells typically take all four inside.
+//  3. 5×5 grid over the bbox — covers non-convex / L-shaped cells
+//     whose inset corners landed outside the polygon.
 //
+// Candidates are deduped by their 1µm int2D bucket so an inset point
+// that happens to coincide with a grid point isn't sampled twice.
 // Degenerate fallback: if no candidate landed inside (extremely thin
-// polygon where every sample misses), return just the centroid so the
+// polygon where every test misses), return just the centroid so the
 // caller still gets a colour sample.
 func cellInteriorSamplePoints(outer []Point2, cx, cy, midZ float32) [][3]float32 {
-	const (
-		minSamples = 5
-		maxSamples = 9
-	)
+	const maxSamples = 9
 	if len(outer) < 3 {
 		return [][3]float32{{cx, cy, midZ}}
 	}
 	minX, minY, maxX, maxY := polyBounds(outer)
+
 	pts := make([][3]float32, 0, maxSamples)
-	if pointInPolygon(outer, cx, cy) {
-		pts = append(pts, [3]float32{cx, cy, midZ})
+	seen := make(map[int2D]struct{}, maxSamples)
+	tryAdd := func(x, y float32) bool {
+		if len(pts) >= maxSamples {
+			return false
+		}
+		if !pointInPolygon(outer, x, y) {
+			return false
+		}
+		key := int2DOf(Point2{x, y})
+		if _, dup := seen[key]; dup {
+			return false
+		}
+		seen[key] = struct{}{}
+		pts = append(pts, [3]float32{x, y, midZ})
+		return true
 	}
-	// Four bbox-inset candidates: bbox corners pulled 30% toward the
-	// centroid. For convex cells they typically land well inside.
+
+	tryAdd(cx, cy)
 	const inset = 0.30
-	bbCands := [...][2]float32{
+	for _, c := range [...][2]float32{
 		{minX + inset*(maxX-minX), minY + inset*(maxY-minY)},
 		{maxX - inset*(maxX-minX), minY + inset*(maxY-minY)},
 		{maxX - inset*(maxX-minX), maxY - inset*(maxY-minY)},
 		{minX + inset*(maxX-minX), maxY - inset*(maxY-minY)},
+	} {
+		tryAdd(c[0], c[1])
 	}
-	for _, c := range bbCands {
-		if pointInPolygon(outer, c[0], c[1]) {
-			pts = append(pts, [3]float32{c[0], c[1], midZ})
-		}
-	}
-	// Deterministic grid rejection sample to top up to minSamples on
-	// non-convex cells. 5×5 grid over the bbox, snake-walked so a
-	// thin cell that crosses the middle of the bbox still finds
-	// in-polygon points quickly.
-	if len(pts) < minSamples {
-		const grid = 5
-		for gj := 0; gj < grid && len(pts) < maxSamples; gj++ {
-			for gi := 0; gi < grid && len(pts) < maxSamples; gi++ {
-				tx := (float32(gi) + 0.5) / float32(grid)
-				ty := (float32(gj) + 0.5) / float32(grid)
-				x := minX + tx*(maxX-minX)
-				y := minY + ty*(maxY-minY)
-				if pointInPolygon(outer, x, y) {
-					pts = append(pts, [3]float32{x, y, midZ})
-				}
-			}
+	// 5×5 grid over the bbox. Bucket-deduped against earlier
+	// candidates, so for a convex cell where every inset point hit
+	// this just adds 4–5 new fill-in samples; for a thin cell where
+	// the inset points missed, the grid carries the budget.
+	const grid = 5
+	for gj := 0; gj < grid; gj++ {
+		for gi := 0; gi < grid; gi++ {
+			tx := (float32(gi) + 0.5) / float32(grid)
+			ty := (float32(gj) + 0.5) / float32(grid)
+			tryAdd(minX+tx*(maxX-minX), minY+ty*(maxY-minY))
 		}
 	}
 	if len(pts) == 0 {
-		// Polygon is so thin that the bbox grid found no interior
-		// pixel-centre. Use the centroid as a last-resort sample even
-		// if pointInPolygon rejects it (centroid sits on a vertex or
-		// inside a tiny concavity).
+		// Polygon is so thin that every candidate missed. Use the
+		// centroid even if pointInPolygon rejects it (centroid sits
+		// on a vertex or inside a tiny concavity) so the caller
+		// always gets at least one sample.
 		pts = append(pts, [3]float32{cx, cy, midZ})
 	}
 	return pts

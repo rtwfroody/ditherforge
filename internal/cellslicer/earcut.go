@@ -398,7 +398,10 @@ func earcutLinked(ear *ecNode, tris *[][3]uint32) {
 	// ear, then need cure, then find another ear, indefinitely; this
 	// cap ensures pathological input falls into the fan fallback after
 	// O(N²) iterations instead of hanging the goroutine. Count nodes
-	// once to size the cap.
+	// once to size the cap. The cap is clamped at 1<<15 nodes before
+	// squaring so the maxIter multiply never overflows int (the count
+	// itself stops growing at 1<<20, but 16 × (1<<20)² overflows int32
+	// platforms and is meaninglessly large on int64 ones).
 	nNodes := 0
 	for n := ear; ; n = n.next {
 		nNodes++
@@ -406,7 +409,11 @@ func earcutLinked(ear *ecNode, tris *[][3]uint32) {
 			break
 		}
 	}
-	maxIter := 16 * nNodes * nNodes
+	capN := nNodes
+	if capN > 1<<15 {
+		capN = 1 << 15
+	}
+	maxIter := 16 * capN * capN
 	iter := 0
 	for ear.prev != ear.next {
 		if iter++; iter > maxIter {

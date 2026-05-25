@@ -46,9 +46,18 @@ func Quantize(p [3]float32) int3D {
 }
 
 // Dequantize returns the canonical float32 position at the centre of
-// bucket q. The float→int→float round-trip is lossless for any model
-// that fits in float32's 24-bit mantissa at 1µm resolution (model
-// extent up to ~16 km).
+// bucket q.
+//
+// Precision envelopes (different limits, both should be respected):
+//
+//   - float32 round-trip lossless when |coord_mm| × clipperScale fits
+//     in float32's 24-bit mantissa, i.e. ~16 m. Beyond that, individual
+//     positions can drift by a bucket on Dequantize.
+//   - int64 cross/dot in splicePoly3DEdges stays overflow-free while
+//     coord_mm × clipperScale ≲ 0.85 × 10⁹, i.e. model extents up to
+//     ~850 m. This is the tighter of the two limits and the one that
+//     bounds practical cellslicer use; print volumes (cm–m) are deep
+//     inside the envelope.
 func Dequantize(q int3D) [3]float32 {
 	return [3]float32{
 		float32(float64(q.X) * invClipperScale),
@@ -61,6 +70,15 @@ func Dequantize(q int3D) [3]float32 {
 // vertex into the cellslicer pipeline so two paths computing the same
 // logical point land on bit-identical floats — no tolerance, no
 // downstream splice gymnastics.
+//
+// math.Round inside Quantize rounds half-away-from-zero, so values at
+// exact half-bucket boundaries (e.g. +0.0005 mm and −0.0005 mm) round
+// to opposite buckets — the function is symmetric across the origin
+// but not strictly monotone near a tie. In practice the cellslicer's
+// inputs (slab plane Z values, source-tri vertices, intersection
+// lerps) never sit exactly on a half-bucket boundary, but if a future
+// caller hand-constructs such values it should expect to see them
+// snap to two distinct buckets across zero.
 func Snap(p [3]float32) [3]float32 {
 	return Dequantize(Quantize(p))
 }
