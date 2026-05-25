@@ -79,41 +79,18 @@ func SampleSlab(
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	out := make([]CellSample, 0, len(s.Cells))
 	midZ := 0.5 * (s.ZBot + s.ZTop)
+	_ = cellSize // sample point count is polygon-driven; cellSize is kept for future per-cell tuning
 	for ci := range s.Cells {
 		c := &s.Cells[ci]
 		cx, cy, area := polyCentroid(c.Outer)
-		// Span the full cell footprint with the jitter grid — the
-		// ±off range below is the cell's half-width, not a quarter,
-		// so a 5×5 grid lands evenly across the polygon. The old
-		// quarter-width offset clustered all samples in the middle
-		// 25% of the cell and could miss the rest of the surface
-		// that contributes to the cell's volume.
-		off := cellSize / 2
-		if off <= 0 {
-			// Per-cell fallback: bbox-derived offset.
-			minX, minY, maxX, maxY := polyBounds(c.Outer)
-			w := maxX - minX
-			h := maxY - minY
-			if w < h {
-				off = w / 2
-			} else {
-				off = h / 2
-			}
-		}
-		// 5×5 jitter grid spanning ±off in X and Y. The earlier 5-
-		// point "+ pattern" was undersampling the texture: for the
-		// production earth.glb at cellSize=0.4 mm, each cell
-		// projects to ~2–3 texture pixels, and a single point
-		// sample can land on an outlier texel.
-		const grid = 5
-		points := make([][3]float32, 0, grid*grid)
-		for gj := 0; gj < grid; gj++ {
-			for gi := 0; gi < grid; gi++ {
-				gx := -off + 2*off*float32(gi)/float32(grid-1)
-				gy := -off + 2*off*float32(gj)/float32(grid-1)
-				points = append(points, [3]float32{cx + gx, cy + gy, midZ})
-			}
-		}
+		// Cell-interior sample points (Step 4 of the cleanup plan):
+		// land every sample STRICTLY inside c.Outer so adjacent
+		// geometry's colour can't bleed in. For convex cells the
+		// centroid + 4 bbox-inset points usually all land inside;
+		// for thin or L-shaped cells (diagonal partition corners),
+		// the rejection-sampling fallback fills the budget with a
+		// deterministic in-polygon walk.
+		points := cellInteriorSamplePoints(c.Outer, cx, cy, midZ)
 		var rSum, gSum, bSum, wSum float32
 		anyAlpha := false
 		for _, p := range points {
@@ -146,6 +123,81 @@ func SampleSlab(
 		})
 	}
 	return out
+}
+
+// cellInteriorSamplePoints returns a small set of (x, y, midZ) sample
+// points that all lie strictly inside the polygon outer (CCW). Every
+// returned point passes pointInPolygon(outer, x, y) — adjacent cells
+// can't pull their colour into this cell's sample average.
+//
+// Strategy:
+//
+//   - Start with the signed-area centroid and four bbox-inset points
+//     (corners pulled 30% toward the centroid). For convex / mostly-
+//     convex cells, these are all inside and we're done.
+//   - For non-convex cells (L-shapes from diagonal partition corners,
+//     thin slivers), points that landed outside the polygon are
+//     replaced by rejection-sampled grid points; we sweep a small
+//     deterministic grid over the bbox, keeping points that pass
+//     pointInPolygon, until we have at least minSamples or run out of
+//     candidates.
+//
+// Degenerate fallback: if no candidate landed inside (extremely thin
+// polygon where every sample misses), return just the centroid so the
+// caller still gets a colour sample.
+func cellInteriorSamplePoints(outer []Point2, cx, cy, midZ float32) [][3]float32 {
+	const (
+		minSamples = 5
+		maxSamples = 9
+	)
+	if len(outer) < 3 {
+		return [][3]float32{{cx, cy, midZ}}
+	}
+	minX, minY, maxX, maxY := polyBounds(outer)
+	pts := make([][3]float32, 0, maxSamples)
+	if pointInPolygon(outer, cx, cy) {
+		pts = append(pts, [3]float32{cx, cy, midZ})
+	}
+	// Four bbox-inset candidates: bbox corners pulled 30% toward the
+	// centroid. For convex cells they typically land well inside.
+	const inset = 0.30
+	bbCands := [...][2]float32{
+		{minX + inset*(maxX-minX), minY + inset*(maxY-minY)},
+		{maxX - inset*(maxX-minX), minY + inset*(maxY-minY)},
+		{maxX - inset*(maxX-minX), maxY - inset*(maxY-minY)},
+		{minX + inset*(maxX-minX), maxY - inset*(maxY-minY)},
+	}
+	for _, c := range bbCands {
+		if pointInPolygon(outer, c[0], c[1]) {
+			pts = append(pts, [3]float32{c[0], c[1], midZ})
+		}
+	}
+	// Deterministic grid rejection sample to top up to minSamples on
+	// non-convex cells. 5×5 grid over the bbox, snake-walked so a
+	// thin cell that crosses the middle of the bbox still finds
+	// in-polygon points quickly.
+	if len(pts) < minSamples {
+		const grid = 5
+		for gj := 0; gj < grid && len(pts) < maxSamples; gj++ {
+			for gi := 0; gi < grid && len(pts) < maxSamples; gi++ {
+				tx := (float32(gi) + 0.5) / float32(grid)
+				ty := (float32(gj) + 0.5) / float32(grid)
+				x := minX + tx*(maxX-minX)
+				y := minY + ty*(maxY-minY)
+				if pointInPolygon(outer, x, y) {
+					pts = append(pts, [3]float32{x, y, midZ})
+				}
+			}
+		}
+	}
+	if len(pts) == 0 {
+		// Polygon is so thin that the bbox grid found no interior
+		// pixel-centre. Use the centroid as a last-resort sample even
+		// if pointInPolygon rejects it (centroid sits on a vertex or
+		// inside a tiny concavity).
+		pts = append(pts, [3]float32{cx, cy, midZ})
+	}
+	return pts
 }
 
 func resolveSearchRadius(searchRadius, cellSize float32) float32 {
