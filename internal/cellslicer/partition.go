@@ -521,12 +521,12 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 	stats.Final = len(cells)
 	// Tag each cell's outer-boundary edges so the cell-prism clip can
 	// run open-ended on the partition's outer perimeter. See Cell's
-	// OuterEdgeOnBoundary field doc for the why.
+	// OuterEdgeOpen field doc for the why.
 	MarkOuterEdges(cells, fpCur)
 	return cells, r, stats
 }
 
-// MarkOuterEdges populates each cell's OuterEdgeOnBoundary field by
+// MarkOuterEdges populates each cell's OuterEdgeOpen field by
 // scanning the slab's cells for shared directed half-edges. An edge
 // is "outer" iff:
 //
@@ -578,7 +578,7 @@ func MarkOuterEdges(cells []Cell, fp *Footprint) {
 			}
 			flags[k] = true
 		}
-		cells[ci].OuterEdgeOnBoundary = flags
+		cells[ci].OuterEdgeOpen = flags
 	}
 }
 
@@ -597,7 +597,12 @@ func insideFootprintOnOuterSide(fp *Footprint, a, b Point2) bool {
 	dx, dy := b[0]-a[0], b[1]-a[1]
 	length2 := dx*dx + dy*dy
 	if length2 == 0 {
-		return false
+		// Zero-length edge — treat as "inside fp" so the caller
+		// keeps the edge clipping rather than tagging it as a
+		// past-partition opening. Real partitions don't produce
+		// zero-length cell-Outer edges; this branch is paranoia
+		// against future raster simplification regressions.
+		return true
 	}
 	length := float32(math.Sqrt(float64(length2)))
 	// CCW polygon → interior on the left of edge direction →
@@ -605,7 +610,10 @@ func insideFootprintOnOuterSide(fp *Footprint, a, b Point2) bool {
 	// edge direction).
 	nx, ny := dy/length, -dx/length
 	midX, midY := (a[0]+b[0])/2, (a[1]+b[1])/2
-	const probeMM = float32(0.001) // 1µm — clear of float-precision noise at the edge
+	// Probe ≫ int2D bucket size (1µm @ clipperScale=1000) to clear
+	// bucket-grid noise but well inside the smallest pxSize cells
+	// (~125µm) so we stay clear of legitimate neighbour territory.
+	const probeMM = float32(0.01)
 	return fp.Contains(midX+probeMM*nx, midY+probeMM*ny)
 }
 

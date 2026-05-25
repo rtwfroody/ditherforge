@@ -214,7 +214,7 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 		sb.WriteString(`"/>`)
 
 		// Overlay: cells' outer-boundary edges (open-ended at clip
-		// time — see Cell.OuterEdgeOnBoundary). Rendered in red, 2×
+		// time — see Cell.OuterEdgeOpen). Rendered in red, 2×
 		// the base edge width so they're visibly thicker than the
 		// black underlay. Lets a reader of the layer dump see at a
 		// glance which edges absorb source geometry that nudges past
@@ -369,13 +369,13 @@ func appendFootprintPaths(sb *strings.Builder, fp *Footprint) {
 }
 
 // anyBoundaryEdgeTagged reports whether at least one cell has a
-// populated OuterEdgeOnBoundary slice with a true entry. Lets the
+// populated OuterEdgeOpen slice with a true entry. Lets the
 // SVG renderer skip emitting an empty outer-edge overlay (and the
 // associated path tag) when nothing is tagged — keeps legacy
 // PartitionSlab debug output free of an empty <path>.
 func anyBoundaryEdgeTagged(cells []Cell) bool {
 	for ci := range cells {
-		flags := cells[ci].OuterEdgeOnBoundary
+		flags := cells[ci].OuterEdgeOpen
 		for _, f := range flags {
 			if f {
 				return true
@@ -386,7 +386,7 @@ func anyBoundaryEdgeTagged(cells []Cell) bool {
 }
 
 // appendOuterBoundaryEdgePaths emits one "M a L b" subpath per cell
-// edge where OuterEdgeOnBoundary[k] is true. Caller wraps in a single
+// edge where OuterEdgeOpen[k] is true. Caller wraps in a single
 // stroked <path> element. Each edge becomes its own M/L pair (rather
 // than joining into long polylines) because adjacent outer-boundary
 // edges in CCW order are not necessarily contiguous on the page —
@@ -396,7 +396,7 @@ func appendOuterBoundaryEdgePaths(sb *strings.Builder, cells []Cell) {
 	first := true
 	for ci := range cells {
 		pts := cells[ci].Outer
-		flags := cells[ci].OuterEdgeOnBoundary
+		flags := cells[ci].OuterEdgeOpen
 		if len(flags) != len(pts) {
 			continue
 		}

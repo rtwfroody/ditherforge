@@ -440,10 +440,10 @@ func clipPolyToCellsCap(
 //     topologically clean.
 //
 // Open-ended outer edges: any cell.Outer edge tagged in
-// cell.OuterEdgeOnBoundary skips its Sutherland-Hodgman cut entirely
+// cell.OuterEdgeOpen skips its Sutherland-Hodgman cut entirely
 // — slabPoly fragments that extend past the partition's outer boundary
 // land in this cell instead of being silently dropped. See the field
-// doc on Cell for the rationale. Nil OuterEdgeOnBoundary keeps the
+// doc on Cell for the rationale. Nil OuterEdgeOpen keeps the
 // historical strict-clip behaviour (every edge cuts), so legacy
 // PartitionSlab cells still work unchanged.
 //
@@ -459,7 +459,7 @@ func clipPolyToCellsCap(
 // emits CCW (Clipper non-zero union normalises). The defensive
 // reversal that used to live here was dropped along with the open-ended
 // feature: silently reversing the polygon while NOT reversing the
-// OuterEdgeOnBoundary flags would scramble the open/closed-edge
+// OuterEdgeOpen flags would scramble the open/closed-edge
 // mapping. If a future caller breaks the CCW invariant, the
 // open-ended logic would mark all the wrong edges; better to fail
 // loudly via assert-CCW upstream than to half-cover the failure here.
@@ -471,7 +471,7 @@ func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cell *Cell) [][][3]floa
 	if len(slabPolyPts) < 3 || len(cellOuter) < 3 {
 		return nil
 	}
-	outerFlags := cell.OuterEdgeOnBoundary
+	outerFlags := cell.OuterEdgeOpen
 	n := len(cellOuter)
 	if isConvex(cellOuter) {
 		clipped := slabPolyPts
@@ -495,24 +495,20 @@ func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cell *Cell) [][][3]floa
 		clipped := slabPolyPts
 		for k := 0; k < 3; k++ {
 			i, j := int(tri[k]), int(tri[(k+1)%3])
-			if outerFlags != nil {
-				// Cell.Outer edge? Endpoints consecutive (in either direction)
-				// in the original cell.Outer index space.
-				switch {
-				case j == (i+1)%n:
-					if outerFlags[i] {
-						continue
-					}
-				case i == (j+1)%n:
-					if outerFlags[j] {
-						continue
-					}
-				}
-				// Otherwise (diagonals), fall through to always clip.
+			// Cell.Outer edge? Earcut emits CCW triangles whose vertex
+			// indices reference cellOuter in CCW order, so an earcut-tri
+			// edge (i, j) coincides with cell.Outer edge[i] iff j ==
+			// (i+1)%n. The reverse direction (j → i with i == (j+1)%n)
+			// would only fire for CW earcut output, which the CCW
+			// invariant upstream guarantees doesn't happen. Anything
+			// non-consecutive is an earcut diagonal — those must always
+			// clip (they separate sibling earcut tris inside the same
+			// cell; skipping them would let one tri's piece leak into
+			// the next).
+			if outerFlags != nil && j == (i+1)%n && outerFlags[i] {
+				continue
 			}
-			a := earVerts[i]
-			b := earVerts[j]
-			clipped = clipPolyByCellEdge(clipped, a, b)
+			clipped = clipPolyByCellEdge(clipped, earVerts[i], earVerts[j])
 			if len(clipped) < 3 {
 				break
 			}

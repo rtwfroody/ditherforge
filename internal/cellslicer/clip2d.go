@@ -157,6 +157,11 @@ type slabPoly struct {
 // shared Z planes. Each pass uses runtime.NumCPU() workers; details
 // of the splice/triangulation are in clip2d_subdivide.go.
 func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex) (ClipResult, error) {
+	// Reset per-invocation diagnostic counters. Package-level state
+	// would otherwise accumulate across calls (test suites, the dev
+	// GUI's re-slice, future batch workflows), making the
+	// "non-zero == this run tripped it" semantic a lie.
+	atomic.StoreUint64(&verticalPathRiskCount, 0)
 	offsets := make([]int, len(slabs)+1)
 	for si := range slabs {
 		offsets[si+1] = offsets[si] + len(slabs[si].Cells)
@@ -683,9 +688,58 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 			cr.Faces[i] = [3]uint32{remap[f[0]], remap[f[1]], remap[f[2]]}
 		}
 	}
+	// Cross-face dedup. With open-ended ring cells, two cells whose
+	// outer edges meet at a convex partition corner both have an open
+	// edge perpendicular to the other. A slabPoly fragment past that
+	// corner falls in BOTH cells' open half-spaces, so both clip-paths
+	// emit the same triangle (identical post-vertex-dedup IDs, same
+	// winding). Without this dedup pass the past-corner fragment is
+	// double-counted: each copy inherits its owning cell's colour,
+	// producing the building/top tile-mae regression and the earth/side
+	// + earth/persp outlier-pixel regressions noted in 5d60ff6.
+	//
+	// Canonicalise each face by rotating to smallest-vertex-first
+	// (preserves CCW direction); dedup picks the first emitter for
+	// each canonical key. Colour assignment for double-claimed
+	// triangles is therefore "first cell to clip wins" — a stable
+	// (worker-order-dependent) but arbitrary choice. A future fix
+	// would do a Voronoi-style ownership pass at clip time so the
+	// rightful cell claims the past-corner region in the first place
+	// and we don't need this post-hoc cleanup.
+	if len(cr.Faces) > 0 {
+		canon := func(f [3]uint32) [3]uint32 {
+			switch {
+			case f[0] <= f[1] && f[0] <= f[2]:
+				return f
+			case f[1] <= f[2]:
+				return [3]uint32{f[1], f[2], f[0]}
+			default:
+				return [3]uint32{f[2], f[0], f[1]}
+			}
+		}
+		seenFace := make(map[[3]uint32]struct{}, len(cr.Faces))
+		keptFaces := cr.Faces[:0]
+		keptIdx := cr.FaceCellIdx[:0]
+		var dropped int
+		for i, f := range cr.Faces {
+			key := canon(f)
+			if _, dup := seenFace[key]; dup {
+				dropped++
+				continue
+			}
+			seenFace[key] = struct{}{}
+			keptFaces = append(keptFaces, f)
+			keptIdx = append(keptIdx, cr.FaceCellIdx[i])
+		}
+		cr.Faces = keptFaces
+		cr.FaceCellIdx = keptIdx
+		if debugHoles && dropped > 0 {
+			fmt.Fprintf(os.Stderr, "  [hole-report] cross-face dedup: dropped %d duplicate faces (corner-duplication)\n", dropped)
+		}
+	}
 	if n := atomic.LoadUint64(&verticalPathRiskCount); n > 0 {
 		fmt.Fprintf(os.Stderr,
-			"  Clip: WARNING: %d vertical-path slabPolys had source vertices outside the slab footprint — open-ended cells don't apply on the vertical clip path, so geometry past the partition outline may be silently dropped. Re-run with DITHERFORGE_HOLE_REPORT=1 for the per-slabPoly dump (TODO: not yet implemented for the vertical path).\n",
+			"  Clip: WARNING: %d vertical-path slabPolys had source vertices outside the slab footprint — open-ended cells don't apply on the vertical clip path (its clip math is wall strips, not Sutherland-Hodgman against cell.Outer), so geometry past the partition outline may be silently dropped.\n",
 			n)
 	}
 	return cr, nil
