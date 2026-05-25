@@ -187,7 +187,7 @@ func TestSpliceFixesAcrossConvexity(t *testing.T) {
 	for _, ps := range [][][][3]float32{piecesA, piecesB} {
 		for _, p := range ps {
 			for _, v := range p {
-				seen[int3DOf(v)] = struct{}{}
+				seen[Quantize(v)] = struct{}{}
 			}
 		}
 	}
@@ -232,7 +232,7 @@ func TestFourCellsAtCornerVertexMatch(t *testing.T) {
 		{1.9, 1.9, 5},
 		{0.1, 1.9, 5},
 	}
-	corner := int3DOf([3]float32{1, 1, 5})
+	corner := Quantize([3]float32{1, 1, 5})
 	for _, c := range []struct {
 		name  string
 		outer []Point2
@@ -247,7 +247,7 @@ func TestFourCellsAtCornerVertexMatch(t *testing.T) {
 		found := false
 		for _, p := range pieces {
 			for _, v := range p {
-				if int3DOf(v) == corner {
+				if Quantize(v) == corner {
 					found = true
 				}
 			}
@@ -354,16 +354,16 @@ func TestSpliceBridgesCrossSlabSeam(t *testing.T) {
 			a := tc.slab0Edge[0]
 			b := tc.slab0Edge[1]
 			poly := [][3]float32{a, b}
-			set := []int3D{int3DOf(tc.insertPoint)}
+			set := []int3D{Quantize(tc.insertPoint)}
 			spliced := splicePoly3DEdges(poly, set)
-			pIns := int3DOf(tc.insertPoint)
+			pIns := Quantize(tc.insertPoint)
 			found := false
 			for _, v := range spliced {
-				if int3DOf(v) == pIns {
+				if Quantize(v) == pIns {
 					found = true
 				}
 			}
-			t.Logf("input poly (int): a=%v b=%v", int3DOf(a), int3DOf(b))
+			t.Logf("input poly (int): a=%v b=%v", Quantize(a), Quantize(b))
 			t.Logf("trying to insert: %v", pIns)
 			t.Logf("spliced result (%d verts): %v", len(spliced), spliced)
 			if found == tc.wantInsert {
@@ -390,9 +390,9 @@ func TestSpliceBridgesCrossSlabSeam(t *testing.T) {
 // expected to work under the current strict splice or only after the
 // upcoming float-based one.
 func sameXYBucket(a, b, p [3]float32) bool {
-	ai := int3DOf(a)
-	bi := int3DOf(b)
-	pi := int3DOf(p)
+	ai := Quantize(a)
+	bi := Quantize(b)
+	pi := Quantize(p)
 	bx := bi.X - ai.X
 	by := bi.Y - ai.Y
 	bz := bi.Z - ai.Z

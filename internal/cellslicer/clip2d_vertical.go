@@ -214,17 +214,19 @@ func clipPolyByPlaneXY(poly [][3]float32, nx, ny, d float32) [][3]float32 {
 
 // lerpAtPlaneXY returns the point on segment s→e where the plane's
 // XY-evaluation equals d. (sVal, eVal) = nx*x+ny*y at endpoints.
+// Output is snapped to the 1µm grid (via Snap) — see lerpAtZ for the
+// canonical-quantisation rationale.
 func lerpAtPlaneXY(s, e [3]float32, sVal, eVal, d float32) [3]float32 {
 	denom := eVal - sVal
 	if absf(denom) < 1e-12 {
-		return s
+		return Snap(s)
 	}
 	t := (d - sVal) / denom
-	return [3]float32{
+	return Snap([3]float32{
 		s[0] + t*(e[0]-s[0]),
 		s[1] + t*(e[1]-s[1]),
 		s[2] + t*(e[2]-s[2]),
-	}
+	})
 }
 
 // triangleNormal returns the (un-normalized) normal of triangle abc,

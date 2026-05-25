@@ -26,7 +26,6 @@
 package cellslicer
 
 import (
-	"math"
 	"sort"
 	"sync/atomic"
 )
@@ -90,30 +89,9 @@ func bumpNHist(n int) {
 	}
 }
 
-// int3D is a Clipper-integer 3D point. Z uses the same 1µm scale.
-type int3D struct {
-	X, Y, Z int64
-}
-
-func int3DOf(p [3]float32) int3D {
-	return int3D{
-		X: int64(math.Round(float64(p[0]) * clipperScale)),
-		Y: int64(math.Round(float64(p[1]) * clipperScale)),
-		Z: int64(math.Round(float64(p[2]) * clipperScale)),
-	}
-}
-
-func int3DToFloat(p int3D) [3]float32 {
-	return [3]float32{
-		float32(float64(p.X) * invClipperScale),
-		float32(float64(p.Y) * invClipperScale),
-		float32(float64(p.Z) * invClipperScale),
-	}
-}
-
 // splicePoly3DEdges walks each edge of poly and inserts any vertex
-// from set that lies within 1µm of the edge's interior, in order
-// along the edge.
+// from set that lies strictly on the edge's interior, in order along
+// the edge.
 //
 // Called in Phase 2 with the slab-wide seen3D union set produced by
 // Phase 1. Adjacent cells' outlines can have unequal vertex sets
@@ -123,132 +101,91 @@ func int3DToFloat(p int3D) [3]float32 {
 // piece against the slab-wide union produces matching subdivisions
 // on both sides — no T-junctions inside the slab.
 //
-// Float math. The math used to be int64 cross-product == 0
-// collinearity, which is mathematically exact but operates on
-// int3D values that came from float→int rounding upstream. For
-// slanted source segments, a cell-boundary crossing computed in
-// float and rounded to 1µm ends up within a bucket of the line but
-// not *exactly* collinear in int64 — splice rejected those, leaving
-// the cross-slab seams it was designed to fix unfixed. The float-
-// tolerance check matches what the comparison actually means
-// (perpendicular distance ≤ one 1µm bucket).
-//
-// The set is keyed by int3D for hash dedup, but the splice math
-// itself is float64; we convert each candidate via int3DToFloat for
-// the comparison. The inserted point is the bucket-position
-// (int3DToFloat-rounded float) so coincident splices across cells
-// hash-equal in the downstream cross-piece dedup.
+// Strict int64 arithmetic: every polygon vertex is on the 1µm grid
+// (the slab Z-clip and the cell-prism XY-clip both call Snap on
+// every emitted vertex — see lerpAtZ and lerpAtPlaneXY), so a
+// candidate from seen3D either lies *exactly* on the edge (cross
+// product (p−a)×(b−a) is the zero vector) or it doesn't. No
+// tolerance, no float gymnastics. With on-grid endpoints the dot
+// product (p−a)·(b−a) gives an exact int64 parameter in
+// [0, |b−a|²]; strict 0 < t < |b−a|² excludes endpoints.
 func splicePoly3DEdges(poly [][3]float32, set []int3D) [][3]float32 {
 	if len(poly) < 2 || len(set) == 0 {
 		return poly
 	}
-	// Tolerance: 1 Clipper bucket = 1µm in model coords. Squared
-	// since the check uses |cross|² ≤ tol² × |b-a|² to avoid a sqrt.
-	const tol = float64(invClipperScale)
-	const tol2 = tol * tol
-
-	// Pre-compute the int3D bucket of every polygon vertex. Used
-	// to reject candidates equal to ANY polygon vertex, not just
-	// the current edge's endpoints — without this, a candidate
-	// that lies on edge i AND coincides (in bucket) with vertex
-	// i+2 would get inserted on edge i and then re-emitted as
-	// poly[i+2], creating a consecutive same-bucket pair in
-	// outInt. After cross-piece dedup (clip2d.go), that pair
-	// collapses to one global vertex and fan triangulation emits
-	// degenerate triangles whose half-edges blow up the
-	// non-manifold count.
+	// Quantise polygon once. We rely on every vertex already sitting
+	// on the 1µm grid; Quantize is just the int3D view of the same
+	// position.
+	polyInt := make([]int3D, len(poly))
 	polyKey := make(map[int3D]struct{}, len(poly))
-	for _, p := range poly {
-		polyKey[int3DOf(p)] = struct{}{}
+	for i, p := range poly {
+		q := Quantize(p)
+		polyInt[i] = q
+		polyKey[q] = struct{}{}
 	}
-
-	// Pre-convert set to float64 once for the per-candidate math,
-	// keeping the int3D parallel for endpoint-equality + insert
-	// dedup. Drop candidates that match any polygon vertex up-front
-	// (see polyKey rationale above).
-	type candPt struct {
-		ip int3D
-		x  float64
-		y  float64
-		z  float64
-	}
-	pts := make([]candPt, 0, len(set))
+	// Drop candidates that match any polygon vertex. Without this a
+	// candidate that lies on edge i and equals poly[i+2] would get
+	// inserted on edge i and then re-emitted as poly[i+2], creating
+	// a consecutive duplicate that fan-triangulation downstream
+	// turns into a zero-area face and a non-manifold edge.
+	cands := make([]int3D, 0, len(set))
 	for _, p := range set {
 		if _, ok := polyKey[p]; ok {
 			continue
 		}
-		pts = append(pts, candPt{
-			ip: p,
-			x:  float64(p.X) * invClipperScale,
-			y:  float64(p.Y) * invClipperScale,
-			z:  float64(p.Z) * invClipperScale,
-		})
+		cands = append(cands, p)
+	}
+	if len(cands) == 0 {
+		return poly
 	}
 
-	out := make([][3]float32, 0, len(poly)+len(pts))
-	// outInt is the parallel int3D log of what's been appended,
-	// used to suppress consecutive duplicate inserts (two near-
-	// coincident candidates that round to the same bucket).
-	outInt := make([]int3D, 0, len(poly)+len(pts))
-	n := len(poly)
-	// emitVertex appends v/vi to out/outInt but only if vi differs
-	// from the immediately-prior emitted bucket. Centralising the
-	// dedup means the polygon-vertex append at the top of every
-	// edge iteration also gets it — without that, a sequence
-	// `[..., insertOnEdgeI=X, poly[i+1]=X]` would slip through.
-	emitVertex := func(v [3]float32, vi int3D) {
-		if len(outInt) > 0 && outInt[len(outInt)-1] == vi {
+	out := make([][3]float32, 0, len(poly)+len(cands))
+	outInt := make([]int3D, 0, len(poly)+len(cands))
+	emit := func(v [3]float32, vi int3D) {
+		if n := len(outInt); n > 0 && outInt[n-1] == vi {
 			return
 		}
 		out = append(out, v)
 		outInt = append(outInt, vi)
 	}
-	type cand struct {
-		t  float64
+	type insert struct {
+		t  int64
 		ip int3D
-		x  float64
-		y  float64
-		z  float64
 	}
+	n := len(poly)
 	for i := 0; i < n; i++ {
-		af := poly[i]
-		bf := poly[(i+1)%n]
-		ax, ay, az := float64(af[0]), float64(af[1]), float64(af[2])
-		bx, by, bz := float64(bf[0])-ax, float64(bf[1])-ay, float64(bf[2])-az
+		ai := polyInt[i]
+		bi := polyInt[(i+1)%n]
+		emit(poly[i], ai)
+		bx := bi.X - ai.X
+		by := bi.Y - ai.Y
+		bz := bi.Z - ai.Z
 		ab2 := bx*bx + by*by + bz*bz
-		ai := int3DOf(af)
-		emitVertex(af, ai)
 		if ab2 == 0 {
 			continue
 		}
-		tolAb2 := tol2 * ab2
-		var cands []cand
-		for _, c := range pts {
-			px := c.x - ax
-			py := c.y - ay
-			pz := c.z - az
-			// Cross (p−a) × (b−a). |cross|² ≤ tol² × |b−a|²
-			// iff perpendicular distance from p to the line ≤ tol.
-			cx := py*bz - pz*by
-			cy := pz*bx - px*bz
-			cz := px*by - py*bx
-			cross2 := cx*cx + cy*cy + cz*cz
-			if cross2 > tolAb2 {
+		var inserts []insert
+		for _, p := range cands {
+			px := p.X - ai.X
+			py := p.Y - ai.Y
+			pz := p.Z - ai.Z
+			// Exact int64 collinearity: (p−a) × (b−a) is the zero
+			// vector iff p lies on the line through a, b.
+			if py*bz-pz*by != 0 || pz*bx-px*bz != 0 || px*by-py*bx != 0 {
 				continue
 			}
-			// Project p onto the edge: t = (p−a)·(b−a). Strictly
-			// between the endpoints means 0 < t < |b−a|².
+			// Strictly between endpoints: 0 < t < |b−a|².
 			t := px*bx + py*by + pz*bz
 			if t <= 0 || t >= ab2 {
 				continue
 			}
-			cands = append(cands, cand{t: t, ip: c.ip, x: c.x, y: c.y, z: c.z})
+			inserts = append(inserts, insert{t: t, ip: p})
 		}
-		if len(cands) > 1 {
-			sort.Slice(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
+		if len(inserts) > 1 {
+			sort.Slice(inserts, func(i, j int) bool { return inserts[i].t < inserts[j].t })
 		}
-		for _, c := range cands {
-			emitVertex([3]float32{float32(c.x), float32(c.y), float32(c.z)}, c.ip)
+		for _, ins := range inserts {
+			emit(Dequantize(ins.ip), ins.ip)
 		}
 	}
 	if n2 := len(outInt); n2 > 1 && outInt[0] == outInt[n2-1] {
@@ -411,7 +348,7 @@ func clipPolyToCellsCap(
 				continue
 			}
 			for _, v := range piece {
-				seen[int3DOf(v)] = struct{}{}
+				seen[Quantize(v)] = struct{}{}
 			}
 			dst = append(dst, cellPiece{
 				cellIdx: int32(ci),
@@ -592,7 +529,7 @@ func clipPolyToCellsVertical(
 				continue
 			}
 			for _, v := range clipped {
-				seen[int3DOf(v)] = struct{}{}
+				seen[Quantize(v)] = struct{}{}
 			}
 			dst = append(dst, cellPiece{
 				cellIdx: int32(ci),
@@ -723,7 +660,7 @@ func dedup3DPoly(poly [][3]float32) [][3]float32 {
 	out := make([][3]float32, 0, len(poly))
 	outInt := make([]int3D, 0, len(poly))
 	for _, p := range poly {
-		ip := int3DOf(p)
+		ip := Quantize(p)
 		if n := len(outInt); n > 0 && outInt[n-1] == ip {
 			continue
 		}

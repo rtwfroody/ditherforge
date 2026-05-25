@@ -71,9 +71,9 @@ func reportHolesByPos(stage string, verts [][3]float32, faces [][3]uint32, slabZ
 	}
 	counts := make(map[ek]int, len(faces)*2)
 	for _, f := range faces {
-		va := int3DOf(verts[f[0]])
-		vb := int3DOf(verts[f[1]])
-		vc := int3DOf(verts[f[2]])
+		va := Quantize(verts[f[0]])
+		vb := Quantize(verts[f[1]])
+		vc := Quantize(verts[f[2]])
 		if va != vb {
 			counts[mk(va, vb)]++
 		}
@@ -661,7 +661,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	// dedup, downstream slicing reads each fragment in isolation and
 	// the first-layer cross-section comes out as N disconnected
 	// segments → Orca reports "empty initial layer". Dedup by
-	// int3DOf (1µm-quantized 3D position) — same key the splice set
+	// Quantize (1µm-quantized 3D position) — same key the splice set
 	// uses, so coincident-coord verts hash equal. Cross-slab dedup
 	// works for free because slabs[k].ZTop and slabs[k+1].ZBot come
 	// from the same planes[k+1] float32.
@@ -674,7 +674,7 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 		// cr.Verts[i+1].
 		kept := cr.Verts[:0]
 		for i, v := range cr.Verts {
-			key := int3DOf(v)
+			key := Quantize(v)
 			id, ok := seen[key]
 			if !ok {
 				id = uint32(len(kept))
@@ -1043,6 +1043,13 @@ func sliceTriangleToSlab(a, b, c [3]float32, zBot, zTop float32) *slabPoly {
 	if zMax < zBot || zMin > zTop {
 		return nil
 	}
+	// Snap the source triangle to the 1µm grid up-front so every
+	// vertex in the slab/cell clip output (source verts, lerp'd
+	// boundaries, splice insertions) lives on the same canonical
+	// grid. See quant.go and lerpAtZ for rationale.
+	a = Snap(a)
+	b = Snap(b)
+	c = Snap(c)
 	// Build the sub-polygon by clipping against z >= zBot then z <= zTop.
 	poly := [][3]float32{a, b, c}
 	poly = clipPolygonByZHalfSpace(poly, zBot, true /* keep z >= zBot */)
@@ -1136,17 +1143,22 @@ func clipPolygonByZHalfSpace(poly [][3]float32, zPlane float32, keepGreater bool
 	return out
 }
 
-// lerpAtZ returns the point on segment a→b at Z = z.
+// lerpAtZ returns the point on segment a→b at Z = z, snapped to the
+// 1µm grid (via Snap). Snapping the output here is what lets the
+// splice machinery in clip2d_subdivide.go use strict int64
+// collinearity instead of float tolerance: two paths computing the
+// same intersection on the same edge land on bit-identical floats,
+// so their int3D buckets match exactly.
 func lerpAtZ(a, b [3]float32, z float32) [3]float32 {
 	if absf(b[2]-a[2]) < 1e-12 {
-		return a
+		return Snap(a)
 	}
 	t := (z - a[2]) / (b[2] - a[2])
-	return [3]float32{
+	return Snap([3]float32{
 		a[0] + t*(b[0]-a[0]),
 		a[1] + t*(b[1]-a[1]),
 		z,
-	}
+	})
 }
 
 func polyBoundsP2(pts []Point2) (minX, minY, maxX, maxY float32) {

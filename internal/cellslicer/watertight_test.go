@@ -128,7 +128,7 @@ func TestWatertightAfterClip(t *testing.T) {
 }
 
 // countHoleEdges returns (boundary, nonManifold) edge counts keyed by 1µm
-// quantised 3D position — same int3DOf bucket the splice and cross-piece
+// quantised 3D position — same Quantize bucket the splice and cross-piece
 // dedup use, so coincident-position vertices that didn't share an index
 // still collapse to one edge.
 //
@@ -144,9 +144,9 @@ func countHoleEdges(verts [][3]float32, faces [][3]uint32) (boundary, nonManifol
 	}
 	counts := make(map[ek]int, len(faces)*2)
 	for _, f := range faces {
-		va := int3DOf(verts[f[0]])
-		vb := int3DOf(verts[f[1]])
-		vc := int3DOf(verts[f[2]])
+		va := Quantize(verts[f[0]])
+		vb := Quantize(verts[f[1]])
+		vc := Quantize(verts[f[2]])
 		if va != vb {
 			counts[mk(va, vb)]++
 		}

@@ -260,9 +260,9 @@ func vertexLiesStrictlyOnAnyPlanarEdge(p int3D, pieces []cellPiece, planeZ int64
 			continue
 		}
 		var aPrev int3D
-		aPrev = int3DOf(pc.pts[n-1])
+		aPrev = Quantize(pc.pts[n-1])
 		for i := 0; i < n; i++ {
-			b := int3DOf(pc.pts[i])
+			b := Quantize(pc.pts[i])
 			a := aPrev
 			aPrev = b
 			if a.Z != planeZ || b.Z != planeZ {
