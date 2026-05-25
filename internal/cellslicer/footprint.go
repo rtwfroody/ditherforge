@@ -99,6 +99,51 @@ func OffsetFootprint(fp *Footprint, distance float32) *Footprint {
 	return off
 }
 
+// footprintBoolean is the shared Clipper2D backend for the Footprint
+// set operations below. op is the Clipper boolean type.
+func footprintBoolean(a, b *Footprint, op clipper.ClipType) *Footprint {
+	aPaths := footprintToClipperPaths(a)
+	bPaths := footprintToClipperPaths(b)
+	c := clipper.NewClipper(clipper.IoNone)
+	if len(aPaths) > 0 {
+		c.AddPaths(aPaths, clipper.PtSubject, true)
+	}
+	if len(bPaths) > 0 {
+		c.AddPaths(bPaths, clipper.PtClip, true)
+	}
+	tree, ok := c.Execute2(op, clipper.PftNonZero, clipper.PftNonZero)
+	if !ok || tree == nil {
+		return &Footprint{}
+	}
+	out := &Footprint{}
+	for _, child := range tree.Childs() {
+		collectFootprintLoops(child, out)
+	}
+	return out
+}
+
+// FootprintIntersect returns a ∩ b. Empty if either side is empty.
+func FootprintIntersect(a, b *Footprint) *Footprint {
+	if a == nil || b == nil || len(a.Loops) == 0 || len(b.Loops) == 0 {
+		return &Footprint{}
+	}
+	return footprintBoolean(a, b, clipper.CtIntersection)
+}
+
+// FootprintDifference returns a \ b. b == nil treats b as empty (so
+// the result is just a).
+func FootprintDifference(a, b *Footprint) *Footprint {
+	if a == nil || len(a.Loops) == 0 {
+		return &Footprint{}
+	}
+	if b == nil || len(b.Loops) == 0 {
+		// Defensive clone via a Boolean against an empty clip (returns
+		// a normalised polytree with the canonical orientation).
+		return footprintBoolean(a, &Footprint{}, clipper.CtUnion)
+	}
+	return footprintBoolean(a, b, clipper.CtDifference)
+}
+
 // footprintToClipperPaths re-emits fp's loops as Clipper paths with
 // canonical orientation (outers CCW, holes CW).
 func footprintToClipperPaths(fp *Footprint) clipper.Paths {

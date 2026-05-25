@@ -393,7 +393,26 @@ func earcutLinked(ear *ecNode, tris *[][3]uint32) {
 	// the fan fallback.
 	cureAttempts := 0
 	stop := ear
+	// Absolute work budget: each iteration either removes a vertex or
+	// walks ear → ear.next. With cure cycles, the loop can find an
+	// ear, then need cure, then find another ear, indefinitely; this
+	// cap ensures pathological input falls into the fan fallback after
+	// O(N²) iterations instead of hanging the goroutine. Count nodes
+	// once to size the cap.
+	nNodes := 0
+	for n := ear; ; n = n.next {
+		nNodes++
+		if n.next == ear || nNodes > 1<<20 {
+			break
+		}
+	}
+	maxIter := 16 * nNodes * nNodes
+	iter := 0
 	for ear.prev != ear.next {
+		if iter++; iter > maxIter {
+			emitFanFallback(ear, tris)
+			return
+		}
 		prev := ear.prev
 		next := ear.next
 		if isEar(ear) {
