@@ -686,6 +686,292 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 	return cr, nil
 }
 
+// DumpFirstBoundaryEdge picks one boundary half-edge from the final
+// post-dedup mesh (lexicographically-smallest by endpoint vertex IDs,
+// for run-to-run determinism) and prints its world coordinates, the
+// face that emits it, the slab planes the endpoints are within 1µm
+// of, and every other face containing either endpoint. The goal is
+// to give enough context to identify *why* the opposite half-edge is
+// missing — usually a near-miss splice, a sub-1µm Z drift on a slab
+// boundary, or a cell that should have produced a face but didn't.
+//
+// Public so the pipeline layer can call it after the clip stage
+// returns — that way the diagnostic runs even on a clip-cache hit,
+// without forcing the (~5 min) full re-clip each iteration.
+//
+// Cheap on a watertight mesh (just one half-edge pass to confirm
+// zero boundary edges); on a leaky mesh the per-endpoint face scan
+// is O(faces) so the dump is bounded by the size of the mesh.
+func DumpFirstBoundaryEdge(cr ClipResult, slabs []Slab, model *loader.LoadedModel) {
+	type edge struct{ A, B uint32 }
+	edgeCount := make(map[edge]int, len(cr.Faces)*3)
+	edgeFace := make(map[edge]int, len(cr.Faces)*3)
+	for fi, f := range cr.Faces {
+		es := [3]edge{{f[0], f[1]}, {f[1], f[2]}, {f[2], f[0]}}
+		for _, e := range es {
+			edgeCount[e]++
+			if _, ok := edgeFace[e]; !ok {
+				edgeFace[e] = fi
+			}
+		}
+	}
+	var bestE edge
+	have := false
+	for e, c := range edgeCount {
+		if c != 1 {
+			continue
+		}
+		rev := edge{e.B, e.A}
+		if edgeCount[rev] > 0 {
+			continue
+		}
+		if !have ||
+			e.A < bestE.A ||
+			(e.A == bestE.A && e.B < bestE.B) {
+			bestE = e
+			have = true
+		}
+	}
+	if !have {
+		return
+	}
+	pa := cr.Verts[bestE.A]
+	pb := cr.Verts[bestE.B]
+	fmt.Fprintf(os.Stderr, "  [hole-dump] first boundary half-edge v%d→v%d\n", bestE.A, bestE.B)
+	fmt.Fprintf(os.Stderr, "    v%d xyz=(%.6f, %.6f, %.6f)\n", bestE.A, pa[0], pa[1], pa[2])
+	fmt.Fprintf(os.Stderr, "    v%d xyz=(%.6f, %.6f, %.6f)\n", bestE.B, pb[0], pb[1], pb[2])
+	for _, vidx := range [2]uint32{bestE.A, bestE.B} {
+		z := cr.Verts[vidx][2]
+		var planes []string
+		for si, s := range slabs {
+			if absf(z-s.ZBot) < 1e-3 {
+				planes = append(planes, fmt.Sprintf("slab[%d].ZBot=%g", si, s.ZBot))
+			}
+			if absf(z-s.ZTop) < 1e-3 {
+				planes = append(planes, fmt.Sprintf("slab[%d].ZTop=%g", si, s.ZTop))
+			}
+		}
+		fmt.Fprintf(os.Stderr, "    v%d slab-plane matches: %v\n", vidx, planes)
+	}
+	emitFace := func(label string, fi int) {
+		f := cr.Faces[fi]
+		var ci int32 = -1
+		if fi < len(cr.FaceCellIdx) {
+			ci = cr.FaceCellIdx[fi]
+		}
+		fmt.Fprintf(os.Stderr, "      %s face[%d] cell=%d v=(%d,%d,%d) p0=(%.6f,%.6f,%.6f) p1=(%.6f,%.6f,%.6f) p2=(%.6f,%.6f,%.6f)\n",
+			label, fi, ci, f[0], f[1], f[2],
+			cr.Verts[f[0]][0], cr.Verts[f[0]][1], cr.Verts[f[0]][2],
+			cr.Verts[f[1]][0], cr.Verts[f[1]][1], cr.Verts[f[1]][2],
+			cr.Verts[f[2]][0], cr.Verts[f[2]][1], cr.Verts[f[2]][2])
+	}
+	if fi, ok := edgeFace[bestE]; ok {
+		fmt.Fprintf(os.Stderr, "    owning face (emits v%d→v%d):\n", bestE.A, bestE.B)
+		emitFace("own", fi)
+	}
+	for _, vidx := range [2]uint32{bestE.A, bestE.B} {
+		fmt.Fprintf(os.Stderr, "    faces containing v%d:\n", vidx)
+		printed := 0
+		for fi, f := range cr.Faces {
+			if f[0] != vidx && f[1] != vidx && f[2] != vidx {
+				continue
+			}
+			emitFace("    ", fi)
+			printed++
+			if printed >= 16 {
+				fmt.Fprintf(os.Stderr, "        ... (truncated)\n")
+				break
+			}
+		}
+	}
+	// Wider sweep: ANY face that has a vertex within tol of either
+	// endpoint. The point-keyed boundary count is much smaller than
+	// the index-keyed count, which means many "boundary" edges are
+	// actually near-misses where two pieces have vertices off by
+	// less than a bucket. This sweep shows them.
+	const sweepTol = float32(2e-3)
+	closeTo := func(p, q [3]float32) bool {
+		dx := p[0] - q[0]
+		dy := p[1] - q[1]
+		dz := p[2] - q[2]
+		if dx < 0 {
+			dx = -dx
+		}
+		if dy < 0 {
+			dy = -dy
+		}
+		if dz < 0 {
+			dz = -dz
+		}
+		return dx <= sweepTol && dy <= sweepTol && dz <= sweepTol
+	}
+	for _, target := range [2][3]float32{pa, pb} {
+		fmt.Fprintf(os.Stderr, "    faces with ANY vertex within %gmm of (%.6f,%.6f,%.6f):\n",
+			sweepTol, target[0], target[1], target[2])
+		printed := 0
+		for fi, f := range cr.Faces {
+			match := -1
+			for k := 0; k < 3; k++ {
+				if closeTo(cr.Verts[f[k]], target) {
+					match = k
+					break
+				}
+			}
+			if match < 0 {
+				continue
+			}
+			emitFace(fmt.Sprintf("v%d~", f[match]), fi)
+			printed++
+			if printed >= 24 {
+				fmt.Fprintf(os.Stderr, "        ... (truncated)\n")
+				break
+			}
+		}
+	}
+	// Also dump cells in slabs whose Z range contains the edge,
+	// whose Outer polygon touches the boundary edge's XY range —
+	// these are the candidate adjacent cells that *should* contain
+	// the reverse half-edge.
+	zMid := 0.5 * (pa[2] + pb[2])
+	xMid := 0.5 * (pa[0] + pb[0])
+	yMid := 0.5 * (pa[1] + pb[1])
+	for si, s := range slabs {
+		if zMid < s.ZBot-1e-3 || zMid > s.ZTop+1e-3 {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "    cells in slab[%d] Z=[%g,%g] touching (x=%.4f, y=%.4f):\n",
+			si, s.ZBot, s.ZTop, xMid, yMid)
+		for ci := range s.Cells {
+			outer := s.Cells[ci].Outer
+			mn0, mn1, mx0, mx1 := polyBoundsP2(outer)
+			if xMid < mn0-sweepTol || xMid > mx0+sweepTol || yMid < mn1-sweepTol || yMid > mx1+sweepTol {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "      slab[%d].cell[%d] kind=%d px=%d bbox=[%.4f,%.4f]x[%.4f,%.4f] outerN=%d\n",
+				si, ci, s.Cells[ci].Kind, s.Cells[ci].Pixels,
+				mn0, mx0, mn1, mx1, len(outer))
+			for k, p := range outer {
+				fmt.Fprintf(os.Stderr, "        outer[%d] = (%.6f, %.6f)\n", k, p[0], p[1])
+			}
+		}
+		// Also list every cell in this slab whose Outer polygon has
+		// an edge intersecting the boundary edge's XY (line segment).
+		// These cells "should" produce the matching half-edge if the
+		// wall surface crossed them.
+		fmt.Fprintf(os.Stderr, "    slab[%d] cells with an Outer edge crossing the boundary-edge segment in XY:\n", si)
+		hits := 0
+		for ci := range s.Cells {
+			outer := s.Cells[ci].Outer
+			n := len(outer)
+			for k := 0; k < n; k++ {
+				a := outer[k]
+				b := outer[(k+1)%n]
+				// approximation: edge passes near both endpoints
+				if (closeTo([3]float32{a[0], a[1], 0}, [3]float32{pa[0], pa[1], 0}) &&
+					closeTo([3]float32{b[0], b[1], 0}, [3]float32{pb[0], pb[1], 0})) ||
+					(closeTo([3]float32{a[0], a[1], 0}, [3]float32{pb[0], pb[1], 0}) &&
+						closeTo([3]float32{b[0], b[1], 0}, [3]float32{pa[0], pa[1], 0})) {
+					fmt.Fprintf(os.Stderr, "      slab[%d].cell[%d] edge[%d]→[%d] a=(%.4f,%.4f) b=(%.4f,%.4f) — matches both endpoints\n",
+						si, ci, k, (k+1)%n, a[0], a[1], b[0], b[1])
+					hits++
+				}
+			}
+		}
+		if hits == 0 {
+			fmt.Fprintf(os.Stderr, "      (none — boundary edge not aligned to any cell-outer edge)\n")
+		}
+	}
+	// Search the SOURCE mesh for triangles whose edges land within
+	// tol of v30-v31 (in either direction). Each such triangle's
+	// fragments should appear in the output mesh; if one does and
+	// the other doesn't, that explains the unmatched half-edge.
+	if model == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "    source-mesh triangles with edge near v%d↔v%d (tol=%gmm):\n",
+		bestE.A, bestE.B, sweepTol)
+	hits := 0
+	for fi := range model.Faces {
+		f := model.Faces[fi]
+		va := model.Vertices[f[0]]
+		vb := model.Vertices[f[1]]
+		vc := model.Vertices[f[2]]
+		nearA := [3]bool{closeTo(va, pa), closeTo(vb, pa), closeTo(vc, pa)}
+		nearB := [3]bool{closeTo(va, pb), closeTo(vb, pb), closeTo(vc, pb)}
+		hasA := nearA[0] || nearA[1] || nearA[2]
+		hasB := nearB[0] || nearB[1] || nearB[2]
+		if !(hasA && hasB) {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "      model.face[%d] v=(%d,%d,%d) p0=(%.6f,%.6f,%.6f) p1=(%.6f,%.6f,%.6f) p2=(%.6f,%.6f,%.6f)\n",
+			fi, f[0], f[1], f[2],
+			va[0], va[1], va[2], vb[0], vb[1], vb[2], vc[0], vc[1], vc[2])
+		hits++
+		if hits >= 8 {
+			fmt.Fprintf(os.Stderr, "        ... (truncated)\n")
+			break
+		}
+	}
+	if hits == 0 {
+		fmt.Fprintf(os.Stderr, "      (none — both endpoints are not source-mesh vertices)\n")
+		// Look for triangles whose plane contains both endpoints.
+		// They may have intermediate splits, so the endpoints
+		// might be interior to a triangle edge rather than at
+		// vertices.
+		fmt.Fprintf(os.Stderr, "    source-mesh triangles whose edge LINE contains both endpoints (parametric):\n")
+		hits = 0
+		for fi := range model.Faces {
+			f := model.Faces[fi]
+			for k := 0; k < 3; k++ {
+				va := model.Vertices[f[k]]
+				vb := model.Vertices[f[(k+1)%3]]
+				dx := vb[0] - va[0]
+				dy := vb[1] - va[1]
+				dz := vb[2] - va[2]
+				ab2 := float64(dx*dx + dy*dy + dz*dz)
+				if ab2 == 0 {
+					continue
+				}
+				// project both endpoints to t along va→vb,
+				// check perpendicular distance.
+				project := func(p [3]float32) (t float64, perp2 float64) {
+					px := float64(p[0] - va[0])
+					py := float64(p[1] - va[1])
+					pz := float64(p[2] - va[2])
+					t = (px*float64(dx) + py*float64(dy) + pz*float64(dz)) / ab2
+					rx := px - t*float64(dx)
+					ry := py - t*float64(dy)
+					rz := pz - t*float64(dz)
+					perp2 = rx*rx + ry*ry + rz*rz
+					return
+				}
+				tA, perpA := project(pa)
+				tB, perpB := project(pb)
+				const tol2 = float64(sweepTol) * float64(sweepTol)
+				if perpA > tol2 || perpB > tol2 {
+					continue
+				}
+				if tA < -0.01 || tA > 1.01 || tB < -0.01 || tB > 1.01 {
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "      model.face[%d].edge[%d]→[%d] tA=%.3f tB=%.3f perp=(%g,%g)mm v0=(%.4f,%.4f,%.4f) v1=(%.4f,%.4f,%.4f) v2=(%.4f,%.4f,%.4f)\n",
+					fi, k, (k+1)%3, tA, tB, math.Sqrt(perpA), math.Sqrt(perpB),
+					model.Vertices[f[0]][0], model.Vertices[f[0]][1], model.Vertices[f[0]][2],
+					model.Vertices[f[1]][0], model.Vertices[f[1]][1], model.Vertices[f[1]][2],
+					model.Vertices[f[2]][0], model.Vertices[f[2]][1], model.Vertices[f[2]][2])
+				hits++
+				if hits >= 8 {
+					fmt.Fprintf(os.Stderr, "        ... (truncated)\n")
+					return
+				}
+			}
+		}
+		if hits == 0 {
+			fmt.Fprintf(os.Stderr, "      (none — endpoints are not on any source-mesh edge)\n")
+		}
+	}
+}
+
 // sliceTriangleToSlab clips triangle (a,b,c) against the half-spaces
 // z >= zBot and z <= zTop and returns the resulting planar 3D
 // sub-polygon, or nil if the triangle does not overlap the slab.

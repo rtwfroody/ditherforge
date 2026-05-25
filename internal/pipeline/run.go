@@ -1166,6 +1166,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
 			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
 		reportHolesIfEnabled("clip output", clipped.Faces)
+		if debugHoles {
+			cellslicer.DumpFirstBoundaryEdge(clipped, vo.CellSlabs, lo.Model)
+		}
 
 		// Per-cell face-count cross-tab against partition pixel
 		// bucket. Identifies the "missing geometry" suspects:
