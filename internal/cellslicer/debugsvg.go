@@ -212,6 +212,22 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 		}
 		appendCellPaths(&sb, s.Cells, all)
 		sb.WriteString(`"/>`)
+
+		// Overlay: cells' outer-boundary edges (open-ended at clip
+		// time — see Cell.OuterEdgeOnBoundary). Rendered in red, 2×
+		// the base edge width so they're visibly thicker than the
+		// black underlay. Lets a reader of the layer dump see at a
+		// glance which edges absorb source geometry that nudges past
+		// the partition outline. No-op when no cell has the field
+		// populated (legacy PartitionSlab path).
+		if anyBoundaryEdgeTagged(s.Cells) {
+			fmt.Fprintf(&sb,
+				`<path fill="none" stroke="#e02020" stroke-width="%s" stroke-linecap="round" vector-effect="non-scaling-stroke" d="`,
+				f(edgeW*2),
+			)
+			appendOuterBoundaryEdgePaths(&sb, s.Cells)
+			sb.WriteString(`"/>`)
+		}
 	}
 
 	if opt.DrawContours {
@@ -349,6 +365,61 @@ func appendFootprintPaths(sb *strings.Builder, fp *Footprint) {
 			sb.WriteString(f(pts[j][1]))
 		}
 		sb.WriteByte('Z')
+	}
+}
+
+// anyBoundaryEdgeTagged reports whether at least one cell has a
+// populated OuterEdgeOnBoundary slice with a true entry. Lets the
+// SVG renderer skip emitting an empty outer-edge overlay (and the
+// associated path tag) when nothing is tagged — keeps legacy
+// PartitionSlab debug output free of an empty <path>.
+func anyBoundaryEdgeTagged(cells []Cell) bool {
+	for ci := range cells {
+		flags := cells[ci].OuterEdgeOnBoundary
+		for _, f := range flags {
+			if f {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// appendOuterBoundaryEdgePaths emits one "M a L b" subpath per cell
+// edge where OuterEdgeOnBoundary[k] is true. Caller wraps in a single
+// stroked <path> element. Each edge becomes its own M/L pair (rather
+// than joining into long polylines) because adjacent outer-boundary
+// edges in CCW order are not necessarily contiguous on the page —
+// stair-step polyomino cells often have non-adjacent runs of outer
+// edges.
+func appendOuterBoundaryEdgePaths(sb *strings.Builder, cells []Cell) {
+	first := true
+	for ci := range cells {
+		pts := cells[ci].Outer
+		flags := cells[ci].OuterEdgeOnBoundary
+		if len(flags) != len(pts) {
+			continue
+		}
+		n := len(pts)
+		for k := 0; k < n; k++ {
+			if !flags[k] {
+				continue
+			}
+			a := pts[k]
+			b := pts[(k+1)%n]
+			if !first {
+				sb.WriteByte(' ')
+			}
+			first = false
+			sb.WriteByte('M')
+			sb.WriteString(f(a[0]))
+			sb.WriteByte(',')
+			sb.WriteString(f(a[1]))
+			sb.WriteByte('L')
+			sb.WriteString(f(b[0]))
+			sb.WriteByte(',')
+			sb.WriteString(f(b[1]))
+		}
 	}
 }
 

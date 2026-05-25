@@ -55,8 +55,8 @@ func TestSharedEdgeVerticesMatch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			piecesA := clipSlabPolyToCellPrism3D(tc.poly, cellA)
-			piecesB := clipSlabPolyToCellPrism3D(tc.poly, cellB)
+			piecesA := clipSlabPolyToCellPrism3D(tc.poly, &Cell{Outer: cellA})
+			piecesB := clipSlabPolyToCellPrism3D(tc.poly, &Cell{Outer: cellB})
 			if len(piecesA) == 0 || len(piecesB) == 0 {
 				t.Fatalf("empty piece: A=%d B=%d", len(piecesA), len(piecesB))
 			}
@@ -145,8 +145,8 @@ func TestSharedEdgeAcrossConvexity(t *testing.T) {
 		{2.8, 2.8, 5},
 		{0.2, 2.8, 5},
 	}
-	piecesA := clipSlabPolyToCellPrism3D(slabPoly, cellA)
-	piecesB := clipSlabPolyToCellPrism3D(slabPoly, cellB)
+	piecesA := clipSlabPolyToCellPrism3D(slabPoly, &Cell{Outer: cellA})
+	piecesB := clipSlabPolyToCellPrism3D(slabPoly, &Cell{Outer: cellB})
 	t.Logf("cellA emitted %d piece(s), cellB emitted %d piece(s)", len(piecesA), len(piecesB))
 	vA := vertsOnSharedX(piecesA, 1.0)
 	vB := vertsOnSharedX(piecesB, 1.0)
@@ -178,8 +178,8 @@ func TestSpliceFixesAcrossConvexity(t *testing.T) {
 		{2.8, 2.8, 5},
 		{0.2, 2.8, 5},
 	}
-	piecesA := clipSlabPolyToCellPrism3D(slabPoly, cellA)
-	piecesB := clipSlabPolyToCellPrism3D(slabPoly, cellB)
+	piecesA := clipSlabPolyToCellPrism3D(slabPoly, &Cell{Outer: cellA})
+	piecesB := clipSlabPolyToCellPrism3D(slabPoly, &Cell{Outer: cellB})
 
 	// Build slab-wide seen3D from every vertex of every piece — same
 	// shape Phase 1 produces.
@@ -239,7 +239,7 @@ func TestFourCellsAtCornerVertexMatch(t *testing.T) {
 	}{
 		{"A", cellA}, {"B", cellB}, {"C", cellC}, {"D", cellD},
 	} {
-		pieces := clipSlabPolyToCellPrism3D(slabPoly, c.outer)
+		pieces := clipSlabPolyToCellPrism3D(slabPoly, &Cell{Outer: c.outer})
 		if len(pieces) == 0 {
 			t.Errorf("cell %s: no pieces emitted", c.name)
 			continue
@@ -283,8 +283,8 @@ func TestSharedSourceEdgeMatch(t *testing.T) {
 		{0, 1, 5},
 		{0, -1, 5},
 	}
-	piecesT1 := clipSlabPolyToCellPrism3D(t1, cell)
-	piecesT2 := clipSlabPolyToCellPrism3D(t2, cell)
+	piecesT1 := clipSlabPolyToCellPrism3D(t1, &Cell{Outer: cell})
+	piecesT2 := clipSlabPolyToCellPrism3D(t2, &Cell{Outer: cell})
 	t.Logf("T1 emitted %d piece(s), T2 emitted %d piece(s)", len(piecesT1), len(piecesT2))
 	// Shared source edge is x=0 (vertical) from y=-1 to y=1, z=5.
 	vT1 := vertsOnSharedX(piecesT1, 0.0)

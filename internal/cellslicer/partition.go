@@ -519,7 +519,94 @@ func PartitionSlabRaster(fpCur, fpBelow, fpAbove *Footprint, cellSize, pxSize fl
 		cells = append(cells, Cell{Outer: outline, Kind: rawCells[ci].Kind, Pixels: int(counts[ci])})
 	}
 	stats.Final = len(cells)
+	// Tag each cell's outer-boundary edges so the cell-prism clip can
+	// run open-ended on the partition's outer perimeter. See Cell's
+	// OuterEdgeOnBoundary field doc for the why.
+	MarkOuterEdges(cells, fpCur)
 	return cells, r, stats
+}
+
+// MarkOuterEdges populates each cell's OuterEdgeOnBoundary field by
+// scanning the slab's cells for shared directed half-edges. An edge
+// is "outer" iff:
+//
+//	1. No other cell in the slab owns its reverse half-edge.
+//	2. The half-space immediately outside the edge is outside fp
+//	   (the slab footprint). Without this guard a true partition gap
+//	   would let two cells facing the gap both mark their gap-side
+//	   edges outer; clip-time open-ending would then double-claim
+//	   geometry inside the gap and produce non-manifold faces.
+//
+// Vertex equality is on the 1µm Clipper-integer bucket (int2DOf), so
+// two cells' independently-rounded shared corners match.
+//
+// fp may be nil; the safety check is then disabled (rule 2 always
+// passes). That keeps the function usable from test fixtures that
+// don't carry a real footprint.
+//
+// O(Σ |cell.Outer|) for the edge-map build, plus one Footprint.Contains
+// per candidate-outer edge for the safety check.
+//
+// TODO: AddWithinSlabAdjacency in pipeline/run.go also walks cell-Outer
+// edges to build cell-cell adjacency. Worth folding the two passes into
+// one once we're confident the open-ended behaviour stays — would save
+// one full pass over the same data.
+func MarkOuterEdges(cells []Cell, fp *Footprint) {
+	type edgeKey struct{ a, b int2D }
+	edges := make(map[edgeKey]struct{}, len(cells)*8)
+	for ci := range cells {
+		outer := cells[ci].Outer
+		n := len(outer)
+		for k := 0; k < n; k++ {
+			edges[edgeKey{int2DOf(outer[k]), int2DOf(outer[(k+1)%n])}] = struct{}{}
+		}
+	}
+	for ci := range cells {
+		outer := cells[ci].Outer
+		n := len(outer)
+		if n == 0 {
+			continue
+		}
+		flags := make([]bool, n)
+		for k := 0; k < n; k++ {
+			a, b := outer[k], outer[(k+1)%n]
+			if _, hasMate := edges[edgeKey{int2DOf(b), int2DOf(a)}]; hasMate {
+				continue
+			}
+			if fp != nil && insideFootprintOnOuterSide(fp, a, b) {
+				continue
+			}
+			flags[k] = true
+		}
+		cells[ci].OuterEdgeOnBoundary = flags
+	}
+}
+
+// insideFootprintOnOuterSide reports whether the half-space
+// immediately outside edge a→b (assuming a CCW outer polygon — outward
+// is the right-hand side of the edge direction) lies inside fp. Used
+// by MarkOuterEdges to distinguish "edge faces the partition's outer
+// boundary" (outside fp → safe to open-end) from "edge faces a gap
+// inside the partition" (inside fp → not safe to open-end, another
+// cell would double-claim).
+//
+// Probes 1µm out from the edge midpoint along the outward normal.
+// Returns false for zero-length edges (defensive — should never
+// happen on a real cell.Outer).
+func insideFootprintOnOuterSide(fp *Footprint, a, b Point2) bool {
+	dx, dy := b[0]-a[0], b[1]-a[1]
+	length2 := dx*dx + dy*dy
+	if length2 == 0 {
+		return false
+	}
+	length := float32(math.Sqrt(float64(length2)))
+	// CCW polygon → interior on the left of edge direction →
+	// outward is the right (perpendicular rotated 90° CW from
+	// edge direction).
+	nx, ny := dy/length, -dx/length
+	midX, midY := (a[0]+b[0])/2, (a[1]+b[1])/2
+	const probeMM = float32(0.001) // 1µm — clear of float-precision noise at the edge
+	return fp.Contains(midX+probeMM*nx, midY+probeMM*ny)
 }
 
 // splitDisconnectedCells finds cells in r.CellID whose pixel sets

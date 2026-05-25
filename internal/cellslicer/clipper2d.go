@@ -81,6 +81,23 @@ func clipperPathToPoints(path clipper.Path) []Point2 {
 	return out
 }
 
+// int2D is a Clipper-integer 2D point — mirror of int3D in
+// clip2d_subdivide.go but for XY-only use. Two independently rounded
+// copies of the same float32 XY coordinate bucket to the same int2D
+// (1µm grid), so an edge map keyed by int2D pairs reliably identifies
+// shared cell-Outer edges across cells without float comparison
+// pitfalls.
+type int2D struct {
+	X, Y int64
+}
+
+func int2DOf(p Point2) int2D {
+	return int2D{
+		X: int64(math.Round(float64(p[0]) * clipperScale)),
+		Y: int64(math.Round(float64(p[1]) * clipperScale)),
+	}
+}
+
 // clipPolygonToFootprint intersects a single polygon with the
 // footprint via Clipper non-zero fill. Returns the (one or more)
 // component polygons of the result. Used by both ring-cell trapezoid

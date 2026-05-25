@@ -683,6 +683,11 @@ func ClipMeshToCells2D(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIn
 			cr.Faces[i] = [3]uint32{remap[f[0]], remap[f[1]], remap[f[2]]}
 		}
 	}
+	if n := atomic.LoadUint64(&verticalPathRiskCount); n > 0 {
+		fmt.Fprintf(os.Stderr,
+			"  Clip: WARNING: %d vertical-path slabPolys had source vertices outside the slab footprint — open-ended cells don't apply on the vertical clip path, so geometry past the partition outline may be silently dropped. Re-run with DITHERFORGE_HOLE_REPORT=1 for the per-slabPoly dump (TODO: not yet implemented for the vertical path).\n",
+			n)
+	}
 	return cr, nil
 }
 

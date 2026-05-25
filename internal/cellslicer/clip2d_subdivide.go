@@ -344,10 +344,34 @@ func clipPolyToCells(
 		return dst, candidates
 	}
 	if isPolyXYDegenerate(p.Pts) {
+		// Defensive: the open-ended outer-edge rule only fires inside
+		// the cap path (clipSlabPolyToCellPrism3D). If a vertical-path
+		// slabPoly has any vertex outside the slab footprint, the
+		// fragment past the partition outline gets silently dropped
+		// here — same failure mode the cap path used to have. Count
+		// these so a regression or new-model corner case shows up
+		// loudly at end-of-clip instead of going unnoticed.
+		fp := slabs[slabIdx].Footprint
+		if fp != nil {
+			for _, v := range p.Pts {
+				if !fp.Contains(v[0], v[1]) {
+					atomic.AddUint64(&verticalPathRiskCount, 1)
+					break
+				}
+			}
+		}
 		return clipPolyToCellsVertical(p, slabIdx, slabs, candidates, dst, seen), candidates
 	}
 	return clipPolyToCellsCap(p, slabIdx, slabs, candidates, dst, seen), candidates
 }
+
+// verticalPathRiskCount tracks vertical-path slabPolys that have at
+// least one vertex falling outside the slab footprint. Non-zero at end
+// of ClipMeshToCells2D means the vertical clip path may be dropping
+// geometry that open-ended cells would have absorbed in the cap path.
+// Always-on (no env gate) so future-us notices the regression without
+// re-enabling diagnostics.
+var verticalPathRiskCount uint64
 
 // clipPolyToCellsCap clips slabPoly against each candidate cell's
 // vertical prism in 3D, preserving Z exactly through Sutherland-
@@ -380,7 +404,7 @@ func clipPolyToCellsCap(
 ) []cellPiece {
 	for _, ci := range candidates {
 		cell := &slabs[slabIdx].Cells[ci]
-		pieces := clipSlabPolyToCellPrism3D(p.Pts, cell.Outer)
+		pieces := clipSlabPolyToCellPrism3D(p.Pts, cell)
 		for _, piece := range pieces {
 			piece = dedup3DPoly(piece)
 			if len(piece) < 3 {
@@ -415,35 +439,47 @@ func clipPolyToCellsCap(
 //     dedup3DPoly + the splice machinery in Phase 2 keep the seams
 //     topologically clean.
 //
+// Open-ended outer edges: any cell.Outer edge tagged in
+// cell.OuterEdgeOnBoundary skips its Sutherland-Hodgman cut entirely
+// — slabPoly fragments that extend past the partition's outer boundary
+// land in this cell instead of being silently dropped. See the field
+// doc on Cell for the rationale. Nil OuterEdgeOnBoundary keeps the
+// historical strict-clip behaviour (every edge cuts), so legacy
+// PartitionSlab cells still work unchanged.
+//
+// For the earcut path the "outer" rule applies only to the earcut
+// triangle's cell.Outer edges (those whose endpoints are consecutive
+// in cell.Outer). Earcut diagonals — internal to the cell — must
+// always clip; without them one earcut triangle's piece would leak
+// into its sibling's region and produce duplicate geometry.
+//
 // Orientation: both paths use the inward-half-space derivation
-// (nx, ny) = (dy, -dx), which is CCW-only — for a CW input the
-// half-space inverts and SH clips away the entire interior, silently
-// dropping the cell. Production cell producers all emit CCW (raster
-// path's marching-squares, the older ring/hex generators), but the
-// reversed-copy fallback below is cheap insurance against future
-// callers, and removes the "did anyone change cell winding?" failure
-// mode from a hot path that's hard to debug.
+// (nx, ny) = (dy, -dx), which assumes CCW cell.Outer. PartitionSlabRaster
+// emits CCW (raster-derived marching-squares); legacy PartitionSlab
+// emits CCW (Clipper non-zero union normalises). The defensive
+// reversal that used to live here was dropped along with the open-ended
+// feature: silently reversing the polygon while NOT reversing the
+// OuterEdgeOnBoundary flags would scramble the open/closed-edge
+// mapping. If a future caller breaks the CCW invariant, the
+// open-ended logic would mark all the wrong edges; better to fail
+// loudly via assert-CCW upstream than to half-cover the failure here.
 //
 // Output piece vertex Z values come straight from clipPolyByPlaneXY's
 // linear lerp, which is exact for points on the source plane.
-func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][][3]float32 {
+func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cell *Cell) [][][3]float32 {
+	cellOuter := cell.Outer
 	if len(slabPolyPts) < 3 || len(cellOuter) < 3 {
 		return nil
 	}
-	if !isCCW(cellOuter) {
-		rev := make([]Point2, len(cellOuter))
-		for i, p := range cellOuter {
-			rev[len(cellOuter)-1-i] = p
-		}
-		cellOuter = rev
-	}
+	outerFlags := cell.OuterEdgeOnBoundary
+	n := len(cellOuter)
 	if isConvex(cellOuter) {
 		clipped := slabPolyPts
-		n := len(cellOuter)
 		for i := 0; i < n; i++ {
-			a := cellOuter[i]
-			b := cellOuter[(i+1)%n]
-			clipped = clipPolyByCellEdge(clipped, a, b)
+			if outerFlags != nil && outerFlags[i] {
+				continue
+			}
+			clipped = clipPolyByCellEdge(clipped, cellOuter[i], cellOuter[(i+1)%n])
 			if len(clipped) < 3 {
 				return nil
 			}
@@ -456,32 +492,34 @@ func clipSlabPolyToCellPrism3D(slabPolyPts [][3]float32, cellOuter []Point2) [][
 	}
 	out := make([][][3]float32, 0, len(tris))
 	for _, tri := range tris {
-		a := earVerts[tri[0]]
-		b := earVerts[tri[1]]
-		c := earVerts[tri[2]]
-		// Earcut emits CCW triangles (it normalizes outer to CCW
-		// internally — see earcut.go's linkedList). For a CCW
-		// triangle the interior lies to the LEFT of each edge
-		// V_i→V_{i+1}, so the outward XY normal is the edge direction
-		// rotated 90° CW: (dy, -dx) where (dx, dy) = V_{i+1} - V_i.
-		// The interior half-space is then nx*x + ny*y <= d with
-		// d = nx*V_i.x + ny*V_i.y — the same convention
-		// clipPolyByPlaneXY uses (and it treats on-plane points as
-		// inside, so a slabPoly edge flush with a cell edge survives).
 		clipped := slabPolyPts
-		clipped = clipPolyByCellEdge(clipped, a, b)
-		if len(clipped) < 3 {
-			continue
+		for k := 0; k < 3; k++ {
+			i, j := int(tri[k]), int(tri[(k+1)%3])
+			if outerFlags != nil {
+				// Cell.Outer edge? Endpoints consecutive (in either direction)
+				// in the original cell.Outer index space.
+				switch {
+				case j == (i+1)%n:
+					if outerFlags[i] {
+						continue
+					}
+				case i == (j+1)%n:
+					if outerFlags[j] {
+						continue
+					}
+				}
+				// Otherwise (diagonals), fall through to always clip.
+			}
+			a := earVerts[i]
+			b := earVerts[j]
+			clipped = clipPolyByCellEdge(clipped, a, b)
+			if len(clipped) < 3 {
+				break
+			}
 		}
-		clipped = clipPolyByCellEdge(clipped, b, c)
-		if len(clipped) < 3 {
-			continue
+		if len(clipped) >= 3 {
+			out = append(out, clipped)
 		}
-		clipped = clipPolyByCellEdge(clipped, c, a)
-		if len(clipped) < 3 {
-			continue
-		}
-		out = append(out, clipped)
 	}
 	return out
 }
