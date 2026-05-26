@@ -1135,12 +1135,18 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 
 		var clipped cellslicer.ClipResult
 		var cerr error
-		if os.Getenv("DITHERFORGE_CLIP_MODE") == "horizontal" {
+		switch mode := os.Getenv("DITHERFORGE_CLIP_MODE"); mode {
+		case "horizontal":
 			plog.Printf("  Clip: DITHERFORGE_CLIP_MODE=horizontal (no per-cell XY clip)")
 			clipped, cerr = cellslicer.ClipMeshHorizontally(lo.Model, vo.CellSlabs)
-		} else {
+		case "legacy":
+			plog.Printf("  Clip: DITHERFORGE_CLIP_MODE=legacy (splice/earcut clip)")
 			triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
 			clipped, cerr = cellslicer.ClipMeshToCells2D(lo.Model, vo.CellSlabs, triIdx)
+		default:
+			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
+				cellslicer.OpenEdgeBloat)
+			clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, nil, vo.CellSize)
 		}
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)

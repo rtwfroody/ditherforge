@@ -82,3 +82,46 @@ func Dequantize(q int3D) [3]float32 {
 func Snap(p [3]float32) [3]float32 {
 	return Dequantize(Quantize(p))
 }
+
+// DedupVertsByPosition returns a mesh whose vertices are collapsed to
+// their canonical 1µm bucket. Duplicate-position vertices that the
+// loader kept separate because they had different UVs / normals /
+// other per-vertex attributes (typical of textured GLB) all map to
+// the same output vertex, and faces are re-indexed.
+//
+// Degenerate faces (two or more vertices sharing the same bucket
+// after merging) are dropped — these are usually no-area triangles
+// the loader emitted as filler, not load-bearing topology.
+//
+// Manifold's C ABI requires watertight 2-manifold input; the
+// cellslicer pipeline's source meshes (alphawrap output, untextured
+// GLB, simple STL) are mostly already that shape after position dedup.
+// Run this once before constructing the source Manifold.
+func DedupVertsByPosition(verts [][3]float32, faces [][3]uint32) ([][3]float32, [][3]uint32) {
+	if len(verts) == 0 {
+		return nil, nil
+	}
+	bucketIdx := make(map[int3D]uint32, len(verts))
+	remap := make([]uint32, len(verts))
+	outV := make([][3]float32, 0, len(verts))
+	for i, v := range verts {
+		q := Quantize(v)
+		if j, ok := bucketIdx[q]; ok {
+			remap[i] = j
+			continue
+		}
+		j := uint32(len(outV))
+		bucketIdx[q] = j
+		remap[i] = j
+		outV = append(outV, Dequantize(q))
+	}
+	outF := make([][3]uint32, 0, len(faces))
+	for _, f := range faces {
+		a, b, c := remap[f[0]], remap[f[1]], remap[f[2]]
+		if a == b || b == c || a == c {
+			continue
+		}
+		outF = append(outF, [3]uint32{a, b, c})
+	}
+	return outV, outF
+}
