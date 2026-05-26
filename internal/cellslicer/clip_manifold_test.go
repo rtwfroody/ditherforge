@@ -149,6 +149,71 @@ func TestClipMeshToCellsManifoldFourCells(t *testing.T) {
 	}
 }
 
+func TestClipMeshToCellsManifoldMultipleSlabs(t *testing.T) {
+	// Three contiguous slabs over a 10 mm cube, each with one cell
+	// covering the full footprint. Exercises splitSrcBySlabs: src is
+	// pre-split at z=3 and z=7, and each per-slab Manifold should hand
+	// its worker exactly the surface inside its Z range.
+	//
+	// Expected surface area: the bottom slab catches the z=0 cap, the
+	// top slab catches the z=10 cap, and all three together catch the
+	// full vertical wall area. Total = 6 sides × 10 × 10 = 600 mm².
+	model := cubeModel(10)
+	slabs := []Slab{
+		makeCubeSlab(10, 0, 3),
+		makeCubeSlab(10, 3, 7),
+		makeCubeSlab(10, 7, 10),
+	}
+	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	if err != nil {
+		t.Fatalf("ClipMeshToCellsManifold: %v", err)
+	}
+	if len(cr.Faces) == 0 {
+		t.Fatal("0 faces")
+	}
+	// Every slab's cell must contribute faces (global indices 0,1,2).
+	seen := make(map[int32]bool)
+	for _, idx := range cr.FaceCellIdx {
+		seen[idx] = true
+	}
+	for i := int32(0); i < 3; i++ {
+		if !seen[i] {
+			t.Errorf("cell %d had no output faces", i)
+		}
+	}
+	// Surface-only: top/bottom caps of the cube (z=0, z=10) are NOT
+	// part of the cube's "side walls" — but they ARE part of the cube's
+	// surface, so they should show up in the bottom and top slabs.
+	// Total cube surface = 6 sides × 100 = 600 mm². The bottom slab
+	// includes the z=0 face; the top includes z=10.
+	area := triMeshArea(cr.Verts, cr.Faces)
+	if math.Abs(area-600) > 0.01 {
+		t.Errorf("total surface area = %.4f mm², want 600 (full cube surface)", area)
+	}
+}
+
+func TestClipMeshToCellsManifoldSlabsOutOfOrder(t *testing.T) {
+	// Same fixture as TestClipMeshToCellsManifoldMultipleSlabs but the
+	// slab list is in reverse Z order. splitSrcBySlabs must walk planes
+	// bottom-up regardless of caller order, and perSlab indexing must
+	// match the caller's slab indexing — global index 0 still maps to
+	// slabs[0] (the topmost slab in Z here).
+	model := cubeModel(10)
+	slabs := []Slab{
+		makeCubeSlab(10, 7, 10), // global idx 0, top
+		makeCubeSlab(10, 3, 7),  // global idx 1, middle
+		makeCubeSlab(10, 0, 3),  // global idx 2, bottom
+	}
+	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	if err != nil {
+		t.Fatalf("ClipMeshToCellsManifold: %v", err)
+	}
+	area := triMeshArea(cr.Verts, cr.Faces)
+	if math.Abs(area-600) > 0.01 {
+		t.Errorf("total surface area = %.4f mm², want 600", area)
+	}
+}
+
 func TestBloatOpenEdgesNoFlagsIsIdentity(t *testing.T) {
 	outer := []Point2{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
 	got := bloatOpenEdges(outer, nil, 5)

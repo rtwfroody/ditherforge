@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -71,6 +72,28 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, triIdx *Tr
 	defer src.Close()
 	srcID := src.OriginalID()
 
+	// Pre-split src into one Manifold per slab. Each per-cell
+	// Intersection only walks the BVH of its own slab, cutting cgo and
+	// boolean cost on tall models with many slabs. The per-slab
+	// Manifold's own OriginalID is derived (-1); src's faces still
+	// carry srcID via per-face run_original_id, so ToMeshFiltered(srcID)
+	// downstream still recovers source-surface-only output and drops
+	// the plane-cut faces split_by_plane adds.
+	perSlab, err := splitSrcBySlabs(src, slabs)
+	if err != nil {
+		return ClipResult{}, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
+	}
+	defer closeSlabManifolds(perSlab)
+	slabManifold := func(si int) *manifoldbool.Manifold {
+		// perSlab[si] is nil only when splitSrcBySlabs took its
+		// no-split early return (len(slabs) ≤ 1); fall back to src
+		// directly in that case.
+		if m := perSlab[si]; m != nil {
+			return m
+		}
+		return src
+	}
+
 	type job struct {
 		globalIdx int
 		slabIdx   int
@@ -123,7 +146,7 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, triIdx *Tr
 				j := jobs[ji]
 				s := &slabs[j.slabIdx]
 				cell := &s.Cells[j.cellIdx]
-				v, f, cerr := clipOneCellManifold(src, srcID, cell, s.ZBot, s.ZTop, cellSize)
+				v, f, cerr := clipOneCellManifold(slabManifold(j.slabIdx), srcID, cell, s.ZBot, s.ZTop, cellSize)
 				if cerr != nil {
 					errMu.Lock()
 					if firstE == nil {
@@ -166,6 +189,105 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, triIdx *Tr
 		}
 	}
 	return cr, nil
+}
+
+// splitSrcBySlabs pre-splits src into one Manifold per slab by walking
+// the slab Z planes bottom-up. The returned slice is indexed by slab
+// index (not Z order). Entries may be nil — that signals "use src
+// directly" and currently only happens when len(slabs) ≤ 1 (no
+// splitting needed). closeSlabManifolds takes care of the nil handling.
+//
+// Assumes neighbouring slabs are contiguous in Z; gaps would leave a
+// floating sliver between slabs that gets attached to the wrong side.
+// SlabBoundaryPlanes-derived partitions satisfy this; defensive callers
+// that pass arbitrary slab lists should verify it first.
+func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab) ([]*manifoldbool.Manifold, error) {
+	perSlab := make([]*manifoldbool.Manifold, len(slabs))
+	if len(slabs) <= 1 {
+		// One (or zero) slabs — no split needed; per-cell workers use
+		// src directly via the nil sentinel.
+		return perSlab, nil
+	}
+	// Walk slabs bottom-up. Sort indexes so we can split planes in Z
+	// order even if caller passed slabs out of order.
+	order := make([]int, len(slabs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return slabs[order[i]].ZBot < slabs[order[j]].ZBot
+	})
+	// Verify contiguity: each slab's top must equal the next slab's
+	// bottom (within a small float tolerance — slab Z planes come from
+	// the same SlabBoundaryPlanes generator so exact equality is
+	// expected, but defensive against rounding in alternate callers).
+	// A gap leaves model geometry stranded between slabs and silently
+	// attached to the wrong side by split_by_plane.
+	const zEps = 1e-5
+	for k := 0; k < len(order)-1; k++ {
+		gap := slabs[order[k+1]].ZBot - slabs[order[k]].ZTop
+		if gap < -zEps || gap > zEps {
+			return nil, fmt.Errorf("non-contiguous slabs: slab %d ZTop=%g, slab %d ZBot=%g (gap=%g)",
+				order[k], slabs[order[k]].ZTop, order[k+1], slabs[order[k+1]].ZBot, gap)
+		}
+	}
+	// current holds the unallocated remainder of src as we split off
+	// each slab. For k=0, current==src (caller-owned, do NOT close).
+	// After the first split, current is a freshly allocated "above"
+	// piece that we own and must close before re-assigning.
+	current := src
+	ownsCurrent := false
+	rollback := func(upTo int) {
+		for j := 0; j < upTo; j++ {
+			if m := perSlab[order[j]]; m != nil {
+				m.Close()
+				perSlab[order[j]] = nil
+			}
+		}
+		if ownsCurrent {
+			current.Close()
+		}
+	}
+	for k := 0; k < len(order)-1; k++ {
+		si := order[k]
+		// Plane is the boundary between slab order[k] and slab order[k+1].
+		// Contiguity is checked above, so slabs[si].ZTop ==
+		// slabs[order[k+1]].ZBot.
+		zPlane := float64(slabs[si].ZTop)
+		above, below, err := manifoldbool.SplitByPlane(current, 0, 0, 1, zPlane)
+		// First iteration: current==src (caller-owned, ownsCurrent
+		// false → skipped). Subsequent iterations: current is the
+		// previously-allocated "above" piece we own.
+		if ownsCurrent {
+			current.Close()
+			ownsCurrent = false
+		}
+		if err != nil {
+			// SplitByPlane closed above/below already on error; just
+			// release any previously emitted per-slab pieces.
+			rollback(k)
+			return nil, fmt.Errorf("split at z=%g (slab %d): %w", zPlane, si, err)
+		}
+		perSlab[si] = below
+		current = above
+		ownsCurrent = true
+	}
+	// The remaining "current" is the topmost slab's portion.
+	perSlab[order[len(order)-1]] = current
+	return perSlab, nil
+}
+
+// closeSlabManifolds closes every per-slab Manifold splitSrcBySlabs
+// allocated. nil entries (the "use src directly" sentinel) are skipped;
+// the caller still owns src and closes it separately.
+func closeSlabManifolds(perSlab []*manifoldbool.Manifold) {
+	for i, m := range perSlab {
+		if m == nil {
+			continue
+		}
+		m.Close()
+		perSlab[i] = nil
+	}
 }
 
 // clipOneCellManifold builds the cell prism, intersects it with src,

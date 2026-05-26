@@ -44,15 +44,24 @@ type Manifold struct {
 	mem unsafe.Pointer
 }
 
-// Close runs the in-place C++ destructor and frees the backing
-// buffer. Safe to call multiple times; nil-safe.
+// Close runs the in-place C++ destructor (when ptr is set) and frees
+// the backing buffer (when mem is set). Safe to call multiple times;
+// nil-safe. ptr and mem are released independently so a constructor
+// that allocated mem but failed to populate ptr — libmanifoldc can
+// return NULL pair members from manifold_split_* under degenerate
+// inputs — still releases the buffer rather than leaking it.
 func (m *Manifold) Close() {
-	if m == nil || m.ptr == nil {
+	if m == nil {
 		return
 	}
-	C.manifold_destruct_manifold(m.ptr)
-	C.free(m.mem)
-	m.ptr, m.mem = nil, nil
+	if m.ptr != nil {
+		C.manifold_destruct_manifold(m.ptr)
+		m.ptr = nil
+	}
+	if m.mem != nil {
+		C.free(m.mem)
+		m.mem = nil
+	}
 }
 
 // alloc returns a fresh manifold_manifold_size() buffer. Callers wrap
@@ -234,6 +243,39 @@ func Intersection(a, b *Manifold) (*Manifold, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// SplitByPlane splits m at the plane normal·p = offset. Returns
+// (above, below) where above contains the portion with normal·p > offset
+// and below contains normal·p < offset. New "cut" faces created on the
+// plane carry a fresh original-mesh ID, distinct from any per-face ID
+// inherited from m — so a downstream ToMeshFiltered(m.OriginalID())
+// still recovers only m's original surface.
+//
+// Either return value may be empty (NumTri==0) if m lies entirely on
+// one side of the plane. The caller owns both returned Manifolds and
+// must Close() each. The input m survives the call.
+func SplitByPlane(m *Manifold, nx, ny, nz, offset float64) (*Manifold, *Manifold, error) {
+	if m == nil || m.ptr == nil {
+		return nil, nil, fmt.Errorf("manifoldbool: SplitByPlane on nil Manifold")
+	}
+	memAbove := alloc()
+	memBelow := alloc()
+	pair := C.manifold_split_by_plane(memAbove, memBelow, m.ptr,
+		C.double(nx), C.double(ny), C.double(nz), C.double(offset))
+	above := &Manifold{ptr: pair.first, mem: memAbove}
+	below := &Manifold{ptr: pair.second, mem: memBelow}
+	if err := above.statusErr(); err != nil {
+		above.Close()
+		below.Close()
+		return nil, nil, err
+	}
+	if err := below.statusErr(); err != nil {
+		above.Close()
+		below.Close()
+		return nil, nil, err
+	}
+	return above, below, nil
 }
 
 // NumTri returns the triangle count of the underlying mesh.
