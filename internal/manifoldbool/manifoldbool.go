@@ -6,9 +6,8 @@
 // Manifold (https://github.com/elalish/manifold) is "exact predicates,
 // approximate construction" — it preserves topology aggressively and
 // guarantees the output of a Boolean op is itself a closed orientable
-// 2-manifold. That's the property we want from the cellslicer clip
-// stage: today the bespoke splice/earcut path produces stitched output
-// with thousands of boundary edges; Manifold's intersection cannot.
+// 2-manifold. That's the property the cellslicer clip stage relies on
+// (see internal/cellslicer/clip_manifold.go).
 //
 // Inputs must be watertight. Position-dedup at 1µm (see the cellslicer
 // Quantize / Snap API) is normally enough to satisfy that — the

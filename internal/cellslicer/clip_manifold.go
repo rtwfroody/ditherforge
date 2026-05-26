@@ -11,6 +11,24 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/manifoldbool"
 )
 
+// ClipResult is the aggregated output of ClipMeshToCellsManifold: a
+// single concatenated triangle mesh with per-face cell provenance.
+//
+// FaceCellIdx[i] is the global cell index (matches the flat
+// CellSamples order in SampleCells output) of the cell whose prism
+// produced face i. Downstream pipeline code maps that to a dithered
+// palette index.
+//
+// The mesh is the surface-only intersection of the source mesh with
+// each cell prism (clip_volume=false equivalent): the prism's walls
+// are filtered out via Manifold's run_original_id mechanism, leaving
+// only inherited source-mesh triangles.
+type ClipResult struct {
+	Verts       [][3]float32
+	Faces       [][3]uint32
+	FaceCellIdx []int32
+}
+
 // OpenEdgeBloat is the outward distance (mm) applied to each open
 // cell-Outer edge when building the per-cell prism for Manifold
 // clipping. Cells at the slab partition's outer boundary have one or
@@ -33,13 +51,14 @@ import (
 // for the global bloat-vs-bbox case.
 const OpenEdgeBloat = 5.0
 
-// ClipMeshToCellsManifold is the Manifold-backed replacement for the
-// bespoke ClipMeshToCells2D pipeline. For each cell it:
+// ClipMeshToCellsManifold is the Manifold-backed per-cell clip. For
+// each cell it:
 //
 //  1. Builds the cell's 2D polygon, replacing any open-edge run with
 //     a 5×cellSize outward bloat (see OpenEdgeBloat).
 //  2. Extrudes that polygon between [zBot, zTop] into a closed prism.
-//  3. Intersects the source Manifold with the prism via
+//  3. Intersects the per-slab source Manifold (pre-split from the
+//     full model via splitSrcBySlabs) with the prism via
 //     manifold_intersection. The result is watertight by construction.
 //  4. Reads the resulting triangles back and tags each face with the
 //     cell's global index.
@@ -51,16 +70,9 @@ const OpenEdgeBloat = 5.0
 // low_poly_building.glb pre-alphawrap) will surface as a clear error
 // at FromMesh.
 //
-// triIdx is accepted for signature parity with ClipMeshToCells2D but
-// currently unused — Manifold builds a single source object once and
-// the per-cell prism's BVH path is internal. We may add candidate
-// pruning back later for very large meshes.
-//
 // cellSize is the dither cell size in mm, used to scale OpenEdgeBloat.
 // Pass the same value supplied to PartitionModel.
-func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, triIdx *TriXYZIndex, cellSize float32) (ClipResult, error) {
-	_ = triIdx
-
+func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize float32) (ClipResult, error) {
 	verts, faces := DedupVertsByPosition(model.Vertices, model.Faces)
 	if len(verts) == 0 || len(faces) == 0 {
 		return ClipResult{}, fmt.Errorf("cellslicer/manifold: source mesh has no faces")

@@ -53,7 +53,7 @@ func TestClipMeshToCellsManifoldClosedCube(t *testing.T) {
 	slab := makeCubeSlab(10, 4, 6)
 	slabs := []Slab{slab}
 
-	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -77,8 +77,8 @@ func TestClipMeshToCellsManifoldClosedCube(t *testing.T) {
 		if v[2] < 4-eps || v[2] > 6+eps {
 			t.Errorf("surface-only: vertex z=%v outside slab [4..6]", v[2])
 		}
-		onWall := absf(v[0]-0) < eps || absf(v[0]-10) < eps ||
-			absf(v[1]-0) < eps || absf(v[1]-10) < eps
+		onWall := math.Abs(float64(v[0])) < eps || math.Abs(float64(v[0]-10)) < eps ||
+			math.Abs(float64(v[1])) < eps || math.Abs(float64(v[1]-10)) < eps
 		if !onWall {
 			t.Errorf("surface-only: vertex %v not on a cube side wall (x/y in {0,10})", v)
 		}
@@ -124,7 +124,7 @@ func TestClipMeshToCellsManifoldFourCells(t *testing.T) {
 	}
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: cells}}
 
-	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestClipMeshToCellsManifoldMultipleSlabs(t *testing.T) {
 		makeCubeSlab(10, 3, 7),
 		makeCubeSlab(10, 7, 10),
 	}
-	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestClipMeshToCellsManifoldSlabsOutOfOrder(t *testing.T) {
 		makeCubeSlab(10, 3, 7),  // global idx 1, middle
 		makeCubeSlab(10, 0, 3),  // global idx 2, bottom
 	}
-	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestClipMeshToCellsManifoldOpenEdgeBloatsOutward(t *testing.T) {
 	}
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: []Cell{cell}}}
 
-	cr, err := ClipMeshToCellsManifold(model, slabs, nil, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}

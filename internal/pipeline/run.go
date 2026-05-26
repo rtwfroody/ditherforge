@@ -1086,13 +1086,13 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 }
 
 // Clip cuts the geometry mesh into per-cell fragments via
-// cellslicer.ClipMeshToCells2D (pure Go, per-slab parallel; see
-// clip2d.go). Each output face is tagged with the dithered palette
-// index of its source cell; faces from cells with no dither
-// assignment fall back to the mesh's most-common palette index.
-// The geometry mesh must be closed and orientable — the alpha-wrap
-// path produces this directly; for raw meshes the pipeline relies
-// on opts.AlphaWrap.
+// cellslicer.ClipMeshToCellsManifold (Manifold per-slab boolean
+// intersect; see clip_manifold.go). Each output face is tagged with
+// the dithered palette index of its source cell; faces from cells
+// with no dither assignment fall back to the mesh's most-common
+// palette index. The geometry mesh must be closed and orientable —
+// the alpha-wrap path produces this directly; for raw meshes the
+// pipeline relies on opts.AlphaWrap.
 func (r *pipelineRun) Clip() (*clipOutput, error) {
 	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
 		do, err := r.Dither()
@@ -1133,21 +1133,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			cellAssign[gi] = do.Assignments[vi]
 		}
 
-		var clipped cellslicer.ClipResult
-		var cerr error
-		switch mode := os.Getenv("DITHERFORGE_CLIP_MODE"); mode {
-		case "horizontal":
-			plog.Printf("  Clip: DITHERFORGE_CLIP_MODE=horizontal (no per-cell XY clip)")
-			clipped, cerr = cellslicer.ClipMeshHorizontally(lo.Model, vo.CellSlabs)
-		case "legacy":
-			plog.Printf("  Clip: DITHERFORGE_CLIP_MODE=legacy (splice/earcut clip)")
-			triIdx := cellslicer.NewTriXYZIndex(lo.Model, vo.CellSize*2)
-			clipped, cerr = cellslicer.ClipMeshToCells2D(lo.Model, vo.CellSlabs, triIdx)
-		default:
-			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
-				cellslicer.OpenEdgeBloat)
-			clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, nil, vo.CellSize)
-		}
+		plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
+			cellslicer.OpenEdgeBloat)
+		clipped, cerr := cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
 		}
@@ -1172,9 +1160,6 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
 			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
 		reportHolesIfEnabled("clip output", clipped.Faces)
-		if debugHoles {
-			cellslicer.DumpFirstBoundaryEdge(clipped, vo.CellSlabs, lo.Model)
-		}
 
 		// Per-cell face-count cross-tab against partition pixel
 		// bucket. Identifies the "missing geometry" suspects:

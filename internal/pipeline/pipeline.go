@@ -599,10 +599,10 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 // overrideFaceColorsFromSamples rewrites outputMesh.FaceColors so
 // each face's RGB is its originating section's raw sampled color
 // (looked up by faceSection[fi] in sectionColors). Faces with
-// faceSection[fi] < 0 (earcut interior triangles) are left at
-// their dithered-palette color so the unsampled fallback geometry
-// still has *some* color. Used only when opts.ShowSampledColors
-// is set.
+// faceSection[fi] < 0 (interior fill triangles that don't trace back
+// to a sampled cell) are left at their dithered-palette color so the
+// unsampled fallback geometry still has *some* color. Used only when
+// opts.ShowSampledColors is set.
 func overrideFaceColorsFromSamples(mesh *MeshData, faceSection []int32, sectionColors [][3]uint8) {
 	if mesh == nil || len(mesh.FaceColors) == 0 {
 		return

@@ -81,12 +81,11 @@ func clipperPathToPoints(path clipper.Path) []Point2 {
 	return out
 }
 
-// int2D is a Clipper-integer 2D point — mirror of int3D in
-// clip2d_subdivide.go but for XY-only use. Two independently rounded
-// copies of the same float32 XY coordinate bucket to the same int2D
-// (1µm grid), so an edge map keyed by int2D pairs reliably identifies
-// shared cell-Outer edges across cells without float comparison
-// pitfalls.
+// int2D is a Clipper-integer 2D point — the XY counterpart of int3D
+// (see quant.go). Two independently rounded copies of the same
+// float32 XY coordinate bucket to the same int2D (1µm grid), so an
+// edge map keyed by int2D pairs reliably identifies shared
+// cell-Outer edges across cells without float comparison pitfalls.
 type int2D struct {
 	X, Y int64
 }

@@ -1,12 +1,13 @@
 // Package cellslicer partitions a sliced model into per-slab cells:
 // small 2D polygons that tile each slab's footprint. Cells are the
 // unit of color sampling and dithering in the cellslicer pipeline;
-// the original mesh is later 2D-clipped against each cell's prism so
-// triangle fragments inherit the enclosing cell's color.
+// the original mesh is later intersected (via Manifold's 3D boolean
+// in clip_manifold.go) against each cell's prism so triangle fragments
+// inherit the enclosing cell's color.
 //
-// The package owns Z-plane slicing (SliceMesh + Loop + Point2),
-// slab partition, cell polygon generation, adjacency, sampling, and
-// the per-cell 2D Clip stage.
+// The package owns Z-plane slicing (SliceMesh + Loop + Point2), slab
+// partition, cell polygon generation, adjacency, sampling, and the
+// per-cell Manifold Clip stage.
 package cellslicer
 
 // CellKind distinguishes ring cells (along the slab's boundary) from
@@ -34,27 +35,22 @@ type Cell struct {
 	Kind  CellKind
 	// Pixels is the cell's pixel-count in the partition raster
 	// (pxSize = cellSize/4 by default). Useful for diagnosing
-	// missing-geometry dropouts: 1-px cells have an outline ~one
-	// raster pixel wide and frequently produce no faces in
-	// ClipMeshToCells2D. Zero when the cell was not built from a
-	// raster (e.g. legacy PartitionSlab path).
+	// missing-geometry dropouts. Zero when the cell was not built
+	// from a raster (e.g. legacy PartitionSlab path).
 	Pixels int
-	// OuterEdgeOpen, when non-nil, has length len(Outer) and
-	// marks whether each cell-Outer edge lies on the slab partition's
-	// outer boundary — i.e. no other cell in the slab owns its
-	// reverse half-edge AND the half-space immediately outside the
-	// edge falls outside the slab footprint.
+	// OuterEdgeOpen, when non-nil, has length len(Outer) and marks
+	// whether each cell-Outer edge lies on the slab partition's outer
+	// boundary — i.e. no other cell in the slab owns its reverse
+	// half-edge AND the half-space immediately outside the edge falls
+	// outside the slab footprint.
 	//
-	// ClipMeshToCells2D treats "outer" edges as open: it skips the
-	// Sutherland-Hodgman cut at the cell prism for those edges, so
-	// source-mesh fragments whose vertices nudge slightly outside the
-	// slab footprint (typical of alpha-wrap discretisation on
-	// near-vertical walls) land in this cell rather than being
-	// silently dropped — they're what was producing tens of thousands
-	// of unmatched cell-boundary edges in the building model.
-	//
-	// debugsvg.go renders OuterEdgeOpen edges in red so a layer
-	// debug view shows the open boundary at a glance.
+	// ClipMeshToCellsManifold treats "outer" edges as open: it bloats
+	// them outward when building the per-cell prism so source-mesh
+	// fragments whose vertices nudge slightly outside the slab
+	// footprint (typical of alpha-wrap discretisation on near-vertical
+	// walls) still land in this cell rather than being silently
+	// dropped. debugsvg.go renders OuterEdgeOpen edges in red so a
+	// layer debug view shows the open boundary at a glance.
 	//
 	// nil for cells from the legacy PartitionSlab path that hasn't
 	// been tagged; consumers MUST treat nil as "every edge is inner"
