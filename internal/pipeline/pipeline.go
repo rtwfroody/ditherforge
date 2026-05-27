@@ -495,12 +495,6 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		}
 		overrideFaceColorsFromSamples(outputMesh, mo.ShellSectionIdx, cellColors)
 	}
-	if lo.PreviewScale != 1 {
-		for i := range outputMesh.Vertices {
-			outputMesh.Vertices[i] *= lo.PreviewScale
-		}
-	}
-
 	if opts.Stats {
 		printStats(mo.ShellAssignments, po.Palette)
 	}

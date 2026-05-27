@@ -289,15 +289,23 @@ func RenderInput(m *InputMesh, v View, res int) *image.RGBA {
 // back-face culling: only faces whose world-space normal projects
 // toward the camera are drawn. Used as the apples-to-apples
 // comparand for the culled sampled-mesh render so the test sees
-// what the GUI sees.
-func RenderInputCulled(m *InputMesh, v View, res int) *image.RGBA {
+// what the GUI sees. Returns the full ColorImage so callers can
+// read both RGB (via .ToRGBA()) and the depth buffer.
+//
+// Note for depth-comparison callers: depth values in the returned
+// ColorImage are raw projected coordinates (independent of bounds-
+// derived scaling), so two RenderInputCulled / RenderPipelineMesh-
+// Culled outputs are directly comparable per-pixel ONLY when the
+// two meshes have closely-matching bboxes — the per-mesh framing
+// places the same world (X, Z) at the same screen pixel only when
+// both meshes occupy roughly the same world rectangle.
+func RenderInputCulled(m *InputMesh, v View, res int) *render.ColorImage {
 	faces, faceOrigIdx := cullFaces(m.Vertices, m.Faces, v)
 	bounds := render.ProjectedBounds(m.Vertices, v.Azimuth, v.Elev)
-	ci := render.RenderColor(m.Vertices, faces, v.Azimuth, v.Elev, res, bounds,
+	return render.RenderColor(m.Vertices, faces, v.Azimuth, v.Elev, res, bounds,
 		func(fi int, u, vv float64) [3]uint8 {
 			return m.ColorAt(faceOrigIdx[fi], u, vv)
 		})
-	return ci.ToRGBA()
 }
 
 // RenderPipelineMesh renders a pipeline output MeshData using its
@@ -343,7 +351,10 @@ func RenderPipelineMesh(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
 // back-face culling. This is the version test assertions should use:
 // the GUI culls back faces, so any winding/missing-front-face bug
 // must be caught against a culled render or it'll pass silently.
-func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
+// Returns the full ColorImage so callers can read both RGB (via
+// .ToRGBA()) and the depth buffer. See RenderInputCulled for the
+// caveat about per-pixel depth comparison.
+func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *render.ColorImage {
 	nVerts := len(mesh.Vertices) / 3
 	verts := make([][3]float32, nVerts)
 	for i := 0; i < nVerts; i++ {
@@ -360,7 +371,7 @@ func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *image.R
 	}
 	faces, faceOrigIdx := cullFaces(verts, facesAll, v)
 	bounds := render.ProjectedBounds(verts, v.Azimuth, v.Elev)
-	ci := render.RenderColor(verts, faces, v.Azimuth, v.Elev, res, bounds,
+	return render.RenderColor(verts, faces, v.Azimuth, v.Elev, res, bounds,
 		func(fi int, u, vv float64) [3]uint8 {
 			orig := faceOrigIdx[fi]
 			if orig*3+2 >= len(mesh.FaceColors) {
@@ -372,7 +383,6 @@ func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *image.R
 				uint8(mesh.FaceColors[3*orig+2]),
 			}
 		})
-	return ci.ToRGBA()
 }
 
 // cullFaces returns the subset of faces whose world-space normal

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/debugrender"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
+	"github.com/rtwfroody/ditherforge/internal/render"
 )
 
 // TestSampledMatchesInput runs the pipeline in ShowSampledColors
@@ -60,6 +62,15 @@ func TestSampledMatchesInput(t *testing.T) {
 		// a few percent to silhouette aliasing. 0 disables the
 		// per-case check.
 		silhPx float64
+		// holeFrac is the maximum allowed fraction of overlap
+		// pixels whose per-pixel depth differs from the input by
+		// more than 10% of the projected scene depth range. Catches
+		// through-the-wall holes that the RGB-only silhouette
+		// check misses when the back-of-building paint matches the
+		// missing front wall — the camera sees a far surface
+		// instead of the near one, so depth jumps even though
+		// colour and alpha do not. 0 disables the per-case check.
+		holeFrac float64
 	}
 	cases := []struct {
 		name string
@@ -127,7 +138,7 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "cube",
 			path:              filepath.Join("objects", "cube.stl"),
-			def:               viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99},
+			def:               viewLimits{avg: 30, tile: 30, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99, holeFrac: 0.001},
 			showSampledColors: true,
 			scaleOnly:         true, // 20mm native — the bug's repro scale
 			allAxisViews:      true, // cube-cap winding bug only shows on -Y / -X
@@ -146,7 +157,7 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "cube_dither",
 			path:              filepath.Join("objects", "cube.stl"),
-			def:               viewLimits{avg: 60, tile: 60, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99},
+			def:               viewLimits{avg: 60, tile: 60, silh: 0.95, outlierFrac: 0.01, silhPx: 0.99, holeFrac: 0.001},
 			showSampledColors: false,
 			scaleOnly:         true, // reproduce GUI's sizeMode=scale, scale=1.0 — native 20mm cube
 			allAxisViews:      true,
@@ -155,8 +166,8 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name:              "earth",
 			path:              filepath.Join("objects", "earth.glb"),
-			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97},
-			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97}},
+			def:               viewLimits{avg: 22, tile: 12, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97, holeFrac: 0.005},
+			perView:           map[string]viewLimits{"persp": {avg: 22, tile: 18, silh: 0.97, outlierFrac: 0.004, silhPx: 0.97, holeFrac: 0.005}},
 			showSampledColors: true,
 		},
 		// low_poly_building is a multi-primitive GLB (floor +
@@ -170,14 +181,24 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name: "building",
 			path: filepath.Join("objects", "low_poly_building.glb"),
-			def:  viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95},
+			// holeFrac is set tight enough (2% of overlap pixels) to
+			// fail building/side, which currently shows ~6%
+			// depth-mismatched pixels — the wall-bottom gap bug:
+			// the sampled mesh's ±Y wall has small holes near the
+			// bottom that the colour silhouette check misses
+			// (camera sees through to the opposite wall's interior,
+			// which happens to share paint), but the depth check
+			// catches because the far surface is well behind the
+			// near one. The other three building views currently
+			// score 0.1–1.7% so they pass at 2%.
+			def: viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
 			perView: map[string]viewLimits{
 				// Top: the persp tile threshold stays generous to
 				// absorb shading differences on the roof's small
 				// vent / chimney features that the 0.4mm cell grid
 				// can't resolve at full fidelity.
-				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003, silhPx: 0.95},
-				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95},
+				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
+				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
 			},
 			alphaWrap:         true,
 			showSampledColors: true,
@@ -291,8 +312,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				// diagnostic companions — if the culled assertion fires,
 				// the unculled twin shows whether the geometry is missing
 				// or merely wrong-wound.
-				inputImg := debugrender.RenderInputCulled(inputMesh, v, res)
-				sampledImg := debugrender.RenderPipelineMeshCulled(pr.OutputMesh, v, res)
+				inputCI := debugrender.RenderInputCulled(inputMesh, v, res)
+				sampledCI := debugrender.RenderPipelineMeshCulled(pr.OutputMesh, v, res)
+				inputImg := inputCI.ToRGBA()
+				sampledImg := sampledCI.ToRGBA()
 				inputUnculled := debugrender.RenderInput(inputMesh, v, res)
 				sampledUnculled := debugrender.RenderPipelineMesh(pr.OutputMesh, v, res)
 				_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("input_%s.png", v.Name)), inputImg)
@@ -304,8 +327,9 @@ func TestSampledMatchesInput(t *testing.T) {
 				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
 				iouPx, inputPx, sampledPx := silhouettePixelIoU(inputImg, sampledImg)
 				outFrac, outOverlap, nOut := outlierPixelFraction(inputImg, sampledImg, 150)
-				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f) %s",
-					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, worstTileDesc)
+				holeFrac, holeOverlap, nHole := depthHoleFraction(inputCI, sampledCI, 0.10)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f), depth-hole %d/%d=%.4f (thr=10%% of range, limit %.4f) %s",
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, nHole, holeOverlap, holeFrac, limits.holeFrac, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -330,6 +354,10 @@ func TestSampledMatchesInput(t *testing.T) {
 				if limits.outlierFrac > 0 && outFrac > limits.outlierFrac {
 					t.Errorf("%s/%s: %d/%d=%.4f overlap pixels deviate by >150/channel from input (limit %.4f); localized colour failure — sample-cap, palette fallback, or cap-plane fill bug; PNGs in %s",
 						tc.name, v.Name, nOut, outOverlap, outFrac, limits.outlierFrac, dumpDir)
+				}
+				if limits.holeFrac > 0 && holeFrac > limits.holeFrac {
+					t.Errorf("%s/%s: %d/%d=%.4f pixels show depth-mismatch >10%% of scene range (limit %.4f) — likely holes in front-facing geometry exposing the far surface, which a same-colour back wall would hide from the RGB silhouette check; PNGs in %s",
+						tc.name, v.Name, nHole, holeOverlap, holeFrac, limits.holeFrac, dumpDir)
 				}
 			}
 		})
@@ -676,6 +704,55 @@ func silhouettePixelIoU(a, b *image.RGBA) (iou float64, opaqueA, opaqueB int) {
 		return 1, opaqueA, opaqueB
 	}
 	return float64(inter) / float64(union), opaqueA, opaqueB
+}
+
+// depthHoleFraction returns the fraction of pixels (out of those
+// where BOTH renders are opaque) whose per-pixel depth differs from
+// the input by more than thrFrac of the projected scene depth range.
+//
+// Motivation: a hole in a front-facing wall lets the camera see
+// through to the back wall. The silhouette IoU passes — both
+// renders are opaque at that pixel — and if the inside of the back
+// wall happens to share colour with the missing front wall (very
+// common on a building with one paint scheme) the RGB MAE / outlier
+// checks also pass. But the depth jumps from "near wall surface" to
+// "far wall surface", which is a large fraction of the scene depth
+// range. The check uses the union of both renders' DepthMin/DepthMax
+// as the normaliser so a single hole is judged relative to the
+// scene as a whole, not relative to a possibly-zero per-render
+// range. thrFrac of 0.10 means "depth jumped by 10% of the model's
+// projected depth" — generous enough to ignore raster-edge wobble
+// on tilted surfaces, tight enough to catch a single missing wall
+// of a boxy object.
+func depthHoleFraction(a, b *render.ColorImage, thrFrac float64) (frac float64, overlap, holes int) {
+	if a == nil || b == nil || a.Width != b.Width || a.Height != b.Height {
+		return 0, 0, 0
+	}
+	dMin := math.Min(a.DepthMin, b.DepthMin)
+	dMax := math.Max(a.DepthMax, b.DepthMax)
+	dRange := dMax - dMin
+	if dRange < 1e-12 {
+		return 0, 0, 0
+	}
+	thr := thrFrac * dRange
+	n := a.Width * a.Height
+	for i := 0; i < n; i++ {
+		if !a.HasPixel[i] || !b.HasPixel[i] {
+			continue
+		}
+		overlap++
+		diff := a.Depth[i] - b.Depth[i]
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > thr {
+			holes++
+		}
+	}
+	if overlap == 0 {
+		return 0, 0, 0
+	}
+	return float64(holes) / float64(overlap), overlap, holes
 }
 
 // maxNormalDirectionShare reports the largest single share of

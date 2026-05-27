@@ -1,7 +1,7 @@
 {
   "_ditherforge": {
     "url": "https://github.com/rtwfroody/ditherforge",
-    "version": "ditherforge 0.9.26"
+    "version": "ditherforge 0.9.27"
   },
   "settings": {
     "inputFile": "low_poly_building.glb",
@@ -21,7 +21,7 @@
       null,
       null
     ],
-    "inventoryCollection": "Inventory",
+    "inventoryCollection": "Panchroma Basic",
     "brightness": 0,
     "contrast": 0,
     "saturation": 0,
