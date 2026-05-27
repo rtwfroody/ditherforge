@@ -404,7 +404,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		if len(bakedDecals) > 0 {
 			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
-		mesh = scalePreviewMesh(mesh, lo.PreviewScale)
+		mesh = ScalePreviewMesh(mesh, lo.PreviewScale)
 		// Compute the original-mesh-coord bbox (in mm, post-scale,
 		// post-normalizeZ). Used by the Split UI to size the offset
 		// slider per axis.
@@ -429,7 +429,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			var wrapped *MeshData
 			if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
 				wrapped = buildWrappedMeshData(lo.Model)
-				wrapped = scalePreviewMesh(wrapped, lo.PreviewScale)
+				wrapped = ScalePreviewMesh(wrapped, lo.PreviewScale)
 			}
 			onAlphaWrappedMesh(wrapped, lo.PreviewScale)
 		}
@@ -439,7 +439,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 			if so != nil && so.FromAlphaWrap && len(so.Decals) > 0 {
 				overlay = buildStickerOverlayMesh(so.Model, so.Decals)
 				if overlay != nil {
-					overlay = scalePreviewMesh(overlay, lo.PreviewScale)
+					overlay = ScalePreviewMesh(overlay, lo.PreviewScale)
 				}
 			}
 			onStickerOverlay(overlay, lo.PreviewScale)

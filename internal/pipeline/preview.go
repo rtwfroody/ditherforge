@@ -310,10 +310,12 @@ func encodeAtlasTexture(img image.Image) string {
 	return "png:" + base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-// scalePreviewMesh applies a uniform scale to a MeshData's vertices.
+// ScalePreviewMesh applies a uniform scale to a MeshData's vertices.
 // scale==1 returns the mesh unchanged; otherwise a shallow copy with a
-// scaled Vertices slice is returned (other slices are shared).
-func scalePreviewMesh(mesh *MeshData, scale float32) *MeshData {
+// scaled Vertices slice is returned (other slices are shared). Used by
+// callers that want to convert pipeline-mm coords back to the GUI's
+// preview-mm frame (multiply by lo.PreviewScale).
+func ScalePreviewMesh(mesh *MeshData, scale float32) *MeshData {
 	if mesh == nil || scale == 1 {
 		return mesh
 	}

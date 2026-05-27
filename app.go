@@ -468,10 +468,17 @@ func (a *App) processOne(req pipelineRequest) {
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
+	// lastPreviewScale captures the pipeline's pvScale (unitScale /
+	// totalScale) so the output-mesh emit below can convert the
+	// pipeline-mm pr.OutputMesh back to the GUI's preview-mm frame.
+	// Tests read pr.OutputMesh directly and want pipeline-mm, so the
+	// pipeline returns it unscaled; the GUI scaling lives here.
+	var lastPreviewScale float32 = 1
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
 		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32, bboxMin, bboxMax [3]float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
+			lastPreviewScale = pvScale
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
@@ -564,10 +571,21 @@ func (a *App) processOne(req pipelineRequest) {
 		if a.lastOutputID != "" {
 			a.meshes.Remove(a.lastOutputID)
 		}
-		a.lastOutputID = a.meshes.Store(result.OutputMesh)
+		// Scale pipeline-mm OutputMesh back to the GUI's preview-mm
+		// frame so it lines up with the input mesh (which is already
+		// pre-scaled inside the pipeline; see pipeline.RunCached's
+		// onInputMesh path). PreviewScale rides on the event so the
+		// frontend can derive scale-dependent things — same pattern
+		// as input-mesh / wrapped-mesh / input-overlay-mesh.
+		scaled := pipeline.ScalePreviewMesh(result.OutputMesh, lastPreviewScale)
+		a.lastOutputID = a.meshes.Store(scaled)
 		plog.Printf("Pipeline gen %d output mesh: %d verts, %d faces",
-			req.gen, len(result.OutputMesh.Vertices)/3, len(result.OutputMesh.Faces)/3)
-		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastOutputID})
+			req.gen, len(scaled.Vertices)/3, len(scaled.Faces)/3)
+		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{
+			Gen:          req.gen,
+			URL:          "/mesh/" + a.lastOutputID,
+			PreviewScale: lastPreviewScale,
+		})
 	}
 
 	if result.NeedsForce {
