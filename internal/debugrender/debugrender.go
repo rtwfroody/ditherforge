@@ -295,17 +295,33 @@ func RenderInput(m *InputMesh, v View, res int) *image.RGBA {
 // Note for depth-comparison callers: depth values in the returned
 // ColorImage are raw projected coordinates (independent of bounds-
 // derived scaling), so two RenderInputCulled / RenderPipelineMesh-
-// Culled outputs are directly comparable per-pixel ONLY when the
-// two meshes have closely-matching bboxes — the per-mesh framing
-// places the same world (X, Z) at the same screen pixel only when
-// both meshes occupy roughly the same world rectangle.
+// Culled outputs are directly comparable per-pixel ONLY when both
+// renders use the *same* bounds — otherwise the per-mesh framing
+// places the same world (X, Z) at different screen pixels. Use the
+// *WithBounds variants and pass a shared (union) bounds when
+// per-pixel depth comparison matters.
 func RenderInputCulled(m *InputMesh, v View, res int) *render.ColorImage {
+	return RenderInputCulledWithBounds(m, v, res, InputMeshProjectedBounds(m, v))
+}
+
+// RenderInputCulledWithBounds is RenderInputCulled with a caller-
+// supplied framing rectangle. Use this when comparing the resulting
+// depth buffer per-pixel against another render — pass the union of
+// both meshes' ProjectedBounds so they share screen-space framing.
+func RenderInputCulledWithBounds(m *InputMesh, v View, res int, bounds render.Bounds) *render.ColorImage {
 	faces, faceOrigIdx := cullFaces(m.Vertices, m.Faces, v)
-	bounds := render.ProjectedBounds(m.Vertices, v.Azimuth, v.Elev)
 	return render.RenderColor(m.Vertices, faces, v.Azimuth, v.Elev, res, bounds,
 		func(fi int, u, vv float64) [3]uint8 {
 			return m.ColorAt(faceOrigIdx[fi], u, vv)
 		})
+}
+
+// InputMeshProjectedBounds returns the screen-space framing rectangle
+// for an InputMesh under the given view. Exposed so callers that need
+// to render multiple meshes into a shared frame (e.g. a depth-
+// comparison test) can union per-mesh bounds before rendering.
+func InputMeshProjectedBounds(m *InputMesh, v View) render.Bounds {
+	return render.ProjectedBounds(m.Vertices, v.Azimuth, v.Elev)
 }
 
 // RenderPipelineMesh renders a pipeline output MeshData using its
@@ -355,22 +371,19 @@ func RenderPipelineMesh(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
 // .ToRGBA()) and the depth buffer. See RenderInputCulled for the
 // caveat about per-pixel depth comparison.
 func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *render.ColorImage {
-	nVerts := len(mesh.Vertices) / 3
-	verts := make([][3]float32, nVerts)
-	for i := 0; i < nVerts; i++ {
-		verts[i] = [3]float32{
-			mesh.Vertices[3*i], mesh.Vertices[3*i+1], mesh.Vertices[3*i+2],
-		}
-	}
-	nFacesAll := len(mesh.Faces) / 3
-	facesAll := make([][3]uint32, nFacesAll)
-	for i := 0; i < nFacesAll; i++ {
-		facesAll[i] = [3]uint32{
-			mesh.Faces[3*i], mesh.Faces[3*i+1], mesh.Faces[3*i+2],
-		}
-	}
+	verts := meshDataVerts(mesh)
+	return RenderPipelineMeshCulledWithBounds(mesh, v, res, render.ProjectedBounds(verts, v.Azimuth, v.Elev))
+}
+
+// RenderPipelineMeshCulledWithBounds is RenderPipelineMeshCulled with
+// a caller-supplied framing rectangle. Use this when comparing the
+// resulting depth buffer per-pixel against another render — pass the
+// union of both meshes' ProjectedBounds so they share screen-space
+// framing.
+func RenderPipelineMeshCulledWithBounds(mesh *pipeline.MeshData, v View, res int, bounds render.Bounds) *render.ColorImage {
+	verts := meshDataVerts(mesh)
+	facesAll := meshDataFaces(mesh)
 	faces, faceOrigIdx := cullFaces(verts, facesAll, v)
-	bounds := render.ProjectedBounds(verts, v.Azimuth, v.Elev)
 	return render.RenderColor(verts, faces, v.Azimuth, v.Elev, res, bounds,
 		func(fi int, u, vv float64) [3]uint8 {
 			orig := faceOrigIdx[fi]
@@ -383,6 +396,46 @@ func RenderPipelineMeshCulled(mesh *pipeline.MeshData, v View, res int) *render.
 				uint8(mesh.FaceColors[3*orig+2]),
 			}
 		})
+}
+
+// MeshDataProjectedBounds returns the screen-space framing rectangle
+// for a pipeline MeshData under the given view. Companion to
+// InputMeshProjectedBounds for shared-bounds depth comparison.
+func MeshDataProjectedBounds(mesh *pipeline.MeshData, v View) render.Bounds {
+	return render.ProjectedBounds(meshDataVerts(mesh), v.Azimuth, v.Elev)
+}
+
+// UnionBounds returns the smallest Bounds containing both a and b on
+// every axis. Used to share screen-space framing between two renders
+// whose depth buffers will be compared per-pixel.
+func UnionBounds(a, b render.Bounds) render.Bounds {
+	return render.Bounds{
+		XMin: math.Min(a.XMin, b.XMin), XMax: math.Max(a.XMax, b.XMax),
+		YMin: math.Min(a.YMin, b.YMin), YMax: math.Max(a.YMax, b.YMax),
+		DMin: math.Min(a.DMin, b.DMin), DMax: math.Max(a.DMax, b.DMax),
+	}
+}
+
+func meshDataVerts(mesh *pipeline.MeshData) [][3]float32 {
+	nVerts := len(mesh.Vertices) / 3
+	verts := make([][3]float32, nVerts)
+	for i := 0; i < nVerts; i++ {
+		verts[i] = [3]float32{
+			mesh.Vertices[3*i], mesh.Vertices[3*i+1], mesh.Vertices[3*i+2],
+		}
+	}
+	return verts
+}
+
+func meshDataFaces(mesh *pipeline.MeshData) [][3]uint32 {
+	nFaces := len(mesh.Faces) / 3
+	faces := make([][3]uint32, nFaces)
+	for i := 0; i < nFaces; i++ {
+		faces[i] = [3]uint32{
+			mesh.Faces[3*i], mesh.Faces[3*i+1], mesh.Faces[3*i+2],
+		}
+	}
+	return faces
 }
 
 // cullFaces returns the subset of faces whose world-space normal

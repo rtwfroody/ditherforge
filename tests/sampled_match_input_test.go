@@ -321,6 +321,12 @@ func TestSampledMatchesInput(t *testing.T) {
 				// diagnostic companions — if the culled assertion fires,
 				// the unculled twin shows whether the geometry is missing
 				// or merely wrong-wound.
+				// RGB / silhouette renders use per-mesh framing so each
+				// mesh fills its own bbox. This tolerates small Z /
+				// XY translations between meshes (LoadInputMesh
+				// doesn't Z-normalize, the pipeline does — so input
+				// and sampled bboxes can be offset by a couple mm
+				// without the rendered shapes looking different).
 				inputCI := debugrender.RenderInputCulled(inputMesh, v, res)
 				sampledCI := debugrender.RenderPipelineMeshCulled(pr.OutputMesh, v, res)
 				inputImg := inputCI.ToRGBA()
@@ -337,21 +343,42 @@ func TestSampledMatchesInput(t *testing.T) {
 				iouPx, inputPx, sampledPx := silhouettePixelIoU(inputImg, sampledImg)
 				outFrac, outOverlap, nOut := outlierPixelFraction(inputImg, sampledImg, 150)
 
-				// Depth comparison uses the alpha-wrapped mesh (the
-				// cellslicer's actual input) when alpha-wrap is on, so
-				// the metric only fires on cellslicer-introduced
-				// divergence rather than legitimate wrap-induced
-				// reshaping (e.g. sealing open windows on a building
-				// model). When alpha-wrap is off, OutputMesh's input is
-				// the original input mesh, so we compare against that.
-				depthRefCI := inputCI
+				// Depth-hole reference: alpha-wrapped mesh (the
+				// cellslicer's actual input) when wrap is on, raw
+				// input mesh otherwise. The wrap path stops the
+				// metric from firing on legitimate wrap-induced
+				// reshaping (e.g. sealing open windows on a building)
+				// rather than cellslicer-introduced divergence.
+				//
+				// When the reference is the wrap, re-render BOTH the
+				// sampled and wrapped meshes into a shared framing
+				// rectangle (union of their bboxes) so per-pixel
+				// depth values map to the same world (X, Z). Per-mesh
+				// framing would inject silhouette-edge holes whenever
+				// the two bboxes diverge by more than the per-pixel
+				// cell size — fine today (0.02 mm match) but fragile
+				// for thinner / spikier models where the post-
+				// decimate wrap can exceed OutputMesh's bbox by more
+				// than that. We don't apply this to the raw-input
+				// path because LoadInputMesh doesn't Z-normalize and
+				// union framing would surface that as a silhouette
+				// shift.
 				depthRefLabel := "input"
+				sampledForDepth := sampledCI
+				depthRefCI := inputCI
 				if pr.WrappedMesh != nil {
-					depthRefCI = debugrender.RenderPipelineMeshCulled(pr.WrappedMesh, v, res)
 					depthRefLabel = "wrapped"
+					sharedBounds := debugrender.UnionBounds(
+						debugrender.MeshDataProjectedBounds(pr.OutputMesh, v),
+						debugrender.MeshDataProjectedBounds(pr.WrappedMesh, v),
+					)
+					sampledForDepth = debugrender.RenderPipelineMeshCulledWithBounds(pr.OutputMesh, v, res, sharedBounds)
+					depthRefCI = debugrender.RenderPipelineMeshCulledWithBounds(pr.WrappedMesh, v, res, sharedBounds)
 					_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("wrapped_%s.png", v.Name)), depthRefCI.ToRGBA())
+					wrappedUnculled := debugrender.RenderPipelineMesh(pr.WrappedMesh, v, res)
+					_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("wrapped_unculled_%s.png", v.Name)), wrappedUnculled)
 				}
-				holeFrac, holeOverlap, nHole := depthHoleFraction(depthRefCI, sampledCI, 0.10)
+				holeFrac, holeOverlap, nHole := depthHoleFraction(depthRefCI, sampledForDepth, 0.10)
 				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f), depth-hole(vs %s) %d/%d=%.4f (thr=10%% of range, limit %.4f) %s",
 					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, depthRefLabel, nHole, holeOverlap, holeFrac, limits.holeFrac, worstTileDesc)
 				if overlap < 100 {
