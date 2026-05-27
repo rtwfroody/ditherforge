@@ -63,13 +63,22 @@ func TestSampledMatchesInput(t *testing.T) {
 		// per-case check.
 		silhPx float64
 		// holeFrac is the maximum allowed fraction of overlap
-		// pixels whose per-pixel depth differs from the input by
+		// pixels whose per-pixel depth differs from the reference by
 		// more than 10% of the projected scene depth range. Catches
-		// through-the-wall holes that the RGB-only silhouette
-		// check misses when the back-of-building paint matches the
-		// missing front wall — the camera sees a far surface
-		// instead of the near one, so depth jumps even though
-		// colour and alpha do not. 0 disables the per-case check.
+		// holes in front-facing geometry (RGB-only silhouette check
+		// misses these when the surface seen "through" the hole shares
+		// colour with the missing wall — common on a same-paint
+		// building).
+		//
+		// Reference choice: when alpha-wrap is on we compare against
+		// the wrap (the cellslicer's actual input). The original input
+		// model often has open windows / recesses the wrap legitimately
+		// seals, and comparing the cellslicer output to the un-wrapped
+		// model would flood the metric with wrap-induced reshaping
+		// rather than cellslicer-introduced divergence. When alpha-wrap
+		// is off, we compare against the raw input mesh.
+		//
+		// 0 disables the per-case check.
 		holeFrac float64
 	}
 	cases := []struct {
@@ -327,9 +336,24 @@ func TestSampledMatchesInput(t *testing.T) {
 				iou, inputOpaque, sampledOpaque := silhouetteIoU(inputImg, sampledImg)
 				iouPx, inputPx, sampledPx := silhouettePixelIoU(inputImg, sampledImg)
 				outFrac, outOverlap, nOut := outlierPixelFraction(inputImg, sampledImg, 150)
-				holeFrac, holeOverlap, nHole := depthHoleFraction(inputCI, sampledCI, 0.10)
-				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f), depth-hole %d/%d=%.4f (thr=10%% of range, limit %.4f) %s",
-					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, nHole, holeOverlap, holeFrac, limits.holeFrac, worstTileDesc)
+
+				// Depth comparison uses the alpha-wrapped mesh (the
+				// cellslicer's actual input) when alpha-wrap is on, so
+				// the metric only fires on cellslicer-introduced
+				// divergence rather than legitimate wrap-induced
+				// reshaping (e.g. sealing open windows on a building
+				// model). When alpha-wrap is off, OutputMesh's input is
+				// the original input mesh, so we compare against that.
+				depthRefCI := inputCI
+				depthRefLabel := "input"
+				if pr.WrappedMesh != nil {
+					depthRefCI = debugrender.RenderPipelineMeshCulled(pr.WrappedMesh, v, res)
+					depthRefLabel = "wrapped"
+					_ = debugrender.WritePNG(filepath.Join(dumpDir, fmt.Sprintf("wrapped_%s.png", v.Name)), depthRefCI.ToRGBA())
+				}
+				holeFrac, holeOverlap, nHole := depthHoleFraction(depthRefCI, sampledCI, 0.10)
+				t.Logf("%s/%s: overlap=%d px, mae=%.2f (limit %.1f), worst-tile mae=%.2f (limit %.1f, %dx%d grid), silhouette IoU=%.3f (limit %.2f; input %d / sampled %d opaque tiles), pix-IoU=%.4f (limit %.2f; input %d / sampled %d opaque px), outlier-px %d/%d=%.4f (devThr=150, limit %.4f), depth-hole(vs %s) %d/%d=%.4f (thr=10%% of range, limit %.4f) %s",
+					tc.name, v.Name, overlap, mae, limits.avg, maxTileMAE, limits.tile, tileGrid, tileGrid, iou, limits.silh, inputOpaque, sampledOpaque, iouPx, limits.silhPx, inputPx, sampledPx, nOut, outOverlap, outFrac, limits.outlierFrac, depthRefLabel, nHole, holeOverlap, holeFrac, limits.holeFrac, worstTileDesc)
 				if overlap < 100 {
 					t.Errorf("%s/%s: too few overlapping pixels (%d) for a meaningful comparison",
 						tc.name, v.Name, overlap)
@@ -356,8 +380,8 @@ func TestSampledMatchesInput(t *testing.T) {
 						tc.name, v.Name, nOut, outOverlap, outFrac, limits.outlierFrac, dumpDir)
 				}
 				if limits.holeFrac > 0 && holeFrac > limits.holeFrac {
-					t.Errorf("%s/%s: %d/%d=%.4f pixels show depth-mismatch >10%% of scene range (limit %.4f) — likely holes in front-facing geometry exposing the far surface, which a same-colour back wall would hide from the RGB silhouette check; PNGs in %s",
-						tc.name, v.Name, nHole, holeOverlap, holeFrac, limits.holeFrac, dumpDir)
+					t.Errorf("%s/%s: %d/%d=%.4f pixels show depth-mismatch >10%% of scene range vs %s reference (limit %.4f) — likely holes in front-facing geometry exposing the far surface, which a same-colour back wall would hide from the RGB silhouette check; PNGs in %s",
+						tc.name, v.Name, nHole, holeOverlap, holeFrac, depthRefLabel, limits.holeFrac, dumpDir)
 				}
 			}
 		})

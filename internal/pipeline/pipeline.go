@@ -288,7 +288,15 @@ type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
 	OutputMesh    *MeshData `json:"-"` // sent async via events, not in JSON response
-	Duration      time.Duration
+	// WrappedMesh is the alpha-wrap output (post-decimate) in the same
+	// coord system as OutputMesh. Populated only when opts.AlphaWrap is
+	// true; nil otherwise. Used by tests that want to compare the
+	// sampled mesh against the *actual* input to the cellslicer (the
+	// wrap) rather than the original model — wrap-induced divergence
+	// (e.g. sealing open windows with surfaces at unexpected depths)
+	// would otherwise pollute cellslicer-correctness metrics.
+	WrappedMesh *MeshData `json:"-"`
+	Duration    time.Duration
 }
 
 // PrepareResult summarizes the Prepare phase (kept for CLI backward compat).
@@ -499,9 +507,15 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		printStats(mo.ShellAssignments, po.Palette)
 	}
 
+	var wrappedMesh *MeshData
+	if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+		wrappedMesh = buildWrappedMeshData(lo.Model)
+	}
+
 	return &ProcessResult{
-		OutputMesh: outputMesh,
-		Duration:   time.Since(start),
+		OutputMesh:  outputMesh,
+		WrappedMesh: wrappedMesh,
+		Duration:    time.Since(start),
 	}, nil
 }
 
