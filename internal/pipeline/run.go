@@ -588,7 +588,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			cellSizeLayer0 = cellSizeUpper
 		}
 		// Single policy point: layer 0 = the bottom slab. Used by
-		// PartitionSlabRaster, SampleSlab, and AddWithinSlabAdjacency.
+		// PartitionSlabAnalytic, SampleSlab, and AddWithinSlabAdjacency.
 		cellSizeForSlab := func(i int) float32 {
 			if i == 0 {
 				return cellSizeLayer0
@@ -788,29 +788,19 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			len(slabs), nCells, len(cells), nEdges/2,
 			cellSizeLayer0, cellSizeUpper, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
 
-		// Aggregate per-slab partition stats. RawRing+RawHex are pre-
-		// split, pre-drop generator output; SplitAdded counts extra
-		// cells emitted by splitDisconnectedCells; DroppedZeroPx counts
-		// raw cells whose pixel mask ended up empty (slivers below the
-		// pxSize=cellSize/4 raster). Final is the surviving cell count
-		// per slab. PxHist buckets surviving cells by pixel count —
-		// the [1,2-4] buckets are the suspects for "missing geometry"
-		// dropouts: a 1-pixel cell has a single-quad outline whose
-		// clip footprint is one cellSize/4 square.
+		// Aggregate per-slab partition stats. RawRing+RawHex are the
+		// pre-clip generator output; Final is the surviving cell count
+		// after each raw cell is Clipper-clipped to its region (empty
+		// intersections are never emitted). The gap between RawRing+
+		// RawHex and Final is cells that clipped away to nothing.
 		var agg cellslicer.PartitionStats
 		for _, s := range perSlabStats {
 			agg.RawRing += s.RawRing
 			agg.RawHex += s.RawHex
-			agg.SplitAdded += s.SplitAdded
-			agg.DroppedZeroPx += s.DroppedZeroPx
 			agg.Final += s.Final
-			for k := range agg.PxHist {
-				agg.PxHist[k] += s.PxHist[k]
-			}
 		}
-		plog.Printf("  Partition: ring=%d hex=%d split+%d drop0px=%d final=%d pxHist=[1:%d 2-4:%d 5-16:%d 17-64:%d 65+:%d]",
-			agg.RawRing, agg.RawHex, agg.SplitAdded, agg.DroppedZeroPx, agg.Final,
-			agg.PxHist[0], agg.PxHist[1], agg.PxHist[2], agg.PxHist[3], agg.PxHist[4])
+		plog.Printf("  Partition: ring=%d hex=%d final=%d",
+			agg.RawRing, agg.RawHex, agg.Final)
 
 		return &voxelizeOutput{
 			Cells:         cells,

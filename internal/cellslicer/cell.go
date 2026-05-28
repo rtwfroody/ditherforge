@@ -33,10 +33,11 @@ type Cell struct {
 	// Outer is the cell's outer boundary, CCW, no closing duplicate.
 	Outer []Point2
 	Kind  CellKind
-	// Pixels is the cell's pixel-count in the partition raster
-	// (pxSize = cellSize/4 by default). Useful for diagnosing
-	// missing-geometry dropouts. Zero when the cell was not built
-	// from a raster (e.g. legacy PartitionSlab path).
+	// Pixels is a coarse size estimate: the cell's polygon area in
+	// units of (cellSize/4)², matching what the old raster path
+	// counted at pxSize = cellSize/4. Diagnostic only (the pipeline's
+	// partition size histogram). Zero for cells from paths that don't
+	// set it (e.g. the PartitionSlab path used by slice.go).
 	Pixels int
 	// OuterEdgeOpen, when non-nil, has length len(Outer) and marks
 	// whether each cell-Outer edge lies on the slab partition's outer
