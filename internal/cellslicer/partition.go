@@ -256,6 +256,19 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 	r := cellSize / float32(math.Sqrt(3))
 	dx := cellSize
 	dy := cellSize * float32(math.Sqrt(3)/2)
+	// Extend the lattice one cellSize past the high edge so the hex
+	// whose centre sits just beyond maxX/maxY — but whose body still
+	// reaches back into the footprint — is generated. The loop starts
+	// exactly at minX/minY, so a hex centre always lands on the low
+	// edge and the -X/-Y extremes are covered; only the high edge can
+	// fall short, when the footprint reaches past the last in-bounds
+	// hex's edge but the next centre lies outside the bbox and was
+	// never emitted, leaving a thin uncovered sliver there. One
+	// cellSize covers it (a hex reaches at most its circumradius
+	// r < cellSize from its centre); the extra hexes clip away to
+	// nothing against innerCap downstream.
+	maxX += cellSize
+	maxY += cellSize
 	row := 0
 	for y := minY; y <= maxY; y += dy {
 		offset := float32(0)
