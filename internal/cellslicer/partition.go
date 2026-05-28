@@ -285,13 +285,20 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 //	ringRegion = fpCur minus innerCap — the lateral band the hex cells
 //	             don't own, which is the whole footprint on wall slabs.
 //
-// Raw ring trapezoids are clipped to ringRegion and raw hexagons to
-// innerCap. The two sets tile fpCur exactly: they share the innerCap
-// boundary and neither overlaps the other. Each Clipper intersection
-// may return several disjoint polygons (e.g. a hexagon pinched by a
-// concave footprint); each becomes its own cell, which subsumes the
-// raster path's splitDisconnectedCells. Cells whose intersection is
-// empty are simply never emitted, subsuming the zero-pixel drop.
+// innerCap and ringRegion partition fpCur (disjoint, union = fpCur).
+// Raw hexagons are clipped to innerCap and fill it. Raw ring
+// trapezoids are clipped to ringRegion but only extend depthFactor*
+// cellSize inward from the boundary, so they fill ringRegion only
+// within that band: on a cap or thin-wall slab that is all of
+// ringRegion, but a wide wall slab's deep interior is left uncovered
+// on purpose — it carries no visible surface (surface-only; interior
+// cells would just leak error into invisible volume). So the cells
+// tile the footprint wherever there is surface to sample, not the
+// whole footprint. Each Clipper intersection may return several
+// disjoint polygons (e.g. a hexagon pinched by a concave footprint);
+// each becomes its own cell, which subsumes the raster path's
+// splitDisconnectedCells. Empty intersections are never emitted,
+// subsuming the zero-pixel drop.
 //
 // Pass nil for either neighbour at the top/bottom of the model.
 func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, PartitionStats) {
@@ -313,10 +320,10 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// loops here lays ring cells into that band. A CW hole loop's
 	// inwardNormal points into the solid, so ringCellsForLoopRaw needs
 	// no special-casing.
-	const ringDepth = 3
+	const depthFactor = 3
 	var rawRing []Cell
 	for i := range fpCur.Loops {
-		rawRing = append(rawRing, ringCellsForLoopRaw(&fpCur.Loops[i], cellSize, ringDepth*cellSize)...)
+		rawRing = append(rawRing, ringCellsForLoopRaw(&fpCur.Loops[i], cellSize, depthFactor*cellSize)...)
 	}
 	rawHex := generateHexCellsRaw(inner, cellSize)
 	stats.RawRing = len(rawRing)
