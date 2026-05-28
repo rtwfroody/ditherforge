@@ -205,45 +205,59 @@ func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 	return cells, fp
 }
 
+// ringCellsForLoopRaw emits unclipped trapezoidal ring cells along one
+// footprint loop, each spanning a consecutive pair of cellSize-spaced
+// boundary marks and extending `depth` into the solid. inwardNormal is
+// 90° CCW of the tangent, which points into the interior for a CCW
+// outer loop and outward from the hole — i.e. into the solid — for a
+// CW hole loop, so the same code serves both loop kinds.
+func ringCellsForLoopRaw(loop *FootprintLoop, cellSize, depth float32) []Cell {
+	marks := walkLoopAtCellSize(loop, cellSize)
+	if len(marks) == 0 {
+		return nil
+	}
+	cells := make([]Cell, 0, len(marks))
+	for k := range marks {
+		mA := marks[k]
+		mB := marks[(k+1)%len(marks)]
+		nA := inwardNormal(loop, mA)
+		nB := inwardNormal(loop, mB)
+		innerB := Point2{
+			mB.point[0] + depth*nB[0],
+			mB.point[1] + depth*nB[1],
+		}
+		innerA := Point2{
+			mA.point[0] + depth*nA[0],
+			mA.point[1] + depth*nA[1],
+		}
+		arc := extractArc(loop, mA, mB)
+		raw := make([]Point2, 0, len(arc)+2)
+		raw = append(raw, arc...)
+		raw = append(raw, innerB, innerA)
+		if len(raw) < 3 {
+			continue
+		}
+		cells = append(cells, Cell{Outer: raw, Kind: KindRing})
+	}
+	return cells
+}
+
 // generateRingCellsRaw mirrors GenerateRingCells but emits the
 // unclipped trapezoidal cell polygons directly — no Clipper-clip
 // against the footprint. The footprint mask is applied later by
 // the rasteriser, so the per-cell Clipper call goes away entirely.
+// Hole loops are skipped: the raster's backfill covers the band
+// around holes. The analytic path walks holes explicitly instead
+// (see PartitionSlabAnalytic).
 func generateRingCellsRaw(fp *Footprint, cellSize float32) []Cell {
-	cells := []Cell{}
 	const depthFactor = 3
 	depth := depthFactor * cellSize
+	cells := []Cell{}
 	for i := range fp.Loops {
-		loop := &fp.Loops[i]
-		if loop.IsHole {
+		if fp.Loops[i].IsHole {
 			continue
 		}
-		marks := walkLoopAtCellSize(loop, cellSize)
-		if len(marks) == 0 {
-			continue
-		}
-		for k := range marks {
-			mA := marks[k]
-			mB := marks[(k+1)%len(marks)]
-			nA := inwardNormal(loop, mA)
-			nB := inwardNormal(loop, mB)
-			innerB := Point2{
-				mB.point[0] + depth*nB[0],
-				mB.point[1] + depth*nB[1],
-			}
-			innerA := Point2{
-				mA.point[0] + depth*nA[0],
-				mA.point[1] + depth*nA[1],
-			}
-			arc := extractArc(loop, mA, mB)
-			raw := make([]Point2, 0, len(arc)+2)
-			raw = append(raw, arc...)
-			raw = append(raw, innerB, innerA)
-			if len(raw) < 3 {
-				continue
-			}
-			cells = append(cells, Cell{Outer: raw, Kind: KindRing})
-		}
+		cells = append(cells, ringCellsForLoopRaw(&fp.Loops[i], cellSize, depth)...)
 	}
 	return cells
 }
@@ -274,6 +288,92 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 		row++
 	}
 	return cells
+}
+
+// PartitionSlabAnalytic partitions a slab's footprint into ring + hex
+// cells using exact Clipper polygon booleans, with no raster
+// round-trip. It is the production replacement for PartitionSlabRaster.
+//
+// Region algebra (all Clipper set ops on the slab footprints):
+//
+//	inner      = fpCur shrunk inward by cellSize.
+//	innerCap   = inner minus the region covered by BOTH neighbours.
+//	             That leaves only cap surface — the model's top/bottom
+//	             or an interior horizontal feature. Pure wall slabs
+//	             have empty innerCap (the interior is hidden between
+//	             neighbours), so they produce no interior hex cells.
+//	ringRegion = fpCur minus innerCap — the lateral band the hex cells
+//	             don't own, which is the whole footprint on wall slabs.
+//
+// Raw ring trapezoids are clipped to ringRegion and raw hexagons to
+// innerCap. The two sets tile fpCur exactly: they share the innerCap
+// boundary and neither overlaps the other. Each Clipper intersection
+// may return several disjoint polygons (e.g. a hexagon pinched by a
+// concave footprint); each becomes its own cell, which subsumes the
+// raster path's splitDisconnectedCells. Cells whose intersection is
+// empty are simply never emitted, subsuming the zero-pixel drop.
+//
+// Pass nil for either neighbour at the top/bottom of the model.
+func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, PartitionStats) {
+	var stats PartitionStats
+	if fpCur == nil || len(fpCur.Loops) == 0 {
+		return nil, stats
+	}
+	inner := OffsetFootprint(fpCur, -cellSize)
+	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
+	innerCap := FootprintDifference(inner, neighborBoth)
+	ringRegion := FootprintDifference(fpCur, innerCap)
+
+	// Ring cells walk every footprint loop — outer AND hole. The
+	// raster path skips holes because backfillUnassigned fills the
+	// band around them; with no raster there is no backfill, so a
+	// footprint hole would otherwise leave a cellSize-wide uncovered
+	// ring (ring cells skip it; hex cells stay clear because
+	// OffsetFootprint grows holes inward by cellSize). Walking hole
+	// loops here lays ring cells into that band. A CW hole loop's
+	// inwardNormal points into the solid, so ringCellsForLoopRaw needs
+	// no special-casing.
+	const ringDepth = 3
+	var rawRing []Cell
+	for i := range fpCur.Loops {
+		rawRing = append(rawRing, ringCellsForLoopRaw(&fpCur.Loops[i], cellSize, ringDepth*cellSize)...)
+	}
+	rawHex := generateHexCellsRaw(inner, cellSize)
+	stats.RawRing = len(rawRing)
+	stats.RawHex = len(rawHex)
+
+	// Pixels is a diagnostic only (run.go's partition histogram); the
+	// raster path counted real pixels at pxSize = cellSize/4, so report
+	// the polygon area in those same pixel units to keep the histogram
+	// comparable.
+	pxArea := (cellSize / 4) * (cellSize / 4)
+
+	cells := make([]Cell, 0, len(rawRing)+len(rawHex))
+	emit := func(raw []Cell, region *Footprint, kind CellKind) {
+		if region == nil || len(region.Loops) == 0 {
+			return
+		}
+		for i := range raw {
+			for _, c := range clipPolygonToFootprint(raw[i].Outer, region) {
+				if len(c) < 3 {
+					continue
+				}
+				area := signedArea(c)
+				if area < 0 {
+					area = -area
+				}
+				cells = append(cells, Cell{Outer: c, Kind: kind, Pixels: int(area / pxArea)})
+			}
+		}
+	}
+	emit(rawRing, ringRegion, KindRing)
+	emit(rawHex, innerCap, KindHex)
+	stats.Final = len(cells)
+
+	// Tag outer-perimeter edges so the per-cell prism clip can open-end
+	// there (see Cell.OuterEdgeOpen). Same call the raster path made.
+	MarkOuterEdges(cells, fpCur)
+	return cells, stats
 }
 
 // PartitionSlabRaster is the raster-first partition pass. It needs

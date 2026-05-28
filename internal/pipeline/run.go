@@ -666,13 +666,12 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		}, func(i int, state any) {
 			buf := state.(*voxel.SearchBuf)
 			t0 := time.Now()
-			// PartitionSlabRaster takes the slab's own footprint plus
+			// PartitionSlabAnalytic takes the slab's own footprint plus
 			// its neighbours' (or nil at the model's top/bottom). It
 			// emits ring cells along the lateral band, hex cells only
 			// where the slab's footprint differs from its neighbours
 			// (cap surfaces). Wall slabs — by far the common case —
-			// produce only ring cells. The dense raster is dropped
-			// on return; downstream consumers see polygons.
+			// produce only ring cells. Cells are exact Clipper polygons.
 			var fpBelow, fpAbove *cellslicer.Footprint
 			if i > 0 {
 				fpBelow = footprints[i-1]
@@ -681,7 +680,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 				fpAbove = footprints[i+1]
 			}
 			cs := cellSizeForSlab(i)
-			cells, _, stats := cellslicer.PartitionSlabRaster(footprints[i], fpBelow, fpAbove, cs, 0)
+			cells, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
 			perSlabStats[i] = stats
 			slabs[i] = cellslicer.Slab{
 				Index:     i,
