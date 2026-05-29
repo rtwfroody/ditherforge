@@ -65,6 +65,22 @@ type Args struct {
 	DebugRender                     string   `arg:"--debug-render" help:"After running the pipeline, write PNG renders (input + dithered + sampled, four views each) into this directory. Useful for headless debugging."`
 	DebugRenderRes                  int      `arg:"--debug-render-res" default:"800" help:"PNG resolution (square) for --debug-render output"`
 	DebugCellsDir                   string   `arg:"--debug-cells-dir" help:"After Voxelize, write per-slab cell PNGs colored by the sampled RGB into this directory."`
+	Split                           bool     `arg:"--split" help:"Cut the model into two halves laid out side by side on the bed (requires --alpha-wrap)"`
+	SplitAxis                       string   `arg:"--split-axis" default:"z" help:"Split cut axis: x, y, or z"`
+	SplitOffset                     float64  `arg:"--split-offset" help:"Split cut position along the axis in mm (model coords, post --size, post normalize). X/Y are centered on 0; Z rests on 0 so use ~half the height."`
+	SplitConnector                  string   `arg:"--split-connector" default:"none" help:"Split connector style: none, pegs, or dowels"`
+}
+
+// parseSplitAxis maps an x/y/z axis name to the pipeline's 0/1/2 index.
+func parseSplitAxis(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "x":
+		return 0
+	case "y":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func (Args) Description() string {
@@ -122,6 +138,14 @@ func main() {
 		AlphaWrapOffset:                      args.AlphaWrapOffset,
 		Layer0AdhesionXYScale:                args.Layer0AdhesionXYScale,
 		UpperLayerXYScale:                    args.UpperLayerXYScale,
+	}
+	if args.Split {
+		opts.Split = pipeline.SplitSettings{
+			Enabled:        true,
+			Axis:           parseSplitAxis(args.SplitAxis),
+			Offset:         args.SplitOffset,
+			ConnectorStyle: args.SplitConnector,
+		}
 	}
 
 	ctx := context.Background()

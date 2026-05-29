@@ -568,13 +568,17 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Sticker / Split are stubbed during the cellslicer
-		// transition; resolve them so their stubs cache, but
-		// ignore the (empty) outputs.
+		// Sticker is still stubbed during the cellslicer transition;
+		// resolve it so its stub caches, but ignore the (empty)
+		// output (decals are not yet wired into cell sampling).
 		if _, err := r.Sticker(); err != nil {
 			return nil, err
 		}
-		if _, err := r.Split(); err != nil {
+		// Split, when enabled, drives the per-half cellslicer pass
+		// below: each half's bed-space geometry is sliced and sampled
+		// independently. See docs/split-cellslicer.md.
+		so, err := r.Split()
+		if err != nil {
 			return nil, err
 		}
 
@@ -603,138 +607,93 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], false, 0)
 		defer stage.Done()
 
-		// Slicing operates on the geometry mesh (alpha-wrapped if
-		// requested). Color sampling reads from ColorModel. They
-		// alias when alpha-wrap is off.
-		geomModel := lo.Model
+		// Color sampling reads from ColorModel (original-mesh coords,
+		// uncut and unmoved by Split). The spatial index is built once
+		// and shared across both halves. When Split is enabled, each
+		// half's geometry is sliced in its own bed-space frame and a
+		// per-half inverse layout transform maps sample points back to
+		// ColorModel coords. See docs/split-cellslicer.md.
 		colorModel := lo.ColorModel
-
-		// Slice once and build the spatial index once — both feed
-		// every per-slab worker below. Each slab is then independent,
-		// so we fan out NumCPU workers over the slab list and have
-		// each one own its own SearchBuf (the only piece of voxel
-		// state that isn't safe to share).
-		tSlice := time.Now()
-		zMin, zMax := modelZRange(geomModel)
-		if zMax <= zMin {
-			return nil, fmt.Errorf("cellslicer: degenerate Z range")
-		}
-		planes := cellslicer.SlabBoundaryPlanes(zMin, zMax, layerH)
-		layers := cellslicer.SliceMesh(geomModel, planes)
-		nSlabs := len(layers) - 1
-		if nSlabs < 1 {
-			return nil, fmt.Errorf("cellslicer: no slabs produced")
-		}
 		spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
-		sliceElapsed := time.Since(tSlice).Seconds()
 
-		nWorkers := runtime.NumCPU()
-		if nWorkers < 1 {
-			nWorkers = 1
+		// Work units: one per split half (geometry already laid out in
+		// bed coords by split.Layout), or a single unit on the whole
+		// model when Split is off. colorXform maps a unit's sample
+		// points back into ColorModel coords; nil = identity.
+		type voxUnit struct {
+			geom       *loader.LoadedModel
+			colorXform func([3]float32) [3]float32
+			halfIdx    byte
 		}
-		if nWorkers > nSlabs {
-			nWorkers = nSlabs
-		}
-
-		// Footprint phase: compute the planar footprint for every
-		// slab up front. Used twice each — once for the slab itself
-		// and once when its neighbours look at it to decide where
-		// caps lie. ComputeFootprint is a small Clipper Union per
-		// slab; doing it once cleanly is cheaper than the 3× per-
-		// slab recompute pattern that grouping it inline would force.
-		tFp := time.Now()
-		footprints := make([]*cellslicer.Footprint, nSlabs)
-		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
-			footprints[i] = cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
-		})
-		fpElapsed := time.Since(tFp).Seconds()
-
-		// Per-slab phase: partition + sample. Each worker writes only
-		// its own slabs[i] and perSlabSamples[i] slots, so no locks
-		// are needed. We need the per-slab cell counts to compute
-		// global offsets before adjacency, so this completes first.
-		// partitionNs / sampleNs are atomically-accumulated per-worker
-		// busy time, summed to a CPU-time total — handy for spotting
-		// which substep dominates the parallel wall time.
-		tSlab := time.Now()
-		var partitionNs, sampleNs atomic.Int64
-		slabs := make([]cellslicer.Slab, nSlabs)
-		perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
-		perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
-		runParallel(nWorkers, nSlabs, func(workerID int) any {
-			return voxel.NewSearchBuf(len(colorModel.Faces))
-		}, func(i int, state any) {
-			buf := state.(*voxel.SearchBuf)
-			t0 := time.Now()
-			// PartitionSlabAnalytic takes the slab's own footprint plus
-			// its neighbours' (or nil at the model's top/bottom). It
-			// emits ring cells along the lateral band, hex cells only
-			// where the slab's footprint differs from its neighbours
-			// (cap surfaces). Wall slabs — by far the common case —
-			// produce only ring cells. Cells are exact Clipper polygons.
-			var fpBelow, fpAbove *cellslicer.Footprint
-			if i > 0 {
-				fpBelow = footprints[i-1]
+		var units []voxUnit
+		if so.Enabled {
+			for h := 0; h < 2; h++ {
+				// Each half's geometry is in bed coords; ApplyInverse maps
+				// a sample point back to the original-mesh coords where
+				// ColorModel (and sticker decals) live.
+				units = append(units, voxUnit{
+					geom:       so.Halves[h],
+					colorXform: so.Xform[h].ApplyInverse,
+					halfIdx:    byte(h),
+				})
 			}
-			if i+1 < nSlabs {
-				fpAbove = footprints[i+1]
-			}
-			cs := cellSizeForSlab(i)
-			cells, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
-			perSlabStats[i] = stats
-			slabs[i] = cellslicer.Slab{
-				Index:     i,
-				ZBot:      planes[i],
-				ZTop:      planes[i+1],
-				BotLayer:  &layers[i],
-				TopLayer:  &layers[i+1],
-				Footprint: footprints[i],
-				Cells:     cells,
-			}
-			t1 := time.Now()
-			partitionNs.Add(int64(t1.Sub(t0)))
-			perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, nil, nil, buf)
-			sampleNs.Add(int64(time.Since(t1)))
-		})
-		slabElapsed := time.Since(tSlab).Seconds()
-		partitionCPU := time.Duration(partitionNs.Load()).Seconds()
-		sampleCPU := time.Duration(sampleNs.Load()).Seconds()
-
-		nCells := 0
-		for i := range slabs {
-			nCells += len(slabs[i].Cells)
-		}
-		samples := make([]cellslicer.CellSample, 0, nCells)
-		for i := range perSlabSamples {
-			samples = append(samples, perSlabSamples[i]...)
+		} else {
+			units = []voxUnit{{geom: lo.Model, colorXform: nil, halfIdx: 0}}
 		}
 
-		// Adjacency phase. Within-slab is fully independent per slab.
-		// Cross-slab pair (i,i+1) writes to both slab i and slab i+1's
-		// neighbor rows, so neighboring pairs collide on the shared
-		// slab; we split pairs into even and odd parities to keep the
-		// two phases lock-free.
-		tAdj := time.Now()
-		globalOffsets := cellslicer.SlabGlobalOffsets(slabs)
-		globalNeighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
-		tWithin := time.Now()
-		runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
-			cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSizeForSlab(i), 0, globalNeighbors)
-		})
-		withinElapsed := time.Since(tWithin).Seconds()
-		tCross := time.Now()
-		for parity := 0; parity < 2; parity++ {
-			pairs := make([]int, 0, nSlabs/2+1)
-			for i := parity; i < nSlabs-1; i += 2 {
-				pairs = append(pairs, i)
+		// Run the cellslicer chain (slice → footprint → partition →
+		// sample → adjacency) once per unit, then concatenate. The
+		// global cell index is the position in the flattened CellSlabs
+		// (unit 0 first), which matches CellSamples and the neighbor
+		// graph. Neighbor indices from unit N are shifted by the count
+		// of cells already emitted; halves never share adjacency edges
+		// (they are physically separate on the bed).
+		var (
+			slabs           []cellslicer.Slab
+			samples         []cellslicer.CellSample
+			globalNeighbors [][]voxel.Neighbor
+			agg             cellslicer.PartitionStats
+		)
+		for _, u := range units {
+			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, u.colorXform, u.halfIdx, cellSizeForSlab, layerH)
+			if herr != nil {
+				return nil, herr
 			}
-			runParallel(nWorkers, len(pairs), nil, func(k int, _ any) {
-				i := pairs[k]
-				cellslicer.AddCrossSlabAdjacency(&slabs[i], globalOffsets[i], &slabs[i+1], globalOffsets[i+1], globalNeighbors)
-			})
+			cellOffset := len(samples)
+			slabOffset := len(slabs)
+			// Renumber this unit's slabs and samples from unit-local to
+			// global indices. Slab.Index and CellSample.SlabIdx must
+			// both address the flattened CellSlabs list, or anything
+			// indexing slabs[SlabIdx] (debug cell dumps) and any
+			// Layer-keyed adjacency (ActiveCell.Layer → BuildNeighbors,
+			// FloydSteinberg's layer sort) would collide half 1's cells
+			// onto half 0's slabs.
+			for i := range hv.slabs {
+				hv.slabs[i].Index = slabOffset + i
+			}
+			for i := range hv.samples {
+				hv.samples[i].SlabIdx += slabOffset
+			}
+			slabs = append(slabs, hv.slabs...)
+			samples = append(samples, hv.samples...)
+			for _, nbrs := range hv.neighbors {
+				if cellOffset == 0 {
+					// First unit (and the whole unsplit graph): indices
+					// are already global, so reuse the rows as-is.
+					globalNeighbors = append(globalNeighbors, nbrs)
+					continue
+				}
+				shifted := make([]voxel.Neighbor, len(nbrs))
+				for k, n := range nbrs {
+					shifted[k] = voxel.Neighbor{Idx: n.Idx + cellOffset, Weight: n.Weight}
+				}
+				globalNeighbors = append(globalNeighbors, shifted)
+			}
+			agg.RawRing += hv.stats.RawRing
+			agg.RawHex += hv.stats.RawHex
+			agg.Final += hv.stats.Final
 		}
-		crossElapsed := time.Since(tCross).Seconds()
-		adjElapsed := time.Since(tAdj).Seconds()
+		nCells := len(samples)
 
 		// Build ActiveCells: one per visible cell. Hidden
 		// (Alpha == false) cells are dropped so palette selection
@@ -784,21 +743,16 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			nEdges += len(out)
 		}
 
-		plog.Printf("  Cellslicer: %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs [within=%.2fs cross=%.2fs] (workers=%d)",
-			len(slabs), nCells, len(cells), nEdges/2,
-			cellSizeLayer0, cellSizeUpper, layerH, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, withinElapsed, crossElapsed, nWorkers)
+		plog.Printf("  Cellslicer: %d units, %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm",
+			len(units), len(slabs), nCells, len(cells), nEdges/2,
+			cellSizeLayer0, cellSizeUpper, layerH)
 
-		// Aggregate per-slab partition stats. RawRing+RawHex are the
-		// pre-clip generator output; Final is the surviving cell count
-		// after each raw cell is Clipper-clipped to its region (empty
-		// intersections are never emitted). The gap between RawRing+
-		// RawHex and Final is cells that clipped away to nothing.
-		var agg cellslicer.PartitionStats
-		for _, s := range perSlabStats {
-			agg.RawRing += s.RawRing
-			agg.RawHex += s.RawHex
-			agg.Final += s.Final
-		}
+		// agg accumulates per-slab partition stats across all units.
+		// RawRing+RawHex are the pre-clip generator output; Final is the
+		// surviving cell count after each raw cell is Clipper-clipped to
+		// its region (empty intersections are never emitted). The gap
+		// between RawRing+RawHex and Final is cells that clipped to
+		// nothing.
 		plog.Printf("  Partition: ring=%d hex=%d final=%d",
 			agg.RawRing, agg.RawHex, agg.Final)
 
@@ -812,6 +766,150 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			CellSize:      cellSizeUpper,
 		}, nil
 	})
+}
+
+// halfVoxels is one work unit's cellslicer output, before the global
+// visible-cell / adjacency-reindex step Voxelize does across units.
+// neighbors is indexed by the unit-local global cell index (parallel
+// to samples and to the flattened slabs[*].Cells).
+type halfVoxels struct {
+	slabs     []cellslicer.Slab
+	samples   []cellslicer.CellSample
+	neighbors [][]voxel.Neighbor
+	stats     cellslicer.PartitionStats
+}
+
+// sliceSampleHalf runs slice → footprint → partition → sample →
+// adjacency on one geometry mesh. geom is sliced in its own coordinate
+// frame; colorModel + spatial are the shared (original-coords) color
+// source, and colorXform maps each sample point from geom's frame back
+// into colorModel's frame (nil = identity). halfIdx is stamped onto
+// every emitted slab and sample. See docs/split-cellslicer.md.
+func (r *pipelineRun) sliceSampleHalf(
+	geom, colorModel *loader.LoadedModel,
+	spatial *voxel.SpatialIndex,
+	colorXform func([3]float32) [3]float32,
+	halfIdx byte,
+	cellSizeForSlab func(int) float32,
+	layerH float32,
+) (halfVoxels, error) {
+	tSlice := time.Now()
+	zMin, zMax := modelZRange(geom)
+	if zMax <= zMin {
+		return halfVoxels{}, fmt.Errorf("cellslicer: degenerate Z range")
+	}
+	planes := cellslicer.SlabBoundaryPlanes(zMin, zMax, layerH)
+	layers := cellslicer.SliceMesh(geom, planes)
+	nSlabs := len(layers) - 1
+	if nSlabs < 1 {
+		return halfVoxels{}, fmt.Errorf("cellslicer: no slabs produced")
+	}
+	sliceElapsed := time.Since(tSlice).Seconds()
+
+	nWorkers := runtime.NumCPU()
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+	if nWorkers > nSlabs {
+		nWorkers = nSlabs
+	}
+
+	// Footprint phase: compute the planar footprint for every slab up
+	// front. Used twice each — once for the slab itself and once when
+	// its neighbours look at it to decide where caps lie.
+	tFp := time.Now()
+	footprints := make([]*cellslicer.Footprint, nSlabs)
+	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
+		footprints[i] = cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+	})
+	fpElapsed := time.Since(tFp).Seconds()
+
+	// Per-slab phase: partition + sample. Each worker writes only its
+	// own slabs[i] / perSlabSamples[i] slots, so no locks are needed.
+	tSlab := time.Now()
+	var partitionNs, sampleNs atomic.Int64
+	slabs := make([]cellslicer.Slab, nSlabs)
+	perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
+	perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
+	runParallel(nWorkers, nSlabs, func(workerID int) any {
+		return voxel.NewSearchBuf(len(colorModel.Faces))
+	}, func(i int, state any) {
+		buf := state.(*voxel.SearchBuf)
+		t0 := time.Now()
+		// PartitionSlabAnalytic takes the slab's own footprint plus its
+		// neighbours' (or nil at the top/bottom). It emits ring cells
+		// along the lateral band, hex cells only where the footprint
+		// differs from its neighbours (cap surfaces).
+		var fpBelow, fpAbove *cellslicer.Footprint
+		if i > 0 {
+			fpBelow = footprints[i-1]
+		}
+		if i+1 < nSlabs {
+			fpAbove = footprints[i+1]
+		}
+		cs := cellSizeForSlab(i)
+		cells, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
+		perSlabStats[i] = stats
+		slabs[i] = cellslicer.Slab{
+			Index:     i,
+			HalfIdx:   halfIdx,
+			ZBot:      planes[i],
+			ZTop:      planes[i+1],
+			BotLayer:  &layers[i],
+			TopLayer:  &layers[i+1],
+			Footprint: footprints[i],
+			Cells:     cells,
+		}
+		t1 := time.Now()
+		partitionNs.Add(int64(t1.Sub(t0)))
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, nil, nil, colorXform, buf)
+		sampleNs.Add(int64(time.Since(t1)))
+	})
+	slabElapsed := time.Since(tSlab).Seconds()
+
+	nCells := 0
+	for i := range slabs {
+		nCells += len(slabs[i].Cells)
+	}
+	samples := make([]cellslicer.CellSample, 0, nCells)
+	for i := range perSlabSamples {
+		samples = append(samples, perSlabSamples[i]...)
+	}
+
+	// Adjacency phase, within this unit only. Within-slab is fully
+	// independent per slab. Cross-slab pair (i,i+1) writes to both
+	// slabs' neighbor rows, so we split pairs into even/odd parities to
+	// keep the two phases lock-free.
+	tAdj := time.Now()
+	globalOffsets := cellslicer.SlabGlobalOffsets(slabs)
+	neighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
+	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
+		cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSizeForSlab(i), 0, neighbors)
+	})
+	for parity := 0; parity < 2; parity++ {
+		pairs := make([]int, 0, nSlabs/2+1)
+		for i := parity; i < nSlabs-1; i += 2 {
+			pairs = append(pairs, i)
+		}
+		runParallel(nWorkers, len(pairs), nil, func(k int, _ any) {
+			i := pairs[k]
+			cellslicer.AddCrossSlabAdjacency(&slabs[i], globalOffsets[i], &slabs[i+1], globalOffsets[i+1], neighbors)
+		})
+	}
+	adjElapsed := time.Since(tAdj).Seconds()
+
+	var agg cellslicer.PartitionStats
+	for _, s := range perSlabStats {
+		agg.RawRing += s.RawRing
+		agg.RawHex += s.RawHex
+		agg.Final += s.Final
+	}
+	partitionCPU := time.Duration(partitionNs.Load()).Seconds()
+	sampleCPU := time.Duration(sampleNs.Load()).Seconds()
+	plog.Printf("  Cellslicer half %d: %d slabs, %d cells; slice=%.2fs fp=%.2fs slab=%.2fs [partCPU=%.2fs sampCPU=%.2fs] adj=%.2fs (workers=%d)",
+		halfIdx, nSlabs, nCells, sliceElapsed, fpElapsed, slabElapsed, partitionCPU, sampleCPU, adjElapsed, nWorkers)
+
+	return halfVoxels{slabs: slabs, samples: samples, neighbors: neighbors, stats: agg}, nil
 }
 
 // modelZRange returns the min and max Z over a model's vertices.
@@ -1096,12 +1194,15 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Decimate + Split are stubbed during the cellslicer
-		// transition; keep the calls so their stubs cache.
+		// Decimate is stubbed during the cellslicer transition; keep
+		// the call so its stub caches.
 		if _, err := r.Decimate(); err != nil {
 			return nil, err
 		}
-		if _, err := r.Split(); err != nil {
+		// Split, when enabled, makes the clip run once per half against
+		// that half's bed-space geometry. See docs/split-cellslicer.md.
+		so, err := r.Split()
+		if err != nil {
 			return nil, err
 		}
 
@@ -1124,7 +1225,21 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 
 		plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
 			cellslicer.OpenEdgeBloat)
-		clipped, cerr := cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
+		var (
+			clipped      cellslicer.ClipResult
+			shellHalfIdx []byte
+			cerr         error
+		)
+		if so.Enabled {
+			// One clip per half, against that half's bed-space geometry.
+			// clipPerHalf concatenates the two results (half 0 first,
+			// unified vertex table) and tags each face with its half;
+			// FaceCellIdx is remapped to the global flattened-CellSlabs
+			// index space so the per-cell bookkeeping below is unchanged.
+			clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs, vo.CellSize)
+		} else {
+			clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
+		}
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
 		}
@@ -1260,8 +1375,55 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			ShellFaces:       clipped.Faces,
 			ShellAssignments: faceAssign,
 			ShellSectionIdx:  clipped.FaceCellIdx,
+			ShellHalfIdx:     shellHalfIdx,
 		}, nil
 	})
+}
+
+// clipPerHalf clips each split half's bed-space geometry against its
+// own slabs and concatenates into one ClipResult — half 0 faces first,
+// a unified vertex table (each half's vertex indices offset) — plus a
+// per-face HalfIdx array parallel to the faces. Each half's returned
+// FaceCellIdx is half-local; clipPerHalf remaps it to the global
+// flattened-CellSlabs index space (the same space cellAssign /
+// facesPerCell use) by adding the running cell offset. Slabs are
+// processed in CellSlabs order, so the offset stays correct regardless
+// of how halves are grouped. See docs/split-cellslicer.md.
+func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (cellslicer.ClipResult, []byte, error) {
+	var (
+		out     cellslicer.ClipResult
+		halfIdx []byte
+	)
+	cellOffset := 0
+	start := 0
+	for start < len(slabs) {
+		h := slabs[start].HalfIdx
+		end := start
+		for end < len(slabs) && slabs[end].HalfIdx == h {
+			end++
+		}
+		sub := slabs[start:end]
+		cr, err := cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub, cellSize)
+		if err != nil {
+			return cellslicer.ClipResult{}, nil, fmt.Errorf("half %d: %w", h, err)
+		}
+		base := uint32(len(out.Verts))
+		out.Verts = append(out.Verts, cr.Verts...)
+		for _, f := range cr.Faces {
+			out.Faces = append(out.Faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
+		}
+		for _, gi := range cr.FaceCellIdx {
+			out.FaceCellIdx = append(out.FaceCellIdx, gi+int32(cellOffset))
+		}
+		for range cr.Faces {
+			halfIdx = append(halfIdx, h)
+		}
+		for i := range sub {
+			cellOffset += len(sub[i].Cells)
+		}
+		start = end
+	}
+	return out, halfIdx, nil
 }
 
 // mostCommonNonNeg returns the most frequent non-negative palette
@@ -1300,13 +1462,13 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 			before := len(shellFaces)
 			var merr error
 			if shellHalfIdx != nil {
-				// Per-half merge: halves don't share vertices (clipSplit
+				// Per-half merge: halves don't share vertices (clipPerHalf
 				// offsets each half's vertex indices), so
 				// MergeCoplanarTriangles run on the full mesh would not
 				// merge across halves anyway, but the per-face HalfIdx
 				// parallel array needs to track the merged face count.
 				// Simplest: extract per-half slices, merge each, then
-				// concatenate. Faces in clipSplit's output are already
+				// concatenate. Faces in clipPerHalf's output are already
 				// grouped by half (h=0 then h=1), so the slice ranges
 				// are contiguous.
 				shellFaces, shellAssignments, shellHalfIdx, merr =
@@ -1336,9 +1498,9 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 }
 
 // mergeSplitFaces runs MergeCoplanarTriangles independently on each
-// half's contiguous face slice (clipSplit groups faces by half), then
+// half's contiguous face slice (clipPerHalf groups faces by half), then
 // concatenates results and rebuilds the per-face HalfIdx array.
-// Vertices are shared across halves by index space (clipSplit emits a
+// Vertices are shared across halves by index space (clipPerHalf emits a
 // unified vertex table with offsets), but faces never reference
 // across halves, so per-half merge is correct.
 func mergeSplitFaces(

@@ -598,12 +598,10 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 //
 // When the merge output carries a per-face HalfIdx (Split was
 // enabled), the result's FaceMeshIdx is populated from it and
-// NumMeshes is set to 2. NO CURRENT CONSUMER READS THESE FIELDS —
-// the wiring is preparatory for the Phase 7 follow-up in
-// internal/export3mf, which will iterate per FaceMeshIdx group to
-// emit two `<object>` entries. Until that lands, the export path
-// emits a single `<object>` containing both halves with the
-// bed-layout gap between them.
+// NumMeshes is set to 2. export3mf.splitModelByMesh reads these to
+// emit one `<object>` entry per half (each with its own vertex
+// table), so the two laid-out halves export as sibling parts the
+// slicer treats as independent printable objects.
 // overrideFaceColorsFromSamples rewrites outputMesh.FaceColors so
 // each face's RGB is its originating section's raw sampled color
 // (looked up by faceSection[fi] in sectionColors). Faces with

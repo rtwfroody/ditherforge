@@ -21,6 +21,9 @@ type CellSample struct {
 	Color    [3]uint8
 	Alpha    bool
 	Area     float32
+	// HalfIdx tags which split half produced this cell (0 or 1).
+	// Copied from the source Slab; 0 in the unsplit pipeline.
+	HalfIdx byte
 }
 
 // SampleCells colors every cell in slabs by averaging
@@ -47,7 +50,7 @@ func SampleCells(
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	out := []CellSample{}
 	for si_ := range slabs {
-		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, override, buf)...)
+		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, override, nil, buf)...)
 	}
 	return out
 }
@@ -65,6 +68,13 @@ func SampleCells(
 //
 // searchRadius == 0 picks the same default as SampleCells. buf must
 // be sized for model.Faces (NewSearchBuf(len(model.Faces))).
+// colorXform, when non-nil, maps each sample point from the slab's
+// (bed-space) coordinate frame back into the color model's coordinate
+// frame before SampleNearestColor. The Split pipeline passes the
+// per-half inverse layout transform so geometry can be sliced in bed
+// coords while color is still read from the untouched original-coords
+// ColorModel. nil = identity (the unsplit pipeline). See
+// docs/split-cellslicer.md.
 func SampleSlab(
 	s *Slab,
 	slabIdx int,
@@ -74,6 +84,7 @@ func SampleSlab(
 	searchRadius float32,
 	decals []*voxel.StickerDecal,
 	override voxel.BaseColorOverride,
+	colorXform func([3]float32) [3]float32,
 	buf *voxel.SearchBuf,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
@@ -93,6 +104,9 @@ func SampleSlab(
 		var rSum, gSum, bSum, wSum float32
 		anyAlpha := false
 		for _, p := range points {
+			if colorXform != nil {
+				p = colorXform(p)
+			}
 			rgba := voxel.SampleNearestColor(p, model, si, searchRadius, buf, decals, override)
 			if rgba[3] < 128 {
 				continue
@@ -119,6 +133,7 @@ func SampleSlab(
 			Color:    color,
 			Alpha:    anyAlpha,
 			Area:     area,
+			HalfIdx:  s.HalfIdx,
 		})
 	}
 	return out

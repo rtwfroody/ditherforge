@@ -65,6 +65,11 @@ type Cell struct {
 type Slab struct {
 	// Index is the slab's index within the model's slab list, 0-based.
 	Index int
+	// HalfIdx tags which split half this slab belongs to (0 or 1). It
+	// is 0 for the unsplit pipeline and for half 0; the Clip stage
+	// groups slabs by HalfIdx so each half is clipped against its own
+	// (bed-space) geometry. See docs/split-cellslicer.md.
+	HalfIdx byte
 	// ZBot, ZTop bound the slab in Z (mm).
 	ZBot, ZTop float32
 	// BotLayer / TopLayer are the slicer's per-Z contour layers at
