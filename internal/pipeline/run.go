@@ -1654,7 +1654,9 @@ func mergeSplitFaces(
 	for _, f := range mergedH1Faces {
 		combinedFaces = append(combinedFaces, [3]uint32{f[0] + off, f[1] + off, f[2] + off})
 	}
-	combinedAssign := append(mergedH0Assign, mergedH1Assign...)
+	combinedAssign := make([]int32, 0, len(mergedH0Assign)+len(mergedH1Assign))
+	combinedAssign = append(combinedAssign, mergedH0Assign...)
+	combinedAssign = append(combinedAssign, mergedH1Assign...)
 	combinedHalfIdx := make([]byte, 0, len(combinedFaces))
 	for range mergedH0Faces {
 		combinedHalfIdx = append(combinedHalfIdx, 0)

@@ -100,15 +100,16 @@ func TestSplitEnabled_FieldCascade(t *testing.T) {
 
 // TestMergeSplitFaces_PerHalfMergeAndConcat — mergeSplitFaces should
 // run MergeCoplanarTriangles once per half (faces are grouped by
-// halfIdx in clipSplit's output) and concatenate, preserving the
-// per-face HalfIdx parallel array on the result. Constructs a tiny
-// shell with two coplanar quads on each half (4 triangles per half,
-// expecting merge to reduce to 2 triangles per half).
+// halfIdx in clipSplit's output) and concatenate, keeping the per-face
+// HalfIdx parallel array and the faces' vertex indices valid against the
+// concatenated welded vertex table. This test covers that plumbing
+// (concat order, parallel-array lengths, index offsetting) — not the
+// face-count reduction, which these tiny strips don't trigger (a 1×2
+// strip's boundary ear-clips back to the same 2 triangles per quad).
 func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
-	// Half 0: a quad in the z=0 plane at x=[0,1], y=[0,2], split into
-	// 2 triangles, with a coplanar adjacent quad at y=[2,4]. Result:
-	// 4 triangles that merge into 2 (since coplanar same-color groups
-	// re-triangulate to a quad = 2 tris).
+	// Half 0: a quad in the z=0 plane at x=[0,1], y=[0,2], with a
+	// coplanar adjacent quad at y=[2,4]; half 1 is the same shifted in x.
+	// 4 coplanar same-color triangles per half.
 	verts := [][3]float32{
 		// half 0 (8 verts)
 		{0, 0, 0}, {1, 0, 0}, {1, 2, 0}, {0, 2, 0},
