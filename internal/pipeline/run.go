@@ -1580,10 +1580,10 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 				// concatenate. Faces in clipPerHalf's output are already
 				// grouped by half (h=0 then h=1), so the slice ranges
 				// are contiguous.
-				shellFaces, shellAssignments, shellHalfIdx, merr =
+				shellVerts, shellFaces, shellAssignments, shellHalfIdx, merr =
 					mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, r.tracker)
 			} else {
-				shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
+				shellVerts, shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
 			}
 			if merr != nil {
 				return nil, fmt.Errorf("merge: %w", merr)
@@ -1608,10 +1608,13 @@ func (r *pipelineRun) Merge() (*mergeOutput, error) {
 
 // mergeSplitFaces runs MergeCoplanarTriangles independently on each
 // half's contiguous face slice (clipPerHalf groups faces by half), then
-// concatenates results and rebuilds the per-face HalfIdx array.
-// Vertices are shared across halves by index space (clipPerHalf emits a
-// unified vertex table with offsets), but faces never reference
-// across halves, so per-half merge is correct.
+// concatenates results and rebuilds the per-face HalfIdx array. Faces
+// never reference across halves, so per-half merge is correct.
+//
+// MergeCoplanarTriangles welds each half to its own compact vertex set
+// (representatives chosen among that half's own faces, so the two halves
+// never share an index even where positions coincide). We concatenate the
+// two welded vertex tables and offset half 1's face indices past half 0.
 func mergeSplitFaces(
 	ctx context.Context,
 	verts [][3]float32,
@@ -1619,7 +1622,7 @@ func mergeSplitFaces(
 	assignments []int32,
 	halfIdx []byte,
 	tracker progress.Tracker,
-) ([][3]uint32, []int32, []byte, error) {
+) ([][3]float32, [][3]uint32, []int32, []byte, error) {
 	// Find the boundary between half 0 and half 1.
 	boundary := len(faces)
 	for i, h := range halfIdx {
@@ -1633,16 +1636,24 @@ func mergeSplitFaces(
 	h0Assign := assignments[:boundary]
 	h1Assign := assignments[boundary:]
 
-	mergedH0Faces, mergedH0Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h0Faces, h0Assign, tracker)
+	mergedH0Verts, mergedH0Faces, mergedH0Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h0Faces, h0Assign, tracker)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("merge half 0: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("merge half 0: %w", err)
 	}
-	mergedH1Faces, mergedH1Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h1Faces, h1Assign, tracker)
+	mergedH1Verts, mergedH1Faces, mergedH1Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h1Faces, h1Assign, tracker)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("merge half 1: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("merge half 1: %w", err)
 	}
 
-	combinedFaces := append(mergedH0Faces, mergedH1Faces...)
+	combinedVerts := make([][3]float32, 0, len(mergedH0Verts)+len(mergedH1Verts))
+	combinedVerts = append(combinedVerts, mergedH0Verts...)
+	combinedVerts = append(combinedVerts, mergedH1Verts...)
+	off := uint32(len(mergedH0Verts))
+	combinedFaces := make([][3]uint32, 0, len(mergedH0Faces)+len(mergedH1Faces))
+	combinedFaces = append(combinedFaces, mergedH0Faces...)
+	for _, f := range mergedH1Faces {
+		combinedFaces = append(combinedFaces, [3]uint32{f[0] + off, f[1] + off, f[2] + off})
+	}
 	combinedAssign := append(mergedH0Assign, mergedH1Assign...)
 	combinedHalfIdx := make([]byte, 0, len(combinedFaces))
 	for range mergedH0Faces {
@@ -1651,5 +1662,5 @@ func mergeSplitFaces(
 	for range mergedH1Faces {
 		combinedHalfIdx = append(combinedHalfIdx, 1)
 	}
-	return combinedFaces, combinedAssign, combinedHalfIdx, nil
+	return combinedVerts, combinedFaces, combinedAssign, combinedHalfIdx, nil
 }

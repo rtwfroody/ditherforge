@@ -130,7 +130,7 @@ func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
 	}
 	assignments := []int32{0, 0, 0, 0, 1, 1, 1, 1}
 	halfIdx := []byte{0, 0, 0, 0, 1, 1, 1, 1}
-	outFaces, outAssign, outHalf, err := mergeSplitFaces(
+	outVerts, outFaces, outAssign, outHalf, err := mergeSplitFaces(
 		context.Background(), verts, faces, assignments, halfIdx, progress.NullTracker{},
 	)
 	if err != nil {
@@ -138,6 +138,14 @@ func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
 	}
 	if len(outFaces) != len(outAssign) || len(outFaces) != len(outHalf) {
 		t.Errorf("output array lengths differ: faces=%d assign=%d half=%d", len(outFaces), len(outAssign), len(outHalf))
+	}
+	// Every face must index into the concatenated welded vertex table.
+	for fi, f := range outFaces {
+		for _, vi := range f {
+			if int(vi) >= len(outVerts) {
+				t.Fatalf("face %d references vert %d out of range (verts=%d)", fi, vi, len(outVerts))
+			}
+		}
 	}
 	// Count faces per half. Should be > 0 and grouped (all 0s come
 	// before all 1s after concat).
