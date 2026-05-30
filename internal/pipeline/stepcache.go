@@ -645,6 +645,10 @@ type voxelizeSettings struct {
 	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
 	BaseColorMaterialXTileMM             float64
 	BaseColorMaterialXTriplanarSharpness float64
+	// NoInteriorFaceFootprint changes which footprint the cellslicer
+	// builds (and thus which cap cells exist), so it must invalidate the
+	// voxelize cache when toggled.
+	NoInteriorFaceFootprint bool
 }
 
 type stickerSettings struct {
@@ -782,6 +786,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			BaseColorMaterialXSize:               size,
 			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
 			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
+			NoInteriorFaceFootprint:              opts.NoInteriorFaceFootprint,
 		}
 	case StageSticker:
 		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
@@ -915,6 +920,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
 		writeFloat64(h, v.BaseColorMaterialXTileMM)
 		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
+		writeBool(h, v.NoInteriorFaceFootprint)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)

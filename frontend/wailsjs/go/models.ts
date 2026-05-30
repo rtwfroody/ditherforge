@@ -446,6 +446,7 @@ export namespace pipeline {
 	    Layer0AdhesionXYScale: number;
 	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
+	    NoInteriorFaceFootprint?: boolean;
 	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -491,6 +492,7 @@ export namespace pipeline {
 	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
 	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
+	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
 	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	

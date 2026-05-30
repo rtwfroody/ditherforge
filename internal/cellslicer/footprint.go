@@ -122,6 +122,24 @@ func footprintBoolean(a, b *Footprint, op clipper.ClipType) *Footprint {
 	return out
 }
 
+// FootprintUnion returns a ∪ b. A nil/empty side yields a re-fenced
+// copy of the other (still routed through Clipper so loop orientation
+// and bbox match ComputeFootprint's output).
+func FootprintUnion(a, b *Footprint) *Footprint {
+	aEmpty := a == nil || len(a.Loops) == 0
+	bEmpty := b == nil || len(b.Loops) == 0
+	if aEmpty && bEmpty {
+		return &Footprint{}
+	}
+	if aEmpty {
+		return footprintBoolean(b, &Footprint{}, clipper.CtUnion)
+	}
+	if bEmpty {
+		return footprintBoolean(a, &Footprint{}, clipper.CtUnion)
+	}
+	return footprintBoolean(a, b, clipper.CtUnion)
+}
+
 // FootprintIntersect returns a ∩ b. Empty if either side is empty.
 func FootprintIntersect(a, b *Footprint) *Footprint {
 	if a == nil || b == nil || len(a.Loops) == 0 || len(b.Loops) == 0 {

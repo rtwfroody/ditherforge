@@ -53,6 +53,7 @@ type Args struct {
 	BlueNoiseTolerance              float64  `arg:"--blue-noise-tol" help:"Blue-noise dither per-cell projection-error tolerance (RGB units). Smaller = lower wander but more drift; larger = more wander but less drift. 0 = use built-in default (currently 20)"`
 	NoMerge                         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
+	NoInteriorFaceFootprint         bool     `arg:"--no-interior-face-footprint" help:"Advanced: disable projecting thin between-plane horizontal faces into slab footprints (for A/B timing of that augmentation)"`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force                           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats                           bool     `arg:"--stats" help:"Print face counts per material"`
@@ -128,6 +129,7 @@ func main() {
 		BlueNoiseTolerance:                   args.BlueNoiseTolerance,
 		NoMerge:                              args.NoMerge,
 		NoSimplify:                           args.NoSimplify,
+		NoInteriorFaceFootprint:              args.NoInteriorFaceFootprint,
 		Size:                                 args.Size,
 		Force:                                args.Force,
 		Stats:                                args.Stats,

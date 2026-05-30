@@ -818,9 +818,25 @@ func (r *pipelineRun) sliceSampleHalf(
 	// front. Used twice each — once for the slab itself and once when
 	// its neighbours look at it to decide where caps lie.
 	tFp := time.Now()
+	// Interior-face footprints recover thin horizontal sheets (e.g. an
+	// alpha-wrapped single-surface roof, ~0.03 mm) that lie wholly
+	// between two slab planes and so contribute nothing to the bounding-
+	// plane slices ComputeFootprint uses. Unioned into the slab footprint
+	// below, they give cap detection the sheet's surface. Gated by an
+	// advanced opt-out for A/B timing.
+	var interiorFps []*cellslicer.Footprint
+	if !r.opts.NoInteriorFaceFootprint {
+		interiorFps = cellslicer.InteriorHorizontalFootprints(geom, planes)
+	}
 	footprints := make([]*cellslicer.Footprint, nSlabs)
 	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
 		footprints[i] = cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+		// interiorFps, when present, is sized to nSlabs (== len(planes)-1
+		// == len(layers)-1); the length guard makes that invariant
+		// explicit rather than load-bearing.
+		if interiorFps != nil && i < len(interiorFps) && interiorFps[i] != nil {
+			footprints[i] = cellslicer.FootprintUnion(footprints[i], interiorFps[i])
+		}
 	})
 	fpElapsed := time.Since(tFp).Seconds()
 

@@ -108,6 +108,15 @@ type Options struct {
 	// color detail with fewer primitives. 0 / negative treats as 1.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
+	// NoInteriorFaceFootprint disables the interior-horizontal-face
+	// footprint augmentation in Voxelize (see
+	// cellslicer.InteriorHorizontalFootprints). Default false = feature
+	// ON: thin horizontal sheets that fall between two slab planes (e.g.
+	// an alpha-wrapped single-surface roof) are projected into the slab
+	// footprint so cap detection sees them. Set true to fall back to the
+	// pure bounding-plane footprint — an advanced/diagnostic knob, mainly
+	// for A/B timing of the augmentation's cost.
+	NoInteriorFaceFootprint bool `json:"NoInteriorFaceFootprint,omitempty"`
 
 	// ShowSampledColors is a diagnostic mode: when true, the output
 	// mesh's per-face colors come from each face's originating
