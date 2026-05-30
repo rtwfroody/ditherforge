@@ -1015,8 +1015,10 @@ type Settings struct {
 	BlueNoiseTol        float64             `json:"blueNoiseTol"`
 	ColorSnap           float64             `json:"colorSnap"`
 	NoMerge             bool                `json:"noMerge"`
+	CellMerge           bool                `json:"cellMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
 	Stats               bool                `json:"stats"`
+	ShowSampledColors   bool                `json:"showSampledColors"`
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
 	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
@@ -1093,8 +1095,10 @@ func defaultSettings() Settings {
 		BlueNoiseTol:          20,
 		ColorSnap:             5,
 		NoMerge:               false,
+		CellMerge:             false,
 		NoSimplify:            false,
 		Stats:                 false,
+		ShowSampledColors:     false,
 		AlphaWrap:             false,
 		AlphaWrapAlpha:        "",
 		AlphaWrapOffset:       "",

@@ -97,6 +97,24 @@ func int2DOf(p Point2) int2D {
 	}
 }
 
+// dirEdge is a directed cell-Outer edge a→b keyed by its endpoints'
+// int2D buckets. A cell-Outer edge in one cell meets its reverse in the
+// neighbour that shares it, so a map keyed by dirEdge is the canonical
+// way the cellslicer identifies shared cell boundaries. MarkOuterEdges
+// (open-edge marking), groupConnectedSameColorCells (merge grouping),
+// and mergedGroupContours (merge contour cancellation) all rely on this
+// one bucketing + winding convention — keep it defined here only.
+type dirEdge struct{ a, b int2D }
+
+// dirEdgeOf buckets the float endpoints of edge a→b into a dirEdge.
+func dirEdgeOf(a, b Point2) dirEdge {
+	return dirEdge{int2DOf(a), int2DOf(b)}
+}
+
+// reverse returns the opposite-direction edge b→a — the mate a shared
+// interior edge cancels against.
+func (e dirEdge) reverse() dirEdge { return dirEdge{e.b, e.a} }
+
 // clipPolygonToFootprint intersects a single polygon with the
 // footprint via Clipper non-zero fill. Returns the (one or more)
 // component polygons of the result. Used by both ring-cell trapezoid

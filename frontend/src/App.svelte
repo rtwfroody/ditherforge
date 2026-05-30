@@ -184,6 +184,7 @@
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
+  let cellMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
@@ -969,6 +970,7 @@
       blueNoiseTol,
       colorSnap,
       noMerge,
+      cellMerge,
       noSimplify,
       stats,
       showSampledColors,
@@ -1161,6 +1163,7 @@
     { key: 'blueNoiseTol',                    validate: pickNumber,                                        apply: (v) => { blueNoiseTol = v; committedBlueNoiseTol = v; } },
     { key: 'colorSnap',                       validate: pickNumber,                                        apply: (v) => { colorSnap = v; committedColorSnap = v; } },
     { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
+    { key: 'cellMerge',                       validate: pickBool,                                          apply: (v) => { cellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
@@ -1461,6 +1464,7 @@
       RiemersmaInputBias: committedRiemersmaBias,
       BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
+      CellMerge: cellMerge,
       ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -1554,7 +1558,13 @@
 
 <svelte:window
   onclick={handleViewMenuOutside}
-  onkeydown={(e) => { if (e.key === 'Escape' && triangleSelectMode) { triangleSelectMode = false; } }}
+  onkeydown={(e) => {
+    if (e.key === 'Escape') {
+      if (triangleSelectMode) { triangleSelectMode = false; }
+      viewMenuOpen = false;
+      outputViewMenuOpen = false;
+    }
+  }}
 />
 
 <Tooltip.Provider>
@@ -2181,9 +2191,9 @@
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noMerge} />
-                No merge
+                No coplanar merge
                 <HelpTip>
-                  Skip merging adjacent same-color voxels into larger regions. Produces more primitives but can preserve fine dither detail.
+                  Skip merging coplanar same-color triangles into larger polygons after clipping. Produces more triangles but keeps the raw clipped geometry.
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
@@ -2191,6 +2201,13 @@
                 No simplify
                 <HelpTip>
                   Skip mesh simplification. Keeps the raw per-voxel geometry, which is accurate but dramatically larger.
+                </HelpTip>
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={cellMerge} />
+                Cell merge
+                <HelpTip>
+                  Merge connected same-color cells within each layer and clip them together, instead of clipping every cell individually. Faster, with fewer output triangles and no internal seams between same-color cells. Does not change colors. Off by default; an opt-in optimization.
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
@@ -2250,7 +2267,6 @@
       <div
         bind:this={viewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"
-        onkeydown={(e) => { if (e.key === 'Escape') viewMenuOpen = false; }}
       >
         <button
           type="button"
@@ -2297,7 +2313,6 @@
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"
-        onkeydown={(e) => { if (e.key === 'Escape') outputViewMenuOpen = false; }}
       >
         <button
           type="button"

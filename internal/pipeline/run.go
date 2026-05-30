@@ -1239,8 +1239,31 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			cellAssign[gi] = do.Assignments[vi]
 		}
 
-		plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
-			cellslicer.OpenEdgeBloat)
+		// Cell merging groups same-kind, same-color cells within each
+		// slab and clips the model against each group's merged prism in
+		// one Manifold intersection (instead of one per cell), cutting
+		// boolean count and removing internal seams between same-color
+		// cells. Colors come from Dither, so this is purely a clip-time
+		// /geometry optimisation with no effect on the dithered output.
+		//
+		// It is forced off under ShowSampledColors: that diagnostic colours
+		// each output face by its source cell's SAMPLED input colour
+		// (overrideFaceColorsFromSamples via ShellSectionIdx), which
+		// needs per-cell face provenance. Merging same-palette cells
+		// intentionally coarsens that provenance — fine for the real
+		// palette-coloured output (a merge group shares one palette
+		// index), but it would smear the per-cell sampled view. So the
+		// diagnostic runs the per-cell clip to keep its provenance exact.
+		// CellMerge is opt-in (default off); it only needs enabling for the
+		// clip-time / triangle-count win.
+		mergeCells := r.opts.CellMerge && !r.opts.ShowSampledColors
+		if mergeCells {
+			plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.1f×cellSize)",
+				cellslicer.OpenEdgeBloat)
+		} else {
+			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
+				cellslicer.OpenEdgeBloat)
+		}
 		var (
 			clipped      cellslicer.ClipResult
 			shellHalfIdx []byte
@@ -1252,12 +1275,23 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			// unified vertex table) and tags each face with its half;
 			// FaceCellIdx is remapped to the global flattened-CellSlabs
 			// index space so the per-cell bookkeeping below is unchanged.
-			clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs, vo.CellSize)
+			if mergeCells {
+				clipped, shellHalfIdx, cerr = clipPerHalfMerged(so, vo.CellSlabs, vo.CellSize, cellAssign)
+			} else {
+				clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs, vo.CellSize)
+			}
 		} else {
-			clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
+			if mergeCells {
+				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize, cellAssign)
+			} else {
+				clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
+			}
 		}
 		if cerr != nil {
 			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
+		}
+		if clipped.CellRep != nil {
+			plog.Printf("  Clip merged %d cells → %d groups", len(clipped.CellRep), distinctReps(clipped.CellRep))
 		}
 		// Map per-face cell index → palette assignment. Faces from
 		// cells with no assignment (-1) get -1, downstream
@@ -1294,6 +1328,17 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 				facesPerCell[gi]++
 			}
 		}
+		// Under cell merging, faces are tagged with their group's
+		// representative cell, so a non-representative member's own
+		// slot is 0 even though its surface was clipped (as part of the
+		// group). repOf maps each cell to the representative whose face
+		// count reflects the whole group, keeping "zero-face" honest.
+		repOf := func(gi int) int {
+			if clipped.CellRep != nil && gi < len(clipped.CellRep) {
+				return int(clipped.CellRep[gi])
+			}
+			return gi
+		}
 		bucketOf := func(px int) int {
 			switch {
 			case px <= 1:
@@ -1326,7 +1371,7 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 				}
 				b := bucketOf(c.Pixels)
 				totalByBucket[k][b]++
-				zero := facesPerCell[gi] == 0
+				zero := facesPerCell[repOf(gi)] == 0
 				if zero {
 					zeroByBucket[k][b]++
 				}
@@ -1396,16 +1441,44 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 	})
 }
 
-// clipPerHalf clips each split half's bed-space geometry against its
-// own slabs and concatenates into one ClipResult — half 0 faces first,
-// a unified vertex table (each half's vertex indices offset) — plus a
-// per-face HalfIdx array parallel to the faces. Each half's returned
-// FaceCellIdx is half-local; clipPerHalf remaps it to the global
-// flattened-CellSlabs index space (the same space cellAssign /
-// facesPerCell use) by adding the running cell offset. Slabs are
-// processed in CellSlabs order, so the offset stays correct regardless
-// of how halves are grouped. See docs/split-cellslicer.md.
+// clipPerHalf clips each split half's bed-space geometry against its own
+// slabs and concatenates (the per-cell clip path). See clipPerHalfWith
+// for the shared stitching; this just supplies the per-half clip call.
 func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (cellslicer.ClipResult, []byte, error) {
+	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
+		return cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub, cellSize)
+	})
+}
+
+// clipPerHalfMerged is the merged-cell counterpart of clipPerHalf,
+// clipping connected same-color cells together per slab. cellColor is
+// the global per-cell color array (cellAssign), sliced per half by cell
+// offset; the resulting CellRep is offset to the global space by
+// clipPerHalfWith.
+func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellSize float32, cellColor []int32) (cellslicer.ClipResult, []byte, error) {
+	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
+		return cellslicer.ClipMeshToMergedCellsManifold(so.Halves[h], sub, cellSize, cellColor[cellOffset:cellOffset+nSub])
+	})
+}
+
+// clipPerHalfWith clips each split half's bed-space geometry and
+// concatenates into one ClipResult — half 0 faces first, a unified
+// vertex table (each half's vertex indices offset) — plus a per-face
+// HalfIdx array parallel to the faces. It walks slabs in CellSlabs
+// order, grouping each contiguous run of one HalfIdx, and calls clipHalf
+// for that run with its global cell offset and cell count.
+//
+// Each half's returned FaceCellIdx is half-local; clipPerHalfWith remaps
+// it to the global flattened-CellSlabs index space (the same space
+// cellAssign / facesPerCell use) by adding the running cell offset. If a
+// half returns a CellRep (the merged clip does), it is merged into a
+// global-length CellRep, offsetting both the cell index and the
+// representative value it stores. See docs/split-cellslicer.md.
+func clipPerHalfWith(slabs []cellslicer.Slab, clipHalf func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error)) (cellslicer.ClipResult, []byte, error) {
+	totalCells := 0
+	for i := range slabs {
+		totalCells += len(slabs[i].Cells)
+	}
 	var (
 		out     cellslicer.ClipResult
 		halfIdx []byte
@@ -1419,7 +1492,11 @@ func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (ce
 			end++
 		}
 		sub := slabs[start:end]
-		cr, err := cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub, cellSize)
+		nSub := 0
+		for i := range sub {
+			nSub += len(sub[i].Cells)
+		}
+		cr, err := clipHalf(h, sub, cellOffset, nSub)
 		if err != nil {
 			return cellslicer.ClipResult{}, nil, fmt.Errorf("half %d: %w", h, err)
 		}
@@ -1434,12 +1511,28 @@ func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (ce
 		for range cr.Faces {
 			halfIdx = append(halfIdx, h)
 		}
-		for i := range sub {
-			cellOffset += len(sub[i].Cells)
+		if cr.CellRep != nil {
+			if out.CellRep == nil {
+				out.CellRep = make([]int32, totalCells)
+			}
+			for i, rep := range cr.CellRep {
+				out.CellRep[cellOffset+i] = rep + int32(cellOffset)
+			}
 		}
+		cellOffset += nSub
 		start = end
 	}
 	return out, halfIdx, nil
+}
+
+// distinctReps counts the distinct representative indices in a CellRep
+// array — i.e. the number of merge groups the cells collapsed into.
+func distinctReps(cellRep []int32) int {
+	seen := make(map[int32]struct{}, len(cellRep))
+	for _, r := range cellRep {
+		seen[r] = struct{}{}
+	}
+	return len(seen)
 }
 
 // mostCommonNonNeg returns the most frequent non-negative palette
@@ -1560,4 +1653,3 @@ func mergeSplitFaces(
 	}
 	return combinedFaces, combinedAssign, combinedHalfIdx, nil
 }
-

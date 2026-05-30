@@ -118,6 +118,18 @@ type Options struct {
 	// for A/B timing of the augmentation's cost.
 	NoInteriorFaceFootprint bool `json:"NoInteriorFaceFootprint,omitempty"`
 
+	// CellMerge enables same-color cell merging in the Clip stage (see
+	// cellslicer.ClipMeshToMergedCellsManifold). Default false = OFF:
+	// every cell is clipped individually. When true, within each slab the
+	// connected same-kind cells of the same dithered color are clipped
+	// against one merged prism in a single Manifold intersection instead
+	// of one per cell, cutting boolean count and removing internal seams
+	// between same-color cells. Because colors come from Dither, it never
+	// affects the dithered output — it only changes clip time and triangle
+	// count (faster, fewer triangles). Opt-in for now. Forced off under
+	// ShowSampledColors, which needs per-cell face provenance.
+	CellMerge bool `json:"CellMerge,omitempty"`
+
 	// ShowSampledColors is a diagnostic mode: when true, the output
 	// mesh's per-face colors come from each face's originating
 	// section's RAW SAMPLED RGB instead of its dithered palette

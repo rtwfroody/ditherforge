@@ -73,6 +73,39 @@ func TestExtrudePolygonProducesCube(t *testing.T) {
 	}
 }
 
+func TestExtrudePolygonsWithHole(t *testing.T) {
+	// 10×10 outer square (CCW) with a 4×4 hole (CW), extruded height 2.
+	// Volume = (100 - 16) × 2 = 168.
+	outer := [][2]float32{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
+	hole := [][2]float32{{3, 3}, {3, 7}, {7, 7}, {7, 3}} // clockwise
+	m, err := ExtrudePolygons([][][2]float32{outer, hole}, 0, 2)
+	if err != nil {
+		t.Fatalf("ExtrudePolygons: %v", err)
+	}
+	defer m.Close()
+	if m.IsEmpty() {
+		t.Fatal("ExtrudePolygons: empty result")
+	}
+	if vol := m.Volume(); math.Abs(vol-168) > 1e-4 {
+		t.Errorf("Volume = %g, want 168 ((100-16)×2)", vol)
+	}
+}
+
+func TestExtrudePolygonsTwoDisjointPieces(t *testing.T) {
+	// Two separate 2×2 squares (both CCW), extruded height 1 →
+	// two disjoint prisms, total volume 4 + 4 = 8 in one Manifold.
+	a := [][2]float32{{0, 0}, {2, 0}, {2, 2}, {0, 2}}
+	b := [][2]float32{{10, 0}, {12, 0}, {12, 2}, {10, 2}}
+	m, err := ExtrudePolygons([][][2]float32{a, b}, 0, 1)
+	if err != nil {
+		t.Fatalf("ExtrudePolygons: %v", err)
+	}
+	defer m.Close()
+	if vol := m.Volume(); math.Abs(vol-8) > 1e-4 {
+		t.Errorf("Volume = %g, want 8 (two 2×2×1 prisms)", vol)
+	}
+}
+
 func TestIntersectionOverlappingCubes(t *testing.T) {
 	// Two unit cubes overlapping by 50% along X.
 	v, f := cubeMesh(1)

@@ -54,6 +54,7 @@ type Args struct {
 	NoMerge                         bool     `arg:"--no-merge" help:"Skip coplanar triangle merging"`
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
 	NoInteriorFaceFootprint         bool     `arg:"--no-interior-face-footprint" help:"Advanced: disable projecting thin between-plane horizontal faces into slab footprints (for A/B timing of that augmentation)"`
+	CellMerge                       bool     `arg:"--cell-merge" help:"Advanced: merge connected same-color cells per slab before clip (faster, fewer triangles, no effect on dithered output). Off by default."`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force                           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats                           bool     `arg:"--stats" help:"Print face counts per material"`
@@ -130,6 +131,7 @@ func main() {
 		NoMerge:                              args.NoMerge,
 		NoSimplify:                           args.NoSimplify,
 		NoInteriorFaceFootprint:              args.NoInteriorFaceFootprint,
+		CellMerge:                            args.CellMerge,
 		Size:                                 args.Size,
 		Force:                                args.Force,
 		Stats:                                args.Stats,

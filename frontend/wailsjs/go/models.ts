@@ -153,8 +153,10 @@ export namespace main {
 	    blueNoiseTol: number;
 	    colorSnap: number;
 	    noMerge: boolean;
+	    cellMerge: boolean;
 	    noSimplify: boolean;
 	    stats: boolean;
+	    showSampledColors: boolean;
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
@@ -202,8 +204,10 @@ export namespace main {
 	        this.blueNoiseTol = source["blueNoiseTol"];
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
+	        this.cellMerge = source["cellMerge"];
 	        this.noSimplify = source["noSimplify"];
 	        this.stats = source["stats"];
+	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
@@ -447,6 +451,7 @@ export namespace pipeline {
 	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
 	    NoInteriorFaceFootprint?: boolean;
+	    CellMerge?: boolean;
 	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -493,6 +498,7 @@ export namespace pipeline {
 	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
+	        this.CellMerge = source["CellMerge"];
 	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	

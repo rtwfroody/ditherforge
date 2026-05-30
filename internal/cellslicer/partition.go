@@ -391,12 +391,12 @@ type PartitionStats struct {
 // scanning the slab's cells for shared directed half-edges. An edge
 // is "outer" iff:
 //
-//	1. No other cell in the slab owns its reverse half-edge.
-//	2. The half-space immediately outside the edge is outside fp
-//	   (the slab footprint). Without this guard a true partition gap
-//	   would let two cells facing the gap both mark their gap-side
-//	   edges outer; clip-time open-ending would then double-claim
-//	   geometry inside the gap and produce non-manifold faces.
+//  1. No other cell in the slab owns its reverse half-edge.
+//  2. The half-space immediately outside the edge is outside fp
+//     (the slab footprint). Without this guard a true partition gap
+//     would let two cells facing the gap both mark their gap-side
+//     edges outer; clip-time open-ending would then double-claim
+//     geometry inside the gap and produce non-manifold faces.
 //
 // Vertex equality is on the 1µm Clipper-integer bucket (int2DOf), so
 // two cells' independently-rounded shared corners match.
@@ -413,13 +413,12 @@ type PartitionStats struct {
 // one once we're confident the open-ended behaviour stays — would save
 // one full pass over the same data.
 func MarkOuterEdges(cells []Cell, fp *Footprint) {
-	type edgeKey struct{ a, b int2D }
-	edges := make(map[edgeKey]struct{}, len(cells)*8)
+	edges := make(map[dirEdge]struct{}, len(cells)*8)
 	for ci := range cells {
 		outer := cells[ci].Outer
 		n := len(outer)
 		for k := 0; k < n; k++ {
-			edges[edgeKey{int2DOf(outer[k]), int2DOf(outer[(k+1)%n])}] = struct{}{}
+			edges[dirEdgeOf(outer[k], outer[(k+1)%n])] = struct{}{}
 		}
 	}
 	for ci := range cells {
@@ -431,7 +430,7 @@ func MarkOuterEdges(cells []Cell, fp *Footprint) {
 		flags := make([]bool, n)
 		for k := 0; k < n; k++ {
 			a, b := outer[k], outer[(k+1)%n]
-			if _, hasMate := edges[edgeKey{int2DOf(b), int2DOf(a)}]; hasMate {
+			if _, hasMate := edges[dirEdgeOf(a, b).reverse()]; hasMate {
 				continue
 			}
 			if fp != nil && insideFootprintOnOuterSide(fp, a, b) {
@@ -477,4 +476,3 @@ func insideFootprintOnOuterSide(fp *Footprint, a, b Point2) bool {
 	const probeMM = float32(0.01)
 	return fp.Contains(midX+probeMM*nx, midY+probeMM*ny)
 }
-

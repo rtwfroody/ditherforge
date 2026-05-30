@@ -176,6 +176,18 @@ func ExtrudePolygon(poly [][2]float32, zBot, zTop float32) (*Manifold, error) {
 	if len(poly) < 3 {
 		return nil, fmt.Errorf("manifoldbool: polygon needs ≥3 points, got %d", len(poly))
 	}
+	return ExtrudePolygons([][][2]float32{poly}, zBot, zTop)
+}
+
+// ExtrudePolygons extrudes a set of contours between zBot and zTop into
+// a single prism. Outer contours must be CCW (positive area) and hole
+// contours CW (negative area); multiple disjoint outer pieces are
+// allowed (Manifold's triangulator fills by winding, so the contour set
+// is extruded as one Manifold). Contours with fewer than 3 points are
+// skipped. This is the merged-cell clip's path: the union of many
+// same-color cell polygons within a slab, extruded once instead of
+// per cell.
+func ExtrudePolygons(contours [][][2]float32, zBot, zTop float32) (*Manifold, error) {
 	if zTop <= zBot {
 		return nil, fmt.Errorf("manifoldbool: zTop %g must exceed zBot %g", zTop, zBot)
 	}
@@ -186,26 +198,49 @@ func ExtrudePolygon(poly [][2]float32, zBot, zTop float32) (*Manifold, error) {
 	// passing Go memory that contains nested pointers (the polygons
 	// wrapper would carry a Go pointer to a Go pointer). C.malloc
 	// keeps the arrays in non-moving memory and out of the cgo
-	// pinning checker's way.
-	ptsC := (*C.ManifoldVec2)(C.malloc(C.size_t(len(poly)) * C.size_t(unsafe.Sizeof(C.ManifoldVec2{}))))
-	defer C.free(unsafe.Pointer(ptsC))
-	ptsSlice := unsafe.Slice(ptsC, len(poly))
-	for i, p := range poly {
-		ptsSlice[i].x = C.double(p[0])
-		ptsSlice[i].y = C.double(p[1])
-	}
-	spMem := C.malloc(C.manifold_simple_polygon_size())
-	defer C.free(spMem)
-	sp := C.manifold_simple_polygon(spMem, ptsC, C.size_t(len(poly)))
-	defer C.manifold_destruct_simple_polygon(sp)
+	// pinning checker's way. All allocations are released on return
+	// (after manifold_extrude has consumed them).
+	var frees []unsafe.Pointer
+	var destroys []func()
+	defer func() {
+		for _, d := range destroys {
+			d()
+		}
+		for _, p := range frees {
+			C.free(p)
+		}
+	}()
 
+	sps := make([]*C.ManifoldSimplePolygon, 0, len(contours))
+	for _, poly := range contours {
+		if len(poly) < 3 {
+			continue
+		}
+		ptsC := (*C.ManifoldVec2)(C.malloc(C.size_t(len(poly)) * C.size_t(unsafe.Sizeof(C.ManifoldVec2{}))))
+		frees = append(frees, unsafe.Pointer(ptsC))
+		ptsSlice := unsafe.Slice(ptsC, len(poly))
+		for i, p := range poly {
+			ptsSlice[i].x = C.double(p[0])
+			ptsSlice[i].y = C.double(p[1])
+		}
+		spMem := C.malloc(C.manifold_simple_polygon_size())
+		frees = append(frees, spMem)
+		sp := C.manifold_simple_polygon(spMem, ptsC, C.size_t(len(poly)))
+		destroys = append(destroys, func() { C.manifold_destruct_simple_polygon(sp) })
+		sps = append(sps, sp)
+	}
+	if len(sps) == 0 {
+		return nil, fmt.Errorf("manifoldbool: no contour with ≥3 points")
+	}
+
+	simplePtrsC := (**C.ManifoldSimplePolygon)(C.malloc(C.size_t(len(sps)) * C.size_t(unsafe.Sizeof(sps[0]))))
+	frees = append(frees, unsafe.Pointer(simplePtrsC))
+	ptrSlice := unsafe.Slice(simplePtrsC, len(sps))
+	copy(ptrSlice, sps)
 	psMem := C.malloc(C.manifold_polygons_size())
-	defer C.free(psMem)
-	simplePtrsC := (**C.ManifoldSimplePolygon)(C.malloc(C.size_t(unsafe.Sizeof(sp))))
-	defer C.free(unsafe.Pointer(simplePtrsC))
-	*simplePtrsC = sp
-	ps := C.manifold_polygons(psMem, simplePtrsC, C.size_t(1))
-	defer C.manifold_destruct_polygons(ps)
+	frees = append(frees, psMem)
+	ps := C.manifold_polygons(psMem, simplePtrsC, C.size_t(len(sps)))
+	destroys = append(destroys, func() { C.manifold_destruct_polygons(ps) })
 
 	height := C.double(zTop - zBot)
 	extMem := alloc()

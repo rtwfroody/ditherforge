@@ -27,6 +27,16 @@ type ClipResult struct {
 	Verts       [][3]float32
 	Faces       [][3]uint32
 	FaceCellIdx []int32
+	// CellRep, when non-nil, has one entry per cell (global flattened
+	// index, same space as FaceCellIdx) giving the representative cell
+	// index its merge-group was tagged with in FaceCellIdx. It is set
+	// only by the merged clip (ClipMeshToMergedCellsManifold): cells in
+	// the same same-kind/same-color group share a representative, and
+	// only that representative appears in FaceCellIdx. Downstream
+	// per-cell coverage diagnostics use CellRep[gi] to look up whether
+	// gi's group produced any faces. nil for the per-cell clip, where
+	// every cell is its own representative.
+	CellRep []int32
 }
 
 // OpenEdgeBloat is the outward distance (mm) applied to each open
@@ -72,18 +82,26 @@ const OpenEdgeBloat = 5.0
 //
 // cellSize is the dither cell size in mm, used to scale OpenEdgeBloat.
 // Pass the same value supplied to PartitionModel.
-func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize float32) (ClipResult, error) {
+// slabSrc holds the source Manifold and its per-slab pre-split pieces,
+// shared by the per-cell and merged clip entry points.
+type slabSrc struct {
+	src     *manifoldbool.Manifold
+	srcID   int32
+	perSlab []*manifoldbool.Manifold
+}
+
+// buildSlabSrc dedups the model, builds its source Manifold, and
+// pre-splits it into one Manifold per slab (see the per-slab rationale
+// in ClipMeshToCellsManifold). The caller must call close() when done.
+func buildSlabSrc(model *loader.LoadedModel, slabs []Slab) (*slabSrc, error) {
 	verts, faces := DedupVertsByPosition(model.Vertices, model.Faces)
 	if len(verts) == 0 || len(faces) == 0 {
-		return ClipResult{}, fmt.Errorf("cellslicer/manifold: source mesh has no faces")
+		return nil, fmt.Errorf("cellslicer/manifold: source mesh has no faces")
 	}
 	src, err := manifoldbool.FromMesh(verts, faces)
 	if err != nil {
-		return ClipResult{}, fmt.Errorf("cellslicer/manifold: build source Manifold: %w", err)
+		return nil, fmt.Errorf("cellslicer/manifold: build source Manifold: %w", err)
 	}
-	defer src.Close()
-	srcID := src.OriginalID()
-
 	// Pre-split src into one Manifold per slab. Each per-cell
 	// Intersection only walks the BVH of its own slab, cutting cgo and
 	// boolean cost on tall models with many slabs. The per-slab
@@ -93,76 +111,103 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize f
 	// the plane-cut faces split_by_plane adds.
 	perSlab, err := splitSrcBySlabs(src, slabs)
 	if err != nil {
-		return ClipResult{}, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
+		src.Close()
+		return nil, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
 	}
-	defer closeSlabManifolds(perSlab)
-	slabManifold := func(si int) *manifoldbool.Manifold {
-		// perSlab[si] is nil only when splitSrcBySlabs took its
-		// no-split early return (len(slabs) ≤ 1); fall back to src
-		// directly in that case.
-		if m := perSlab[si]; m != nil {
-			return m
-		}
-		return src
-	}
+	return &slabSrc{src: src, srcID: src.OriginalID(), perSlab: perSlab}, nil
+}
 
-	type job struct {
-		globalIdx int
-		slabIdx   int
-		cellIdx   int
+// slabManifold returns the per-slab source Manifold for slab si, or src
+// itself when splitSrcBySlabs took its no-split early return (len(slabs)
+// ≤ 1, leaving perSlab[si] nil).
+func (s *slabSrc) slabManifold(si int) *manifoldbool.Manifold {
+	if m := s.perSlab[si]; m != nil {
+		return m
 	}
-	type result struct {
-		globalIdx int
-		verts     [][3]float32
-		faces     [][3]uint32
+	return s.src
+}
+
+func (s *slabSrc) close() {
+	closeSlabManifolds(s.perSlab)
+	s.src.Close()
+}
+
+func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize float32) (ClipResult, error) {
+	ss, err := buildSlabSrc(model, slabs)
+	if err != nil {
+		return ClipResult{}, err
 	}
-	globalOffsets := make([]int, len(slabs)+1)
-	for si := range slabs {
-		globalOffsets[si+1] = globalOffsets[si] + len(slabs[si].Cells)
-	}
-	jobs := make([]job, 0, globalOffsets[len(slabs)])
+	defer ss.close()
+
+	// One job per cell, tagged with its global flattened-CellSlabs index.
+	type cellRef struct{ globalIdx, slabIdx, cellIdx int }
+	globalOffsets := SlabGlobalOffsets(slabs)
+	refs := make([]cellRef, 0, globalOffsets[len(slabs)])
 	for si := range slabs {
 		for ci := range slabs[si].Cells {
-			jobs = append(jobs, job{globalIdx: globalOffsets[si] + ci, slabIdx: si, cellIdx: ci})
+			refs = append(refs, cellRef{globalOffsets[si] + ci, si, ci})
 		}
 	}
-	results := make([]result, len(jobs))
+	return runClipJobs(len(refs), func(i int) (int, [][3]float32, [][3]uint32, error) {
+		r := refs[i]
+		s := &slabs[r.slabIdx]
+		v, f, cerr := clipOneCellManifold(ss.slabManifold(r.slabIdx), ss.srcID, &s.Cells[r.cellIdx], s.ZBot, s.ZTop, cellSize)
+		if cerr != nil {
+			return 0, nil, nil, fmt.Errorf("cell %d (slab=%d,cell=%d): %w", r.globalIdx, r.slabIdx, r.cellIdx, cerr)
+		}
+		return r.globalIdx, v, f, nil
+	})
+}
 
-	// Manifold itself is thread-safe across independent Manifold
-	// objects; per-cell work touches src read-only and writes into
-	// its own slot in results. The libmanifoldc allocator is
-	// process-wide, but boolean ops do not share mutable state
-	// between separate calls.
+// runClipJobs is the shared worker-pool engine behind both clip entry
+// points (per-cell and merged-cell). It runs n independent clip jobs
+// across NumCPU workers and concatenates the surviving meshes — in job
+// order, into one unified vertex table — tagging every face with the
+// global cell index its job returned.
+//
+// clip(i) produces the surface-only mesh for job i and the rep cell
+// index to tag its faces with; it must already wrap any error with job
+// context. clip is called concurrently for distinct i: Manifold is
+// thread-safe across independent objects, source Manifolds are touched
+// read-only, and each call's output goes to its own result slot, so no
+// locking is needed inside clip.
+//
+// CellRep is left nil; the merged clip populates it after this returns.
+func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error)) (ClipResult, error) {
+	type result struct {
+		rep   int
+		verts [][3]float32
+		faces [][3]uint32
+	}
+	results := make([]result, n)
+
 	nWorkers := runtime.NumCPU()
-	if nWorkers > len(jobs) {
-		nWorkers = len(jobs)
+	if nWorkers > n {
+		nWorkers = n
 	}
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
-	jobCh := make(chan int, len(jobs))
-	for i := range jobs {
+	jobCh := make(chan int, n)
+	for i := 0; i < n; i++ {
 		jobCh <- i
 	}
 	close(jobCh)
 	var (
-		wg      sync.WaitGroup
-		errMu   sync.Mutex
-		firstE  error
+		wg     sync.WaitGroup
+		errMu  sync.Mutex
+		firstE error
 	)
 	for w := 0; w < nWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for ji := range jobCh {
-				j := jobs[ji]
-				s := &slabs[j.slabIdx]
-				cell := &s.Cells[j.cellIdx]
-				v, f, cerr := clipOneCellManifold(slabManifold(j.slabIdx), srcID, cell, s.ZBot, s.ZTop, cellSize)
+				rep, v, f, cerr := clip(ji)
 				if cerr != nil {
 					errMu.Lock()
 					if firstE == nil {
-						firstE = fmt.Errorf("cell %d (slab=%d,cell=%d): %w", j.globalIdx, j.slabIdx, j.cellIdx, cerr)
+						firstE = cerr
 					}
 					errMu.Unlock()
 					continue
@@ -170,7 +215,7 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize f
 				if len(f) == 0 {
 					continue
 				}
-				results[ji] = result{globalIdx: j.globalIdx, verts: v, faces: f}
+				results[ji] = result{rep: rep, verts: v, faces: f}
 			}
 		}()
 	}
@@ -197,7 +242,7 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize f
 		cr.Verts = append(cr.Verts, r.verts...)
 		for _, f := range r.faces {
 			cr.Faces = append(cr.Faces, [3]uint32{f[0] + base, f[1] + base, f[2] + base})
-			cr.FaceCellIdx = append(cr.FaceCellIdx, int32(r.globalIdx))
+			cr.FaceCellIdx = append(cr.FaceCellIdx, int32(r.rep))
 		}
 	}
 	return cr, nil

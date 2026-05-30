@@ -718,9 +718,14 @@ type ditherSettings struct {
 	BlueNoiseTolerance float64
 }
 
-// clipSettings is currently empty — the clip stage is invalidated
-// only by dependency cascade from Dither / Voxelize.
-type clipSettings struct{}
+// clipSettings carries the clip-stage knobs. Beyond these the stage is
+// invalidated by dependency cascade from Dither / Voxelize. MergeCells
+// is the *effective* same-color-cell merge decision (see Clip): on only
+// when CellMerge is set and not under ShowSampledColors, so the cache key
+// tracks exactly which clip path produced the output.
+type clipSettings struct {
+	MergeCells bool
+}
 
 type mergeSettings struct {
 	NoMerge bool
@@ -836,7 +841,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
 	case StageClip:
-		return clipSettings{}
+		return clipSettings{MergeCells: opts.CellMerge && !opts.ShowSampledColors}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
 	}
@@ -999,8 +1004,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat64(h, v.RiemersmaInputBias)
 		writeFloat64(h, v.BlueNoiseTolerance)
 	case clipSettings:
-		// No fields to hash; clip stage rides dependency cascade
-		// from Voxelize/Dither.
+		writeBool(h, v.MergeCells)
 	case mergeSettings:
 		writeBool(h, v.NoMerge)
 	}
