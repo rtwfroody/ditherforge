@@ -18,22 +18,30 @@ import "math"
 // never reaches more than ~2*cellSize from its seed (it spans ~cellSize
 // along the contour and the band is cellSize deep). So we start each
 // cell as a local box of half-width localHalf around the seed — NOT a
-// global box — and clip only against seeds within 2*localHalf. A seed
-// farther than that has its bisector beyond the local box, so it cannot
-// affect the cell and is safely skipped (a uniform grid supplies the
-// near seeds in O(1)). Starting from a *global* box with only near seeds
-// was the earlier bug: with no interior seeds (a pure wall slab) the
-// cell stayed unbounded inward and ran clear across the model to the far
-// wall, re-entering the band there as a phantom overlapping cell. The
-// local box supplies that inward bound directly, so the far wall's seeds
-// are no longer needed. The convex result is then Clipper-clipped to the
-// band, which resolves concavities/holes and may split one cell into
-// several polygons (each its own Cell).
+// global box — and clip only against seeds within clipRadius (a uniform
+// grid supplies them in O(1)). Starting from a *global* box with only
+// near seeds was the earlier bug: with no interior seeds (a pure wall
+// slab) the cell stayed unbounded inward and ran clear across the model
+// to the far wall, re-entering the band there as a phantom overlapping
+// cell. The local box supplies that inward bound directly, so the far
+// wall's seeds are no longer needed. The convex result is then
+// Clipper-clipped to the band, which resolves concavities/holes and may
+// split one cell into several polygons (each its own Cell).
 //
-// localHalf must exceed the band-cell's reach or cells would be
-// truncated, leaving gaps; 4*cellSize is a generous safe margin over the
-// ~2*cellSize worst case (verified by TestVoronoiBandCellsTilesExactly,
-// which checks the cells tile the band with no gaps and no overlaps).
+// Two radii, both keyed off localHalf:
+//
+//   - localHalf must exceed the band-cell's reach (~2*cellSize) or cells
+//     would be truncated, leaving gaps. 4*cellSize is a generous margin
+//     (verified by TestVoronoiBandCellsTilesExactly across square, hole,
+//     thin-strip, and reflex-corner footprints).
+//   - clipRadius must cover the local box's far CORNER, at distance
+//     √2*localHalf — a seed's bisector can clip a box corner out to
+//     2*√2*localHalf ≈ 2.83*localHalf. We use 3*localHalf so every seed
+//     that can touch the box is clipped, making the convex cell exact
+//     within the box; since the band-cell lies inside the box, its
+//     Clipper-clip is then the exact Voronoi cell. (2*localHalf — the box
+//     EDGE — would skip corner-cutting seeds and rely on a thin, subtle
+//     margin instead.)
 //
 // kind tags the emitted cells (KindRing for boundary cells). pxArea is
 // the cellSize/4 pixel area used for the diagnostic Pixels field, kept
@@ -43,7 +51,7 @@ func voronoiBandCells(seeds []Point2, region *Footprint, cellSize, pxArea float3
 		return nil
 	}
 	localHalf := 4 * cellSize
-	clipRadius := 2 * localHalf
+	clipRadius := 3 * localHalf
 	grid := newSeedGrid(seeds, clipRadius)
 
 	cells := make([]Cell, 0, len(seeds))
