@@ -77,9 +77,18 @@ type Slab struct {
 	// triangles for color sampling without re-slicing.
 	BotLayer *Layer
 	TopLayer *Layer
-	// Footprint is the Clipper union of bot + top loops. Cells lie
-	// inside it.
+	// Footprint is the Clipper union of bot + top loops — the full solid
+	// cross-section. Cells lie inside it, but do NOT (and should not) tile
+	// all of it: the cellslicer is surface-only.
 	Footprint *Footprint
+	// CoverTarget is the surface shell the cells are actually meant to
+	// tile: the lateral band (walls) ∪ innerCap (cap surfaces), as
+	// computed by PartitionSlabAnalytic. It excludes the hidden interior
+	// volume, so it is the correct reference for a coverage-gap check
+	// (Footprint over-counts the interior as "uncovered"). May be nil for
+	// slabs built by the PartitionSlab/PartitionModel helper path, which
+	// has no neighbour context; callers should fall back to Footprint.
+	CoverTarget *Footprint
 	// Cells is the slab's cell list. Order is ring-cells first
 	// (loop-by-loop), then hex cells.
 	Cells []Cell

@@ -282,15 +282,19 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 // intersections are never emitted.
 //
 // Pass nil for either neighbour at the top/bottom of the model.
-func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, PartitionStats) {
+func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, *Footprint, PartitionStats) {
 	var stats PartitionStats
 	if fpCur == nil || len(fpCur.Loops) == 0 {
-		return nil, stats
+		return nil, nil, stats
 	}
 	inner := OffsetFootprint(fpCur, -cellSize)
 	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
 	innerCap := FootprintDifference(inner, neighborBoth)
 	band := FootprintDifference(fpCur, inner)
+	// The surface shell the emitted cells tile: lateral band ∪ cap region.
+	// Stored on the Slab so diagnostics can measure coverage against the
+	// region cells are actually meant to fill, not the full footprint.
+	coverTarget := FootprintUnion(band, innerCap)
 
 	// Pixels is a diagnostic only (run.go's partition histogram); the
 	// raster path counted real pixels at pxSize = cellSize/4, so report
@@ -334,7 +338,7 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// Tag outer-perimeter edges so the per-cell prism clip can open-end
 	// there (see Cell.OuterEdgeOpen). Same call the raster path made.
 	MarkOuterEdges(cells, fpCur)
-	return cells, stats
+	return cells, coverTarget, stats
 }
 
 // PartitionStats reports diagnostic counters from one

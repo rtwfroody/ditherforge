@@ -45,8 +45,14 @@ type DebugSVGOptions struct {
 	// Defaults: cyan ("#00b7eb") for bot, orange ("#ff7f00") for top.
 	BotContourStroke string
 	TopContourStroke string
-	// HighlightUncovered fills the area in the footprint that no cell's
-	// Outer polygon covers, so partition coverage gaps are visible.
+	// HighlightUncovered fills the area in the slab's CoverTarget (the
+	// surface shell the cells are meant to tile — band ∪ innerCap) that no
+	// cell's Outer polygon covers, so genuine partition coverage gaps are
+	// visible. It deliberately does NOT use the full Footprint: the hidden
+	// interior is supposed to be empty (surface-only cellslicer), so
+	// measuring against the footprint would flag every solid slab's
+	// interior as a false gap. Falls back to Footprint when CoverTarget is
+	// nil (the neighbour-less PartitionSlab helper path).
 	HighlightUncovered bool
 	// UncoveredFill is the fill color for uncovered areas. Default
 	// "#ff0000" (opaque red).
@@ -168,11 +174,18 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 		sb.WriteString(`<g opacity="0.85">`)
 	}
 
-	// Uncovered region: footprint minus union of cell.Outer polygons,
+	// Uncovered region: CoverTarget minus union of cell.Outer polygons,
 	// using SVG's even-odd fill rule. With all polygons CCW the rule
-	// XORs them, so points inside fp but inside zero cells stay
-	// "odd" (filled), everything else becomes "even" (transparent).
+	// XORs them, so points inside the cover target but inside zero cells
+	// stay "odd" (filled), everything else becomes "even" (transparent).
+	// CoverTarget is the surface shell the cells should tile; using it
+	// (not the full Footprint) keeps the hidden interior of solid slabs
+	// from reading as a false coverage gap.
 	if opt.HighlightUncovered {
+		coverFP := s.CoverTarget
+		if coverFP == nil {
+			coverFP = s.Footprint
+		}
 		fill := opt.UncoveredFill
 		if fill == "" {
 			fill = "#ff0000"
@@ -181,12 +194,12 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 			`<path fill="%s" fill-rule="evenodd" shape-rendering="crispEdges" d="`,
 			fill,
 		)
-		appendFootprintPaths(&sb, s.Footprint)
+		appendFootprintPaths(&sb, coverFP)
 		all := make([]int, len(s.Cells))
 		for i := range all {
 			all[i] = i
 		}
-		if len(s.Footprint.Loops) > 0 && len(s.Cells) > 0 {
+		if len(coverFP.Loops) > 0 && len(s.Cells) > 0 {
 			sb.WriteByte(' ')
 		}
 		appendCellPaths(&sb, s.Cells, all)

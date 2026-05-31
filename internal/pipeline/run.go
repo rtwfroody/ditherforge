@@ -931,17 +931,18 @@ func (r *pipelineRun) sliceSampleHalf(
 			fpAbove = footprints[i+1]
 		}
 		cs := cellSizeForSlab(i)
-		cells, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
+		cells, coverTarget, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
 		perSlabStats[i] = stats
 		slabs[i] = cellslicer.Slab{
-			Index:     i,
-			HalfIdx:   halfIdx,
-			ZBot:      planes[i],
-			ZTop:      planes[i+1],
-			BotLayer:  &layers[i],
-			TopLayer:  &layers[i+1],
-			Footprint: footprints[i],
-			Cells:     cells,
+			Index:       i,
+			HalfIdx:     halfIdx,
+			ZBot:        planes[i],
+			ZTop:        planes[i+1],
+			BotLayer:    &layers[i],
+			TopLayer:    &layers[i+1],
+			Footprint:   footprints[i],
+			CoverTarget: coverTarget,
+			Cells:       cells,
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
