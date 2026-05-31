@@ -44,7 +44,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -1373,6 +1373,16 @@
     }
   }
 
+  async function handleExportCollection() {
+    const name = collectionStore.activeCollection;
+    if (!name) return;
+    try {
+      await ExportCollection(name);
+    } catch (err) {
+      console.error('Failed to export collection:', err);
+    }
+  }
+
   async function handleDeleteCollection() {
     const name = collectionStore.activeCollection;
     if (!name) return;
@@ -2391,11 +2401,12 @@
       <Dialog.Title>{collectionStore.activeCollection}</Dialog.Title>
     </Dialog.Header>
     <CollectionManager />
-    {#if collectionStore.isEditable}
-      <Dialog.Footer>
+    <Dialog.Footer>
+      <Button variant="outline" size="sm" onclick={handleExportCollection}>Export...</Button>
+      {#if collectionStore.isEditable}
         <Button variant="destructive" size="sm" class="text-foreground" onclick={() => { deleteCollectionDialogOpen = true; }}>Delete Collection</Button>
-      </Dialog.Footer>
-    {/if}
+      {/if}
+    </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
 

@@ -26,6 +26,10 @@ export function Export3MF() {
   return window['go']['main']['App']['Export3MF']();
 }
 
+export function ExportCollection(arg1) {
+  return window['go']['main']['App']['ExportCollection'](arg1);
+}
+
 export function GetCollectionColors(arg1) {
   return window['go']['main']['App']['GetCollectionColors'](arg1);
 }

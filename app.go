@@ -787,6 +787,31 @@ func (a *App) ImportCollection() (string, error) {
 	return col.Name, nil
 }
 
+// ExportCollection opens a native save dialog and writes the named
+// collection (built-in or user) to a text file in the same
+// "#RRGGBB Label" format ImportCollection reads. Returns the saved
+// path, or empty if the user cancelled.
+func (a *App) ExportCollection(name string) (string, error) {
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "Export Filament Collection",
+		DefaultFilename: name + ".txt",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "All Files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := a.collections.Export(name, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // RenameCollection renames a user collection.
 func (a *App) RenameCollection(oldName, newName string) error {
 	return a.collections.Rename(oldName, newName)

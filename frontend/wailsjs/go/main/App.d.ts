@@ -16,6 +16,8 @@ export function EnumerateObjects(arg1:string):Promise<Array<loader.ObjectInfo>>;
 
 export function Export3MF():Promise<string>;
 
+export function ExportCollection(arg1:string):Promise<string>;
+
 export function GetCollectionColors(arg1:string):Promise<Array<main.ColorEntry>>;
 
 export function ImportCollection():Promise<string>;

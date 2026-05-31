@@ -196,6 +196,16 @@ func (m *Manager) Import(path string) (Collection, error) {
 	}, nil
 }
 
+// Export writes a collection (built-in or user) to destPath in the
+// "#RRGGBB Label" format that Import reads.
+func (m *Manager) Export(name, destPath string) error {
+	col, ok := m.Get(name)
+	if !ok {
+		return fmt.Errorf("collection %q not found", name)
+	}
+	return m.writeFile(destPath, col.Entries)
+}
+
 // Delete removes a user collection. Returns an error for built-in or protected collections.
 func (m *Manager) Delete(name string) error {
 	if name == InventoryName {
