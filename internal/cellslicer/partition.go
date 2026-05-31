@@ -205,43 +205,6 @@ func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 	return cells, fp
 }
 
-// ringCellsForLoopRaw emits unclipped trapezoidal ring cells along one
-// footprint loop, each spanning a consecutive pair of cellSize-spaced
-// boundary marks and extending `depth` into the solid. inwardNormal is
-// 90° CCW of the tangent, which points into the interior for a CCW
-// outer loop and outward from the hole — i.e. into the solid — for a
-// CW hole loop, so the same code serves both loop kinds.
-func ringCellsForLoopRaw(loop *FootprintLoop, cellSize, depth float32) []Cell {
-	marks := walkLoopAtCellSize(loop, cellSize)
-	if len(marks) == 0 {
-		return nil
-	}
-	cells := make([]Cell, 0, len(marks))
-	for k := range marks {
-		mA := marks[k]
-		mB := marks[(k+1)%len(marks)]
-		nA := inwardNormal(loop, mA)
-		nB := inwardNormal(loop, mB)
-		innerB := Point2{
-			mB.point[0] + depth*nB[0],
-			mB.point[1] + depth*nB[1],
-		}
-		innerA := Point2{
-			mA.point[0] + depth*nA[0],
-			mA.point[1] + depth*nA[1],
-		}
-		arc := extractArc(loop, mA, mB)
-		raw := make([]Point2, 0, len(arc)+2)
-		raw = append(raw, arc...)
-		raw = append(raw, innerB, innerA)
-		if len(raw) < 3 {
-			continue
-		}
-		cells = append(cells, Cell{Outer: raw, Kind: KindRing})
-	}
-	return cells
-}
-
 // generateHexCellsRaw mirrors GenerateHexCells but emits the
 // unclipped regular hexagons directly — no Clipper-clip against
 // the inner footprint. Hexes whose centres fall outside the inner
@@ -283,35 +246,40 @@ func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
 	return cells
 }
 
-// PartitionSlabAnalytic partitions a slab's footprint into ring + hex
-// cells using exact Clipper polygon booleans, with no raster
-// round-trip.
+// PartitionSlabAnalytic partitions a slab's footprint into compact
+// boundary + hex cells using exact Clipper polygon booleans, with no
+// raster round-trip. Every cell is sized so a cellSize-diameter circle
+// fits inside it (inradius ≈ cellSize/2) with minimal extra — no long-
+// skinny cells, no overlaps.
 //
 // Region algebra (all Clipper set ops on the slab footprints):
 //
-//	inner      = fpCur shrunk inward by cellSize.
-//	innerCap   = inner minus the region covered by BOTH neighbours.
-//	             That leaves only cap surface — the model's top/bottom
-//	             or an interior horizontal feature. Pure wall slabs
-//	             have empty innerCap (the interior is hidden between
-//	             neighbours), so they produce no interior hex cells.
-//	ringRegion = fpCur minus innerCap — the lateral band the hex cells
-//	             don't own, which is the whole footprint on wall slabs.
+//	inner    = fpCur shrunk inward by cellSize.
+//	innerCap = inner minus the region covered by BOTH neighbours.
+//	           That leaves only cap surface — the model's top/bottom
+//	           or an interior horizontal feature. Pure wall slabs
+//	           have empty innerCap (the interior is hidden between
+//	           neighbours), so they produce no interior hex cells.
+//	band     = fpCur minus inner — the cellSize-wide ring along every
+//	           footprint loop (outer AND hole). This is the lateral
+//	           (wall) surface; its width is exactly one cell, so the
+//	           wall slab's deep interior is left uncovered on purpose
+//	           (surface-only — interior cells would leak error into
+//	           invisible volume). Angled walls are handled upstream by
+//	           the footprint (bot∪top), not by widening this band.
 //
-// innerCap and ringRegion partition fpCur (disjoint, union = fpCur).
-// Raw hexagons are clipped to innerCap and fill it. Raw ring
-// trapezoids are clipped to ringRegion but only extend depthFactor*
-// cellSize inward from the boundary, so they fill ringRegion only
-// within that band: on a cap or thin-wall slab that is all of
-// ringRegion, but a wide wall slab's deep interior is left uncovered
-// on purpose — it carries no visible surface (surface-only; interior
-// cells would just leak error into invisible volume). So the cells
-// tile the footprint wherever there is surface to sample, not the
-// whole footprint. Each Clipper intersection may return several
-// disjoint polygons (e.g. a hexagon pinched by a concave footprint);
-// each becomes its own cell, which subsumes the raster path's
-// splitDisconnectedCells. Empty intersections are never emitted,
-// subsuming the zero-pixel drop.
+// band and innerCap are disjoint and meet cleanly along `inner`.
+//
+// Boundary cells are the clipped Voronoi diagram of cellSize-spaced
+// seeds along the footprint loops, restricted to band (voronoiBandCells)
+// — compact, non-overlapping, and contiguous, replacing the old depth-3
+// ring trapezoids that fanned out and overlapped at convex corners. The
+// interior is the raw hex lattice clipped to innerCap; a triangular
+// lattice's Voronoi is itself the hex tiling, so the two cell families
+// follow the same "cellSize circle fits inside" rule. Each Clipper
+// intersection may return several disjoint polygons (e.g. a hexagon
+// pinched by a concave footprint); each becomes its own cell. Empty
+// intersections are never emitted.
 //
 // Pass nil for either neighbour at the top/bottom of the model.
 func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, PartitionStats) {
@@ -322,25 +290,7 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	inner := OffsetFootprint(fpCur, -cellSize)
 	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
 	innerCap := FootprintDifference(inner, neighborBoth)
-	ringRegion := FootprintDifference(fpCur, innerCap)
-
-	// Ring cells walk every footprint loop — outer AND hole. The
-	// raster path skips holes because backfillUnassigned fills the
-	// band around them; with no raster there is no backfill, so a
-	// footprint hole would otherwise leave a cellSize-wide uncovered
-	// ring (ring cells skip it; hex cells stay clear because
-	// OffsetFootprint grows holes inward by cellSize). Walking hole
-	// loops here lays ring cells into that band. A CW hole loop's
-	// inwardNormal points into the solid, so ringCellsForLoopRaw needs
-	// no special-casing.
-	const depthFactor = 3
-	var rawRing []Cell
-	for i := range fpCur.Loops {
-		rawRing = append(rawRing, ringCellsForLoopRaw(&fpCur.Loops[i], cellSize, depthFactor*cellSize)...)
-	}
-	rawHex := generateHexCellsRaw(inner, cellSize)
-	stats.RawRing = len(rawRing)
-	stats.RawHex = len(rawHex)
+	band := FootprintDifference(fpCur, inner)
 
 	// Pixels is a diagnostic only (run.go's partition histogram); the
 	// raster path counted real pixels at pxSize = cellSize/4, so report
@@ -348,13 +298,26 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// comparable.
 	pxArea := (cellSize / 4) * (cellSize / 4)
 
-	cells := make([]Cell, 0, len(rawRing)+len(rawHex))
-	emit := func(raw []Cell, region *Footprint, kind CellKind) {
-		if region == nil || len(region.Loops) == 0 {
-			return
+	// Boundary seeds: every footprint loop (outer AND hole) walked at
+	// cellSize spacing. Voronoi needs no inward-normal special-casing for
+	// holes — a hole-loop seed's cell simply fills its share of the band.
+	var seeds []Point2
+	for i := range fpCur.Loops {
+		for _, m := range walkLoopAtCellSize(&fpCur.Loops[i], cellSize) {
+			seeds = append(seeds, m.point)
 		}
-		for i := range raw {
-			for _, c := range clipPolygonToFootprint(raw[i].Outer, region) {
+	}
+	stats.RawRing = len(seeds)
+
+	cells := voronoiBandCells(seeds, band, cellSize, pxArea, KindRing)
+
+	// Interior hex cells fill the cap region, clipped from the raw
+	// lattice (unchanged from the prior path).
+	rawHex := generateHexCellsRaw(inner, cellSize)
+	stats.RawHex = len(rawHex)
+	if innerCap != nil && len(innerCap.Loops) > 0 {
+		for i := range rawHex {
+			for _, c := range clipPolygonToFootprint(rawHex[i].Outer, innerCap) {
 				if len(c) < 3 {
 					continue
 				}
@@ -362,12 +325,10 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 				if area < 0 {
 					area = -area
 				}
-				cells = append(cells, Cell{Outer: c, Kind: kind, Pixels: int(area / pxArea)})
+				cells = append(cells, Cell{Outer: c, Kind: KindHex, Pixels: int(area / pxArea)})
 			}
 		}
 	}
-	emit(rawRing, ringRegion, KindRing)
-	emit(rawHex, innerCap, KindHex)
 	stats.Final = len(cells)
 
 	// Tag outer-perimeter edges so the per-cell prism clip can open-end
