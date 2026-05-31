@@ -28,6 +28,73 @@ import (
 // gate the reportHolesIfEnabled call below.
 var debugHoles = os.Getenv("DITHERFORGE_HOLE_REPORT") != ""
 
+// debugOverlap is read once at init from DITHERFORGE_OVERLAP_REPORT.
+// When set, the per-slab phase checks each slab's cells for overlapping
+// polygons (a partition bug) and logs any it finds. No-op when unset.
+var debugOverlap = os.Getenv("DITHERFORGE_OVERLAP_REPORT") != ""
+
+// reportOverlapsIfEnabled, gated on DITHERFORGE_OVERLAP_REPORT, scans
+// every slab for cells whose Outer polygons overlap (cells are supposed
+// to tile the footprint sharing only edges). It logs a per-slab summary
+// plus the worst offending pairs, so a layer with overlapping ring/hex
+// cells shows up by slab index. minAreaMM2 is scaled per-slab from that
+// slab's cellSize so shared-edge rounding noise is ignored.
+func reportOverlapsIfEnabled(slabs []cellslicer.Slab, cellSizeForSlab func(int) float32) {
+	if !debugOverlap {
+		return
+	}
+	totalPairs, slabsWithOverlap := 0, 0
+	for i := range slabs {
+		cs := cellSizeForSlab(i)
+		// Tolerance: 5% of a nominal cell area. Real overlaps (a skinny
+		// ring cell laid over a neighbour) are a large fraction of a
+		// cell; integer-grid rounding slivers along a shared edge are
+		// far below this.
+		minArea := 0.05 * cs * cs
+		ov := cellslicer.DetectCellOverlaps(slabs[i].Cells, minArea)
+		if len(ov) == 0 {
+			continue
+		}
+		slabsWithOverlap++
+		totalPairs += len(ov)
+		var maxArea float32
+		for _, o := range ov {
+			if o.AreaMM2 > maxArea {
+				maxArea = o.AreaMM2
+			}
+		}
+		plog.Printf("  [overlap-report] slab %d (Z %.3f–%.3f, %d cells): %d overlapping pairs, worst %.4f mm² (tol %.4f)",
+			slabs[i].Index, slabs[i].ZBot, slabs[i].ZTop, len(slabs[i].Cells), len(ov), maxArea, minArea)
+		// Show up to the first few pairs for detail.
+		const showN = 5
+		for k, o := range ov {
+			if k >= showN {
+				plog.Printf("      … and %d more pairs", len(ov)-showN)
+				break
+			}
+			plog.Printf("      cells %d(%s) ∩ %d(%s) = %.4f mm²",
+				o.I, kindName(o.KindI), o.J, kindName(o.KindJ), o.AreaMM2)
+		}
+	}
+	if totalPairs == 0 {
+		plog.Printf("  [overlap-report] no overlapping cells in any of %d slabs", len(slabs))
+	} else {
+		plog.Printf("  [overlap-report] TOTAL: %d overlapping pairs across %d/%d slabs",
+			totalPairs, slabsWithOverlap, len(slabs))
+	}
+}
+
+func kindName(k cellslicer.CellKind) string {
+	switch k {
+	case cellslicer.KindRing:
+		return "ring"
+	case cellslicer.KindHex:
+		return "hex"
+	default:
+		return "?"
+	}
+}
+
 // reportHolesIfEnabled, gated on DITHERFORGE_HOLE_REPORT=1, runs
 // voxel.CheckWatertight on a stage-output mesh and logs its boundary /
 // non-manifold counts. Used to bisect at which pipeline stage holes
@@ -882,6 +949,8 @@ func (r *pipelineRun) sliceSampleHalf(
 		sampleNs.Add(int64(time.Since(t1)))
 	})
 	slabElapsed := time.Since(tSlab).Seconds()
+
+	reportOverlapsIfEnabled(slabs, cellSizeForSlab)
 
 	nCells := 0
 	for i := range slabs {
