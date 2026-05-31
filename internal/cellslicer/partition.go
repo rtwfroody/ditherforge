@@ -205,47 +205,6 @@ func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 	return cells, fp
 }
 
-// generateHexCellsRaw mirrors GenerateHexCells but emits the
-// unclipped regular hexagons directly — no Clipper-clip against
-// the inner footprint. Hexes whose centres fall outside the inner
-// footprint are still emitted (the rasteriser drops them naturally
-// when none of their pixels are in the outer footprint mask).
-func generateHexCellsRaw(inner *Footprint, cellSize float32) []Cell {
-	cells := []Cell{}
-	if len(inner.Loops) == 0 {
-		return cells
-	}
-	minX, minY, maxX, maxY, _ := inner.Bounds()
-	r := cellSize / float32(math.Sqrt(3))
-	dx := cellSize
-	dy := cellSize * float32(math.Sqrt(3)/2)
-	// Extend the lattice one cellSize past the high edge so the hex
-	// whose centre sits just beyond maxX/maxY — but whose body still
-	// reaches back into the footprint — is generated. The loop starts
-	// exactly at minX/minY, so a hex centre always lands on the low
-	// edge and the -X/-Y extremes are covered; only the high edge can
-	// fall short, when the footprint reaches past the last in-bounds
-	// hex's edge but the next centre lies outside the bbox and was
-	// never emitted, leaving a thin uncovered sliver there. One
-	// cellSize covers it (a hex reaches at most its circumradius
-	// r < cellSize from its centre); the extra hexes clip away to
-	// nothing against innerCap downstream.
-	maxX += cellSize
-	maxY += cellSize
-	row := 0
-	for y := minY; y <= maxY; y += dy {
-		offset := float32(0)
-		if row%2 == 1 {
-			offset = dx / 2
-		}
-		for x := minX + offset; x <= maxX; x += dx {
-			cells = append(cells, Cell{Outer: hexagonAt(x, y, r), Kind: KindHex})
-		}
-		row++
-	}
-	return cells
-}
-
 // PartitionSlabAnalytic partitions a slab's footprint into compact
 // boundary + hex cells using exact Clipper polygon booleans, with no
 // raster round-trip. Every cell is sized so a cellSize-diameter circle
@@ -302,9 +261,25 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// comparable.
 	pxArea := (cellSize / 4) * (cellSize / 4)
 
-	// Boundary seeds: every footprint loop (outer AND hole) walked at
-	// cellSize spacing. Voronoi needs no inward-normal special-casing for
-	// holes — a hole-loop seed's cell simply fills its share of the band.
+	// A single Voronoi diagram tiles the whole surface shell. Seeds come
+	// from two families, concatenated and partitioned by one diagram so
+	// boundary and interior cells meet along clean shared bisectors
+	// instead of the arbitrary clip seam that the old separate ring-band
+	// and hex-cap passes produced:
+	//
+	//   - Boundary (KindRing): every footprint loop (outer AND hole)
+	//     walked at cellSize spacing. Voronoi needs no inward-normal
+	//     special-casing for holes — a hole-loop seed's cell simply fills
+	//     its share of the band.
+	//   - Interior (KindHex): the cellSize hex lattice inside innerCap. A
+	//     hex lattice's Voronoi is the regular hex tiling, so the interior
+	//     reproduces the old hexagons; empty innerCap (a pure wall slab)
+	//     means no interior seeds, so the deep interior stays uncovered
+	//     (surface-only).
+	//
+	// Every cell is clipped to coverTarget (band ∪ innerCap), not to band
+	// and innerCap separately, so the diagram tiles the shell exactly with
+	// no gap or overlap at the boundary/interior interface.
 	var seeds []Point2
 	for i := range fpCur.Loops {
 		for _, m := range walkLoopAtCellSize(&fpCur.Loops[i], cellSize) {
@@ -313,26 +288,19 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	}
 	stats.RawRing = len(seeds)
 
-	cells := voronoiBandCells(seeds, band, cellSize, pxArea, KindRing)
+	interior := hexLatticeSeeds(innerCap, cellSize)
+	stats.RawHex = len(interior)
 
-	// Interior hex cells fill the cap region, clipped from the raw
-	// lattice (unchanged from the prior path).
-	rawHex := generateHexCellsRaw(inner, cellSize)
-	stats.RawHex = len(rawHex)
-	if innerCap != nil && len(innerCap.Loops) > 0 {
-		for i := range rawHex {
-			for _, c := range clipPolygonToFootprint(rawHex[i].Outer, innerCap) {
-				if len(c) < 3 {
-					continue
-				}
-				area := signedArea(c)
-				if area < 0 {
-					area = -area
-				}
-				cells = append(cells, Cell{Outer: c, Kind: KindHex, Pixels: int(area / pxArea)})
-			}
-		}
+	kinds := make([]CellKind, 0, len(seeds)+len(interior))
+	for range seeds {
+		kinds = append(kinds, KindRing)
 	}
+	for range interior {
+		kinds = append(kinds, KindHex)
+	}
+	seeds = append(seeds, interior...)
+
+	cells := voronoiCells(seeds, kinds, coverTarget, cellSize, pxArea)
 	stats.Final = len(cells)
 
 	// Tag outer-perimeter edges so the per-cell prism clip can open-end

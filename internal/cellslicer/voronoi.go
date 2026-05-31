@@ -2,51 +2,59 @@ package cellslicer
 
 import "math"
 
-// voronoiBandCells partitions `region` (a thin boundary band) into one
-// compact cell per seed, using the seeds' clipped Voronoi diagram. Each
-// returned cell is the set of band points nearer to its seed than to
-// any other seed — convex, non-overlapping, and contiguous by
-// construction, so there are no long-skinny trapezoids and no corner
-// overlaps (the failure mode of the old depth-3 ring trapezoids).
+// voronoiCells partitions `region` into one compact cell per seed using
+// the seeds' clipped Voronoi diagram. Each returned cell is the set of
+// region points nearer to its seed than to any other seed — so the whole
+// seed set tiles `region` exactly: no gaps, no overlaps, and every pair
+// of neighbouring cells (boundary–boundary, boundary–interior, or
+// interior–interior) meets along a single shared bisector. There are no
+// long-skinny trapezoids and no corner overlaps (the failure mode of the
+// old depth-3 ring trapezoids), and no clip-seam artefacts where two
+// independent diagrams used to abut (the old ring-band / hex-cap seam).
 //
-// Seeds are expected to lie on the band's outer edge (the footprint
-// loops, walked at cellSize spacing). A seed's Voronoi cell is the
-// intersection of the half-planes "closer to me than to neighbour j".
+// Seeds come from two families, concatenated and tiled by one diagram:
+// boundary seeds on the footprint loops (walked at cellSize spacing) and
+// interior seeds on the hex lattice (cellSize spaced) inside the cap
+// region. A seed's Voronoi cell is the intersection of the half-planes
+// "closer to me than to neighbour j". kinds[i] tags the cell emitted for
+// seeds[i] (KindRing for boundary, KindHex for interior); the diagram
+// itself does not branch on kind.
 //
-// Locality keeps this ~O(seeds) rather than O(seeds²). The key fact: a
-// boundary seed's cell, once intersected with the cellSize-wide band,
-// never reaches more than ~2*cellSize from its seed (it spans ~cellSize
-// along the contour and the band is cellSize deep). So we start each
-// cell as a local box of half-width localHalf around the seed — NOT a
-// global box — and clip only against seeds within clipRadius (a uniform
-// grid supplies them in O(1)). Starting from a *global* box with only
-// near seeds was the earlier bug: with no interior seeds (a pure wall
-// slab) the cell stayed unbounded inward and ran clear across the model
-// to the far wall, re-entering the band there as a phantom overlapping
-// cell. The local box supplies that inward bound directly, so the far
-// wall's seeds are no longer needed. The convex result is then
-// Clipper-clipped to the band, which resolves concavities/holes and may
-// split one cell into several polygons (each its own Cell).
+// Locality keeps this ~O(seeds) rather than O(seeds²). The key fact: the
+// seeds are a roughly uniform cellSize-spaced point set, so every cell —
+// boundary or interior — reaches at most ~2*cellSize from its seed (a
+// boundary cell spans ~cellSize along the contour and the band is
+// cellSize deep; an interior hex cell reaches only its circumradius
+// cellSize/√3). So we start each cell as a local box of half-width
+// localHalf around the seed — NOT a global box — and clip only against
+// seeds within clipRadius (a uniform grid supplies them in O(1)).
+// Starting from a *global* box with only near seeds was an earlier bug:
+// with no interior seeds (a pure wall slab) the cell stayed unbounded
+// inward and ran clear across the model to the far wall, re-entering the
+// band there as a phantom overlapping cell. The local box supplies that
+// inward bound directly, so the far wall's seeds are no longer needed.
+// The convex result is then Clipper-clipped to `region`, which resolves
+// concavities/holes and may split one cell into several polygons (each
+// its own Cell).
 //
 // Two radii, both keyed off localHalf:
 //
-//   - localHalf must exceed the band-cell's reach (~2*cellSize) or cells
-//     would be truncated, leaving gaps. 4*cellSize is a generous margin
+//   - localHalf must exceed a cell's reach (~2*cellSize) or cells would
+//     be truncated, leaving gaps. 4*cellSize is a generous margin
 //     (verified by TestVoronoiBandCellsTilesExactly across square, hole,
 //     thin-strip, and reflex-corner footprints).
 //   - clipRadius must cover the local box's far CORNER, at distance
 //     √2*localHalf — a seed's bisector can clip a box corner out to
 //     2*√2*localHalf ≈ 2.83*localHalf. We use 3*localHalf so every seed
 //     that can touch the box is clipped, making the convex cell exact
-//     within the box; since the band-cell lies inside the box, its
+//     within the box; since the region-cell lies inside the box, its
 //     Clipper-clip is then the exact Voronoi cell. (2*localHalf — the box
 //     EDGE — would skip corner-cutting seeds and rely on a thin, subtle
 //     margin instead.)
 //
-// kind tags the emitted cells (KindRing for boundary cells). pxArea is
-// the cellSize/4 pixel area used for the diagnostic Pixels field, kept
-// consistent with the rest of PartitionSlabAnalytic.
-func voronoiBandCells(seeds []Point2, region *Footprint, cellSize, pxArea float32, kind CellKind) []Cell {
+// pxArea is the cellSize/4 pixel area used for the diagnostic Pixels
+// field, kept consistent with the rest of PartitionSlabAnalytic.
+func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize, pxArea float32) []Cell {
 	if region == nil || len(region.Loops) == 0 || len(seeds) == 0 {
 		return nil
 	}
@@ -79,10 +87,53 @@ func voronoiBandCells(seeds []Point2, region *Footprint, cellSize, pxArea float3
 			if area < 0 {
 				area = -area
 			}
-			cells = append(cells, Cell{Outer: c, Kind: kind, Pixels: int(area / pxArea)})
+			cells = append(cells, Cell{Outer: c, Kind: kinds[i], Pixels: int(area / pxArea)})
 		}
 	}
 	return cells
+}
+
+// voronoiBandCells tiles `region` with the clipped Voronoi diagram of a
+// single seed family, all tagged `kind`. Thin wrapper over voronoiCells
+// for callers (and tests) that have one uniform seed set.
+func voronoiBandCells(seeds []Point2, region *Footprint, cellSize, pxArea float32, kind CellKind) []Cell {
+	kinds := make([]CellKind, len(seeds))
+	for i := range kinds {
+		kinds[i] = kind
+	}
+	return voronoiCells(seeds, kinds, region, cellSize, pxArea)
+}
+
+// hexLatticeSeeds returns the centres of a cellSize-spaced hex lattice
+// that fall inside `region`. These are the interior Voronoi seeds: a
+// triangular/hex lattice's Voronoi diagram is the regular hex tiling, so
+// seeding the interior this way reproduces the hexagonal interior cells
+// while letting one unified diagram blend them into the boundary band.
+// Only centres inside `region` are kept; the unified diagram still tiles
+// `region` with no gaps, since any region point omitted by a filtered
+// centre is simply claimed by its next-nearest seed.
+func hexLatticeSeeds(region *Footprint, cellSize float32) []Point2 {
+	if region == nil || len(region.Loops) == 0 {
+		return nil
+	}
+	minX, minY, maxX, maxY, _ := region.Bounds()
+	dx := cellSize
+	dy := cellSize * float32(math.Sqrt(3)/2)
+	var seeds []Point2
+	row := 0
+	for y := minY; y <= maxY; y += dy {
+		offset := float32(0)
+		if row%2 == 1 {
+			offset = dx / 2
+		}
+		for x := minX + offset; x <= maxX; x += dx {
+			if region.Contains(x, y) {
+				seeds = append(seeds, Point2{x, y})
+			}
+		}
+		row++
+	}
+	return seeds
 }
 
 // clipHalfPlaneCloserTo returns the part of convex polygon `poly` that
