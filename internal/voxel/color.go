@@ -507,7 +507,17 @@ func SampleNearestColorWithSticker(
 	}
 
 	if bestTri < 0 {
-		return [4]uint8{128, 128, 128, 255}
+		// No triangle within the search radius (in XY and the Z
+		// window). This is "no surface found here," not a real grey
+		// sample — return fully transparent so multi-point cell
+		// samplers (SampleSlab) skip it instead of averaging an
+		// opaque mid-grey into the cell. Painting misses grey
+		// silently darkened cells whose nearest surface sat just
+		// beyond the radius (e.g. inner-ring cells ~1 cell-width in
+		// from a wall), and a grid-bucket boundary asymmetry made it
+		// hit the max-coordinate walls but not the min ones — turning
+		// a uniform cube into a two-tone one after quantization.
+		return [4]uint8{0, 0, 0, 0}
 	}
 
 	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
