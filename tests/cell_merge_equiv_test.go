@@ -71,10 +71,20 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			size := float32(50)
+			// Lock the full palette so selection is deterministic.
+			// ResolvePalette returns locked colors verbatim when
+			// NumColors == len(LockedColors) (no inventory search), so both
+			// clip runs dither against the identical palette. Without this,
+			// palette selection is non-deterministic and the two runs can
+			// pick different colors, making the area-fraction comparison
+			// flaky (the test has no disk cache to share the palette between
+			// runs). The inventory is supplied but unused at this lock count.
+			lockedPalette := lockedTestPalette()
 			base := pipeline.Options{
 				Input:           tc.path,
 				ObjectIndex:     -1,
-				NumColors:       6,
+				NumColors:       len(lockedPalette),
+				LockedColors:    lockedPalette,
 				InventoryColors: inventoryRGB(),
 				InventoryLabels: inventoryLabels(),
 				NozzleDiameter:  0.4,
@@ -89,10 +99,10 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 				// palette-coloured output, with merging actually active.
 			}
 
-			// Shared cache: the clip cache key encodes the merge decision,
-			// so the two runs get distinct Clip/Merge entries while every
-			// upstream stage (load, alpha-wrap, voxelize, dither, palette)
-			// is computed once and reused — roughly halving the runtime.
+			// NewStageCache has no disk tier, so nothing is actually
+			// reused between the two runs — each recomputes the whole
+			// pipeline. Equivalence holds because LockedColors pins the
+			// palette (see base), not because upstream is shared.
 			cache := pipeline.NewStageCache()
 			run := func(cellMerge bool) *pipeline.MeshData {
 				opts := base
@@ -173,5 +183,23 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// lockedTestPalette is a fixed, well-spread 6-colour palette used to make
+// pipeline tests deterministic. Passed as opts.LockedColors with
+// NumColors == len, it forces ResolvePalette to return these colours
+// verbatim (no inventory selection), so palette choice — which is
+// otherwise non-deterministic run-to-run — can't make output comparisons
+// flaky. The spread (neutrals + R/G/B + yellow) keeps every test model
+// dithering across several colours.
+func lockedTestPalette() []string {
+	return []string{
+		"#FFFFFF", // white
+		"#7F7F7F", // grey
+		"#000000", // black
+		"#C03020", // red
+		"#2080C0", // blue
+		"#E0C020", // yellow
 	}
 }
