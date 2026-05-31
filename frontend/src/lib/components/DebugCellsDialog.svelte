@@ -308,6 +308,50 @@
           </div>
         {/if}
       </div>
+
+      <div class="text-xs text-muted-foreground space-y-2 mt-1">
+        <p class="font-medium text-foreground">What the colors mean</p>
+        <p>
+          The whole footprint is painted magenta first; everything else
+          is drawn on top slightly transparent, so covered cells pick up
+          a faint magenta wash and any cell-free area inside the
+          footprint is flagged red.
+        </p>
+        <ul class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5">
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#ff00ff"></span>
+            <span><span class="font-medium text-foreground">Magenta</span> — footprint base fill: underlies the slab, showing as a faint wash on covered cells.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="linear-gradient(135deg,#c2410c,#0891b2,#16a34a)"></span>
+            <span><span class="font-medium text-foreground">Cell fill</span> — each cell's raw sampled RGB, before dither.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#b4b4b4"></span>
+            <span><span class="font-medium text-foreground">Grey cell</span> — no sample / transparent (alpha off): sampling found no surface color here.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#ff0000"></span>
+            <span><span class="font-medium text-foreground">Red fill</span> — uncovered area: inside the footprint but reached by no cell (a coverage gap).</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="rgba(0,0,0,0.5)"></span>
+            <span><span class="font-medium text-foreground">Thin grey lines</span> — each cell's outline (the partition grid), drawn translucent.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#e02020"></span>
+            <span><span class="font-medium text-foreground">Thick red edges</span> — open outer-boundary edges that absorb geometry nudged past the outline.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#00b7eb"></span>
+            <span><span class="font-medium text-foreground">Cyan</span> — raw bottom-Z slice contour for this slab.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <span class="legend-swatch" style:background="#ff7f00"></span>
+            <span><span class="font-medium text-foreground">Orange</span> — raw top-Z slice contour for this slab.</span>
+          </li>
+        </ul>
+      </div>
     {/if}
   </Dialog.Content>
 </Dialog.Root>
@@ -362,5 +406,13 @@
   }
   .scale-bar-label {
     font-variant-numeric: tabular-nums;
+  }
+  .legend-swatch {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 0, 0, 0.2);
   }
 </style>

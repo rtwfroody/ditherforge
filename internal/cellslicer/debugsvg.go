@@ -9,8 +9,8 @@ import (
 // DebugSVGOptions controls the per-slab cell visualization rendered
 // by RenderSlabDebugSVG. Zero values pick sensible defaults.
 type DebugSVGOptions struct {
-	// CellSizeMM is the slab's cell pitch in mm; used to pick a
-	// sensible default edge stroke width when EdgeWidthMM <= 0.
+	// CellSizeMM is the slab's cell pitch in mm; used to pick sensible
+	// default bbox padding and contour stroke widths.
 	CellSizeMM float32
 	// PadMM is the bbox padding in mm. 0 → CellSizeMM (or 1 if that's 0).
 	PadMM float32
@@ -20,22 +20,23 @@ type DebugSVGOptions struct {
 	// DrawEdges adds a stroked path of every cell boundary on top of
 	// the fills, so neighboring same-color cells remain visible.
 	DrawEdges bool
-	// EdgeWidthMM is the edge stroke width in mm. 0 → CellSizeMM/40
-	// (≈ a thin hairline at typical viewing scale).
-	EdgeWidthMM float32
+	// EdgeWidthPx is the edge stroke width in CSS pixels. The edge path
+	// uses vector-effect=non-scaling-stroke, so the width is measured in
+	// the SVG element's pixel space (constant on screen at any zoom),
+	// NOT in viewBox mm. 0 → 1px (a thin hairline). A mm-scale value
+	// here renders sub-pixel and is invisible — see the cs/40 bug.
+	EdgeWidthPx float32
 	// MissingFill is the fill color for cells with no sample (or
 	// Alpha=false). Default "#b4b4b4" — same grey the PNG path used.
 	MissingFill string
-	// DrawFootprint overlays the slab's computed footprint as a
-	// stroked outline on top of the cells, so missing-coverage gaps
-	// between cells and the footprint boundary are obvious.
+	// DrawFootprint paints the slab's computed footprint as an opaque
+	// base fill beneath the cells, then draws everything else on top in
+	// a slightly-transparent group. Coverage gaps between the cells and
+	// the footprint boundary show through as the pure base color.
 	DrawFootprint bool
-	// FootprintStroke is the footprint outline color. Default "#ff00ff"
+	// FootprintFill is the footprint base-fill color. Default "#ff00ff"
 	// (magenta — contrasts with most sampled colors).
-	FootprintStroke string
-	// FootprintWidthMM is the footprint stroke width in mm. 0 →
-	// CellSizeMM/10 (visibly thicker than cell edges).
-	FootprintWidthMM float32
+	FootprintFill string
 	// DrawContours overlays the raw bot-Z and top-Z slice contours that
 	// were unioned to make the footprint, so you can see when they are
 	// nested (annular surface) vs. nearly coincident (wall slab).
@@ -57,15 +58,6 @@ type DebugSVGOptions struct {
 // footprint geometry. Cells with the same exact RGB are folded into
 // one <path>, keeping the DOM size proportional to the number of
 // distinct sampled colors rather than the number of cells.
-// neighborForCap returns slabs[slabIdx+delta] or nil if out of range.
-func neighborForCap(slabs []Slab, slabIdx, delta int) *Slab {
-	j := slabIdx + delta
-	if j < 0 || j >= len(slabs) {
-		return nil
-	}
-	return &slabs[j]
-}
-
 func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt DebugSVGOptions) string {
 	if slabIdx < 0 || slabIdx >= len(slabs) {
 		return ""
@@ -96,13 +88,11 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 		return ""
 	}
 
-	edgeW := opt.EdgeWidthMM
+	// Edge stroke is a non-scaling (pixel-space) width, so this is in
+	// CSS px, not mm. 1px is a crisp hairline at any zoom.
+	edgeW := opt.EdgeWidthPx
 	if edgeW <= 0 {
-		cs := opt.CellSizeMM
-		if cs <= 0 {
-			cs = 1
-		}
-		edgeW = cs / 40
+		edgeW = 1
 	}
 	missingFill := opt.MissingFill
 	if missingFill == "" {
@@ -156,6 +146,28 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 	}
 	sb.WriteString(`<g transform="scale(1,-1)">`)
 
+	// Footprint base fill: the entire footprint is painted in a single
+	// distinct color first, then everything else is drawn on top inside
+	// a slightly-transparent group. Coverage gaps show through as the
+	// pure base color, and covered cells pick up a subtle wash that
+	// marks them as lying inside the footprint. even-odd respects holes.
+	dimmed := opt.DrawFootprint && s.Footprint != nil && len(s.Footprint.Loops) > 0
+	if dimmed {
+		fpFill := opt.FootprintFill
+		if fpFill == "" {
+			fpFill = "#ff00ff"
+		}
+		fmt.Fprintf(&sb,
+			`<path fill="%s" fill-rule="evenodd" shape-rendering="crispEdges" d="`,
+			fpFill,
+		)
+		appendFootprintPaths(&sb, s.Footprint)
+		sb.WriteString(`"/>`)
+		// Everything below renders slightly transparent so the base
+		// footprint color tints through.
+		sb.WriteString(`<g opacity="0.85">`)
+	}
+
 	// Uncovered region: footprint minus union of cell.Outer polygons,
 	// using SVG's even-odd fill rule. With all polygons CCW the rule
 	// XORs them, so points inside fp but inside zero cells stay
@@ -202,8 +214,10 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 	if opt.DrawEdges {
 		// Single stroked path over every cell, fill=none. Shared edges
 		// get double-stroked, which at typical edge widths is invisible.
+		// Thin and translucent so the cell grid is legible without
+		// burying the sampled fills underneath.
 		fmt.Fprintf(&sb,
-			`<path fill="none" stroke="#000000" stroke-width="%s" vector-effect="non-scaling-stroke" d="`,
+			`<path fill="none" stroke="#000000" stroke-opacity="0.5" stroke-width="%s" vector-effect="non-scaling-stroke" d="`,
 			f(edgeW),
 		)
 		all := make([]int, len(s.Cells))
@@ -260,54 +274,12 @@ func RenderSlabDebugSVG(slabs []Slab, samples []CellSample, slabIdx int, opt Deb
 			appendLoopPaths(&sb, s.TopLayer.Loops)
 			sb.WriteString(`"/>`)
 		}
-		// Neighbour footprints — these are the actual fpAbove/fpBelow
-		// values that the partition uses to compute capMask, so any
-		// drift between them and the bot/top contour above can explain
-		// capMask coverage gaps.
-		if nbAbove := neighborForCap(slabs, slabIdx, +1); nbAbove != nil && nbAbove.Footprint != nil {
-			fmt.Fprintf(&sb,
-				`<path fill="none" stroke="%s" stroke-width="%s" stroke-dasharray="%s,%s" d="`,
-				"#7a1fff", f(cw*0.7), f(cw*4), f(cw*2),
-			)
-			appendFootprintPaths(&sb, nbAbove.Footprint)
-			sb.WriteString(`"/>`)
-		}
-		if nbBelow := neighborForCap(slabs, slabIdx, -1); nbBelow != nil && nbBelow.Footprint != nil {
-			fmt.Fprintf(&sb,
-				`<path fill="none" stroke="%s" stroke-width="%s" stroke-dasharray="%s,%s" d="`,
-				"#0a7f3f", f(cw*0.7), f(cw*4), f(cw*2),
-			)
-			appendFootprintPaths(&sb, nbBelow.Footprint)
-			sb.WriteString(`"/>`)
-		}
 	}
 
-	if opt.DrawFootprint {
-		fpStroke := opt.FootprintStroke
-		if fpStroke == "" {
-			fpStroke = "#ff00ff"
-		}
-		fpW := opt.FootprintWidthMM
-		if fpW <= 0 {
-			cs := opt.CellSizeMM
-			if cs <= 0 {
-				cs = 1
-			}
-			// Footprint outline is typically coincident with cell edges
-			// (cells should cover the full footprint), so the magenta
-			// stroke would hide behind the black edge stroke at equal
-			// widths. Make it visibly thicker than edge stroke.
-			fpW = cs / 4
-		}
-		// Dashed so the magenta remains visible even where it lies
-		// exactly on a cell's outer edge.
-		dash := fpW * 4
-		fmt.Fprintf(&sb,
-			`<path fill="none" stroke="%s" stroke-width="%s" stroke-dasharray="%s,%s" stroke-linecap="butt" d="`,
-			fpStroke, f(fpW), f(dash), f(dash),
-		)
-		appendFootprintPaths(&sb, s.Footprint)
-		sb.WriteString(`"/>`)
+	if dimmed {
+		// Close the slightly-transparent overlay group opened above the
+		// footprint base fill.
+		sb.WriteString(`</g>`)
 	}
 
 	sb.WriteString(`</g></svg>`)
