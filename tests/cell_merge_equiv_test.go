@@ -68,11 +68,14 @@ func colorAreaFractions(m *pipeline.MeshData) map[[3]uint16]float64 {
 // — only the triangulation differs (fewer, larger faces, no internal
 // same-color seams).
 //
-// This is the merged path's correctness guard: TestSampledMatchesInput
-// runs in ShowSampledColors mode, which forces the per-cell clip (the
-// sampled-colour diagnostic needs per-cell face provenance that merging
-// coarsens), so it never exercises merging. Here ShowSampledColors is
-// off, so the genuine merged output is rendered and compared.
+// This is the merged path's primary correctness guard. Most
+// TestSampledMatchesInput cases run in ShowSampledColors mode, which forces
+// the per-cell clip (the sampled-colour diagnostic needs per-cell face
+// provenance that merging coarsens), so they don't exercise merging; its
+// cube_dither case runs the default (merged) path but only checks a
+// rendered silhouette, not the geometry. Here ShowSampledColors is off and
+// the genuine merged output is compared against per-cell by surface area
+// and per-colour area distribution.
 func TestCellMergeMatchesPerCell(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test (-short)")
