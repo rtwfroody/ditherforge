@@ -153,7 +153,7 @@ export namespace main {
 	    blueNoiseTol: number;
 	    colorSnap: number;
 	    noMerge: boolean;
-	    cellMerge: boolean;
+	    noCellMerge: boolean;
 	    noSimplify: boolean;
 	    stats: boolean;
 	    showSampledColors: boolean;
@@ -204,7 +204,7 @@ export namespace main {
 	        this.blueNoiseTol = source["blueNoiseTol"];
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
-	        this.cellMerge = source["cellMerge"];
+	        this.noCellMerge = source["noCellMerge"];
 	        this.noSimplify = source["noSimplify"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
@@ -451,7 +451,7 @@ export namespace pipeline {
 	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
 	    NoInteriorFaceFootprint?: boolean;
-	    CellMerge?: boolean;
+	    NoCellMerge?: boolean;
 	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -498,7 +498,7 @@ export namespace pipeline {
 	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
-	        this.CellMerge = source["CellMerge"];
+	        this.NoCellMerge = source["NoCellMerge"];
 	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	

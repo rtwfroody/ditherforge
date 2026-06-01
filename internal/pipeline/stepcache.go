@@ -377,7 +377,6 @@ func (c *StageCache) stageKey(stage StageID, opts Options) string {
 	return diskcache.Key(parts...)
 }
 
-
 // sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
 // distinct from any concrete value.
 func sizeKeyPart(s *float32) string {
@@ -397,7 +396,7 @@ type loadOutput struct {
 	// ColorModel is the original loaded mesh, carrying UVs, textures, and
 	// materials. Used for color sampling and sticker placement. When
 	// alpha-wrap is disabled, Model == ColorModel.
-	ColorModel *loader.LoadedModel
+	ColorModel   *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
@@ -640,9 +639,9 @@ type voxelizeSettings struct {
 	Layer0Z                              float32
 	UpperZ                               float32
 	BaseColor                            string
-	BaseColorMaterialX                   string  // path
-	BaseColorMaterialXMTime              int64   // ns; 0 if file is missing/inaccessible
-	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
+	BaseColorMaterialX                   string // path
+	BaseColorMaterialXMTime              int64  // ns; 0 if file is missing/inaccessible
+	BaseColorMaterialXSize               int64  // bytes; 0 if file is missing/inaccessible
 	BaseColorMaterialXTileMM             float64
 	BaseColorMaterialXTriplanarSharpness float64
 	// NoInteriorFaceFootprint changes which footprint the cellslicer
@@ -691,11 +690,11 @@ type decimateSettings struct {
 // before the Split feature shipped. Toggling other fields while
 // Enabled=false does not invalidate the cache.
 type splitSettings struct {
-	Enabled         bool
-	Axis            int
-	Offset          float64
-	ConnectorStyle  string
-	ConnectorCount  int
+	Enabled          bool
+	Axis             int
+	Offset           float64
+	ConnectorStyle   string
+	ConnectorCount   int
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
@@ -721,7 +720,7 @@ type ditherSettings struct {
 // clipSettings carries the clip-stage knobs. Beyond these the stage is
 // invalidated by dependency cascade from Dither / Voxelize. MergeCells
 // is the *effective* same-color-cell merge decision (see Clip): on only
-// when CellMerge is set and not under ShowSampledColors, so the cache key
+// when NoCellMerge is unset and not under ShowSampledColors, so the cache key
 // tracks exactly which clip path produced the output.
 type clipSettings struct {
 	MergeCells bool
@@ -841,7 +840,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
 	case StageClip:
-		return clipSettings{MergeCells: opts.CellMerge && !opts.ShowSampledColors}
+		return clipSettings{MergeCells: !opts.NoCellMerge && !opts.ShowSampledColors}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
 	}
@@ -1191,4 +1190,3 @@ func (c *StageCache) getMerge(opts Options) *mergeOutput {
 	}
 	return v.(*mergeOutput)
 }
-

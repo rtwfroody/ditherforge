@@ -33,24 +33,24 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex               // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
-	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
-	cancel   context.CancelFunc       // cancels in-flight pipeline work
-	cache    *pipeline.StageCache     // per-stage cache across runs
+	mu       sync.Mutex           // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
+	cancelMu sync.Mutex           // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
+	cancel   context.CancelFunc   // cancels in-flight pipeline work
+	cache    *pipeline.StageCache // per-stage cache across runs
 	// lastOpts is the last successfully processed Options. Uses
 	// atomic.Pointer so SplitPreview (and other read-only Wails
 	// methods) can snapshot it without blocking on `mu`, which the
 	// pipeline worker holds for the entire duration of a run.
-	lastOpts atomic.Pointer[pipeline.Options]
-	pipeGen      atomic.Int64         // generation counter for pipeline requests
-	meshes       *meshHandler         // serves binary mesh data over HTTP
-	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
-	lastOverlayID string              // mesh handler ID for the alpha-wrap sticker overlay
-	lastWrappedID string              // mesh handler ID for the alpha-wrapped geometry preview
-	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
-	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
-	collections   *collection.Manager    // filament collection manager
-	sweepInFlight atomic.Bool             // true while a disk-cache sweep goroutine is running
+	lastOpts      atomic.Pointer[pipeline.Options]
+	pipeGen       atomic.Int64         // generation counter for pipeline requests
+	meshes        *meshHandler         // serves binary mesh data over HTTP
+	lastInputID   string               // mesh handler ID for last input mesh (protected by mu)
+	lastOverlayID string               // mesh handler ID for the alpha-wrap sticker overlay
+	lastWrappedID string               // mesh handler ID for the alpha-wrapped geometry preview
+	lastOutputID  string               // mesh handler ID for last output mesh (protected by mu)
+	reqCh         chan pipelineRequest // buffered channel for pipeline requests; worker drains to latest
+	collections   *collection.Manager  // filament collection manager
+	sweepInFlight atomic.Bool          // true while a disk-cache sweep goroutine is running
 }
 
 // pipelineRequest is sent from ProcessPipeline to the worker goroutine.
@@ -672,9 +672,9 @@ func (a *App) SplitPreview(s pipeline.SplitSettings) (*pipeline.SplitPreviewResu
 // PrinterOption describes one printer + its nozzle/layer-height options for
 // the frontend printer selector. Layer heights are in mm.
 type PrinterOption struct {
-	ID          string          `json:"id"`
-	DisplayName string          `json:"displayName"`
-	Nozzles     []NozzleOption  `json:"nozzles"`
+	ID          string         `json:"id"`
+	DisplayName string         `json:"displayName"`
+	Nozzles     []NozzleOption `json:"nozzles"`
 }
 
 // NozzleOption lists the layer heights available for one nozzle variant.
@@ -949,9 +949,9 @@ type StickerSetting struct {
 
 // WarpPinSetting is the JSON representation of a color warp pin.
 type WarpPinSetting struct {
-	SourceHex   string `json:"sourceHex"`
-	TargetHex   string `json:"targetHex"`
-	TargetLabel string `json:"targetLabel,omitempty"`
+	SourceHex   string  `json:"sourceHex"`
+	TargetHex   string  `json:"targetHex"`
+	TargetLabel string  `json:"targetLabel,omitempty"`
 	Sigma       float64 `json:"sigma"`
 }
 
@@ -1001,17 +1001,17 @@ type ColorSlotSetting struct {
 // in defaultSettings, but that's a visible "wrong initial value"
 // failure on legacy files, not silent data loss.
 type Settings struct {
-	InputFile           string              `json:"inputFile,omitempty"`
+	InputFile string `json:"inputFile,omitempty"`
 	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
 	// the frontend maps nil → -1 ("all objects"), which differs from 0 ("first object").
-	ObjectIndex         *int                `json:"objectIndex,omitempty"`
-	SizeMode            string              `json:"sizeMode"`
-	SizeValue           string              `json:"sizeValue"`
-	ScaleValue          string              `json:"scaleValue"`
-	Printer             string              `json:"printer,omitempty"`
-	NozzleDiameter      string              `json:"nozzleDiameter"`
-	LayerHeight         string              `json:"layerHeight"`
-	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
+	ObjectIndex    *int              `json:"objectIndex,omitempty"`
+	SizeMode       string            `json:"sizeMode"`
+	SizeValue      string            `json:"sizeValue"`
+	ScaleValue     string            `json:"scaleValue"`
+	Printer        string            `json:"printer,omitempty"`
+	NozzleDiameter string            `json:"nozzleDiameter"`
+	LayerHeight    string            `json:"layerHeight"`
+	BaseColor      *ColorSlotSetting `json:"baseColor,omitempty"`
 	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
 	// file or .zip archive. The pipeline reads the file at run time —
 	// settings only stores the path, so projects assume the asset
@@ -1019,15 +1019,15 @@ type Settings struct {
 	// BaseMaterialXTileMM is the procedural-to-mm scale.
 	// BaseMaterialXTriplanarSharpness controls image-backed graphs'
 	// triplanar projection blend (ignored by procedural .mtlx).
-	BaseMaterialXPath                string  `json:"baseMaterialXPath,omitempty"`
-	BaseMaterialXTileMM              float64 `json:"baseMaterialXTileMM,omitempty"`
-	BaseMaterialXTriplanarSharpness  float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
+	BaseMaterialXPath               string  `json:"baseMaterialXPath,omitempty"`
+	BaseMaterialXTileMM             float64 `json:"baseMaterialXTileMM,omitempty"`
+	BaseMaterialXTriplanarSharpness float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
 	// BaseColorMode is "solid" or "texture" — UI mode toggle that
 	// decides which of (BaseColor, BaseMaterialXPath) is sent to the
 	// pipeline. The unselected mode's fields are kept around (so the
 	// user can flip the toggle without losing their other choice) but
 	// don't reach the backend Options.
-	BaseColorMode                    string  `json:"baseColorMode,omitempty"`
+	BaseColorMode       string              `json:"baseColorMode,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`
@@ -1040,7 +1040,7 @@ type Settings struct {
 	BlueNoiseTol        float64             `json:"blueNoiseTol"`
 	ColorSnap           float64             `json:"colorSnap"`
 	NoMerge             bool                `json:"noMerge"`
-	CellMerge           bool                `json:"cellMerge"`
+	NoCellMerge         bool                `json:"noCellMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
 	Stats               bool                `json:"stats"`
 	ShowSampledColors   bool                `json:"showSampledColors"`
@@ -1052,8 +1052,8 @@ type Settings struct {
 	// UpperLayerXYScale tunes upper-layer cell width relative to the
 	// slicer line width. See defaultSettings for the default values
 	// missing-from-JSON keys are filled with on load.
-	Layer0AdhesionXYScale float64             `json:"layer0AdhesionXYScale"`
-	UpperLayerXYScale     float64             `json:"upperLayerXYScale"`
+	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
+	UpperLayerXYScale     float64 `json:"upperLayerXYScale"`
 	// Split panel state. Plain values matching the rest of the struct.
 	// Files saved before these fields existed lack the keys, which
 	// decode as zero in Go and serialise back as the explicit zero
@@ -1120,7 +1120,7 @@ func defaultSettings() Settings {
 		BlueNoiseTol:          20,
 		ColorSnap:             5,
 		NoMerge:               false,
-		CellMerge:             false,
+		NoCellMerge:           false,
 		NoSimplify:            false,
 		Stats:                 false,
 		ShowSampledColors:     false,

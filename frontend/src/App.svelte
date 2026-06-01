@@ -184,7 +184,7 @@
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
-  let cellMerge = $state(false);
+  let noCellMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
@@ -970,7 +970,7 @@
       blueNoiseTol,
       colorSnap,
       noMerge,
-      cellMerge,
+      noCellMerge,
       noSimplify,
       stats,
       showSampledColors,
@@ -1163,7 +1163,7 @@
     { key: 'blueNoiseTol',                    validate: pickNumber,                                        apply: (v) => { blueNoiseTol = v; committedBlueNoiseTol = v; } },
     { key: 'colorSnap',                       validate: pickNumber,                                        apply: (v) => { colorSnap = v; committedColorSnap = v; } },
     { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
-    { key: 'cellMerge',                       validate: pickBool,                                          apply: (v) => { cellMerge = v; } },
+    { key: 'noCellMerge',                       validate: pickBool,                                          apply: (v) => { noCellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
@@ -1474,7 +1474,7 @@
       RiemersmaInputBias: committedRiemersmaBias,
       BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
-      CellMerge: cellMerge,
+      NoCellMerge: noCellMerge,
       ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -2214,10 +2214,10 @@
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={cellMerge} />
-                Cell merge
+                <Checkbox bind:checked={noCellMerge} />
+                No cell merge
                 <HelpTip>
-                  Merge connected same-color cells within each layer and clip them together, instead of clipping every cell individually. Faster, with fewer output triangles and no internal seams between same-color cells. Does not change colors. Off by default; an opt-in optimization.
+                  Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">

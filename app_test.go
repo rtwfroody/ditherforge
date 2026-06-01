@@ -237,7 +237,7 @@ func nonDefaultSettings() Settings {
 		ColorSnap:             3,
 		NoMerge:               true,
 		NoSimplify:            true,
-		CellMerge:             true,
+		NoCellMerge:           true,
 		Stats:                 true,
 		ShowSampledColors:     true,
 		AlphaWrap:             true,

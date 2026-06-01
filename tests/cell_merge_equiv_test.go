@@ -60,12 +60,13 @@ func colorAreaFractions(m *pipeline.MeshData) map[[3]uint16]float64 {
 }
 
 // TestCellMergeMatchesPerCell validates the same-color cell merge in the
-// Clip stage (ClipMeshToMergedCellsManifold, opt-in via CellMerge)
-// against the default per-cell clip. Merging groups same-palette cells
-// per slab and clips them as one prism; because the grouping key is the
-// dithered palette index, the real palette-coloured output must be
-// visually identical to the per-cell clip — only the triangulation
-// differs (fewer, larger faces, no internal same-color seams).
+// Clip stage (ClipMeshToMergedCellsManifold, the default; NoCellMerge
+// forces the per-cell clip) against that per-cell clip. Merging pairs
+// adjacent same-palette cells per slab and clips each pair as one prism;
+// because the grouping key is the dithered palette index, the real
+// palette-coloured output must be visually identical to the per-cell clip
+// — only the triangulation differs (fewer, larger faces, no internal
+// same-color seams).
 //
 // This is the merged path's correctness guard: TestSampledMatchesInput
 // runs in ShowSampledColors mode, which forces the per-cell clip (the
@@ -125,7 +126,7 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 			cache := pipeline.NewStageCache()
 			run := func(cellMerge bool) *pipeline.MeshData {
 				opts := base
-				opts.CellMerge = cellMerge
+				opts.NoCellMerge = !cellMerge
 				pr, err := pipeline.RunCached(context.Background(), cache, opts, nil)
 				if err != nil {
 					t.Fatalf("%s cellMerge=%v: RunCached: %v", tc.name, cellMerge, err)
