@@ -45,13 +45,14 @@ type Cell struct {
 	// half-edge AND the half-space immediately outside the edge falls
 	// outside the slab footprint.
 	//
-	// ClipMeshToCellsManifold treats "outer" edges as open: it bloats
-	// them outward when building the per-cell prism so source-mesh
-	// fragments whose vertices nudge slightly outside the slab
-	// footprint (typical of alpha-wrap discretisation on near-vertical
-	// walls) still land in this cell rather than being silently
-	// dropped. debugsvg.go renders OuterEdgeOpen edges in red so a
-	// layer debug view shows the open boundary at a glance.
+	// ClipMeshToCellsManifold treats "outer" edges as open: it nudges
+	// them outward by a few µm (OpenEdgeBloatMM) when building the
+	// per-cell prism, so surface lying exactly on the vertical prism
+	// wall isn't dropped by the Manifold intersection (which would leave
+	// pinhole gaps). It's a floating-point margin only — the footprint is
+	// the XY projection of the surface, so there is no surface beyond the
+	// boundary to reach for. debugsvg.go renders OuterEdgeOpen edges in
+	// red so a layer debug view shows the open boundary at a glance.
 	//
 	// nil for cells from the legacy PartitionSlab path that hasn't
 	// been tagged; consumers MUST treat nil as "every edge is inner"

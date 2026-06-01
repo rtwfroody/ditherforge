@@ -1328,11 +1328,11 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		// clip-time / triangle-count win.
 		mergeCells := r.opts.CellMerge && !r.opts.ShowSampledColors
 		if mergeCells {
-			plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.1f×cellSize)",
-				cellslicer.OpenEdgeBloat)
+			plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.3gmm)",
+				cellslicer.OpenEdgeBloatMM)
 		} else {
-			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.1f×cellSize)",
-				cellslicer.OpenEdgeBloat)
+			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.3gmm)",
+				cellslicer.OpenEdgeBloatMM)
 		}
 		var (
 			clipped      cellslicer.ClipResult
@@ -1346,15 +1346,15 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			// FaceCellIdx is remapped to the global flattened-CellSlabs
 			// index space so the per-cell bookkeeping below is unchanged.
 			if mergeCells {
-				clipped, shellHalfIdx, cerr = clipPerHalfMerged(so, vo.CellSlabs, vo.CellSize, cellAssign)
+				clipped, shellHalfIdx, cerr = clipPerHalfMerged(so, vo.CellSlabs, cellAssign)
 			} else {
-				clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs, vo.CellSize)
+				clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs)
 			}
 		} else {
 			if mergeCells {
-				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize, cellAssign)
+				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifold(lo.Model, vo.CellSlabs, cellAssign)
 			} else {
-				clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs, vo.CellSize)
+				clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs)
 			}
 		}
 		if cerr != nil {
@@ -1514,9 +1514,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 // clipPerHalf clips each split half's bed-space geometry against its own
 // slabs and concatenates (the per-cell clip path). See clipPerHalfWith
 // for the shared stitching; this just supplies the per-half clip call.
-func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (cellslicer.ClipResult, []byte, error) {
+func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab) (cellslicer.ClipResult, []byte, error) {
 	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
-		return cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub, cellSize)
+		return cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub)
 	})
 }
 
@@ -1525,9 +1525,9 @@ func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, cellSize float32) (ce
 // the global per-cell color array (cellAssign), sliced per half by cell
 // offset; the resulting CellRep is offset to the global space by
 // clipPerHalfWith.
-func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellSize float32, cellColor []int32) (cellslicer.ClipResult, []byte, error) {
+func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellColor []int32) (cellslicer.ClipResult, []byte, error) {
 	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
-		return cellslicer.ClipMeshToMergedCellsManifold(so.Halves[h], sub, cellSize, cellColor[cellOffset:cellOffset+nSub])
+		return cellslicer.ClipMeshToMergedCellsManifold(so.Halves[h], sub, cellColor[cellOffset:cellOffset+nSub])
 	})
 }
 

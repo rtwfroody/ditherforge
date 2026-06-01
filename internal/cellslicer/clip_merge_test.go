@@ -17,7 +17,7 @@ func TestMergedGroupContours_SimpleMerge(t *testing.T) {
 	// Two edge-adjacent unit squares merge into one rectangle: a single
 	// CCW contour, traced cleanly.
 	cells := []Cell{sq(0, 0, 1, KindHex), sq(1, 0, 1, KindHex)}
-	contours, clean := mergedGroupContours(cells, []int{0, 1}, 1.0)
+	contours, clean := mergedGroupContours(cells, []int{0, 1})
 	if !clean {
 		t.Fatal("simple two-cell merge should be clean")
 	}
@@ -46,7 +46,7 @@ func TestMergedGroupContours_Hole(t *testing.T) {
 			cells = append(cells, sq(float32(cx), float32(cy), 1, KindHex))
 		}
 	}
-	contours, clean := mergedGroupContours(cells, idx, 1.0)
+	contours, clean := mergedGroupContours(cells, idx)
 	if !clean {
 		t.Fatal("ring-with-hole should trace cleanly")
 	}
@@ -73,7 +73,7 @@ func TestMergedGroupContours_PinchNotClean(t *testing.T) {
 	// edges from (2,2)), so the trace must report not-clean so the caller
 	// falls back to per-cell clipping instead of dropping a sub-loop.
 	cells := []Cell{sq(0, 0, 2, KindHex), sq(2, 2, 2, KindHex)}
-	_, clean := mergedGroupContours(cells, []int{0, 1}, 1.0)
+	_, clean := mergedGroupContours(cells, []int{0, 1})
 	if clean {
 		t.Fatal("corner-touching (pinched) group should report clean=false")
 	}
@@ -88,7 +88,7 @@ func toPoint2(c [][2]float32) []Point2 {
 	return out
 }
 
-func TestGroupConnectedSameColorCells(t *testing.T) {
+func TestPairAdjacentSameColorCells(t *testing.T) {
 	// A row of four 10×10 cells along X: [0..10][10..20][20..30][30..40].
 	// Colors: cell0=A cell1=A cell2=B cell3=A.
 	//   cell0,cell1 are adjacent + same color → one group.
@@ -106,7 +106,7 @@ func TestGroupConnectedSameColorCells(t *testing.T) {
 	}}}
 	color := []int32{1, 1, 2, 1}
 
-	groups := groupConnectedSameColorCells(slabs, color)
+	groups := pairAdjacentSameColorCells(slabs, color)
 	if len(groups) != 3 {
 		t.Fatalf("got %d groups, want 3: %+v", len(groups), groups)
 	}
@@ -126,24 +126,26 @@ func TestGroupConnectedSameColorCells(t *testing.T) {
 	}
 }
 
-func TestGroupConnectedSameColorCells_KindBoundary(t *testing.T) {
+func TestPairAdjacentSameColorCells_KindBoundary(t *testing.T) {
 	// Two adjacent same-color cells of DIFFERENT kind must not merge.
 	slabs := []Slab{{Cells: []Cell{
 		sq(0, 0, 10, KindRing), // 0
 		sq(10, 0, 10, KindHex), // 1 adjacent, same color, different kind
 	}}}
-	groups := groupConnectedSameColorCells(slabs, []int32{5, 5})
+	groups := pairAdjacentSameColorCells(slabs, []int32{5, 5})
 	if len(groups) != 2 {
 		t.Fatalf("different-kind adjacent cells must not merge; got %d groups, want 2", len(groups))
 	}
 }
 
 func TestClipMeshToMergedCellsFourCellsOneColor(t *testing.T) {
-	// Same fixture as TestClipMeshToCellsManifoldFourCells, but all four
-	// cells share one color → one merged group. The merged clip must
-	// produce the same surface area (80 mm²) as the per-cell clip, tag
-	// every face with the group representative (cell 0), and report the
-	// merge in CellRep.
+	// Same fixture as TestClipMeshToCellsManifoldFourCells, with all four
+	// cells one color. Merging is capped at two cells per group, so the
+	// 2×2 same-color block pairs greedily into TWO groups — {0,1} (rep 0)
+	// and {2,3} (rep 2) — not one slab-spanning group. The merged clip must
+	// still cover the same surface area (80 mm²) as the per-cell clip, tag
+	// every face with its group representative, and report the pairing in
+	// CellRep.
 	model := cubeModel(10)
 	cells := []Cell{
 		{Outer: []Point2{{0, 0}, {5, 0}, {5, 5}, {0, 5}}, Kind: KindHex},
@@ -154,26 +156,33 @@ func TestClipMeshToMergedCellsFourCellsOneColor(t *testing.T) {
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: cells}}
 	color := []int32{3, 3, 3, 3}
 
-	cr, err := ClipMeshToMergedCellsManifold(model, slabs, 1.0, color)
+	cr, err := ClipMeshToMergedCellsManifold(model, slabs, color)
 	if err != nil {
 		t.Fatalf("ClipMeshToMergedCellsManifold: %v", err)
 	}
 	if len(cr.Faces) == 0 {
 		t.Fatal("0 faces")
 	}
-	// All faces map to the single group's representative (cell 0).
+	// Faces map to one of the two group representatives (cells 0 and 2),
+	// and both groups contribute faces.
+	seen := map[int32]bool{}
 	for _, idx := range cr.FaceCellIdx {
-		if idx != 0 {
-			t.Errorf("FaceCellIdx contains %d, want 0 (group rep)", idx)
+		if idx != 0 && idx != 2 {
+			t.Errorf("FaceCellIdx contains %d, want 0 or 2 (group reps)", idx)
 		}
+		seen[idx] = true
 	}
-	// CellRep: all four cells point at representative 0.
-	if len(cr.CellRep) != 4 {
-		t.Fatalf("CellRep len=%d, want 4", len(cr.CellRep))
+	if !seen[0] || !seen[2] {
+		t.Errorf("expected faces tagged with both reps 0 and 2, got %v", seen)
+	}
+	// CellRep: cells 0,1 → rep 0; cells 2,3 → rep 2.
+	want := []int32{0, 0, 2, 2}
+	if len(cr.CellRep) != len(want) {
+		t.Fatalf("CellRep len=%d, want %d", len(cr.CellRep), len(want))
 	}
 	for i, rep := range cr.CellRep {
-		if rep != 0 {
-			t.Errorf("CellRep[%d]=%d, want 0", i, rep)
+		if rep != want[i] {
+			t.Errorf("CellRep[%d]=%d, want %d", i, rep, want[i])
 		}
 	}
 	area := triMeshArea(cr.Verts, cr.Faces)
@@ -196,11 +205,11 @@ func TestMergedClipMatchesPerCellArea(t *testing.T) {
 	}
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: cells}}
 
-	perCell, err := ClipMeshToCellsManifold(model, slabs, 1.0)
+	perCell, err := ClipMeshToCellsManifold(model, slabs)
 	if err != nil {
 		t.Fatalf("per-cell clip: %v", err)
 	}
-	merged, err := ClipMeshToMergedCellsManifold(model, slabs, 1.0, []int32{1, 1, 1, 1})
+	merged, err := ClipMeshToMergedCellsManifold(model, slabs, []int32{1, 1, 1, 1})
 	if err != nil {
 		t.Fatalf("merged clip: %v", err)
 	}
@@ -230,7 +239,7 @@ func TestMergedClipTwoColorsKeepsBoundary(t *testing.T) {
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: cells}}
 	color := []int32{10, 20, 10, 20}
 
-	cr, err := ClipMeshToMergedCellsManifold(model, slabs, 1.0, color)
+	cr, err := ClipMeshToMergedCellsManifold(model, slabs, color)
 	if err != nil {
 		t.Fatalf("ClipMeshToMergedCellsManifold: %v", err)
 	}

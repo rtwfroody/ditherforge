@@ -53,7 +53,7 @@ func TestClipMeshToCellsManifoldClosedCube(t *testing.T) {
 	slab := makeCubeSlab(10, 4, 6)
 	slabs := []Slab{slab}
 
-	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestClipMeshToCellsManifoldFourCells(t *testing.T) {
 	}
 	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: cells}}
 
-	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestClipMeshToCellsManifoldMultipleSlabs(t *testing.T) {
 		makeCubeSlab(10, 3, 7),
 		makeCubeSlab(10, 7, 10),
 	}
-	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestClipMeshToCellsManifoldSlabsOutOfOrder(t *testing.T) {
 		makeCubeSlab(10, 3, 7),  // global idx 1, middle
 		makeCubeSlab(10, 0, 3),  // global idx 2, bottom
 	}
-	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
+	cr, err := ClipMeshToCellsManifold(model, slabs)
 	if err != nil {
 		t.Fatalf("ClipMeshToCellsManifold: %v", err)
 	}
@@ -313,41 +313,5 @@ func TestBloatOpenEdgesMiterOnCornerRun(t *testing.T) {
 			math.Abs(float64(got[i][1]-want[i][1])) > 1e-4 {
 			t.Errorf("miter vert %d: got %v, want %v", i, got[i], want[i])
 		}
-	}
-}
-
-func TestClipMeshToCellsManifoldOpenEdgeBloatsOutward(t *testing.T) {
-	// 10 mm cube. One cell covers only [0..6, 0..10], with the
-	// rightmost edge marked open. Bloat at 5×cellSize = 5×1 = 5 mm
-	// extends the right edge past x=11, beyond the cube — the result
-	// should be the full right half of the slab (x=0..10), not just
-	// x=0..6, because the open edge pulls the missing strip in.
-	model := cubeModel(10)
-	cell := Cell{
-		Outer:         []Point2{{0, 0}, {6, 0}, {6, 10}, {0, 10}},
-		OuterEdgeOpen: []bool{false, true, false, false}, // edge 1: (6,0)→(6,10)
-		Kind:          KindHex,
-	}
-	slabs := []Slab{{ZBot: 4, ZTop: 6, Cells: []Cell{cell}}}
-
-	cr, err := ClipMeshToCellsManifold(model, slabs, 1.0)
-	if err != nil {
-		t.Fatalf("ClipMeshToCellsManifold: %v", err)
-	}
-	if len(cr.Faces) == 0 {
-		t.Fatal("0 faces returned")
-	}
-	// Verify the output reaches at least to x=10 (the cube's far
-	// edge), confirming the open-edge bloat captured the full
-	// 10×10×2 = 200 mm³ slab piece, not just the unbloated 6×10×2 =
-	// 120 mm³ section.
-	maxX := float32(0)
-	for _, v := range cr.Verts {
-		if v[0] > maxX {
-			maxX = v[0]
-		}
-	}
-	if maxX < 9.99 {
-		t.Errorf("open-edge bloat: maxX=%.3f, want ≥10 (cube far edge)", maxX)
 	}
 }

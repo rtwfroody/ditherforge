@@ -11,6 +11,32 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 )
 
+// triArea returns the area of mesh face f.
+func triArea(m *pipeline.MeshData, f int) float64 {
+	i0, i1, i2 := m.Faces[3*f], m.Faces[3*f+1], m.Faces[3*f+2]
+	ax, ay, az := m.Vertices[3*i0], m.Vertices[3*i0+1], m.Vertices[3*i0+2]
+	bx, by, bz := m.Vertices[3*i1], m.Vertices[3*i1+1], m.Vertices[3*i1+2]
+	cx, cy, cz := m.Vertices[3*i2], m.Vertices[3*i2+1], m.Vertices[3*i2+2]
+	ux, uy, uz := bx-ax, by-ay, bz-az
+	vx, vy, vz := cx-ax, cy-ay, cz-az
+	nx, ny, nz := uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx
+	return 0.5 * math.Sqrt(float64(nx*nx+ny*ny+nz*nz))
+}
+
+// meshSurfaceArea returns the total triangle surface area of the mesh.
+// Re-triangulating a surface (what merging does) leaves total area
+// unchanged, so merged and per-cell clips of the same model must report
+// the same total. A hole — surface the merge failed to emit — shows up
+// here as missing area, which the normalized colorAreaFractions metric
+// cannot see (it divides it back out).
+func meshSurfaceArea(m *pipeline.MeshData) float64 {
+	var total float64
+	for f := 0; f < len(m.Faces)/3; f++ {
+		total += triArea(m, f)
+	}
+	return total
+}
+
 // colorAreaFractions returns, per face color (RGB triple), that color's
 // fraction of the mesh's total triangle surface area. Triangulation-
 // independent: merging same-color faces leaves each color's total area
@@ -19,14 +45,7 @@ func colorAreaFractions(m *pipeline.MeshData) map[[3]uint16]float64 {
 	area := map[[3]uint16]float64{}
 	var total float64
 	for f := 0; f < len(m.Faces)/3; f++ {
-		i0, i1, i2 := m.Faces[3*f], m.Faces[3*f+1], m.Faces[3*f+2]
-		ax, ay, az := m.Vertices[3*i0], m.Vertices[3*i0+1], m.Vertices[3*i0+2]
-		bx, by, bz := m.Vertices[3*i1], m.Vertices[3*i1+1], m.Vertices[3*i1+2]
-		cx, cy, cz := m.Vertices[3*i2], m.Vertices[3*i2+1], m.Vertices[3*i2+2]
-		ux, uy, uz := bx-ax, by-ay, bz-az
-		vx, vy, vz := cx-ax, cy-ay, cz-az
-		nx, ny, nz := uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx
-		a := 0.5 * math.Sqrt(float64(nx*nx+ny*ny+nz*nz))
+		a := triArea(m, f)
 		col := [3]uint16{m.FaceColors[3*f], m.FaceColors[3*f+1], m.FaceColors[3*f+2]}
 		area[col] += a
 		total += a
@@ -132,6 +151,27 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 				tc.name, mergedTris, perCellTris,
 				100*float64(mergedTris)/float64(perCellTris))
 
+			// Total surface area must match: merging only re-triangulates a
+			// surface, so it can't change how much surface there is. This is
+			// the hole guard — a hole (surface the merge dropped) removes
+			// area here, which the normalized per-color metric below divides
+			// out and cannot detect. Both clips nudge open edges outward by
+			// the same fixed OpenEdgeBloatMM margin, so the silhouettes land
+			// in the same place; the only residual is floating-point noise in
+			// the Manifold booleans (measured ≤14 ppm across cube/earth/
+			// building). The 0.05% limit is well above that FP floor and far
+			// below a real hole (which ran ~3%). An earlier cell-scale bloat
+			// made the merged silhouette diverge ~3% here; that's gone.
+			mArea := meshSurfaceArea(merged)
+			pArea := meshSurfaceArea(perCell)
+			relArea := math.Abs(mArea-pArea) / pArea
+			t.Logf("%s: total surface area merged=%.2f per-cell=%.2f (rel diff %.5f)",
+				tc.name, mArea, pArea, relArea)
+			if relArea > 0.0005 {
+				t.Errorf("%s: total surface area diverges by %.5f (>0.05%%): merged=%.2f per-cell=%.2f — merge dropped or added surface (hole?)",
+					tc.name, relArea, mArea, pArea)
+			}
+
 			// Semantic equivalence: merging re-triangulates within a
 			// color but must not move surface to a different color, so the
 			// area-weighted palette distribution is invariant. This is the
@@ -161,14 +201,16 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 					maxDiff, worst = d, c
 				}
 			}
-			t.Logf("%s: max per-color area-fraction diff = %.4f at RGB(%d,%d,%d)",
+			t.Logf("%s: max per-color area-fraction diff = %.5f at RGB(%d,%d,%d)",
 				tc.name, maxDiff, worst[0], worst[1], worst[2])
-			// 1% absolute. The residual comes only from open-edge bloat
-			// being applied to the merged boundary vs per cell, which
-			// catches marginally different slivers of alpha-wrap geometry
-			// at silhouette edges. Color scrambling pushed this past 10%.
-			if maxDiff > 0.01 {
-				t.Errorf("%s: per-color area fraction diverges by %.4f (>1%%) at RGB(%d,%d,%d) — merging moved surface between colors",
+			// 0.05% absolute. With both clips bloating open edges by the same
+			// fixed margin, the per-color distribution is invariant to
+			// floating-point noise (measured 0.0000 across all three models).
+			// A real color-scrambling regression — the bug this guards
+			// against — moved large area between colors (~10%); this catches
+			// that with a wide margin.
+			if maxDiff > 0.0005 {
+				t.Errorf("%s: per-color area fraction diverges by %.5f (>0.05%%) at RGB(%d,%d,%d) — merging moved surface between colors",
 					tc.name, maxDiff, worst[0], worst[1], worst[2])
 			}
 

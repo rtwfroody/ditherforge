@@ -39,33 +39,39 @@ type ClipResult struct {
 	CellRep []int32
 }
 
-// OpenEdgeBloat is the outward distance (mm) applied to each open
-// cell-Outer edge when building the per-cell prism for Manifold
-// clipping. Cells at the slab partition's outer boundary have one or
-// more edges flagged with Cell.OuterEdgeOpen[i] = true; we model the
-// "infinity" semantics of those edges by pushing them outward by
-// OpenEdgeBloat × cellSize so the resulting closed prism reaches well
-// past any model geometry on the open side.
+// OpenEdgeBloatMM is the outward distance (mm) applied to each open
+// cell-Outer edge when building the per-cell prism for Manifold clipping.
+// Cells at the slab partition's outer boundary have one or more edges
+// flagged with Cell.OuterEdgeOpen[i] = true; we push those edges outward
+// by this much so the prism wall sits just past the model surface there
+// rather than exactly on it.
 //
-// The relevant scale here is the alphawrap step size (typically much
-// smaller than cellSize) — that's how far model geometry can nudge
-// outside the slab footprint. 5×cellSize is comfortably above that
-// while keeping the detour at a sensible scale in the debug SVG view
-// (large enough to be visually distinct from closed edges, small
-// enough that the bloated cell isn't dwarfing the rest of the layer).
-// bloatOpenEdges further caps the per-cell displacement at the cell
-// bbox's max side to prevent self-intersection on thin cells; see
-// the comment there for details.
+// This is a floating-point margin, NOT a coverage mechanism. The cell
+// footprint is the XY projection of the slab surface, so the surface never
+// extends past the footprint boundary by a meaningful amount — there is no
+// distant geometry to "reach out and grab". The only failure mode left is
+// surface lying exactly on the vertical prism wall, which the Manifold
+// intersection can drop (the boolean dedups coincident geometry at 1µm),
+// leaving pinhole gaps that punch through to the back surface. A few µm of
+// outward nudge moves that surface safely inside the prism.
 //
-// devscripts/manifold_clip/open_edge.py demonstrates the convergence
-// for the global bloat-vs-bbox case.
-const OpenEdgeBloat = 5.0
+// 5µm is comfortably above Manifold's 1µm dedup tolerance and small enough
+// to add no visible skirt — merged and per-cell clips converge to the same
+// surface to floating-point. An earlier design bloated by 5×cellSize to
+// chase surface that supposedly nudged outside the footprint; with the
+// XY-projected footprint that surface doesn't exist, and the large bloat
+// only inflated every clip by a ~12% outward skirt (and, because the cap
+// scaled with the polygon's bbox, made the merged clip diverge from the
+// per-cell one). bloatOpenEdges still caps displacement at the cell bbox's
+// max side as a self-intersection guard for thin cells, but at 5µm that
+// cap never binds.
+const OpenEdgeBloatMM = 0.005
 
 // ClipMeshToCellsManifold is the Manifold-backed per-cell clip. For
 // each cell it:
 //
-//  1. Builds the cell's 2D polygon, replacing any open-edge run with
-//     a 5×cellSize outward bloat (see OpenEdgeBloat).
+//  1. Builds the cell's 2D polygon, nudging any open-edge run outward by
+//     a small floating-point margin (see OpenEdgeBloatMM).
 //  2. Extrudes that polygon between [zBot, zTop] into a closed prism.
 //  3. Intersects the per-slab source Manifold (pre-split from the
 //     full model via splitSrcBySlabs) with the prism via
@@ -80,8 +86,6 @@ const OpenEdgeBloat = 5.0
 // low_poly_building.glb pre-alphawrap) will surface as a clear error
 // at FromMesh.
 //
-// cellSize is the dither cell size in mm, used to scale OpenEdgeBloat.
-// Pass the same value supplied to PartitionModel.
 // slabSrc holds the source Manifold and its per-slab pre-split pieces,
 // shared by the per-cell and merged clip entry points.
 type slabSrc struct {
@@ -132,7 +136,7 @@ func (s *slabSrc) close() {
 	s.src.Close()
 }
 
-func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize float32) (ClipResult, error) {
+func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab) (ClipResult, error) {
 	ss, err := buildSlabSrc(model, slabs)
 	if err != nil {
 		return ClipResult{}, err
@@ -151,7 +155,7 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize f
 	return runClipJobs(len(refs), func(i int) (int, [][3]float32, [][3]uint32, error) {
 		r := refs[i]
 		s := &slabs[r.slabIdx]
-		v, f, cerr := clipOneCellManifold(ss.slabManifold(r.slabIdx), ss.srcID, &s.Cells[r.cellIdx], s.ZBot, s.ZTop, cellSize)
+		v, f, cerr := clipOneCellManifold(ss.slabManifold(r.slabIdx), ss.srcID, &s.Cells[r.cellIdx], s.ZBot, s.ZTop)
 		if cerr != nil {
 			return 0, nil, nil, fmt.Errorf("cell %d (slab=%d,cell=%d): %w", r.globalIdx, r.slabIdx, r.cellIdx, cerr)
 		}
@@ -353,8 +357,8 @@ func closeSlabManifolds(perSlab []*manifoldbool.Manifold) {
 // intersection adds where the prism cuts through the model volume)
 // are stripped before return. Empty results (the cell doesn't
 // overlap the model) are returned as (nil, nil, nil).
-func clipOneCellManifold(src *manifoldbool.Manifold, srcID int32, cell *Cell, zBot, zTop, cellSize float32) ([][3]float32, [][3]uint32, error) {
-	poly := bloatOpenEdges(cell.Outer, cell.OuterEdgeOpen, OpenEdgeBloat*cellSize)
+func clipOneCellManifold(src *manifoldbool.Manifold, srcID int32, cell *Cell, zBot, zTop float32) ([][3]float32, [][3]uint32, error) {
+	poly := bloatOpenEdges(cell.Outer, cell.OuterEdgeOpen, OpenEdgeBloatMM)
 	if len(poly) < 3 {
 		return nil, nil, nil
 	}
@@ -393,11 +397,12 @@ func clipOneCellManifold(src *manifoldbool.Manifold, srcID int32, cell *Cell, zB
 //     vertices, the original and the bloated, so the polygon walks
 //     perpendicularly out to the partition boundary.
 //
-// The displacement is capped at the cell's bbox max-side so a 1mm-wide
-// ring cell with a 5×cellSize=5mm raw bloat doesn't push its open edge
-// past its opposite closed edge (which would produce a self-
-// intersecting polygon and either a Manifold rejection or a degenerate
-// prism).
+// The displacement is capped at the cell's bbox max-side so the open edge
+// can never be pushed past its opposite closed edge (which would produce a
+// self-intersecting polygon and either a Manifold rejection or a
+// degenerate prism). At the current OpenEdgeBloatMM (a few µm) this cap
+// never binds; it's a guard against a future larger bloat or a
+// pathologically thin cell.
 //
 // openFlags may be nil — in that case every edge is treated as closed
 // and the result is just a defensive copy of outer.
@@ -429,11 +434,9 @@ func bloatOpenEdges(outer []Point2, openFlags []bool, bloat float32) [][2]float3
 	// Per-cell bloat cap. Pin the displacement to no more than the
 	// cell's bbox max-side so the open edge never lands past a
 	// non-incident edge — a guarantee even for future non-convex
-	// cells or pathological partition geometries. The downside is
-	// that small (< raw-bloat-sized) cells get a smaller bloat than
-	// the configured 5×cellSize; that's fine because the geometry
-	// we're trying to catch only nudges past the partition boundary
-	// by sub-cellSize amounts (alphawrap step size).
+	// cells or pathological partition geometries. At the current few-µm
+	// OpenEdgeBloatMM this never binds; it only mattered for the old
+	// cell-scale bloat and is kept as a safety guard.
 	minX, minY, maxX, maxY := polyBounds(outer)
 	maxSide := maxX - minX
 	if dy := maxY - minY; dy > maxSide {

@@ -21,57 +21,39 @@ type mergeGroup struct {
 	cellIdxs []int
 }
 
-// groupConnectedSameColorCells partitions each slab's cells into merge
-// groups of CONNECTED, same-kind, same-color cells. Two cells are
-// connected when they share a directed half-edge in reverse (the exact
-// int2D bucket test MarkOuterEdges uses), so only spatially adjacent
-// cells merge. cellColor is indexed by global cell index (the flattened
-// CellSlabs order, matching ClipMeshToCellsManifold's FaceCellIdx space)
-// and must have one entry per cell.
+// pairAdjacentSameColorCells pairs each slab's cells into merge groups
+// of AT MOST TWO cells. A pair must be same-kind, same-color, and share a
+// footprint edge — one cell owns a directed half-edge whose reverse is
+// owned by the other (the exact int2D bucket test MarkOuterEdges uses), so
+// only spatially adjacent cells merge. cellColor is indexed by global cell
+// index (the flattened CellSlabs order, matching ClipMeshToCellsManifold's
+// FaceCellIdx space) and must have one entry per cell.
 //
-// Connectivity (not just same-color-anywhere-in-slab) matters for two
-// reasons. It is what removes the internal seam between neighbours. And
-// it keeps each group a single tiled region, so its boundary comes out
-// clean from mergedGroupContours' half-edge cancellation and its Manifold
-// intersection stays localized to one blob — grouping all of a slab's
-// scattered same-color speckle into one prism would instead hand Manifold
-// a slab-spanning shape with thousands of disjoint pieces. Non-adjacent
-// same-color cells stay in separate groups and clip independently,
-// exactly as the per-cell path would. A missed adjacency (T-junction
-// where endpoints don't bucket-match) only under-merges — never a false
-// merge.
+// Pairing is greedy: cells are walked in ascending index and each
+// still-unpaired cell is matched with the first still-unpaired same-color
+// edge-neighbour; a cell that finds no partner stays in a group of one.
 //
-// The first (smallest-index) cell in each component is its
-// representative; faces from the group are tagged with it.
-func groupConnectedSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup {
+// The cap of two is deliberate. Arbitrarily large same-color components
+// (the previous union-find behaviour) produced slab-spanning merged prisms
+// whose boundary bloat and pinch-tracing punched holes in the output mesh.
+// A pair is just the union of two adjacent tiles sharing one edge — a
+// simple shape — so the merged output stays faithful to the per-cell clip
+// while still removing the one internal seam between the pair. A missed
+// adjacency only leaves a cell solo — never a false merge.
+//
+// The smaller-index member of each pair is its representative; faces from
+// the group are tagged with it. (Walking ascending guarantees an unpaired
+// partner has a larger index than the cell being processed, so the cell
+// being processed is always the representative.)
+func pairAdjacentSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup {
 	var groups []mergeGroup
 	globalBase := 0
 	for si := range slabs {
 		cells := slabs[si].Cells
 		n := len(cells)
 
-		// Union-find over local cell indices.
-		parent := make([]int, n)
-		for i := range parent {
-			parent[i] = i
-		}
-		find := func(x int) int {
-			for parent[x] != x {
-				parent[x] = parent[parent[x]] // path halving
-				x = parent[x]
-			}
-			return x
-		}
-		union := func(a, b int) {
-			ra, rb := find(a), find(b)
-			if ra != rb {
-				parent[ra] = rb
-			}
-		}
-
-		// Map each directed half-edge to the cell that owns it, then
-		// union a cell with the owner of any reverse half-edge that
-		// matches in kind and color.
+		// Map each directed half-edge to the cell that owns it, so a cell
+		// can find the neighbour across any of its footprint edges.
 		owner := make(map[dirEdge]int, n*4)
 		for ci := range cells {
 			outer := cells[ci].Outer
@@ -80,12 +62,20 @@ func groupConnectedSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup 
 				owner[dirEdgeOf(outer[k], outer[(k+1)%m])] = ci
 			}
 		}
-		for ci := range cells {
+
+		paired := make([]bool, n)
+		for ci := 0; ci < n; ci++ {
+			if paired[ci] {
+				continue
+			}
+			// Find the first still-unpaired same-kind, same-color
+			// edge-neighbour to pair with.
+			partner := -1
 			outer := cells[ci].Outer
 			m := len(outer)
 			for k := 0; k < m; k++ {
 				cj, ok := owner[dirEdgeOf(outer[k], outer[(k+1)%m]).reverse()]
-				if !ok || cj == ci {
+				if !ok || cj == ci || paired[cj] {
 					continue
 				}
 				if cells[cj].Kind != cells[ci].Kind {
@@ -94,25 +84,20 @@ func groupConnectedSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup 
 				if cellColor[globalBase+cj] != cellColor[globalBase+ci] {
 					continue
 				}
-				union(ci, cj)
+				partner = cj
+				break
 			}
-		}
-
-		// Gather components. Iterating ci ascending makes the first cell
-		// seen for a root its smallest-index member → the representative.
-		rootGroup := make(map[int]int, n)
-		for ci := 0; ci < n; ci++ {
-			r := find(ci)
-			if gIdx, ok := rootGroup[r]; ok {
-				groups[gIdx].cellIdxs = append(groups[gIdx].cellIdxs, ci)
-			} else {
-				rootGroup[r] = len(groups)
-				groups = append(groups, mergeGroup{
-					slabIdx:   si,
-					repGlobal: globalBase + ci,
-					cellIdxs:  []int{ci},
-				})
+			paired[ci] = true
+			g := mergeGroup{
+				slabIdx:   si,
+				repGlobal: globalBase + ci,
+				cellIdxs:  []int{ci},
 			}
+			if partner >= 0 {
+				paired[partner] = true
+				g.cellIdxs = append(g.cellIdxs, partner)
+			}
+			groups = append(groups, g)
 		}
 		globalBase += n
 	}
@@ -120,25 +105,24 @@ func groupConnectedSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup 
 }
 
 // ClipMeshToMergedCellsManifold is the merged-cell counterpart of
-// ClipMeshToCellsManifold. It groups connected, same-kind, same-color
-// cells within each slab (see groupConnectedSameColorCells) and clips
-// the model against each group's merged prism in a single Manifold
-// intersection, rather than one intersection per cell. cellColor supplies
-// each cell's color (any int32 label whose equality defines "same color";
-// -1 is an ordinary label — adjacent same-kind -1 cells merge together
-// like any other shared color). The result's FaceCellIdx tags each face
-// with its group's representative global cell index, and CellRep maps
-// every cell to that representative so per-cell coverage diagnostics still
-// work.
+// ClipMeshToCellsManifold. It pairs adjacent same-kind, same-color cells
+// within each slab (at most two per group; see
+// pairAdjacentSameColorCells) and clips the model against each group's
+// merged prism in a single Manifold intersection, rather than one
+// intersection per cell. cellColor supplies each cell's color (any int32
+// label whose equality defines "same color"; -1 is an ordinary label —
+// adjacent same-kind -1 cells pair like any other shared color). The
+// result's FaceCellIdx tags each face with its group's representative
+// global cell index, and CellRep maps every cell to that representative so
+// per-cell coverage diagnostics still work.
 //
-// Output coverage matches the per-cell clip in the model interior; along
-// OPEN (footprint-boundary) edges the silhouette can differ slightly,
-// because bloatOpenEdges caps displacement at the bbox max-side of the
-// MERGED loop here vs. each individual cell's bbox in the per-cell path.
-// The difference is otherwise fewer, larger boolean ops and fewer
-// internal seams between same-color cells. cellSize matches the value
-// passed to PartitionModel (scales the open-edge bloat).
-func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cellSize float32, cellColor []int32) (ClipResult, error) {
+// Output coverage matches the per-cell clip, including along OPEN
+// (footprint-boundary) edges: both paths nudge open edges outward by the
+// same fixed OpenEdgeBloatMM margin, so the merged silhouette lands in the
+// same place as the per-cell one. The only difference from the per-cell
+// clip is fewer, larger boolean ops and fewer internal seams between
+// same-color cells.
+func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cellColor []int32) (ClipResult, error) {
 	nCells := 0
 	for si := range slabs {
 		nCells += len(slabs[si].Cells)
@@ -153,14 +137,14 @@ func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cell
 	}
 	defer ss.close()
 
-	groups := groupConnectedSameColorCells(slabs, cellColor)
+	groups := pairAdjacentSameColorCells(slabs, cellColor)
 
 	// One job per merged group; faces are tagged with the group's
 	// representative global cell index.
 	cr, err := runClipJobs(len(groups), func(i int) (int, [][3]float32, [][3]uint32, error) {
 		g := &groups[i]
 		s := &slabs[g.slabIdx]
-		v, f, cerr := clipOneGroupManifold(ss.slabManifold(g.slabIdx), ss.srcID, s.Cells, g.cellIdxs, s.ZBot, s.ZTop, cellSize)
+		v, f, cerr := clipOneGroupManifold(ss.slabManifold(g.slabIdx), ss.srcID, s.Cells, g.cellIdxs, s.ZBot, s.ZTop)
 		if cerr != nil {
 			return 0, nil, nil, fmt.Errorf("group %d (slab=%d, rep=%d): %w", i, g.slabIdx, g.repGlobal, cerr)
 		}
@@ -201,8 +185,8 @@ func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cell
 // the same surface coverage as the per-cell path, just without the merge
 // (more triangles for this one group). The caller still tags every face
 // with the group representative, so the color is unchanged either way.
-func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell, cellIdxs []int, zBot, zTop, cellSize float32) ([][3]float32, [][3]uint32, error) {
-	contours, clean := mergedGroupContours(cells, cellIdxs, cellSize)
+func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell, cellIdxs []int, zBot, zTop float32) ([][3]float32, [][3]uint32, error) {
+	contours, clean := mergedGroupContours(cells, cellIdxs)
 	if !clean {
 		// Pinch fallback: clip members one at a time, like the per-cell
 		// path. Coverage matches per-cell exactly (each member keeps its
@@ -211,7 +195,7 @@ func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell,
 		var allV [][3]float32
 		var allF [][3]uint32
 		for _, ci := range cellIdxs {
-			cv, cf, cerr := clipOneCellManifold(src, srcID, &cells[ci], zBot, zTop, cellSize)
+			cv, cf, cerr := clipOneCellManifold(src, srcID, &cells[ci], zBot, zTop)
 			if cerr != nil {
 				return nil, nil, cerr
 			}
@@ -259,13 +243,12 @@ func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell,
 // holes traced as their own (oppositely wound) loops for free.
 //
 // Bloat is applied to the MERGED boundary, not per cell: a run of open
-// (footprint-boundary) edges along the component edge is pushed out as
-// one continuous miter, so adjacent cells' bloat can't overlap (the
-// internal cells are already gone). Because bloatOpenEdges caps
-// displacement at the loop's bbox max-side, the merged loop's larger
-// bbox permits a larger open-edge bloat than the per-cell path — so
-// open-edge silhouettes legitimately differ between the two clips
-// (interior coverage is identical).
+// (footprint-boundary) edges along the pair's outer boundary is pushed out
+// by the fixed OpenEdgeBloatMM margin as one continuous miter, so the
+// paired cells' bloat can't overlap (the shared internal edge is already
+// gone). Because the bloat distance is a fixed few-µm margin (not scaled
+// by the polygon's size), the merged silhouette lands in exactly the same
+// place as the per-cell clip's.
 //
 // The bool return is "clean": false when the surviving boundary
 // self-touches at a vertex (a pinch — more than one outgoing boundary
@@ -273,7 +256,7 @@ func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell,
 // dropping a sub-loop. The caller falls back to per-cell clipping in
 // that case rather than emit a shrunken prism. On the clean path it is
 // true (contours may still be nil if nothing usable).
-func mergedGroupContours(cells []Cell, cellIdxs []int, cellSize float32) ([][][2]float32, bool) {
+func mergedGroupContours(cells []Cell, cellIdxs []int) ([][][2]float32, bool) {
 	// Pass 1: record every directed half-edge so we can detect which
 	// have a reverse mate within the group (interior, cancels).
 	present := make(map[dirEdge]struct{}, len(cellIdxs)*4)
@@ -348,7 +331,7 @@ func mergedGroupContours(cells []Cell, cellIdxs []int, cellSize float32) ([][][2
 		if len(pts) < 3 {
 			continue
 		}
-		bloated := bloatOpenEdges(pts, flags, OpenEdgeBloat*cellSize)
+		bloated := bloatOpenEdges(pts, flags, OpenEdgeBloatMM)
 		if len(bloated) >= 3 {
 			contours = append(contours, bloated)
 		}
