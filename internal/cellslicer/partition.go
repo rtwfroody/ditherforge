@@ -224,10 +224,24 @@ func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 //	           (wall) surface; its width is exactly one cell, so the
 //	           wall slab's deep interior is left uncovered on purpose
 //	           (surface-only — interior cells would leak error into
-//	           invisible volume). Angled walls are handled upstream by
-//	           the footprint (bot∪top), not by widening this band.
+//	           invisible volume). Angled/bulging walls are handled
+//	           upstream by fpCur being the in-band surface SILHOUETTE
+//	           (the XY projection of the surface clipped to the slab),
+//	           not just the two bounding-plane contours — so the band
+//	           already reaches the surface's true outermost extent.
 //
 // band and innerCap are disjoint and meet cleanly along `inner`.
+//
+// fpCur is the COVERAGE footprint (the in-band silhouette) and drives
+// inner/band/seeds — what the cells must tile. fpBelow/fpAbove are the
+// neighbours' BOUNDING-PLANE footprints (zBot/zTop contours), used only
+// for the buried-wall test: a column is buried (no cap) iff solid both
+// just below and just above, which is a question about the cross-sections
+// AT the planes. Passing the silhouette there instead would let a
+// neighbour's mid-slab wall bulge read as "buried" and suppress real
+// caps, so the caller deliberately feeds the plane footprints. (inner
+// staying silhouette-based is safe: erosion by cellSize removes any
+// sub-cellSize bulge, so innerCap is unchanged in practice.)
 //
 // Boundary cells are the clipped Voronoi diagram of cellSize-spaced
 // seeds along the footprint loops, restricted to band (voronoiBandCells)

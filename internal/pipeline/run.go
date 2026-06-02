@@ -895,14 +895,25 @@ func (r *pipelineRun) sliceSampleHalf(
 	if !r.opts.NoInteriorFaceFootprint {
 		interiorFps = cellslicer.InteriorHorizontalFootprints(geom, planes)
 	}
+	surfaceFps := cellslicer.SlabSurfaceFootprints(geom, planes)
 	footprints := make([]*cellslicer.Footprint, nSlabs)
+	capFps := make([]*cellslicer.Footprint, nSlabs)
 	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
-		footprints[i] = cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
+		// capFp = bounding-plane footprint (zBot/zTop contours + interior
+		// horizontal sheets) — feeds the cap/buried-wall neighbour test.
+		capFp := cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
 		// interiorFps, when present, is sized to nSlabs (== len(planes)-1
 		// == len(layers)-1); the length guard makes that invariant
 		// explicit rather than load-bearing.
 		if interiorFps != nil && i < len(interiorFps) && interiorFps[i] != nil {
-			footprints[i] = cellslicer.FootprintUnion(footprints[i], interiorFps[i])
+			capFp = cellslicer.FootprintUnion(capFp, interiorFps[i])
+		}
+		capFps[i] = capFp
+		// covFp = capFp ∪ in-band surface projection. Stored as the slab
+		// Footprint and used for all coverage/tiling (band, seeds, clip).
+		footprints[i] = capFp
+		if surfaceFps != nil && i < len(surfaceFps) && surfaceFps[i] != nil {
+			footprints[i] = cellslicer.FootprintUnion(capFp, surfaceFps[i])
 		}
 	})
 	fpElapsed := time.Since(tFp).Seconds()
@@ -919,16 +930,18 @@ func (r *pipelineRun) sliceSampleHalf(
 	}, func(i int, state any) {
 		buf := state.(*voxel.SearchBuf)
 		t0 := time.Now()
-		// PartitionSlabAnalytic takes the slab's own footprint plus its
-		// neighbours' (or nil at the top/bottom). It emits ring cells
-		// along the lateral band, hex cells only where the footprint
-		// differs from its neighbours (cap surfaces).
+		// PartitionSlabAnalytic takes this slab's COVERAGE footprint
+		// (footprints[i], the in-band silhouette) for band/ring/clip, and
+		// the neighbours' bounding-plane CAP footprints (capFps[i±1], or
+		// nil at the top/bottom) for the buried-wall test. It emits ring
+		// cells along the lateral band, hex cells only where the neighbour
+		// cap cross-sections leave interior surface exposed (caps).
 		var fpBelow, fpAbove *cellslicer.Footprint
 		if i > 0 {
-			fpBelow = footprints[i-1]
+			fpBelow = capFps[i-1]
 		}
 		if i+1 < nSlabs {
-			fpAbove = footprints[i+1]
+			fpAbove = capFps[i+1]
 		}
 		cs := cellSizeForSlab(i)
 		cells, coverTarget, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)

@@ -99,6 +99,148 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 	return out
 }
 
+// SlabSurfaceFootprints returns, per slab, the XY projection of the
+// model surface clipped to that slab's Z-band [planes[i], planes[i+1]].
+// Unlike the two bounding-plane slice contours (ComputeFootprint) — which
+// only sample the surface at planes[i] and planes[i+1] — this captures
+// the surface's true XY extent *between* the planes. Where a wall bulges
+// radially outward mid-slab (a convex Z-edge, e.g. a base-rim slope
+// change), or a coarse triangle spans the slab, the bulge projects
+// outside the two-plane footprint and would otherwise be dropped by the
+// per-cell clip, leaving a hole. Unioning this into the slab footprint
+// makes the cells (and their clip prisms) cover the actual surface,
+// independent of triangle size.
+//
+// Wholly-in-band near-horizontal triangles are skipped here: they are
+// already recovered by InteriorHorizontalFootprints, and the caller
+// unions both into the coverage footprint. planes holds nSlabs+1
+// ascending boundaries; the result has nSlabs entries, nil where a slab
+// has no surface.
+func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footprint {
+	nSlabs := len(planes) - 1
+	if nSlabs < 1 {
+		return nil
+	}
+	zLo, zHi := planes[0], planes[nSlabs]
+	perSlab := make([]clipper.Paths, nSlabs)
+	for _, f := range model.Faces {
+		a := model.Vertices[f[0]]
+		b := model.Vertices[f[1]]
+		c := model.Vertices[f[2]]
+		zMin := minf32(a[2], minf32(b[2], c[2]))
+		zMax := maxf32(a[2], maxf32(b[2], c[2]))
+		if zMax <= zLo || zMin >= zHi {
+			continue // entirely outside the sliced range
+		}
+		// Wholly within one slab and near-horizontal: InteriorHorizontal-
+		// Footprints already owns it (avoids duplicate projection work).
+		ks := slabIndexForZ(planes, zMin)
+		ke := slabIndexForZ(planes, zMax)
+		if ks >= 0 && ks == ke && nearHorizontal(a, b, c) {
+			continue
+		}
+		// Iterate only the slabs the triangle spans, not all nSlabs. The
+		// zMax<=zLo / zMin>=zHi reject above guarantees overlap, so a -1
+		// (vertex past a sliced-range end) clamps to the first/last slab.
+		if ks < 0 {
+			ks = 0
+		}
+		if ke < 0 {
+			ke = nSlabs - 1
+		}
+		for si := ks; si <= ke; si++ {
+			zb, zt := planes[si], planes[si+1]
+			if p, ok := triBandXYPath(a, b, c, zb, zt); ok {
+				perSlab[si] = append(perSlab[si], p)
+			}
+		}
+	}
+	out := make([]*Footprint, nSlabs)
+	for i := range perSlab {
+		if len(perSlab[i]) == 0 {
+			continue
+		}
+		c := clipper.NewClipper(clipper.IoNone)
+		c.AddPaths(perSlab[i], clipper.PtSubject, true)
+		tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
+		if !ok || tree == nil {
+			continue
+		}
+		fp := &Footprint{}
+		for _, child := range tree.Childs() {
+			collectFootprintLoops(child, fp)
+		}
+		if len(fp.Loops) > 0 {
+			out[i] = fp
+		}
+	}
+	return out
+}
+
+// triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and
+// returns its XY projection as a CCW Clipper path. ok is false when the
+// in-band portion is empty or degenerate (fewer than 3 projected
+// vertices). CCW winding makes every projected polygon add +1 under the
+// PftNonZero union, matching triPathCCW.
+func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool) {
+	poly := []([3]float32){a, b, c}
+	poly = clipPolyZHalf(poly, zBot, true)  // keep z >= zBot
+	poly = clipPolyZHalf(poly, zTop, false) // keep z <= zTop
+	if len(poly) < 3 {
+		return nil, false
+	}
+	pts := make([]Point2, len(poly))
+	for i, p := range poly {
+		pts[i] = Point2{p[0], p[1]}
+	}
+	if signedArea(pts) < 0 {
+		for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
+			pts[i], pts[j] = pts[j], pts[i]
+		}
+	}
+	return pointsToClipperPath(pts), true
+}
+
+// clipPolyZHalf clips a 3D polygon against a horizontal half-space using
+// Sutherland-Hodgman. keepAbove keeps vertices with z >= zCut; otherwise
+// z <= zCut. The polygon is treated as closed (last vertex wraps to
+// first). A convex input stays convex, so a triangle clipped by both
+// slab planes yields at most a pentagon.
+func clipPolyZHalf(poly [][3]float32, zCut float32, keepAbove bool) [][3]float32 {
+	if len(poly) == 0 {
+		return nil
+	}
+	inside := func(p [3]float32) bool {
+		if keepAbove {
+			return p[2] >= zCut
+		}
+		return p[2] <= zCut
+	}
+	n := len(poly)
+	out := make([][3]float32, 0, n+1)
+	for i := 0; i < n; i++ {
+		cur := poly[i]
+		prev := poly[(i+n-1)%n]
+		ci, pi := inside(cur), inside(prev)
+		if ci {
+			if !pi {
+				out = append(out, lerpZ(prev, cur, zCut))
+			}
+			out = append(out, cur)
+		} else if pi {
+			out = append(out, lerpZ(prev, cur, zCut))
+		}
+	}
+	return out
+}
+
+// lerpZ returns the point on segment a→b at height z. Callers guarantee
+// a[2] != b[2] (the segment crosses the cut plane).
+func lerpZ(a, b [3]float32, z float32) [3]float32 {
+	t := (z - a[2]) / (b[2] - a[2])
+	return [3]float32{a[0] + t*(b[0]-a[0]), a[1] + t*(b[1]-a[1]), z}
+}
+
 // slabIndexForZ returns the index i of the slab [planes[i], planes[i+1])
 // containing z, or -1 if z is outside [planes[0], planes[nSlabs]).
 // planes must be ascending.
