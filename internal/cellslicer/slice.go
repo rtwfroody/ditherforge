@@ -179,9 +179,20 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footp
 
 // triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and
 // returns its XY projection as a CCW Clipper path. ok is false when the
-// in-band portion is empty or degenerate (fewer than 3 projected
-// vertices). CCW winding makes every projected polygon add +1 under the
-// PftNonZero union, matching triPathCCW.
+// in-band portion is empty (fewer than 3 projected vertices) or its XY
+// projection is degenerately thin. CCW winding makes every projected
+// polygon add +1 under the PftNonZero union, matching triPathCCW.
+//
+// The thinness reject is essential for near-vertical surfaces (e.g. a
+// cylinder wall). A vertical wall's between-plane XY silhouette is
+// identical to its silhouette AT the planes, which capFp already holds,
+// so the band slice of such a triangle projects to a numerically
+// near-collinear sliver that contributes no real coverage. Left in, those
+// slivers union into dozens of isolated micro-loops on the perimeter, each
+// of which seeds a degenerate Voronoi cell and warps its neighbours — the
+// "uneven ring cells" failure. We reject by aspect (area vs. longest
+// edge²), which is scale-invariant: a genuine bulge patch projects with
+// O(1) aspect and survives; only essentially-collinear slices are dropped.
 func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool) {
 	poly := []([3]float32){a, b, c}
 	poly = clipPolyZHalf(poly, zBot, true)  // keep z >= zBot
@@ -193,7 +204,27 @@ func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool) 
 	for i, p := range poly {
 		pts[i] = Point2{p[0], p[1]}
 	}
-	if signedArea(pts) < 0 {
+	sa := signedArea(pts)
+	area := sa
+	if area < 0 {
+		area = -area
+	}
+	var maxEdge2 float32
+	for i := range pts {
+		j := (i + 1) % len(pts)
+		dx := pts[j][0] - pts[i][0]
+		dy := pts[j][1] - pts[i][1]
+		if e := dx*dx + dy*dy; e > maxEdge2 {
+			maxEdge2 = e
+		}
+	}
+	// area/maxEdge2 is the dimensionless aspect (≈0.43 for equilateral,
+	// →0 for a sliver). 1e-3 keeps every real surface patch and drops only
+	// near-collinear vertical-wall projection noise.
+	if maxEdge2 == 0 || area < 1e-3*maxEdge2 {
+		return nil, false
+	}
+	if sa < 0 {
 		for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
 			pts[i], pts[j] = pts[j], pts[i]
 		}
