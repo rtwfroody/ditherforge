@@ -99,6 +99,22 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 	return out
 }
 
+// SurfaceDropStats reports how many in-band triangle projections
+// triBandXYPath discarded as degenerate near-vertical slivers, so the drop
+// is observable rather than silent. Considered counts every projection
+// evaluated; Dropped is the subset rejected by the thinness test;
+// AreaSum/AreaMax are the summed and largest single discarded |XY area|
+// (mm²). For a true vertical wall the discarded slices are essentially
+// collinear, so AreaMax stays ~0; a pixel-scale AreaMax is the signal that
+// the filter may have eaten real coverage (the caller flags it). See
+// triBandXYPath.
+type SurfaceDropStats struct {
+	Considered int
+	Dropped    int
+	AreaSum    float32
+	AreaMax    float32
+}
+
 // SlabSurfaceFootprints returns, per slab, the XY projection of the
 // model surface clipped to that slab's Z-band [planes[i], planes[i+1]].
 // Unlike the two bounding-plane slice contours (ComputeFootprint) — which
@@ -115,11 +131,13 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 // already recovered by InteriorHorizontalFootprints, and the caller
 // unions both into the coverage footprint. planes holds nSlabs+1
 // ascending boundaries; the result has nSlabs entries, nil where a slab
-// has no surface.
-func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footprint {
+// has no surface. The second return accounts for the degenerate slivers
+// the projection discarded (see SurfaceDropStats).
+func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) ([]*Footprint, SurfaceDropStats) {
+	var drop SurfaceDropStats
 	nSlabs := len(planes) - 1
 	if nSlabs < 1 {
-		return nil
+		return nil, drop
 	}
 	zLo, zHi := planes[0], planes[nSlabs]
 	perSlab := make([]clipper.Paths, nSlabs)
@@ -150,8 +168,21 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footp
 		}
 		for si := ks; si <= ke; si++ {
 			zb, zt := planes[si], planes[si+1]
-			if p, ok := triBandXYPath(a, b, c, zb, zt); ok {
+			p, ok, slivArea := triBandXYPath(a, b, c, zb, zt)
+			drop.Considered++
+			if ok {
 				perSlab[si] = append(perSlab[si], p)
+			} else if slivArea >= 0 {
+				// slivArea >= 0 marks a thinness reject (its discarded area,
+				// which is exactly 0 for an axis-aligned wall); the empty
+				// reject returns -1 and is not a sliver. Gating on >= 0, not
+				// > 0, keeps exactly-collinear drops in the count so the log
+				// is not silent on box-like geometry.
+				drop.Dropped++
+				drop.AreaSum += slivArea
+				if slivArea > drop.AreaMax {
+					drop.AreaMax = slivArea
+				}
 			}
 		}
 	}
@@ -174,7 +205,7 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footp
 			out[i] = fp
 		}
 	}
-	return out
+	return out, drop
 }
 
 // triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and
@@ -193,22 +224,27 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) []*Footp
 // "uneven ring cells" failure. We reject by aspect (area vs. longest
 // edge²), which is scale-invariant: a genuine bulge patch projects with
 // O(1) aspect and survives; only essentially-collinear slices are dropped.
-func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool) {
+//
+// The third return distinguishes the two reject reasons so the caller can
+// account for what the filter removed: a thinness reject returns the
+// discarded |XY area| (>= 0 — exactly 0 for an axis-aligned wall, whose
+// projection is perfectly collinear); the empty reject (fewer than 3
+// projected vertices) returns -1; an accepted triangle returns 0 with
+// ok=true. A vertical wall's discarded area is ~0; a non-trivial value is
+// the breadcrumb that the filter touched something with real extent.
+func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool, float32) {
 	poly := []([3]float32){a, b, c}
 	poly = clipPolyZHalf(poly, zBot, true)  // keep z >= zBot
 	poly = clipPolyZHalf(poly, zTop, false) // keep z <= zTop
 	if len(poly) < 3 {
-		return nil, false
+		return nil, false, -1
 	}
 	pts := make([]Point2, len(poly))
 	for i, p := range poly {
 		pts[i] = Point2{p[0], p[1]}
 	}
 	sa := signedArea(pts)
-	area := sa
-	if area < 0 {
-		area = -area
-	}
+	area := absf32(sa)
 	var maxEdge2 float32
 	for i := range pts {
 		j := (i + 1) % len(pts)
@@ -222,14 +258,14 @@ func triBandXYPath(a, b, c [3]float32, zBot, zTop float32) (clipper.Path, bool) 
 	// →0 for a sliver). 1e-3 keeps every real surface patch and drops only
 	// near-collinear vertical-wall projection noise.
 	if maxEdge2 == 0 || area < 1e-3*maxEdge2 {
-		return nil, false
+		return nil, false, area
 	}
 	if sa < 0 {
 		for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
 			pts[i], pts[j] = pts[j], pts[i]
 		}
 	}
-	return pointsToClipperPath(pts), true
+	return pointsToClipperPath(pts), true, 0
 }
 
 // clipPolyZHalf clips a 3D polygon against a horizontal half-space using

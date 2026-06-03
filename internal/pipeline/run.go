@@ -895,7 +895,30 @@ func (r *pipelineRun) sliceSampleHalf(
 	if !r.opts.NoInteriorFaceFootprint {
 		interiorFps = cellslicer.InteriorHorizontalFootprints(geom, planes)
 	}
-	surfaceFps := cellslicer.SlabSurfaceFootprints(geom, planes)
+	surfaceFps, surfDrop := cellslicer.SlabSurfaceFootprints(geom, planes)
+	if surfDrop.Dropped > 0 {
+		// The surface-projection stage discards near-vertical wall slices
+		// whose XY projection is a degenerate sliver (see triBandXYPath).
+		// Logged so the drop is never silent. minPx is the smallest dither
+		// pixel across the model; a vertical wall's discarded slices are
+		// collinear (~0 area), so a discard whose area rivals a pixel is the
+		// breadcrumb that the filter may have eaten real coverage — flagged
+		// loudly here so a future surface hole points straight at this stage
+		// instead of costing a blind bisect.
+		minCS := cellSizeForSlab(0)
+		for i := 1; i < nSlabs; i++ {
+			if cs := cellSizeForSlab(i); cs < minCS {
+				minCS = cs
+			}
+		}
+		minPx := (minCS / 4) * (minCS / 4)
+		plog.Printf("  Surface footprint: dropped %d/%d near-vertical slivers (Σarea %.4g mm², max single %.4g mm², pixel %.4g mm²)",
+			surfDrop.Dropped, surfDrop.Considered, surfDrop.AreaSum, surfDrop.AreaMax, minPx)
+		if surfDrop.AreaMax > minPx {
+			plog.Printf("  WARNING: a dropped surface sliver (%.4g mm²) exceeded one dither pixel (%.4g mm²); if the output shows surface holes, suspect the triBandXYPath degeneracy filter",
+				surfDrop.AreaMax, minPx)
+		}
+	}
 	footprints := make([]*cellslicer.Footprint, nSlabs)
 	capFps := make([]*cellslicer.Footprint, nSlabs)
 	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
