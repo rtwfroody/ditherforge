@@ -106,7 +106,7 @@ func TestPairAdjacentSameColorCells(t *testing.T) {
 	}}}
 	color := []int32{1, 1, 2, 1}
 
-	groups := pairAdjacentSameColorCells(slabs, color)
+	groups := growSameColorCellGroups(slabs, color)
 	if len(groups) != 3 {
 		t.Fatalf("got %d groups, want 3: %+v", len(groups), groups)
 	}
@@ -132,7 +132,7 @@ func TestPairAdjacentSameColorCells_KindBoundary(t *testing.T) {
 		sq(0, 0, 10, KindRing), // 0
 		sq(10, 0, 10, KindHex), // 1 adjacent, same color, different kind
 	}}}
-	groups := pairAdjacentSameColorCells(slabs, []int32{5, 5})
+	groups := growSameColorCellGroups(slabs, []int32{5, 5})
 	if len(groups) != 2 {
 		t.Fatalf("different-kind adjacent cells must not merge; got %d groups, want 2", len(groups))
 	}
@@ -140,12 +140,11 @@ func TestPairAdjacentSameColorCells_KindBoundary(t *testing.T) {
 
 func TestClipMeshToMergedCellsFourCellsOneColor(t *testing.T) {
 	// Same fixture as TestClipMeshToCellsManifoldFourCells, with all four
-	// cells one color. Merging is capped at two cells per group, so the
-	// 2×2 same-color block pairs greedily into TWO groups — {0,1} (rep 0)
-	// and {2,3} (rep 2) — not one slab-spanning group. The merged clip must
-	// still cover the same surface area (80 mm²) as the per-cell clip, tag
-	// every face with its group representative, and report the pairing in
-	// CellRep.
+	// cells one color. The 2×2 same-color block is a clean (non-pinched)
+	// square at every growth step, so under the cap of four it grows into a
+	// SINGLE group {0,1,2,3} (rep 0). The merged clip must still cover the
+	// same surface area (80 mm²) as the per-cell clip, tag every face with
+	// the group representative, and report the grouping in CellRep.
 	model := cubeModel(10)
 	cells := []Cell{
 		{Outer: []Point2{{0, 0}, {5, 0}, {5, 5}, {0, 5}}, Kind: KindHex},
@@ -163,20 +162,19 @@ func TestClipMeshToMergedCellsFourCellsOneColor(t *testing.T) {
 	if len(cr.Faces) == 0 {
 		t.Fatal("0 faces")
 	}
-	// Faces map to one of the two group representatives (cells 0 and 2),
-	// and both groups contribute faces.
+	// All faces map to the single group representative (cell 0).
 	seen := map[int32]bool{}
 	for _, idx := range cr.FaceCellIdx {
-		if idx != 0 && idx != 2 {
-			t.Errorf("FaceCellIdx contains %d, want 0 or 2 (group reps)", idx)
+		if idx != 0 {
+			t.Errorf("FaceCellIdx contains %d, want 0 (sole group rep)", idx)
 		}
 		seen[idx] = true
 	}
-	if !seen[0] || !seen[2] {
-		t.Errorf("expected faces tagged with both reps 0 and 2, got %v", seen)
+	if !seen[0] {
+		t.Errorf("expected faces tagged with rep 0, got %v", seen)
 	}
-	// CellRep: cells 0,1 → rep 0; cells 2,3 → rep 2.
-	want := []int32{0, 0, 2, 2}
+	// CellRep: all four cells → rep 0 (one merged group).
+	want := []int32{0, 0, 0, 0}
 	if len(cr.CellRep) != len(want) {
 		t.Fatalf("CellRep len=%d, want %d", len(cr.CellRep), len(want))
 	}

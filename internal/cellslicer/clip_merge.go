@@ -21,31 +21,44 @@ type mergeGroup struct {
 	cellIdxs []int
 }
 
-// pairAdjacentSameColorCells pairs each slab's cells into merge groups
-// of AT MOST TWO cells. A pair must be same-kind, same-color, and share a
-// footprint edge — one cell owns a directed half-edge whose reverse is
-// owned by the other (the exact int2D bucket test MarkOuterEdges uses), so
-// only spatially adjacent cells merge. cellColor is indexed by global cell
-// index (the flattened CellSlabs order, matching ClipMeshToCellsManifold's
-// FaceCellIdx space) and must have one entry per cell.
+// maxMergeGroupCells caps how many cells a single merge group may contain.
+// It is a safety backstop, not the primary complexity limiter — the real
+// limit is the per-admission cleanliness check in growSameColorCellGroups
+// (a candidate is only admitted if the merged footprint still traces as a
+// single non-pinched contour). The cap keeps the incremental re-trace cheap
+// and stops any one prism from growing slab-spanning, which is what the old
+// union-find behaviour did before it punched holes in the output mesh.
+const maxMergeGroupCells = 4
+
+// growSameColorCellGroups partitions each slab's cells into merge groups by
+// greedy region growing, gated on footprint cleanliness. A member must be
+// same-kind, same-color, and share a footprint edge with the group — one
+// cell owns a directed half-edge whose reverse is owned by the other (the
+// exact int2D bucket test MarkOuterEdges uses), so only spatially adjacent
+// cells merge. cellColor is indexed by global cell index (the flattened
+// CellSlabs order, matching ClipMeshToCellsManifold's FaceCellIdx space)
+// and must have one entry per cell.
 //
-// Pairing is greedy: cells are walked in ascending index and each
-// still-unpaired cell is matched with the first still-unpaired same-color
-// edge-neighbour; a cell that finds no partner stays in a group of one.
+// Growing is greedy: cells are walked in ascending index; each unclaimed
+// cell seeds a group, then edge-neighbours are admitted one at a time as
+// long as (a) the group stays under maxMergeGroupCells and (b) the union of
+// its members still traces as a single clean (non-pinched) contour, tested
+// by running mergedGroupContours on the candidate group. A candidate that
+// would pinch the boundary is skipped, not blacklisted — another neighbour
+// may still be admissible — and a cell with no admissible neighbour stays
+// in a group of one.
 //
-// The cap of two is deliberate. Arbitrarily large same-color components
-// (the previous union-find behaviour) produced slab-spanning merged prisms
-// whose boundary bloat and pinch-tracing punched holes in the output mesh.
-// A pair is just the union of two adjacent tiles sharing one edge — a
-// simple shape — so the merged output stays faithful to the per-cell clip
-// while still removing the one internal seam between the pair. A missed
-// adjacency only leaves a cell solo — never a false merge.
+// Gating on cleanliness (rather than a fixed pair count) is what keeps the
+// merged shapes easy to clip: the same pinch test that the clip path falls
+// back on is moved earlier, to admission time, so pinched groups are never
+// built in the first place and every clean merge that fits under the cap is
+// kept. A missed adjacency only leaves a cell solo — never a false merge.
 //
-// The smaller-index member of each pair is its representative; faces from
-// the group are tagged with it. (Walking ascending guarantees an unpaired
-// partner has a larger index than the cell being processed, so the cell
-// being processed is always the representative.)
-func pairAdjacentSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup {
+// The seed is always the group's representative: cells are walked ascending
+// and only unclaimed cells are admitted, so every admitted member has a
+// larger index than the seed. Faces from the group are tagged with the
+// representative's global cell index.
+func growSameColorCellGroups(slabs []Slab, cellColor []int32) []mergeGroup {
 	var groups []mergeGroup
 	globalBase := 0
 	for si := range slabs {
@@ -63,41 +76,57 @@ func pairAdjacentSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup {
 			}
 		}
 
-		paired := make([]bool, n)
+		claimed := make([]bool, n)
 		for ci := 0; ci < n; ci++ {
-			if paired[ci] {
+			if claimed[ci] {
 				continue
 			}
-			// Find the first still-unpaired same-kind, same-color
-			// edge-neighbour to pair with.
-			partner := -1
-			outer := cells[ci].Outer
-			m := len(outer)
-			for k := 0; k < m; k++ {
-				cj, ok := owner[dirEdgeOf(outer[k], outer[(k+1)%m]).reverse()]
-				if !ok || cj == ci || paired[cj] {
-					continue
+			claimed[ci] = true
+			members := []int{ci}
+
+			// Admit edge-neighbours one at a time while the merged
+			// footprint stays clean and the group is under the cap. Each
+			// admission can expose new neighbours, so rescan all members
+			// after every accept (the inner loop breaks back to here).
+			for len(members) < maxMergeGroupCells {
+				cand := -1
+			scan:
+				for _, mi := range members {
+					outer := cells[mi].Outer
+					m := len(outer)
+					for k := 0; k < m; k++ {
+						cj, ok := owner[dirEdgeOf(outer[k], outer[(k+1)%m]).reverse()]
+						if !ok || claimed[cj] {
+							continue
+						}
+						if cells[cj].Kind != cells[ci].Kind {
+							continue
+						}
+						if cellColor[globalBase+cj] != cellColor[globalBase+ci] {
+							continue
+						}
+						// Admit only if the union stays a single clean
+						// (non-pinched) contour.
+						trial := append(append([]int(nil), members...), cj)
+						if _, clean := mergedGroupContours(cells, trial); !clean {
+							continue
+						}
+						cand = cj
+						break scan
+					}
 				}
-				if cells[cj].Kind != cells[ci].Kind {
-					continue
+				if cand < 0 {
+					break
 				}
-				if cellColor[globalBase+cj] != cellColor[globalBase+ci] {
-					continue
-				}
-				partner = cj
-				break
+				claimed[cand] = true
+				members = append(members, cand)
 			}
-			paired[ci] = true
-			g := mergeGroup{
+
+			groups = append(groups, mergeGroup{
 				slabIdx:   si,
 				repGlobal: globalBase + ci,
-				cellIdxs:  []int{ci},
-			}
-			if partner >= 0 {
-				paired[partner] = true
-				g.cellIdxs = append(g.cellIdxs, partner)
-			}
-			groups = append(groups, g)
+				cellIdxs:  members,
+			})
 		}
 		globalBase += n
 	}
@@ -105,13 +134,13 @@ func pairAdjacentSameColorCells(slabs []Slab, cellColor []int32) []mergeGroup {
 }
 
 // ClipMeshToMergedCellsManifold is the merged-cell counterpart of
-// ClipMeshToCellsManifold. It pairs adjacent same-kind, same-color cells
-// within each slab (at most two per group; see
-// pairAdjacentSameColorCells) and clips the model against each group's
-// merged prism in a single Manifold intersection, rather than one
-// intersection per cell. cellColor supplies each cell's color (any int32
-// label whose equality defines "same color"; -1 is an ordinary label —
-// adjacent same-kind -1 cells pair like any other shared color). The
+// ClipMeshToCellsManifold. It groups adjacent same-kind, same-color cells
+// within each slab (greedy region growing, capped and gated on footprint
+// cleanliness; see growSameColorCellGroups) and clips the model against
+// each group's merged prism in a single Manifold intersection, rather than
+// one intersection per cell. cellColor supplies each cell's color (any
+// int32 label whose equality defines "same color"; -1 is an ordinary label
+// — adjacent same-kind -1 cells group like any other shared color). The
 // result's FaceCellIdx tags each face with its group's representative
 // global cell index, and CellRep maps every cell to that representative so
 // per-cell coverage diagnostics still work.
@@ -137,7 +166,7 @@ func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cell
 	}
 	defer ss.close()
 
-	groups := pairAdjacentSameColorCells(slabs, cellColor)
+	groups := growSameColorCellGroups(slabs, cellColor)
 
 	// One job per merged group; faces are tagged with the group's
 	// representative global cell index.

@@ -101,7 +101,7 @@ func int2DOf(p Point2) int2D {
 // int2D buckets. A cell-Outer edge in one cell meets its reverse in the
 // neighbour that shares it, so a map keyed by dirEdge is the canonical
 // way the cellslicer identifies shared cell boundaries. MarkOuterEdges
-// (open-edge marking), pairAdjacentSameColorCells (merge grouping),
+// (open-edge marking), growSameColorCellGroups (merge grouping),
 // and mergedGroupContours (merge contour cancellation) all rely on this
 // one bucketing + winding convention — keep it defined here only.
 type dirEdge struct{ a, b int2D }
