@@ -50,7 +50,7 @@ func SampleCells(
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	out := []CellSample{}
 	for si_ := range slabs {
-		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, override, nil, buf)...)
+		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil)...)
 	}
 	return out
 }
@@ -75,6 +75,18 @@ func SampleCells(
 // coords while color is still read from the untouched original-coords
 // ColorModel. nil = identity (the unsplit pipeline). See
 // docs/split-cellslicer.md.
+//
+// stickerModel/stickerSI are the sticker substrate and its spatial
+// index: base color is always read from model, while the decal is a
+// second nearest-tri lookup against stickerModel (the decal TriUVs
+// index into it, not into model). Pass nil for both when no stickers
+// were placed. The same colorXform'd sample point feeds both lookups —
+// stickerModel lives in the same original-mesh frame as model in every
+// configuration (projection/unfold clone or alpha-wrap mesh). stickerBuf
+// is the per-worker scratch buffer for the decal lookup; it must be
+// sized for stickerModel.Faces (which can exceed model.Faces). Pass nil
+// and SampleSlab allocates one itself — callers that sample many slabs
+// should supply a reused buffer to avoid per-call allocation.
 func SampleSlab(
 	s *Slab,
 	slabIdx int,
@@ -83,11 +95,22 @@ func SampleSlab(
 	cellSize float32,
 	searchRadius float32,
 	decals []*voxel.StickerDecal,
+	stickerModel *loader.LoadedModel,
+	stickerSI *voxel.SpatialIndex,
 	override voxel.BaseColorOverride,
 	colorXform func([3]float32) [3]float32,
 	buf *voxel.SearchBuf,
+	stickerBuf *voxel.SearchBuf,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
+	// The decal lookup indexes stickerModel's faces, which can outnumber
+	// model's (subdivided clone / wrap), so its SearchBuf must be sized to
+	// stickerModel. Allocate one when the caller didn't, rather than let
+	// SampleNearestColorWithSticker reuse the undersized color buf and index
+	// out of range.
+	if stickerModel != nil && stickerBuf == nil {
+		stickerBuf = voxel.NewSearchBuf(len(stickerModel.Faces))
+	}
 	out := make([]CellSample, 0, len(s.Cells))
 	midZ := 0.5 * (s.ZBot + s.ZTop)
 	for ci := range s.Cells {
@@ -107,7 +130,7 @@ func SampleSlab(
 			if colorXform != nil {
 				p = colorXform(p)
 			}
-			rgba := voxel.SampleNearestColor(p, model, si, searchRadius, buf, decals, override)
+			rgba := voxel.SampleNearestColorWithSticker(p, model, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 			if rgba[3] < 128 {
 				continue
 			}

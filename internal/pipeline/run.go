@@ -635,10 +635,17 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Sticker is still stubbed during the cellslicer transition;
-		// resolve it so its stub caches, but ignore the (empty)
-		// output (decals are not yet wired into cell sampling).
-		if _, err := r.Sticker(); err != nil {
+		// Resolve the sticker stage and feed its decals into cell
+		// sampling below. Base color always comes from ColorModel; each
+		// decal is composited via a second nearest-tri lookup against the
+		// sticker substrate (stickerOut.Model) — a clone of ColorModel
+		// (projection/unfold) or the alpha-wrap mesh. Both configurations
+		// use the same two-lookup path, so there is no alpha-wrap special
+		// case here. stickerOut.Model lives in the same original-mesh
+		// frame ColorModel does, so the per-half colorXform maps sample
+		// points correctly for both lookups.
+		stickerOut, err := r.Sticker()
+		if err != nil {
 			return nil, err
 		}
 		// Split, when enabled, drives the per-half cellslicer pass
@@ -683,6 +690,20 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		colorModel := lo.ColorModel
 		spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
 
+		// Sticker substrate + its spatial index for the per-cell decal
+		// lookup. All nil when no stickers were placed, in which case
+		// SampleSlab falls straight through to the base-color-only path.
+		var (
+			stickerModel *loader.LoadedModel
+			stickerSI    *voxel.SpatialIndex
+			decals       []*voxel.StickerDecal
+		)
+		if len(stickerOut.Decals) > 0 {
+			stickerModel = stickerOut.Model
+			stickerSI = stickerOut.ensureSI()
+			decals = stickerOut.Decals
+		}
+
 		// Work units: one per split half (geometry already laid out in
 		// bed coords by split.Layout), or a single unit on the whole
 		// model when Split is off. colorXform maps a unit's sample
@@ -722,7 +743,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			agg             cellslicer.PartitionStats
 		)
 		for _, u := range units {
-			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, u.colorXform, u.halfIdx, cellSizeForSlab, layerH)
+			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, u.colorXform, u.halfIdx, cellSizeForSlab, layerH)
 			if herr != nil {
 				return nil, herr
 			}
@@ -846,6 +867,16 @@ type halfVoxels struct {
 	stats     cellslicer.PartitionStats
 }
 
+// sampleBufs holds the per-worker scratch buffers for one cellslicer
+// sampling goroutine: color indexes ColorModel for base color, sticker
+// indexes the sticker substrate for the decal lookup (nil when no
+// stickers were placed). Kept per worker so the SampleSlab inner loop
+// never allocates.
+type sampleBufs struct {
+	color   *voxel.SearchBuf
+	sticker *voxel.SearchBuf
+}
+
 // sliceSampleHalf runs slice → footprint → partition → sample →
 // adjacency on one geometry mesh. geom is sliced in its own coordinate
 // frame; colorModel + spatial are the shared (original-coords) color
@@ -855,6 +886,9 @@ type halfVoxels struct {
 func (r *pipelineRun) sliceSampleHalf(
 	geom, colorModel *loader.LoadedModel,
 	spatial *voxel.SpatialIndex,
+	stickerModel *loader.LoadedModel,
+	stickerSI *voxel.SpatialIndex,
+	decals []*voxel.StickerDecal,
 	colorXform func([3]float32) [3]float32,
 	halfIdx byte,
 	cellSizeForSlab func(int) float32,
@@ -949,9 +983,17 @@ func (r *pipelineRun) sliceSampleHalf(
 	perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
 	perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
 	runParallel(nWorkers, nSlabs, func(workerID int) any {
-		return voxel.NewSearchBuf(len(colorModel.Faces))
+		b := &sampleBufs{color: voxel.NewSearchBuf(len(colorModel.Faces))}
+		if stickerModel != nil {
+			// The decal lookup indexes stickerModel's faces, so its
+			// SearchBuf must be sized to stickerModel — it can differ
+			// (subdivided clone / wrap) from colorModel.
+			b.sticker = voxel.NewSearchBuf(len(stickerModel.Faces))
+		}
+		return b
 	}, func(i int, state any) {
-		buf := state.(*voxel.SearchBuf)
+		bufs := state.(*sampleBufs)
+		buf := bufs.color
 		t0 := time.Now()
 		// PartitionSlabAnalytic takes this slab's COVERAGE footprint
 		// (footprints[i], the in-band silhouette) for band/ring/clip, and
@@ -982,7 +1024,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
-		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, nil, nil, colorXform, buf)
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, nil, colorXform, buf, bufs.sticker)
 		sampleNs.Add(int64(time.Since(t1)))
 	})
 	slabElapsed := time.Since(tSlab).Seconds()
