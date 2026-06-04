@@ -104,38 +104,6 @@ func voronoiBandCells(seeds []Point2, region *Footprint, cellSize, pxArea float3
 	return voronoiCells(seeds, kinds, region, cellSize, pxArea)
 }
 
-// hexLatticeSeeds returns the centres of a cellSize-spaced hex lattice
-// that fall inside `region`. These are the interior Voronoi seeds: a
-// triangular/hex lattice's Voronoi diagram is the regular hex tiling, so
-// seeding the interior this way reproduces the hexagonal interior cells
-// while letting one unified diagram blend them into the boundary band.
-// Only centres inside `region` are kept; the unified diagram still tiles
-// `region` with no gaps, since any region point omitted by a filtered
-// centre is simply claimed by its next-nearest seed.
-func hexLatticeSeeds(region *Footprint, cellSize float32) []Point2 {
-	if region == nil || len(region.Loops) == 0 {
-		return nil
-	}
-	minX, minY, maxX, maxY, _ := region.Bounds()
-	dx := cellSize
-	dy := cellSize * float32(math.Sqrt(3)/2)
-	var seeds []Point2
-	row := 0
-	for y := minY; y <= maxY; y += dy {
-		offset := float32(0)
-		if row%2 == 1 {
-			offset = dx / 2
-		}
-		for x := minX + offset; x <= maxX; x += dx {
-			if region.Contains(x, y) {
-				seeds = append(seeds, Point2{x, y})
-			}
-		}
-		row++
-	}
-	return seeds
-}
-
 // clipHalfPlaneCloserTo returns the part of convex polygon `poly` that
 // is at least as close to `s` as to `t` — i.e. on s's side of the
 // perpendicular bisector of segment s–t. Sutherland–Hodgman against the
@@ -217,6 +185,36 @@ func (g *seedGrid) key(p Point2) [2]int {
 		int(math.Floor(float64((p[0] - g.minX) / g.bucket))),
 		int(math.Floor(float64((p[1] - g.minY) / g.bucket))),
 	}
+}
+
+// add inserts p into the grid so subsequent queries see it. Used by the
+// greedy seed-acceptance pass, which grows the accepted set incrementally.
+func (g *seedGrid) add(p Point2) {
+	j := len(g.seeds)
+	g.seeds = append(g.seeds, p)
+	k := g.key(p)
+	g.cells[k] = append(g.cells[k], j)
+}
+
+// hasCloserThan reports whether any indexed seed is strictly closer than
+// dist to p. dist must be <= the grid's bucket size so the 3×3 scan covers
+// the full neighbourhood.
+func (g *seedGrid) hasCloserThan(p Point2, dist float32) bool {
+	d2 := dist * dist
+	k := g.key(p)
+	for dx := -1; dx <= 1; dx++ {
+		for dy := -1; dy <= 1; dy++ {
+			for _, j := range g.cells[[2]int{k[0] + dx, k[1] + dy}] {
+				q := g.seeds[j]
+				ddx := q[0] - p[0]
+				ddy := q[1] - p[1]
+				if ddx*ddx+ddy*ddy < d2 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // forEachWithin calls fn(j) for every seed j within the grid radius of

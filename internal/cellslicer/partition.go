@@ -271,6 +271,87 @@ func ringSeeds(fpCur *Footprint, cellSize float32) []Point2 {
 	return seeds
 }
 
+// minSeedSpacingFrac sets the greedy drop threshold for cap seeds as a
+// fraction of cellSize. Two seeds closer than this are not both kept,
+// because a Voronoi cell's in-circle radius is half the distance to its
+// nearest neighbour — so a nearest-neighbour distance of cellSize is what
+// guarantees the cell holds a cellSize-diameter circle. The <1 slack
+// absorbs the FP rounding in the inward offsets and the arc-length walk so
+// legitimate ~cellSize neighbours (e.g. the first cap ring sitting exactly
+// cellSize inside the boundary seeds) are not dropped.
+const minSeedSpacingFrac = 0.999
+
+// concentricCapSeeds fills the cap surface (innerCap) with seeds laid on
+// curves offset progressively inward from the footprint boundary, so cap
+// cells run parallel to the ring cells instead of sitting on an axis-
+// aligned hex grid — which removes the visible seam where the ring meets
+// the cap (the grid's first row hit the contour-following ring at an
+// arbitrary angle and phase).
+//
+// Each ring k is fpCur eroded by cellSize/2 + k*cellSize, walked at
+// cellSize; ring 0 is the boundary seeds themselves (passed in as
+// ringSeedPts and pinned). Candidates are accepted outermost-first and any
+// candidate closer than ~cellSize to an already-accepted seed is dropped
+// (greedy Poisson-disk thinning, via the cellSize spatial hash). That keeps
+// every cell big enough for a cellSize-diameter circle and naturally cleans
+// up the two crowding spots: the ring/cap interface (thinned against the
+// pinned boundary seeds) and the medial axis, where inward rings converge
+// and the surplus is dropped, leaving a sparse central spine.
+//
+// innerCap empty (a buried/wall slab with no visible cap) yields no seeds,
+// so the slicer stays surface-only.
+func concentricCapSeeds(fpCur, innerCap *Footprint, cellSize float32, ringSeedPts []Point2) []Point2 {
+	if innerCap == nil || len(innerCap.Loops) == 0 {
+		return nil
+	}
+	minSpacing := minSeedSpacingFrac * cellSize
+
+	// Greedy min-distance acceptance over the pinned boundary seeds plus the
+	// cap seeds accepted so far. Copy ringSeedPts: the grid grows its own
+	// backing slice and must not disturb the caller's seed list.
+	g := newSeedGrid(append([]Point2(nil), ringSeedPts...), cellSize)
+
+	// The inward offsets terminate when the cap is exhausted (OffsetFootprint
+	// returns empty); the bbox-diagonal cap is only a backstop so a
+	// pathological non-collapsing offset can't spin forever.
+	minX, minY, maxX, maxY, _ := fpCur.Bounds()
+	maxRings := int(hypot(maxX-minX, maxY-minY)/cellSize) + 2
+
+	var capSeeds []Point2
+	for k := 1; k <= maxRings; k++ {
+		d := cellSize/2 + float32(k)*cellSize
+		ring := OffsetFootprint(fpCur, -d)
+		if len(ring.Loops) == 0 {
+			break
+		}
+		// Thin THIS ring against the boundary seeds and the rings already
+		// placed, but not against itself: a ring's own walk sets its spacing
+		// (cellSize, with the same arc-length rounding the boundary seeds
+		// use), so its points are added to the grid only after the whole ring
+		// is processed. Filtering within a ring would let a ring whose walk
+		// rounded to just under cellSize decimate itself to every-other-point.
+		var ringPts []Point2
+		for i := range ring.Loops {
+			lp := &ring.Loops[i]
+			for _, m := range walkLoopAtCellSize(lp, cellSize) {
+				p := m.point
+				if !innerCap.Contains(p[0], p[1]) {
+					continue // outside the visible cap surface
+				}
+				if g.hasCloserThan(p, minSpacing) {
+					continue // crowds a kept seed: would undersize a cell
+				}
+				ringPts = append(ringPts, p)
+			}
+		}
+		for _, p := range ringPts {
+			g.add(p)
+		}
+		capSeeds = append(capSeeds, ringPts...)
+	}
+	return capSeeds
+}
+
 // PartitionSlabAnalytic partitions a slab's footprint into compact
 // boundary + hex cells using exact Clipper polygon booleans, with no
 // raster round-trip. Every cell is sized so a cellSize-diameter circle
@@ -363,7 +444,7 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	seeds := ringSeeds(fpCur, cellSize)
 	stats.RawRing = len(seeds)
 
-	interior := hexLatticeSeeds(innerCap, cellSize)
+	interior := concentricCapSeeds(fpCur, innerCap, cellSize, seeds)
 	stats.RawHex = len(interior)
 
 	kinds := make([]CellKind, 0, len(seeds)+len(interior))
