@@ -294,10 +294,33 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// Every cell is clipped to coverTarget (band ∪ innerCap), not to band
 	// and innerCap separately, so the diagram tiles the shell exactly with
 	// no gap or overlap at the boundary/interior interface.
+	// Ring seeds are placed half a cell INSIDE the perimeter rather than on
+	// it. A seed sitting on the boundary gives a Voronoi cell straddling
+	// fpCur, so the clip to coverTarget throws away its outer ~half and the
+	// surviving ring cell is a half-size sliver the slicer is prone to drop.
+	// Pushing the seed cellSize/2 into the solid lands the whole cell inside,
+	// yielding a ~full-size ring cell. The push is per-seed along the
+	// into-solid normal; spacing and count come from the original perimeter
+	// walk, so the number of ring cells is unchanged — only their seeds
+	// re-center inward. If the pushed point lands outside fpCur (a feature
+	// thinner than ~cellSize, where a true inset would collapse the loop) we
+	// keep the on-perimeter point so the thin band still gets its seed.
 	var seeds []Point2
+	const ringInsetFrac = 0.5 // inset distance as a fraction of cellSize
+	ringInset := ringInsetFrac * cellSize
 	for i := range fpCur.Loops {
-		for _, m := range walkLoopAtCellSize(&fpCur.Loops[i], cellSize) {
-			seeds = append(seeds, m.point)
+		loop := &fpCur.Loops[i]
+		for _, m := range walkLoopAtCellSize(loop, cellSize) {
+			// inwardNormal ("left of travel") points into the solid for
+			// both CCW outer loops and CW hole loops, so no per-loop sign
+			// flip is needed; Contains below is the final safety gate.
+			nrm := inwardNormal(loop, m)
+			cand := Point2{m.point[0] + ringInset*nrm[0], m.point[1] + ringInset*nrm[1]}
+			if fpCur.Contains(cand[0], cand[1]) {
+				seeds = append(seeds, cand)
+			} else {
+				seeds = append(seeds, m.point) // thin feature: inset collapses, stay on perimeter
+			}
 		}
 	}
 	stats.RawRing = len(seeds)
