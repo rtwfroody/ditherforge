@@ -620,6 +620,10 @@ func (a *App) LogMessage(level, msg string) {
 type DebugCellsSlabResult struct {
 	SVG       string `json:"svg"`
 	SlabCount int    `json:"slabCount"`
+	// MedianCellAreaMM2 is the median cell polygon area (mm²) for the
+	// returned slab, summarizing cell size for the debug view. 0 when the
+	// slab has no cells.
+	MedianCellAreaMM2 float32 `json:"medianCellAreaMM2"`
 }
 
 // DebugCellsSlabSVG renders one slab's cell partition (colored by
@@ -632,13 +636,14 @@ func (a *App) DebugCellsSlabSVG(slabIdx int) (*DebugCellsSlabResult, error) {
 	if last == nil {
 		return nil, fmt.Errorf("no model loaded yet — run the pipeline first")
 	}
-	svg, slabCount, err := pipeline.CellsSlabSVG(a.cache, *last, slabIdx)
+	svg, slabCount, medianArea, err := pipeline.CellsSlabSVG(a.cache, *last, slabIdx)
 	if err != nil {
 		return nil, err
 	}
 	return &DebugCellsSlabResult{
-		SVG:       svg,
-		SlabCount: slabCount,
+		SVG:               svg,
+		SlabCount:         slabCount,
+		MedianCellAreaMM2: medianArea,
 	}, nil
 }
 

@@ -2,9 +2,34 @@ package cellslicer
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
+
+// MedianCellAreaMM2 returns the median of the slab's cell polygon XY
+// areas (mm²), or 0 if the slab has no cells with a valid polygon. It
+// summarizes cell size for the Cells debug view; the area is taken from
+// each cell's drawn Outer polygon so it matches exactly what the view
+// shows, independent of which cells produced color samples.
+func (s *Slab) MedianCellAreaMM2() float32 {
+	areas := make([]float32, 0, len(s.Cells))
+	for i := range s.Cells {
+		if len(s.Cells[i].Outer) < 3 {
+			continue
+		}
+		areas = append(areas, absf32(signedArea(s.Cells[i].Outer)))
+	}
+	if len(areas) == 0 {
+		return 0
+	}
+	slices.Sort(areas)
+	n := len(areas)
+	if n%2 == 1 {
+		return areas[n/2]
+	}
+	return (areas[n/2-1] + areas[n/2]) / 2
+}
 
 // DebugSVGOptions controls the per-slab cell visualization rendered
 // by RenderSlabDebugSVG. Zero values pick sensible defaults.

@@ -73,13 +73,16 @@ func CellsSlabPNG(cache *StageCache, opts Options, slabIdx int) (data []byte, sl
 // have run; otherwise returns an error. Empty slabs return an empty
 // string with no error — the slabCount return tells callers which
 // indices have geometry.
-func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, slabCount int, err error) {
+func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, slabCount int, medianAreaMM2 float32, err error) {
 	cache.WaitForDiskWrites()
 	vo := cache.getVoxelize(opts)
 	if vo == nil {
-		return "", 0, fmt.Errorf("voxelize stage has not run yet — run the pipeline first")
+		return "", 0, 0, fmt.Errorf("voxelize stage has not run yet — run the pipeline first")
 	}
 	slabCount = len(vo.CellSlabs)
+	if slabIdx >= 0 && slabIdx < len(vo.CellSlabs) {
+		medianAreaMM2 = vo.CellSlabs[slabIdx].MedianCellAreaMM2()
+	}
 	svg = cellslicer.RenderSlabDebugSVG(vo.CellSlabs, vo.CellSamples, slabIdx, cellslicer.DebugSVGOptions{
 		CellSizeMM:          vo.CellSize,
 		FillBackgroundWhite: true,
@@ -89,7 +92,7 @@ func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, sla
 		HighlightUncovered:  true,
 	})
 	dumpSlabIfRequested(vo.CellSlabs, slabIdx)
-	return svg, slabCount, nil
+	return svg, slabCount, medianAreaMM2, nil
 }
 
 // dumpSlabIfRequested writes a JSON snapshot of slab `slabIdx` to the
@@ -149,14 +152,14 @@ func dumpSlabIfRequested(slabs []cellslicer.Slab, slabIdx int) {
 		return out
 	}
 	payload := struct {
-		SlabIndex   int       `json:"slab_index"`
-		ZBot        float32   `json:"z_bot"`
-		ZTop        float32   `json:"z_top"`
-		BotLoops    []loopJSON `json:"bot_loops"`
-		TopLoops    []loopJSON `json:"top_loops"`
-		Footprint   *fpJSON   `json:"footprint"`
-		FpBelow     *fpJSON   `json:"fp_below"`
-		FpAbove     *fpJSON   `json:"fp_above"`
+		SlabIndex int        `json:"slab_index"`
+		ZBot      float32    `json:"z_bot"`
+		ZTop      float32    `json:"z_top"`
+		BotLoops  []loopJSON `json:"bot_loops"`
+		TopLoops  []loopJSON `json:"top_loops"`
+		Footprint *fpJSON    `json:"footprint"`
+		FpBelow   *fpJSON    `json:"fp_below"`
+		FpAbove   *fpJSON    `json:"fp_above"`
 	}{
 		SlabIndex: s.Index,
 		ZBot:      s.ZBot,

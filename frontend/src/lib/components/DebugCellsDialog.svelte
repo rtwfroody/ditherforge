@@ -12,6 +12,7 @@
 
   let slabIdx = $state(0);
   let slabCount = $state(0);
+  let medianArea = $state(0);
   let svgMarkup = $state<string>('');
   let errorMsg = $state<string>('');
   let loading = $state(false);
@@ -42,6 +43,7 @@
           break;
         }
         slabCount = r.slabCount;
+        medianArea = r.medianCellAreaMM2 ?? 0;
         svgMarkup = r.svg ?? '';
 
         // If the user moved the slider while this request was in
@@ -275,6 +277,13 @@
           {#if loading}
             <span aria-hidden="true">…</span>
           {/if}
+        </span>
+      </div>
+
+      <div class="text-xs text-muted-foreground">
+        Median cell area:
+        <span class="tabular-nums font-medium text-foreground">
+          {medianArea > 0 ? `${medianArea.toFixed(3)} mm²` : '—'}
         </span>
       </div>
 

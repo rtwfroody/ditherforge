@@ -72,6 +72,7 @@ export namespace main {
 	export class DebugCellsSlabResult {
 	    svg: string;
 	    slabCount: number;
+	    medianCellAreaMM2: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new DebugCellsSlabResult(source);
@@ -81,6 +82,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.svg = source["svg"];
 	        this.slabCount = source["slabCount"];
+	        this.medianCellAreaMM2 = source["medianCellAreaMM2"];
 	    }
 	}
 	export class StickerSetting {
