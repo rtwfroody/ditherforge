@@ -21,10 +21,11 @@ func circleLoop(n int, r float32) Loop {
 // is ~full-size instead of a half-size sliver the slicer would drop.
 //
 // On a cylinder cross-section (regular 20-gon) the on-perimeter
-// placement yields ring cells averaging ~0.66 mm² (cellSize²=1); the
-// inset lifts that to ~0.90 mm² and raises the SMALLEST ring cell well
-// clear of one dither pixel. A regression back to perimeter seeds drops
-// the mean below the threshold here and fails this test.
+// placement yields ring cells averaging ~0.66 mm² (cellSize²=1); seeding
+// on the cellSize/2 inset curve lifts that to ~0.96 mm² and raises the
+// SMALLEST ring cell well clear of one dither pixel. A regression back to
+// perimeter seeds drops the mean below the threshold here and fails this
+// test.
 func TestRingSeedsInsetKeepsCellsLarge(t *testing.T) {
 	const cellSize float32 = 1.0
 	loop := circleLoop(20, 10) // cylinder cross-section: regular 20-gon, r=10mm
@@ -150,15 +151,12 @@ func TestRingSeedsInsetReflexCornersStayInBand(t *testing.T) {
 			cells, _, _ := PartitionSlabAnalytic(fp, nil, nil, cellSize)
 
 			// No ring seed may cross the band into the hex (inner) region.
-			ringInset := 0.5 * cellSize
-			for i := range fp.Loops {
-				lp := &fp.Loops[i]
-				for _, m := range walkLoopAtCellSize(lp, cellSize) {
-					nrm := inwardNormal(lp, m)
-					cand := Point2{m.point[0] + ringInset*nrm[0], m.point[1] + ringInset*nrm[1]}
-					if fp.Contains(cand[0], cand[1]) && inner.Contains(cand[0], cand[1]) {
-						t.Errorf("ring seed at (%.2f,%.2f) crossed into inner/hex territory — inset overshot the band", cand[0], cand[1])
-					}
+			// Ring seeds sit on the cellSize/2 inset curve, so they stay a
+			// clear cellSize/2 outside inner (the cellSize erosion); a reflex
+			// pinch must not push any seed past that.
+			for _, s := range ringSeeds(fp, cellSize) {
+				if inner.Contains(s[0], s[1]) {
+					t.Errorf("ring seed at (%.2f,%.2f) crossed into inner/hex territory — inset overshot the band", s[0], s[1])
 				}
 			}
 			// No ring cell may be sub-pixel.

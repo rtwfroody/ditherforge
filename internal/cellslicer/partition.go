@@ -205,6 +205,72 @@ func PartitionSlab(bot, top []Loop, cellSize float32) ([]Cell, *Footprint) {
 	return cells, fp
 }
 
+// ringInsetFrac is the ring-seed inset distance as a fraction of cellSize.
+const ringInsetFrac = 0.5
+
+// ringSeeds places the boundary (KindRing) Voronoi seeds for a slab.
+//
+// The seeds sit on a line inset ringInset = cellSize/2 into the solid,
+// rather than on the footprint perimeter: a seed on the boundary gives a
+// Voronoi cell straddling fpCur, so the clip to coverTarget keeps only its
+// inner ~half and the surviving ring cell is a sliver the slicer drops.
+// Insetting lands the whole cell inside, yielding a ~full-size ring cell.
+//
+// Crucially the spacing is cellSize measured ALONG THE INSET LINE, not along
+// the outer perimeter, because that is the line the cell centers actually
+// live on. We get this for free by walking the real inset curve (fpCur eroded
+// by ringInset). On a convex stretch the inset curve is shorter than the
+// perimeter, so it receives fewer, correctly-spaced centers; on a concave
+// stretch (hole wall, reflex corner) it is longer and receives more. Walking
+// the perimeter and pushing each mark inward — as an earlier version did —
+// instead packed convex centers closer than cellSize and spread concave ones
+// wider, so cells were not a uniform cellSize "regardless of footprint shape".
+//
+// Thin-feature fallback: a feature narrower than 2*ringInset = cellSize
+// collapses under the erosion, leaving that stretch with no inset curve and
+// thus no ring seed. Re-inflating the inset curve by ringInset recovers
+// everything the erosion kept (a morphological open of fpCur); whatever of
+// fpCur that misses is a thin neck. For perimeter marks there we fall back to
+// the inward-pushed point (or the on-perimeter point if even that exits
+// fpCur), so the neck still gets seeded. When fpCur is thin everywhere (a
+// pure wall slab) the inset curve is empty and this reduces to the old
+// perimeter-walk-with-inward-push for the whole footprint.
+func ringSeeds(fpCur *Footprint, cellSize float32) []Point2 {
+	ringInset := ringInsetFrac * cellSize
+	seedLine := OffsetFootprint(fpCur, -ringInset)
+
+	var seeds []Point2
+	for i := range seedLine.Loops {
+		lp := &seedLine.Loops[i]
+		for _, m := range walkLoopAtCellSize(lp, cellSize) {
+			seeds = append(seeds, m.point)
+		}
+	}
+
+	// kept ≈ open(fpCur): the part of fpCur the inset curve represents.
+	// Anything outside it is a thin feature that lost its inset curve.
+	kept := OffsetFootprint(seedLine, ringInset)
+	for i := range fpCur.Loops {
+		loop := &fpCur.Loops[i]
+		for _, m := range walkLoopAtCellSize(loop, cellSize) {
+			// inwardNormal ("left of travel") points into the solid for
+			// both CCW outer loops and CW hole loops, so no per-loop sign
+			// flip is needed.
+			nrm := inwardNormal(loop, m)
+			cand := Point2{m.point[0] + ringInset*nrm[0], m.point[1] + ringInset*nrm[1]}
+			if kept.Contains(cand[0], cand[1]) {
+				continue // fat region: the inset-curve walk already seeded it
+			}
+			if fpCur.Contains(cand[0], cand[1]) {
+				seeds = append(seeds, cand)
+			} else {
+				seeds = append(seeds, m.point) // inset collapsed: stay on perimeter
+			}
+		}
+	}
+	return seeds
+}
+
 // PartitionSlabAnalytic partitions a slab's footprint into compact
 // boundary + hex cells using exact Clipper polygon booleans, with no
 // raster round-trip. Every cell is sized so a cellSize-diameter circle
@@ -294,35 +360,7 @@ func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32)
 	// Every cell is clipped to coverTarget (band ∪ innerCap), not to band
 	// and innerCap separately, so the diagram tiles the shell exactly with
 	// no gap or overlap at the boundary/interior interface.
-	// Ring seeds are placed half a cell INSIDE the perimeter rather than on
-	// it. A seed sitting on the boundary gives a Voronoi cell straddling
-	// fpCur, so the clip to coverTarget throws away its outer ~half and the
-	// surviving ring cell is a half-size sliver the slicer is prone to drop.
-	// Pushing the seed cellSize/2 into the solid lands the whole cell inside,
-	// yielding a ~full-size ring cell. The push is per-seed along the
-	// into-solid normal; spacing and count come from the original perimeter
-	// walk, so the number of ring cells is unchanged — only their seeds
-	// re-center inward. If the pushed point lands outside fpCur (a feature
-	// thinner than ~cellSize, where a true inset would collapse the loop) we
-	// keep the on-perimeter point so the thin band still gets its seed.
-	var seeds []Point2
-	const ringInsetFrac = 0.5 // inset distance as a fraction of cellSize
-	ringInset := ringInsetFrac * cellSize
-	for i := range fpCur.Loops {
-		loop := &fpCur.Loops[i]
-		for _, m := range walkLoopAtCellSize(loop, cellSize) {
-			// inwardNormal ("left of travel") points into the solid for
-			// both CCW outer loops and CW hole loops, so no per-loop sign
-			// flip is needed; Contains below is the final safety gate.
-			nrm := inwardNormal(loop, m)
-			cand := Point2{m.point[0] + ringInset*nrm[0], m.point[1] + ringInset*nrm[1]}
-			if fpCur.Contains(cand[0], cand[1]) {
-				seeds = append(seeds, cand)
-			} else {
-				seeds = append(seeds, m.point) // thin feature: inset collapses, stay on perimeter
-			}
-		}
-	}
+	seeds := ringSeeds(fpCur, cellSize)
 	stats.RawRing = len(seeds)
 
 	interior := hexLatticeSeeds(innerCap, cellSize)
