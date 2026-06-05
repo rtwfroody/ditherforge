@@ -139,7 +139,6 @@ type pipelineRun struct {
 	parse       *loader.LoadedModel
 	load        *loadOutput
 	split       *splitOutput
-	decimate    *decimateOutput
 	sticker     *stickerOutput
 	voxelize    *voxelizeOutput
 	colorAdjust *colorAdjustOutput
@@ -305,9 +304,8 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			// errorBudget bounds geometric drift to ~½ a voxel cell --
 			// finer detail than that won't survive voxelization
 			// downstream, so it's safe to discard before alpha-wrap.
-			// NullTracker avoids colliding with the dedicated
-			// StageDecimate event later. Only the alpha-wrap input is
-			// decimated -- `model` stays intact for ColorModel below.
+			// Only the alpha-wrap input is decimated -- `model` stays
+			// intact for ColorModel below.
 			wrapInput := model
 			if !r.opts.NoSimplify {
 				cellSize := voxelCellSizes(r.opts).UpperXY
@@ -339,12 +337,11 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 
 			// Post-wrap decimation: alpha-wrap output is dense (~one face
 			// per α² of surface area), but downstream stages (Sticker,
-			// Voxelize, StageDecimate) only need detail at voxel cell
-			// resolution. errorBudget caps drift at ½ a cell, so flat
-			// regions collapse aggressively while curved silhouettes
-			// stop being thinned once cumulative drift would exceed
-			// what voxelization can resolve. NullTracker avoids
-			// colliding with the dedicated StageDecimate event later.
+			// Voxelize) only need detail at voxel cell resolution.
+			// errorBudget caps drift at ½ a cell, so flat regions
+			// collapse aggressively while curved silhouettes stop being
+			// thinned once cumulative drift would exceed what
+			// voxelization can resolve.
 			if !r.opts.NoSimplify {
 				cellSize := voxelCellSizes(r.opts).UpperXY
 				budget := decimateErrorBudget(cellSize)
@@ -479,39 +476,6 @@ func parseOrientation(s string) split.Orientation {
 	default:
 		return split.OrientOriginal
 	}
-}
-
-func (r *pipelineRun) Decimate() (*decimateOutput, error) {
-	return runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
-		lo, err := r.Load()
-		if err != nil {
-			return nil, err
-		}
-		so, err := r.Split()
-		if err != nil {
-			return nil, err
-		}
-		cellSize := voxelCellSizes(r.opts).UpperXY
-		budget := decimateErrorBudget(cellSize)
-
-		if so.Enabled {
-			// Targets are vestigial under the cost-budget regime --
-			// pass 1 (DecimateHalves clamps to a per-half floor of 1)
-			// and let `budget` be the actual stopping criterion.
-			halves, derr := voxel.DecimateHalves(r.ctx, so.Halves, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
-			if derr != nil {
-				return nil, fmt.Errorf("decimate (split): %w", derr)
-			}
-			return &decimateOutput{Halves: halves}, nil
-		}
-
-		decimModel, derr := voxel.DecimateMesh(r.ctx, lo.Model, 1, cellSize, budget, r.opts.NoSimplify, r.tracker)
-		if derr != nil {
-			return nil, fmt.Errorf("decimate: %w", derr)
-		}
-		reportHolesIfEnabled("stage-decimate output", decimModel.Faces)
-		return &decimateOutput{DecimModel: decimModel}, nil
-	})
 }
 
 func (r *pipelineRun) Sticker() (*stickerOutput, error) {
@@ -1356,11 +1320,6 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		}
 		lo, err := r.Load()
 		if err != nil {
-			return nil, err
-		}
-		// Decimate is stubbed during the cellslicer transition; keep
-		// the call so its stub caches.
-		if _, err := r.Decimate(); err != nil {
 			return nil, err
 		}
 		// Split, when enabled, makes the clip run once per half against

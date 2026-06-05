@@ -222,7 +222,6 @@ var stageNames = map[StageID]string{
 	StageSplit:       "Splitting",
 	StageVoxelize:    "Voxelizing",
 	StageSticker:     "Applying stickers",
-	StageDecimate:    "Decimating",
 	StageColorAdjust: "Adjusting colors",
 	StageColorWarp:   "Warping colors",
 	StagePalette:     "Building palette",

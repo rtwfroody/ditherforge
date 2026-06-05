@@ -2,7 +2,6 @@ package voxel
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/plog"
@@ -48,24 +47,4 @@ func DecimateMesh(ctx context.Context, model *loader.LoadedModel, targetCells in
 		Vertices: decVerts,
 		Faces:    decFaces,
 	}, nil
-}
-
-// DecimateHalves runs DecimateMesh once per Split half, splitting the
-// total target cell count between halves proportional to each half's
-// face count.
-func DecimateHalves(ctx context.Context, halves [2]*loader.LoadedModel, totalTargetCells int, cellSize float32, errorBudget float64, noSimplify bool, tracker progress.Tracker) ([2]*loader.LoadedModel, error) {
-	totalFaces := len(halves[0].Faces) + len(halves[1].Faces)
-	var out [2]*loader.LoadedModel
-	for i, h := range halves {
-		perHalfTarget := totalTargetCells * len(h.Faces) / totalFaces
-		if perHalfTarget < 1 {
-			perHalfTarget = 1
-		}
-		decimated, err := DecimateMesh(ctx, h, perHalfTarget, cellSize, errorBudget, noSimplify, tracker)
-		if err != nil {
-			return out, fmt.Errorf("decimate half %d: %w", i, err)
-		}
-		out[i] = decimated
-	}
-	return out, nil
 }

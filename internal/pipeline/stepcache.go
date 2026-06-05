@@ -40,11 +40,10 @@ const (
 	StageLoad
 	// StageSplit cuts the watertight loaded mesh in two and lays the
 	// halves out side-by-side on the bed (see docs/SPLIT.md). The
-	// Decimate, Voxelize, and downstream stages consume the split
-	// output when Options.Split.Enabled is true. When disabled, the
-	// stage is a passthrough.
+	// Voxelize and downstream stages consume the split output when
+	// Options.Split.Enabled is true. When disabled, the stage is a
+	// passthrough.
 	StageSplit
-	StageDecimate
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
 	StageColorAdjust
@@ -66,8 +65,6 @@ func stageSubdir(s StageID) string {
 		return "load"
 	case StageSplit:
 		return "split"
-	case StageDecimate:
-		return "decimate"
 	case StageSticker:
 		return "sticker"
 	case StageVoxelize:
@@ -114,8 +111,6 @@ func stageDescription(stage StageID, opts Options) string {
 		}
 		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
 			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
-	case StageDecimate:
-		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
 	case StageSticker:
 		return fmt.Sprintf("Stickers: %s (%d)", base, len(opts.Stickers))
 	case StageVoxelize:
@@ -492,15 +487,6 @@ type colorWarpOutput struct {
 	Cells []voxel.ActiveCell
 }
 
-type decimateOutput struct {
-	// DecimModel is populated for the unsplit path. nil when split is
-	// enabled.
-	DecimModel *loader.LoadedModel
-	// Halves is populated for the split path: per-half decimated
-	// laid-out meshes. Both indices nil when split is disabled.
-	Halves [2]*loader.LoadedModel
-}
-
 // splitOutput is the result of cutting a watertight model in two and
 // laying the halves out side-by-side on the bed. Halves are in bed
 // coordinates (post-Layout); Xform[i] is the forward transform from
@@ -678,12 +664,6 @@ type colorWarpSettings struct {
 	WarpPins []WarpPin
 }
 
-type decimateSettings struct {
-	NoSimplify     bool
-	NozzleDiameter float32
-	LayerHeight    float32
-}
-
 // splitSettings is what affects StageSplit's output. When Enabled is
 // false, only the Enabled bit is hashed so a disabled-Split run
 // produces the same downstream cache keys it would have produced
@@ -825,8 +805,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			ClearanceMM:      opts.Split.ClearanceMM,
 			Orientation:      opts.Split.Orientation,
 		}
-	case StageDecimate:
-		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
 		return paletteSettings{
 			NumColors:         opts.NumColors,
@@ -978,10 +956,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 			writeString(h, v.Orientation[0])
 			writeString(h, v.Orientation[1])
 		}
-	case decimateSettings:
-		writeBool(h, v.NoSimplify)
-		writeFloat32(h, v.NozzleDiameter)
-		writeFloat32(h, v.LayerHeight)
 	case paletteSettings:
 		writeInt(h, v.NumColors)
 		writeString(h, v.LockedColors)
@@ -1021,8 +995,6 @@ func allocOutput(stage StageID) any {
 		return &loadOutput{}
 	case StageSplit:
 		return &splitOutput{}
-	case StageDecimate:
-		return &decimateOutput{}
 	case StageSticker:
 		return &stickerOutput{}
 	case StageVoxelize:

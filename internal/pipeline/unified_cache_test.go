@@ -31,14 +31,11 @@ func TestStageKeyCascade(t *testing.T) {
 	base := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
 
 	// Changing dither (a downstream-only setting) should not change the
-	// load or decimate keys.
+	// load key.
 	upstream := base
 	upstream.Dither = "dizzy"
 	if c.stageKey(StageLoad, base) != c.stageKey(StageLoad, upstream) {
 		t.Error("StageLoad key changed when only Dither changed (no cascade upward expected)")
-	}
-	if c.stageKey(StageDecimate, base) != c.stageKey(StageDecimate, upstream) {
-		t.Error("StageDecimate key changed when only Dither changed")
 	}
 
 	// Changing scale (a load setting) should change every stage's key.
@@ -53,8 +50,7 @@ func TestStageKeyCascade(t *testing.T) {
 
 // TestStageKeyDownstreamCascade: changing Brightness (which is in
 // colorAdjustSettings) invalidates StageColorAdjust and every stage
-// after it, but not the upstream stages (Load, Decimate, Sticker,
-// Voxelize).
+// after it, but not the upstream stages (Load, Sticker, Voxelize).
 //
 // LayerHeight and NozzleDiameter both legitimately affect StageLoad
 // now (via the post-/pre-wrap decimate inside Load), so they're no
@@ -100,21 +96,21 @@ func TestCacheAToggleBToggleAHitsDisk(t *testing.T) {
 	optsB := optsA
 	optsB.LayerHeight = 0.12
 
-	c.set(StageDecimate, optsA, &decimateOutput{})
+	c.set(StageMerge, optsA, &mergeOutput{})
 	c.set(StageVoxelize, optsA, &voxelizeOutput{})
-	c.set(StageDecimate, optsB, &decimateOutput{})
+	c.set(StageMerge, optsB, &mergeOutput{})
 	c.set(StageVoxelize, optsB, &voxelizeOutput{})
 	// Wait for async writes to land before reading.
 	c.WaitForDiskWrites()
 
-	if _, src := c.getWithSource(StageDecimate, optsA); src != hitDisk {
-		t.Errorf("Decimate A→B→A: hit source %v, want hitDisk", src)
+	if _, src := c.getWithSource(StageMerge, optsA); src != hitDisk {
+		t.Errorf("Merge A→B→A: hit source %v, want hitDisk", src)
 	}
 	if _, src := c.getWithSource(StageVoxelize, optsA); src != hitDisk {
 		t.Errorf("Voxelize A→B→A: hit source %v, want hitDisk", src)
 	}
-	if _, src := c.getWithSource(StageDecimate, optsB); src != hitDisk {
-		t.Errorf("Decimate B: hit source %v, want hitDisk", src)
+	if _, src := c.getWithSource(StageMerge, optsB); src != hitDisk {
+		t.Errorf("Merge B: hit source %v, want hitDisk", src)
 	}
 }
 
@@ -221,8 +217,8 @@ func TestRunStageCacheHitReturnsValue(t *testing.T) {
 	path := makeFakeInput(t)
 	opts := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
 
-	want := &decimateOutput{}
-	c.set(StageDecimate, opts, want)
+	want := &splitOutput{}
+	c.set(StageSplit, opts, want)
 	c.WaitForDiskWrites()
 
 	bodyRan := false
@@ -232,9 +228,9 @@ func TestRunStageCacheHitReturnsValue(t *testing.T) {
 		opts:    opts,
 		tracker: progress.NullTracker{},
 	}
-	got, err := runStage(r, StageDecimate, &r.decimate, func() (*decimateOutput, error) {
+	got, err := runStage(r, StageSplit, &r.split, func() (*splitOutput, error) {
 		bodyRan = true
-		return &decimateOutput{}, nil
+		return &splitOutput{}, nil
 	})
 	if err != nil {
 		t.Fatalf("runStage: %v", err)
