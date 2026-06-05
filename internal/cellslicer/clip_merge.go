@@ -28,7 +28,18 @@ type mergeGroup struct {
 // single non-pinched contour). The cap keeps the incremental re-trace cheap
 // and stops any one prism from growing slab-spanning, which is what the old
 // union-find behaviour did before it punched holes in the output mesh.
-const maxMergeGroupCells = 4
+//
+// 32 is the measured knee: sweeping 4→8→16→32→64→128 on earth/glyphid/
+// low_poly_building, output triangle count drops steeply through 32 then
+// flattens (building −8.3% at 32 vs −8.6% at 64, −8.7% at 128; glyphid
+// −9.5% at 32). At 32 the fraction of groups still pegged at the cap is
+// tiny (building 227/61937, glyphid 58/23594, earth 0/46781), so almost no
+// group wants to grow further. Clip wall-time is roughly flat across the
+// sweep — bigger groups cost more per Manifold boolean, cancelling the win
+// from fewer groups — so the benefit is triangle count, not speed. The
+// area-equivalence test (TestCellMergeMatchesPerCell) confirms cap 32 keeps
+// merged↔per-cell surface area within 3e-5 (no holes, no shape drift).
+const maxMergeGroupCells = 32
 
 // growSameColorCellGroups partitions each slab's cells into merge groups by
 // greedy region growing, gated on footprint cleanliness. A member must be
