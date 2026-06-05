@@ -120,9 +120,22 @@ func (e dirEdge) reverse() dirEdge { return dirEdge{e.b, e.a} }
 // component polygons of the result. Used by both ring-cell trapezoid
 // clipping and hex-cell tile clipping.
 func clipPolygonToFootprint(poly []Point2, fp *Footprint) [][]Point2 {
+	return clipPolygonToClipPaths(poly, footprintToClipperPaths(fp))
+}
+
+// clipPolygonToClipPaths is clipPolygonToFootprint with the clip side
+// supplied as already-converted Clipper paths. A loop clipping many
+// polygons against one constant footprint (voronoiCells, where every
+// cell in a slab is clipped to the same coverTarget) converts that
+// footprint once with footprintToClipperPaths and reuses the result
+// here, instead of paying the mm→µm path conversion per cell. clip
+// must carry the PftNonZero winding footprintToClipperPaths emits.
+// clip is read-only (Clipper.AddPaths copies the geometry into its own
+// edge list), so the same Paths may be passed to many calls.
+func clipPolygonToClipPaths(poly []Point2, clip clipper.Paths) [][]Point2 {
 	c := clipper.NewClipper(clipper.IoNone)
 	c.AddPaths(clipper.Paths{pointsToClipperPath(poly)}, clipper.PtSubject, true)
-	c.AddPaths(footprintToClipperPaths(fp), clipper.PtClip, true)
+	c.AddPaths(clip, clipper.PtClip, true)
 	result, ok := c.Execute1(clipper.CtIntersection, clipper.PftNonZero, clipper.PftNonZero)
 	if !ok || len(result) == 0 {
 		return nil

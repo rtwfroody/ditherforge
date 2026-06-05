@@ -62,6 +62,12 @@ func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize,
 	clipRadius := 3 * localHalf
 	grid := newSeedGrid(seeds, clipRadius)
 
+	// region is the same coverTarget for every cell in this slab, so
+	// convert it to Clipper paths once here rather than re-converting
+	// inside the per-cell clip (see clipPolygonToClipPaths). The mm→µm
+	// path conversion was ~7% of voxelize CPU when done per cell.
+	regionPaths := footprintToClipperPaths(region)
+
 	cells := make([]Cell, 0, len(seeds))
 	for i := range seeds {
 		si := seeds[i]
@@ -79,7 +85,7 @@ func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize,
 		if len(cell) < 3 {
 			continue
 		}
-		for _, c := range clipPolygonToFootprint(cell, region) {
+		for _, c := range clipPolygonToClipPaths(cell, regionPaths) {
 			if len(c) < 3 {
 				continue
 			}
