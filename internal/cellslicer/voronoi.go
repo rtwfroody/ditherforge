@@ -1,6 +1,10 @@
 package cellslicer
 
-import "math"
+import (
+	"math"
+
+	clipper "github.com/ctessum/go.clipper"
+)
 
 // voronoiCells partitions `region` into one compact cell per seed using
 // the seeds' clipped Voronoi diagram. Each returned cell is the set of
@@ -62,11 +66,22 @@ func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize,
 	clipRadius := 3 * localHalf
 	grid := newSeedGrid(seeds, clipRadius)
 
-	// region is the same coverTarget for every cell in this slab, so
-	// convert it to Clipper paths once here rather than re-converting
-	// inside the per-cell clip (see clipPolygonToClipPaths). The mm→µm
-	// path conversion was ~7% of voxelize CPU when done per cell.
-	regionPaths := footprintToClipperPaths(region)
+	// Each cell is clipped to region (the slab coverTarget). region is the
+	// same for every cell, but the cell is tiny next to it, so instead of
+	// clipping each cell against every footprint loop we localize: a loop
+	// index serves up just the loops whose bbox overlaps the cell. The loops
+	// are passed as their original paths and a dropped loop neither crosses
+	// nor encloses the cell, so this is winding-exact — bit-identical to the
+	// whole-footprint clip except for ≤1µm tie-breaks at coincident-edge
+	// degeneracies in coverTarget (see footprintLoopIndex). The whole-
+	// footprint path is kept behind disableFootprintLoopIndex for the A/B test.
+	var li *footprintLoopIndex
+	var regionPaths clipper.Paths
+	if disableFootprintLoopIndex {
+		regionPaths = footprintToClipperPaths(region)
+	} else {
+		li = newFootprintLoopIndex(region)
+	}
 
 	cells := make([]Cell, 0, len(seeds))
 	for i := range seeds {
@@ -85,7 +100,12 @@ func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize,
 		if len(cell) < 3 {
 			continue
 		}
-		for _, c := range clipPolygonToClipPaths(cell, regionPaths) {
+		clip := regionPaths
+		if li != nil {
+			minx, miny, maxx, maxy := polyBbox(cell)
+			clip = li.clipFor(minx, miny, maxx, maxy)
+		}
+		for _, c := range clipPolygonToClipPaths(cell, clip) {
 			if len(c) < 3 {
 				continue
 			}
@@ -97,6 +117,32 @@ func voronoiCells(seeds []Point2, kinds []CellKind, region *Footprint, cellSize,
 		}
 	}
 	return cells
+}
+
+// disableFootprintLoopIndex forces voronoiCells back onto the
+// whole-footprint per-cell clip. Off in production; footprint_loops_test.go
+// flips it to A/B the loop-index clip against the whole-footprint clip.
+var disableFootprintLoopIndex = false
+
+// polyBbox returns the axis-aligned bounding box of a polygon's vertices.
+func polyBbox(poly []Point2) (minx, miny, maxx, maxy float32) {
+	minx, miny = poly[0][0], poly[0][1]
+	maxx, maxy = minx, miny
+	for _, p := range poly[1:] {
+		if p[0] < minx {
+			minx = p[0]
+		}
+		if p[0] > maxx {
+			maxx = p[0]
+		}
+		if p[1] < miny {
+			miny = p[1]
+		}
+		if p[1] > maxy {
+			maxy = p[1]
+		}
+	}
+	return
 }
 
 // voronoiBandCells tiles `region` with the clipped Voronoi diagram of a
