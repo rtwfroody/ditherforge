@@ -440,7 +440,7 @@
   let viewMenuRef: HTMLDivElement | undefined = $state(undefined);
   let outputViewMenuOpen = $state(false);
   let outputViewMenuRef: HTMLDivElement | undefined = $state(undefined);
-  type ViewMode = 'solid' | 'wireframe' | 'hidden-line';
+  type ViewMode = 'solid' | 'hidden-line';
   let inputViewStyle: ViewMode = $state('solid');
   let outputViewStyle: ViewMode = $state('solid');
   function handleViewMenuOutside(e: MouseEvent) {
@@ -2307,10 +2307,6 @@
               <span>Solid</span>
             </label>
             <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
-              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="wireframe" />
-              <span>Wireframe</span>
-            </label>
-            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
               <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="hidden-line" />
               <span>Hidden line</span>
             </label>
@@ -2336,10 +2332,6 @@
             <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
               <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="solid" />
               <span>Solid</span>
-            </label>
-            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
-              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="wireframe" />
-              <span>Wireframe</span>
             </label>
             <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
               <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="hidden-line" />

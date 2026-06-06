@@ -99,15 +99,13 @@
     stageTick?: number;
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
-    viewMode?: 'solid' | 'wireframe' | 'hidden-line';
+    viewMode?: 'solid' | 'hidden-line';
   } = $props();
 
   // Non-solid view modes use dedicated materials rather than mutating the
   // colored scene materials in place — keeps lifecycle simple (the scene's
   // materials own their textures/uniforms and shouldn't be toggled out from
   // under their build path).
-  //   Wireframe mode: render just `viewWireMat` so all triangle edges show,
-  //     including back-facing ones (nothing writes depth to occlude them).
   //   Hidden-line mode: render `viewSolidMat` first (white, with polygonOffset
   //     to push it slightly back in z), then `viewWireMat` on top. The solid
   //     pass's depth buffer hides the back edges.
@@ -1341,8 +1339,6 @@
         {#each scene.meshes as mesh}
           {#if viewMode === 'solid'}
             <T.Mesh geometry={mesh.geometry} material={mesh.material} />
-          {:else if viewMode === 'wireframe'}
-            <T.Mesh geometry={mesh.geometry} material={viewWireMat} />
           {:else}
             <T.Mesh geometry={mesh.geometry} material={viewSolidMat} />
             <!-- Wireframe pass shares the solid pass's geometry; opt it
@@ -1354,9 +1350,9 @@
         {/each}
 
         <!-- Overlay is the alpha-wrap sticker carrier — translucent, designed
-             to layer onto a colored base mesh. In wireframe / hidden-line
-             modes it would just add black lines (or an opaque white shell)
-             that mask the base, so skip it entirely. -->
+             to layer onto a colored base mesh. In hidden-line mode it would
+             just add an opaque white shell with black lines that mask the
+             base, so skip it entirely. -->
         {#if overlayScene && viewMode === 'solid'}
           <T.Group bind:ref={overlayGroupRef}>
             {#each overlayScene.meshes as mesh}
