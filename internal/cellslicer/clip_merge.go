@@ -163,6 +163,12 @@ func growSameColorCellGroups(slabs []Slab, cellColor []int32) []mergeGroup {
 // clip is fewer, larger boolean ops and fewer internal seams between
 // same-color cells.
 func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cellColor []int32) (ClipResult, error) {
+	return ClipMeshToMergedCellsManifoldProgress(model, slabs, cellColor, nil)
+}
+
+// ClipMeshToMergedCellsManifoldProgress is ClipMeshToMergedCellsManifold
+// with optional progress reporting (prog may be nil).
+func ClipMeshToMergedCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, cellColor []int32, prog *ClipProgress) (ClipResult, error) {
 	nCells := 0
 	for si := range slabs {
 		nCells += len(slabs[si].Cells)
@@ -171,7 +177,7 @@ func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cell
 		return ClipResult{}, fmt.Errorf("cellslicer/manifold: cellColor has %d entries, want %d (one per cell)", len(cellColor), nCells)
 	}
 
-	ss, err := buildSlabSrc(model, slabs)
+	ss, err := buildSlabSrc(model, slabs, prog.slabSplit())
 	if err != nil {
 		return ClipResult{}, err
 	}
@@ -189,7 +195,7 @@ func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cell
 			return 0, nil, nil, fmt.Errorf("group %d (slab=%d, rep=%d): %w", i, g.slabIdx, g.repGlobal, cerr)
 		}
 		return g.repGlobal, v, f, nil
-	})
+	}, prog.jobs())
 	if err != nil {
 		return ClipResult{}, err
 	}

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/manifoldbool"
@@ -94,10 +95,42 @@ type slabSrc struct {
 	perSlab []*manifoldbool.Manifold
 }
 
+// ClipProgress carries optional progress callbacks for the clip entry
+// points. Both fields may be nil, as may the *ClipProgress itself —
+// either disables reporting. Callbacks receive (done, total) for their
+// phase; Jobs is invoked from multiple worker goroutines with done
+// values drawn from a shared atomic counter.
+type ClipProgress struct {
+	// SlabSplit ticks once per Z-plane cut while the source mesh is
+	// pre-split into per-slab Manifolds (sequential; see splitSrcBySlabs).
+	SlabSplit func(done, total int)
+	// Jobs ticks once per completed clip job — one per cell on the
+	// per-cell path, one per merged group on the merged path. total is
+	// the job count, known only once grouping is done.
+	Jobs func(done, total int)
+}
+
+// slabSplit and jobs are nil-safe accessors so call sites don't fan out
+// into nil checks. A nil receiver returns a nil callback.
+func (p *ClipProgress) slabSplit() func(done, total int) {
+	if p == nil {
+		return nil
+	}
+	return p.SlabSplit
+}
+
+func (p *ClipProgress) jobs() func(done, total int) {
+	if p == nil {
+		return nil
+	}
+	return p.Jobs
+}
+
 // buildSlabSrc dedups the model, builds its source Manifold, and
 // pre-splits it into one Manifold per slab (see the per-slab rationale
 // in ClipMeshToCellsManifold). The caller must call close() when done.
-func buildSlabSrc(model *loader.LoadedModel, slabs []Slab) (*slabSrc, error) {
+// onSplit (may be nil) ticks once per plane cut during the pre-split.
+func buildSlabSrc(model *loader.LoadedModel, slabs []Slab, onSplit func(done, total int)) (*slabSrc, error) {
 	verts, faces := DedupVertsByPosition(model.Vertices, model.Faces)
 	if len(verts) == 0 || len(faces) == 0 {
 		return nil, fmt.Errorf("cellslicer/manifold: source mesh has no faces")
@@ -113,7 +146,7 @@ func buildSlabSrc(model *loader.LoadedModel, slabs []Slab) (*slabSrc, error) {
 	// carry srcID via per-face run_original_id, so ToMeshFiltered(srcID)
 	// downstream still recovers source-surface-only output and drops
 	// the plane-cut faces split_by_plane adds.
-	perSlab, err := splitSrcBySlabs(src, slabs)
+	perSlab, err := splitSrcBySlabs(src, slabs, onSplit)
 	if err != nil {
 		src.Close()
 		return nil, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
@@ -137,7 +170,13 @@ func (s *slabSrc) close() {
 }
 
 func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab) (ClipResult, error) {
-	ss, err := buildSlabSrc(model, slabs)
+	return ClipMeshToCellsManifoldProgress(model, slabs, nil)
+}
+
+// ClipMeshToCellsManifoldProgress is ClipMeshToCellsManifold with
+// optional progress reporting (prog may be nil).
+func ClipMeshToCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, prog *ClipProgress) (ClipResult, error) {
+	ss, err := buildSlabSrc(model, slabs, prog.slabSplit())
 	if err != nil {
 		return ClipResult{}, err
 	}
@@ -160,7 +199,7 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab) (ClipResul
 			return 0, nil, nil, fmt.Errorf("cell %d (slab=%d,cell=%d): %w", r.globalIdx, r.slabIdx, r.cellIdx, cerr)
 		}
 		return r.globalIdx, v, f, nil
-	})
+	}, prog.jobs())
 }
 
 // runClipJobs is the shared worker-pool engine behind both clip entry
@@ -177,7 +216,12 @@ func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab) (ClipResul
 // locking is needed inside clip.
 //
 // CellRep is left nil; the merged clip populates it after this returns.
-func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error)) (ClipResult, error) {
+//
+// onJob (may be nil) ticks once per completed job with (jobs done, n).
+// done values come from a shared atomic counter, so each tick carries a
+// distinct increasing count — but workers may deliver them out of
+// order; consumers must tolerate that (progress.Stage.Span does).
+func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error), onJob func(done, total int)) (ClipResult, error) {
 	type result struct {
 		rep   int
 		verts [][3]float32
@@ -201,6 +245,7 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 		wg     sync.WaitGroup
 		errMu  sync.Mutex
 		firstE error
+		nDone  atomic.Int64
 	)
 	for w := 0; w < nWorkers; w++ {
 		wg.Add(1)
@@ -208,6 +253,9 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 			defer wg.Done()
 			for ji := range jobCh {
 				rep, v, f, cerr := clip(ji)
+				if onJob != nil {
+					onJob(int(nDone.Add(1)), n)
+				}
 				if cerr != nil {
 					errMu.Lock()
 					if firstE == nil {
@@ -262,7 +310,10 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 // floating sliver between slabs that gets attached to the wrong side.
 // SlabBoundaryPlanes-derived partitions satisfy this; defensive callers
 // that pass arbitrary slab lists should verify it first.
-func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab) ([]*manifoldbool.Manifold, error) {
+//
+// onSplit (may be nil) ticks once per plane cut with (cuts done,
+// len(slabs)-1); the cuts run sequentially bottom-up.
+func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab, onSplit func(done, total int)) ([]*manifoldbool.Manifold, error) {
 	perSlab := make([]*manifoldbool.Manifold, len(slabs))
 	if len(slabs) <= 1 {
 		// One (or zero) slabs — no split needed; per-cell workers use
@@ -332,6 +383,9 @@ func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab) ([]*manifoldbool.
 		perSlab[si] = below
 		current = above
 		ownsCurrent = true
+		if onSplit != nil {
+			onSplit(k+1, len(order)-1)
+		}
 	}
 	// The remaining "current" is the topmost slab's portion.
 	perSlab[order[len(order)-1]] = current

@@ -17,9 +17,19 @@ import (
 // Triangles entirely on the plane (all three z's equal Z) are
 // skipped, matching how a real slicer treats top/bottom faces.
 func SliceMesh(model *loader.LoadedModel, zPlanes []float32) []Layer {
+	return SliceMeshProgress(model, zPlanes, nil)
+}
+
+// SliceMeshProgress is SliceMesh with a per-plane progress callback.
+// onPlane (may be nil) receives (planes done, total planes) after each
+// plane is sliced; planes are processed sequentially.
+func SliceMeshProgress(model *loader.LoadedModel, zPlanes []float32, onPlane func(done, total int)) []Layer {
 	layers := make([]Layer, len(zPlanes))
 	for i, z := range zPlanes {
 		layers[i] = sliceAtZ(model, z, i)
+		if onPlane != nil {
+			onPlane(i+1, len(zPlanes))
+		}
 	}
 	return layers
 }

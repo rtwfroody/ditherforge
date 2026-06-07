@@ -642,7 +642,10 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			layerH = 0.2
 		}
 
-		stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], false, 0)
+		// The slab count (the natural work unit) is only known after
+		// slicing, so the bar is normalized to ScaleTotal and each
+		// unit/phase maps onto a weighted window of it — see Stage.Span.
+		stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], true, progress.ScaleTotal)
 		defer stage.Done()
 
 		// Color sampling reads from ColorModel (original-mesh coords,
@@ -706,8 +709,13 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			globalNeighbors [][]voxel.Neighbor
 			agg             cellslicer.PartitionStats
 		)
-		for _, u := range units {
-			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, u.colorXform, u.halfIdx, cellSizeForSlab, layerH)
+		for ui, u := range units {
+			// Each unit owns an equal window of the normalized bar
+			// (split halves are roughly equal work; unsplit = the
+			// whole bar).
+			progLo := ui * progress.ScaleTotal / len(units)
+			progHi := (ui + 1) * progress.ScaleTotal / len(units)
+			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, u.colorXform, u.halfIdx, cellSizeForSlab, layerH, stage, progLo, progHi)
 			if herr != nil {
 				return nil, herr
 			}
@@ -847,6 +855,10 @@ type sampleBufs struct {
 // source, and colorXform maps each sample point from geom's frame back
 // into colorModel's frame (nil = identity). halfIdx is stamped onto
 // every emitted slab and sample. See docs/split-cellslicer.md.
+//
+// stage + [progLo, progHi] is this unit's window of the normalized
+// Voxelize progress bar (see progress.ScaleTotal); sub-phases tick
+// inside it weighted by rough wall-clock share.
 func (r *pipelineRun) sliceSampleHalf(
 	geom, colorModel *loader.LoadedModel,
 	spatial *voxel.SpatialIndex,
@@ -857,14 +869,25 @@ func (r *pipelineRun) sliceSampleHalf(
 	halfIdx byte,
 	cellSizeForSlab func(int) float32,
 	layerH float32,
+	stage *progress.Stage,
+	progLo, progHi int,
 ) (halfVoxels, error) {
+	// Sub-phase weights (percent of this unit's window). Rough
+	// wall-clock shares — good enough for a smooth bar, not a timing
+	// claim; the plog line below reports the real per-phase seconds.
+	pct := func(p int) int { return progLo + (progHi-progLo)*p/100 }
+	progSlice := stage.Span(pct(0), pct(20))
+	progFp := stage.Span(pct(20), pct(35))
+	progSlab := stage.Span(pct(35), pct(90))
+	progAdj := stage.Span(pct(90), pct(100))
+
 	tSlice := time.Now()
 	zMin, zMax := modelZRange(geom)
 	if zMax <= zMin {
 		return halfVoxels{}, fmt.Errorf("cellslicer: degenerate Z range")
 	}
 	planes := cellslicer.SlabBoundaryPlanes(zMin, zMax, layerH)
-	layers := cellslicer.SliceMesh(geom, planes)
+	layers := cellslicer.SliceMeshProgress(geom, planes, progSlice)
 	nSlabs := len(layers) - 1
 	if nSlabs < 1 {
 		return halfVoxels{}, fmt.Errorf("cellslicer: no slabs produced")
@@ -919,7 +942,9 @@ func (r *pipelineRun) sliceSampleHalf(
 	}
 	footprints := make([]*cellslicer.Footprint, nSlabs)
 	capFps := make([]*cellslicer.Footprint, nSlabs)
+	var fpDone atomic.Int64
 	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
+		defer func() { progFp(int(fpDone.Add(1)), nSlabs) }()
 		// capFp = bounding-plane footprint (zBot/zTop contours + interior
 		// horizontal sheets) — feeds the cap/buried-wall neighbour test.
 		capFp := cellslicer.ComputeFootprint(layers[i].Loops, layers[i+1].Loops)
@@ -942,7 +967,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	// Per-slab phase: partition + sample. Each worker writes only its
 	// own slabs[i] / perSlabSamples[i] slots, so no locks are needed.
 	tSlab := time.Now()
-	var partitionNs, sampleNs atomic.Int64
+	var partitionNs, sampleNs, slabDone atomic.Int64
 	slabs := make([]cellslicer.Slab, nSlabs)
 	perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
 	perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
@@ -990,6 +1015,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		partitionNs.Add(int64(t1.Sub(t0)))
 		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, nil, colorXform, buf, bufs.sticker)
 		sampleNs.Add(int64(time.Since(t1)))
+		progSlab(int(slabDone.Add(1)), nSlabs)
 	})
 	slabElapsed := time.Since(tSlab).Seconds()
 
@@ -1011,8 +1037,12 @@ func (r *pipelineRun) sliceSampleHalf(
 	tAdj := time.Now()
 	globalOffsets := cellslicer.SlabGlobalOffsets(slabs)
 	neighbors := make([][]voxel.Neighbor, globalOffsets[nSlabs])
+	// Progress ticks cover the within-slab pass only; the cross-slab
+	// parity passes below are a small tail of the phase.
+	var adjDone atomic.Int64
 	runParallel(nWorkers, nSlabs, nil, func(i int, _ any) {
 		cellslicer.AddWithinSlabAdjacency(&slabs[i], globalOffsets[i], cellSizeForSlab(i), 0, neighbors)
+		progAdj(int(adjDone.Add(1)), nSlabs)
 	})
 	for parity := 0; parity < 2; parity++ {
 		pairs := make([]int, 0, nSlabs/2+1)
@@ -1329,8 +1359,19 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			return nil, err
 		}
 
-		stage := progress.BeginStage(r.tracker, stageNames[StageClip], false, 0)
+		// The clip job count (cells, or merged groups) is only known
+		// mid-stage, so the bar is normalized to ScaleTotal. Each
+		// half/window gives its first ~15% to the sequential per-slab
+		// source pre-split and the rest to the clip jobs.
+		stage := progress.BeginStage(r.tracker, stageNames[StageClip], true, progress.ScaleTotal)
 		defer stage.Done()
+		clipProgFor := func(lo, hi int) *cellslicer.ClipProgress {
+			mid := lo + (hi-lo)*15/100
+			return &cellslicer.ClipProgress{
+				SlabSplit: stage.Span(lo, mid),
+				Jobs:      stage.Span(mid, hi),
+			}
+		}
 		tClip := time.Now()
 
 		// Build a global-cell-index → palette-assignment lookup.
@@ -1382,16 +1423,26 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 			// unified vertex table) and tags each face with its half;
 			// FaceCellIdx is remapped to the global flattened-CellSlabs
 			// index space so the per-cell bookkeeping below is unchanged.
+			// Each half's progress window is proportional to its share
+			// of the cells.
+			mkHalfProg := func(cellOffset, nSub, total int) *cellslicer.ClipProgress {
+				if total <= 0 {
+					return nil
+				}
+				return clipProgFor(progress.ScaleTotal*cellOffset/total,
+					progress.ScaleTotal*(cellOffset+nSub)/total)
+			}
 			if mergeCells {
-				clipped, shellHalfIdx, cerr = clipPerHalfMerged(so, vo.CellSlabs, cellAssign)
+				clipped, shellHalfIdx, cerr = clipPerHalfMerged(so, vo.CellSlabs, cellAssign, mkHalfProg)
 			} else {
-				clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs)
+				clipped, shellHalfIdx, cerr = clipPerHalf(so, vo.CellSlabs, mkHalfProg)
 			}
 		} else {
+			prog := clipProgFor(0, progress.ScaleTotal)
 			if mergeCells {
-				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifold(lo.Model, vo.CellSlabs, cellAssign)
+				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifoldProgress(lo.Model, vo.CellSlabs, cellAssign, prog)
 			} else {
-				clipped, cerr = cellslicer.ClipMeshToCellsManifold(lo.Model, vo.CellSlabs)
+				clipped, cerr = cellslicer.ClipMeshToCellsManifoldProgress(lo.Model, vo.CellSlabs, prog)
 			}
 		}
 		if cerr != nil {
@@ -1551,9 +1602,11 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 // clipPerHalf clips each split half's bed-space geometry against its own
 // slabs and concatenates (the per-cell clip path). See clipPerHalfWith
 // for the shared stitching; this just supplies the per-half clip call.
-func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab) (cellslicer.ClipResult, []byte, error) {
-	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
-		return cellslicer.ClipMeshToCellsManifold(so.Halves[h], sub)
+// mkProg (may be nil) builds a half's progress reporter from its global
+// cell range — see the Clip stage caller.
+func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab, mkProg func(cellOffset, nSub, total int) *cellslicer.ClipProgress) (cellslicer.ClipResult, []byte, error) {
+	return clipPerHalfWith(slabs, mkProg, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int, prog *cellslicer.ClipProgress) (cellslicer.ClipResult, error) {
+		return cellslicer.ClipMeshToCellsManifoldProgress(so.Halves[h], sub, prog)
 	})
 }
 
@@ -1562,9 +1615,9 @@ func clipPerHalf(so *splitOutput, slabs []cellslicer.Slab) (cellslicer.ClipResul
 // the global per-cell color array (cellAssign), sliced per half by cell
 // offset; the resulting CellRep is offset to the global space by
 // clipPerHalfWith.
-func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellColor []int32) (cellslicer.ClipResult, []byte, error) {
-	return clipPerHalfWith(slabs, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error) {
-		return cellslicer.ClipMeshToMergedCellsManifold(so.Halves[h], sub, cellColor[cellOffset:cellOffset+nSub])
+func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellColor []int32, mkProg func(cellOffset, nSub, total int) *cellslicer.ClipProgress) (cellslicer.ClipResult, []byte, error) {
+	return clipPerHalfWith(slabs, mkProg, func(h byte, sub []cellslicer.Slab, cellOffset, nSub int, prog *cellslicer.ClipProgress) (cellslicer.ClipResult, error) {
+		return cellslicer.ClipMeshToMergedCellsManifoldProgress(so.Halves[h], sub, cellColor[cellOffset:cellOffset+nSub], prog)
 	})
 }
 
@@ -1581,7 +1634,11 @@ func clipPerHalfMerged(so *splitOutput, slabs []cellslicer.Slab, cellColor []int
 // half returns a CellRep (the merged clip does), it is merged into a
 // global-length CellRep, offsetting both the cell index and the
 // representative value it stores. See docs/split-cellslicer.md.
-func clipPerHalfWith(slabs []cellslicer.Slab, clipHalf func(h byte, sub []cellslicer.Slab, cellOffset, nSub int) (cellslicer.ClipResult, error)) (cellslicer.ClipResult, []byte, error) {
+//
+// mkProg (may be nil) builds each half's progress reporter from its
+// (cellOffset, nSub, totalCells) range; the result is handed to
+// clipHalf, which may receive nil.
+func clipPerHalfWith(slabs []cellslicer.Slab, mkProg func(cellOffset, nSub, total int) *cellslicer.ClipProgress, clipHalf func(h byte, sub []cellslicer.Slab, cellOffset, nSub int, prog *cellslicer.ClipProgress) (cellslicer.ClipResult, error)) (cellslicer.ClipResult, []byte, error) {
 	totalCells := 0
 	for i := range slabs {
 		totalCells += len(slabs[i].Cells)
@@ -1603,7 +1660,11 @@ func clipPerHalfWith(slabs []cellslicer.Slab, clipHalf func(h byte, sub []cellsl
 		for i := range sub {
 			nSub += len(sub[i].Cells)
 		}
-		cr, err := clipHalf(h, sub, cellOffset, nSub)
+		var prog *cellslicer.ClipProgress
+		if mkProg != nil {
+			prog = mkProg(cellOffset, nSub, totalCells)
+		}
+		cr, err := clipHalf(h, sub, cellOffset, nSub, prog)
 		if err != nil {
 			return cellslicer.ClipResult{}, nil, fmt.Errorf("half %d: %w", h, err)
 		}

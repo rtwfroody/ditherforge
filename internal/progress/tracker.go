@@ -2,6 +2,7 @@ package progress
 
 import (
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
@@ -71,6 +72,10 @@ type Stage struct {
 	tracker Tracker
 	name    string
 	done    bool
+	// last is the highest progress value forwarded so far; Progress
+	// drops anything lower so the bar is strictly non-decreasing even
+	// when concurrent reporters deliver ticks out of order (see Span).
+	last atomic.Int64
 }
 
 // BeginStage emits StageStart and returns a handle whose Done method emits
@@ -94,12 +99,47 @@ func (s *Stage) Done() {
 	s.tracker.StageDone(s.name)
 }
 
-// Progress reports incremental progress within the stage.
+// Progress reports incremental progress within the stage. Ticks that
+// don't advance the bar are dropped: concurrent reporters (Span) can
+// deliver a stale lower value after a higher one, and forwarding it
+// would move the bar backwards — worse in the GUI, whose 100ms event
+// throttle could keep the dip on screen.
 func (s *Stage) Progress(current int) {
 	if s == nil {
 		return
 	}
+	for {
+		prev := s.last.Load()
+		if int64(current) <= prev {
+			return
+		}
+		if s.last.CompareAndSwap(prev, int64(current)) {
+			break
+		}
+	}
 	s.tracker.StageProgress(s.name, current)
+}
+
+// ScaleTotal is the stage total used by stages whose true work-unit
+// count is not known when the stage starts (Voxelize, Clip: slab and
+// clip-job counts only emerge partway in). The stage begins with
+// total=ScaleTotal and each sub-phase maps its own (done, total) onto
+// a fixed window of the bar via Span, weighted by rough wall-clock
+// share — a smooth normalized bar rather than an exact unit count.
+const ScaleTotal = 1000
+
+// Span returns a reporter that maps a sub-phase's (done, total) onto
+// the [lo, hi] window of the stage bar. A nil *Stage yields a no-op
+// reporter. Safe to call from concurrent workers when done values come
+// from a shared atomic counter; ticks may land out of order, but
+// Progress drops any that don't advance the bar.
+func (s *Stage) Span(lo, hi int) func(done, total int) {
+	return func(done, total int) {
+		if s == nil || total <= 0 {
+			return
+		}
+		s.Progress(lo + (hi-lo)*done/total)
+	}
 }
 
 // CLITracker wraps schollz/progressbar for terminal output.
