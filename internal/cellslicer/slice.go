@@ -2,6 +2,8 @@ package cellslicer
 
 import (
 	"math"
+	"runtime"
+	"sync"
 
 	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -77,25 +79,58 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 		}
 		perSlab[ks] = append(perSlab[ks], triPathCCW(a, b, c))
 	}
-	out := make([]*Footprint, nSlabs)
+	return unionPerSlabFootprints(perSlab)
+}
+
+// unionPerSlabFootprints unions each slab's accumulated CCW paths into a
+// single Footprint, returning one entry per slab (nil where the slab has
+// no paths or the union is empty). The slabs are independent, so the
+// unions run on a worker pool — on a finely tessellated mesh a single
+// slab can accumulate thousands of heavily overlapping triangle
+// projections whose Clipper union is superlinear in overlap density
+// (seconds per dense slab), and there are hundreds of slabs; serial this
+// is a multi-minute stall (the golden_pheasant "stuck in voxelizing"
+// hang). The result is identical to a serial loop — out[i] depends only
+// on perSlab[i].
+func unionPerSlabFootprints(perSlab []clipper.Paths) []*Footprint {
+	out := make([]*Footprint, len(perSlab))
+	nWorkers := runtime.NumCPU()
+	if nWorkers > len(perSlab) {
+		nWorkers = len(perSlab)
+	}
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+	jobCh := make(chan int, len(perSlab))
 	for i := range perSlab {
-		if len(perSlab[i]) == 0 {
-			continue
-		}
-		c := clipper.NewClipper(clipper.IoNone)
-		c.AddPaths(perSlab[i], clipper.PtSubject, true)
-		tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
-		if !ok || tree == nil {
-			continue
-		}
-		fp := &Footprint{}
-		for _, child := range tree.Childs() {
-			collectFootprintLoops(child, fp)
-		}
-		if len(fp.Loops) > 0 {
-			out[i] = fp
+		if len(perSlab[i]) > 0 {
+			jobCh <- i
 		}
 	}
+	close(jobCh)
+	var wg sync.WaitGroup
+	for w := 0; w < nWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobCh {
+				c := clipper.NewClipper(clipper.IoNone)
+				c.AddPaths(perSlab[i], clipper.PtSubject, true)
+				tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
+				if !ok || tree == nil {
+					continue
+				}
+				fp := &Footprint{}
+				for _, child := range tree.Childs() {
+					collectFootprintLoops(child, fp)
+				}
+				if len(fp.Loops) > 0 {
+					out[i] = fp
+				}
+			}
+		}()
+	}
+	wg.Wait()
 	return out
 }
 
@@ -186,26 +221,7 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) ([]*Foot
 			}
 		}
 	}
-	out := make([]*Footprint, nSlabs)
-	for i := range perSlab {
-		if len(perSlab[i]) == 0 {
-			continue
-		}
-		c := clipper.NewClipper(clipper.IoNone)
-		c.AddPaths(perSlab[i], clipper.PtSubject, true)
-		tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
-		if !ok || tree == nil {
-			continue
-		}
-		fp := &Footprint{}
-		for _, child := range tree.Childs() {
-			collectFootprintLoops(child, fp)
-		}
-		if len(fp.Loops) > 0 {
-			out[i] = fp
-		}
-	}
-	return out, drop
+	return unionPerSlabFootprints(perSlab), drop
 }
 
 // triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and
