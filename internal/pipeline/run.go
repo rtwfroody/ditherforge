@@ -288,7 +288,33 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 		}
 		nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
+		// Load-time decimation: prune geometry to voxel resolution on every
+		// load, alpha-wrap or not. errorBudget bounds geometric drift to ~½ a
+		// voxel cell -- finer detail than that won't survive voxelization
+		// downstream, so it's safe to discard here. Only the geometry `model`
+		// is decimated; the pristine mesh stays intact for ColorModel below
+		// (UVs, textures, and per-face colors feed color sampling at full
+		// resolution). When alpha-wrap is enabled this decimated mesh is also
+		// the wrap input, so the wrapper rebuilds from an already-pruned
+		// surface.
 		geomModel := model
+		if !r.opts.NoSimplify {
+			cellSize := voxelCellSizes(r.opts).UpperXY
+			budget := decimateErrorBudget(cellSize)
+			dec, derr := voxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
+			if derr != nil {
+				return nil, fmt.Errorf("load decimate: %w", derr)
+			}
+			if len(dec.Faces) < len(model.Faces) {
+				plog.Printf("  Decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+					len(model.Faces), len(dec.Faces), cellSize)
+				geomModel = dec
+			}
+			if err := r.checkCancel(); err != nil {
+				return nil, err
+			}
+		}
+
 		if r.opts.AlphaWrap {
 			alpha := r.opts.AlphaWrapAlpha
 			if alpha <= 0 {
@@ -299,34 +325,9 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 				offset = alpha / 30
 			}
 
-			// Pre-wrap decimation: alpha-wrap rebuilds the surface anyway,
-			// so feed it a mesh already pruned to voxel resolution.
-			// errorBudget bounds geometric drift to ~½ a voxel cell --
-			// finer detail than that won't survive voxelization
-			// downstream, so it's safe to discard before alpha-wrap.
-			// Only the alpha-wrap input is decimated -- `model` stays
-			// intact for ColorModel below.
-			wrapInput := model
-			if !r.opts.NoSimplify {
-				cellSize := voxelCellSizes(r.opts).UpperXY
-				budget := decimateErrorBudget(cellSize)
-				preDec, derr := voxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
-				if derr != nil {
-					return nil, fmt.Errorf("pre-wrap decimate: %w", derr)
-				}
-				if len(preDec.Faces) < len(model.Faces) {
-					plog.Printf("  Pre-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
-						len(model.Faces), len(preDec.Faces), cellSize)
-					wrapInput = preDec
-				}
-				if err := r.checkCancel(); err != nil {
-					return nil, err
-				}
-			}
-
 			plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
 			tWrap := time.Now()
-			wrapped, werr := alphawrap.Wrap(wrapInput, alpha, offset)
+			wrapped, werr := alphawrap.Wrap(geomModel, alpha, offset)
 			if werr != nil {
 				return nil, fmt.Errorf("alpha-wrap: %w", werr)
 			}

@@ -596,9 +596,10 @@ type loadSettings struct {
 	// budget inside Load. Including it here so changing the nozzle
 	// invalidates Load when alpha-wrap is on.
 	NozzleDiameter float32
-	// NoSimplify gates the pre- and post-wrap decimate substeps. With
-	// NoSimplify on, alpha-wrap input/output are passed through verbatim,
-	// so the cached loadOutput differs from the simplified case.
+	// NoSimplify gates the load-time decimate (every load) and the
+	// post-wrap decimate substep. With NoSimplify on, the geometry mesh
+	// and any alpha-wrap output are passed through verbatim, so the
+	// cached loadOutput differs from the simplified case.
 	NoSimplify bool
 }
 
