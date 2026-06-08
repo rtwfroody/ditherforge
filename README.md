@@ -336,52 +336,55 @@ compatible with OrcaSlicer and BambuStudio.
 
 1. **Load** — reads a GLB, 3MF, or STL file and scales it to millimeters. The
    model bottom is normalized to Z = 0. For files with multiple objects, the
-   selected object (or all objects) is processed.
-2. **Decimate** — reduces the triangle count of the input mesh using QEM mesh
-   decimation, before stickers and clipping run on it.
-3. **Stickers** — maps each sticker image onto the mesh. "Projection" mode
+   selected object (or all objects) is processed. The geometry mesh is then
+   decimated to voxel resolution with QEM mesh decimation — detail finer than
+   the voxel grid won't survive voxelization, so discarding it here keeps the
+   downstream stages fast. The pristine mesh is kept separately for color
+   sampling, so textures and per-face colors stay at full resolution.
+2. **Stickers** — maps each sticker image onto the mesh. "Projection" mode
    (the default) projects the image along the sticker normal onto the
    frontmost surface; "Unfold" mode flood-fills from the placement point
    across mesh adjacency. Sticker colors are alpha-composited over the base
    texture.
-4. **Split** (optional) — cuts the geometry mesh along the configured plane
+3. **Split** (optional) — cuts the geometry mesh along the configured plane
    using CGAL's `Polygon_mesh_processing::clip`, bakes peg or dowel
    connectors into the cut faces via boolean ops, and lays the two halves
    side by side on the build plate. Color sampling stays in the original
    mesh's coordinate frame, so stickers, color pins, and base color
    survive the cut unchanged.
-5. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
+4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
    upper cells are narrower (`nozzle × 1.05`).
-6. **Color adjust** — applies brightness, contrast, and saturation.
-7. **Color warp** — applies color pin remappings using Gaussian RBF
+5. **Color adjust** — applies brightness, contrast, and saturation.
+6. **Color warp** — applies color pin remappings using Gaussian RBF
    interpolation in CIELAB color space.
-8. **Palette** — resolves locked colors, then selects auto colors from the
+7. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
-9. **Dither** — assigns a palette color to each cell to approximate the original
+8. **Dither** — assigns a palette color to each cell to approximate the original
    texture. The default `riemersma` mode walks the cells along a locally-
    coherent tour and diffuses each cell's quantization error into a sliding
    window of recent cells. Five other modes are available — `riemersma-pair`,
    `blue-noise`, `dizzy-corrected`, `floyd-steinberg`, and `none` — each with
    different drift/wander/structure trade-offs. See [How to Choose a Dither
    Mode](#how-to-choose-a-dither-mode).
-10. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
-    each fragment a palette color.
-11. **Merge** — merges coplanar triangles to reduce face count.
-12. **Export** — writes a 3MF file with per-face material assignments. When
+9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
+   each fragment a palette color.
+10. **Merge** — merges coplanar triangles to reduce face count.
+11. **Export** — writes a 3MF file with per-face material assignments. When
     Split is enabled, two `<object>` entries are emitted (one per half) so
     slicers see them as independent build items.
 
-If **Alpha-wrap** is enabled (Advanced section), it runs between Load and
-Decimate to produce a watertight shell of the input mesh. Split also forces
+If **Alpha-wrap** is enabled (Advanced section), it runs inside the Load stage
+to produce a watertight shell of the input mesh — the load-time decimation
+feeds it a mesh already pruned to voxel resolution. Split also forces
 alpha-wrap on, since the cut needs a watertight input.
 
 Each stage is cached by its settings hash. Changing a downstream parameter
-(e.g., dithering mode) skips all upstream stages on the next run. The Load,
-Decimate, and Alpha-wrap stage caches persist across app restarts on disk
-(zstd-compressed), so re-opening a recent model is much faster than the
-first time.
+(e.g., dithering mode) skips all upstream stages on the next run. The stage
+caches persist across app restarts on disk (zstd-compressed), so re-opening a
+recent model is much faster than the first time — in particular the Load cache,
+which now subsumes both decimation and alpha-wrap, the slowest upstream work.
 
 While the pipeline runs, the output stage list shows live progress for each
 stage along with cache hit/miss status. If a stage fails, the error message
@@ -430,7 +433,7 @@ settings file.
 | `--color-snap` | `5` | Pre-dither color snap distance in delta E (0 to disable) |
 | `--output` | `<input>.3mf` | Output file path |
 | `--no-merge` | — | Skip coplanar triangle merging |
-| `--no-simplify` | — | Skip QEM mesh decimation before clipping |
+| `--no-simplify` | — | Skip the load-time QEM mesh decimation |
 | `--alpha-wrap` | — | Clean the input mesh with CGAL Alpha-wrap before voxelization |
 | `--alpha-wrap-alpha` | nozzle diameter | Alpha-wrap probe radius in mm |
 | `--alpha-wrap-offset` | alpha / 30 | Alpha-wrap offset distance in mm |
@@ -623,7 +626,7 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 | Option | Default | Description |
 |--------|---------|-------------|
 | No merge | off | Disables coplanar triangle merging in the final mesh |
-| No simplify | off | Disables QEM mesh decimation before clipping |
+| No simplify | off | Disables the load-time QEM mesh decimation |
 | Alpha-wrap | off | Wraps the input mesh with a watertight shell (CGAL Alpha-wrap) to fix self-intersections, thin walls, and other geometry that slicers choke on. Can be slow on large models. |
 | Alpha (mm) | nozzle diameter | Alpha-wrap probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
 | Offset (mm) | alpha / 30 | How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
