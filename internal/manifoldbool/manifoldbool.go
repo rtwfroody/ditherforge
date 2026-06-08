@@ -24,6 +24,13 @@ package manifoldbool
 
 /*
 #cgo LDFLAGS: -lmanifoldc -lmanifold
+// Manifold and Clipper2 are C++; pull in the C++ runtime after them so a
+// standalone link of this package (e.g. `go test ./internal/manifoldbool`
+// against static libs) resolves std:: symbols without relying on another
+// cgo package to drag the runtime in.
+#cgo linux LDFLAGS: -lstdc++ -lm
+#cgo windows LDFLAGS: -lstdc++ -lm
+#cgo darwin LDFLAGS: -lc++
 #cgo CFLAGS: -O2
 #include <stdlib.h>
 #include <manifold/manifoldc.h>

@@ -124,7 +124,7 @@ jobs:
           mkdir objs && cd objs
           ar x ../libmanifold.a && ar x ../libClipper2.a
           rm ../libmanifold.a
-          ar qcs ../libmanifold.a *.o
+          ar qcs ../libmanifold.a *.o*
           cd .. && rm -rf objs libClipper2.a
 
       - name: Build Manifold (Windows)
@@ -145,7 +145,7 @@ jobs:
           mkdir objs && cd objs
           ar x ../libmanifold.a && ar x ../libClipper2.a
           rm ../libmanifold.a
-          ar qcs ../libmanifold.a *.o
+          ar qcs ../libmanifold.a *.o*
           cd .. && rm -rf objs libClipper2.a
 
       - name: Save Manifold cache
