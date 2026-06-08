@@ -89,9 +89,89 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr
+          C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+          # Make cgo and the Manifold build agree on the mingw64 toolchain.
+          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
           echo "CGO_CXXFLAGS=-O3 -DNDEBUG -std=c++17 -Wa,-mbig-obj -IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
           echo "CGO_LDFLAGS=-static C:/msys64/mingw64/lib/libmpfr.a C:/msys64/mingw64/lib/libgmp.a" >> "$GITHUB_ENV"
+
+      # --- Manifold (libmanifoldc) — the cellslicer clip stage links it ---
+      # Not packaged by apt/brew/msys2, so build the C bindings from source
+      # (static, single-threaded — Go parallelizes at the slab level) and
+      # fold Clipper2 into libmanifold.a so the cgo directive
+      # `-lmanifoldc -lmanifold` resolves with no extra link flags.
+
+      - name: Restore Manifold cache
+        id: manifold-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
+          key: manifold-v3.4.1-${{ matrix.platform }}-r1
+
+      - name: Build Manifold (Linux/macOS)
+        if: steps.manifold-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v3.4.1 https://github.com/elalish/manifold.git /tmp/manifold-src
+          cmake -S /tmp/manifold-src -B /tmp/manifold-src/build \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DMANIFOLD_CROSS_SECTION=ON -DMANIFOLD_PAR=OFF -DMANIFOLD_TEST=OFF \
+            -DMANIFOLD_CBIND=ON -DMANIFOLD_USE_BUILTIN_CLIPPER2=ON \
+            -DCMAKE_INSTALL_PREFIX=/tmp/manifold-install
+          cmake --build /tmp/manifold-src/build --config Release -j3
+          cmake --install /tmp/manifold-src/build
+          cd /tmp/manifold-install/lib
+          mkdir objs && cd objs
+          ar x ../libmanifold.a && ar x ../libClipper2.a
+          rm ../libmanifold.a
+          ar qcs ../libmanifold.a *.o
+          cd .. && rm -rf objs libClipper2.a
+
+      - name: Build Manifold (Windows)
+        if: steps.manifold-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        shell: bash
+        run: |
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          git clone --depth 1 --branch v3.4.1 https://github.com/elalish/manifold.git /tmp/manifold-src
+          cmake -S /tmp/manifold-src -B /tmp/manifold-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DMANIFOLD_CROSS_SECTION=ON -DMANIFOLD_PAR=OFF -DMANIFOLD_TEST=OFF \
+            -DMANIFOLD_CBIND=ON -DMANIFOLD_USE_BUILTIN_CLIPPER2=ON \
+            -DCMAKE_CXX_FLAGS="-Wa,-mbig-obj" \
+            -DCMAKE_INSTALL_PREFIX=C:/manifold-install
+          cmake --build /tmp/manifold-src/build -j3
+          cmake --install /tmp/manifold-src/build
+          cd /c/manifold-install/lib
+          mkdir objs && cd objs
+          ar x ../libmanifold.a && ar x ../libClipper2.a
+          rm ../libmanifold.a
+          ar qcs ../libmanifold.a *.o
+          cd .. && rm -rf objs libClipper2.a
+
+      - name: Save Manifold cache
+        if: steps.manifold-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
+          key: manifold-v3.4.1-${{ matrix.platform }}-r1
+
+      - name: Install Manifold (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sudo mkdir -p /usr/local/include /usr/local/lib
+          sudo cp -R /tmp/manifold-install/include/manifold /usr/local/include/
+          sudo cp /tmp/manifold-install/lib/libmanifoldc.a /tmp/manifold-install/lib/libmanifold.a /usr/local/lib/
+          echo "CGO_CFLAGS=-I/usr/local/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L/usr/local/lib" >> "$GITHUB_ENV"
+
+      - name: Install Manifold (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp -R /c/manifold-install/include/manifold /c/msys64/mingw64/include/
+          cp /c/manifold-install/lib/libmanifoldc.a /c/manifold-install/lib/libmanifold.a /c/msys64/mingw64/lib/
+          echo "CGO_CFLAGS=-IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
