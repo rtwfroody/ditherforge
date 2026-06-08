@@ -89,9 +89,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
-          # Make cgo and the Manifold build agree on the mingw64 toolchain.
-          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          C:/msys64/usr/bin/pacman -S --noconfirm mingw-w64-x86_64-cgal mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr
           echo "CGO_CXXFLAGS=-O3 -DNDEBUG -std=c++17 -Wa,-mbig-obj -IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
           echo "CGO_LDFLAGS=-static C:/msys64/mingw64/lib/libmpfr.a C:/msys64/mingw64/lib/libgmp.a" >> "$GITHUB_ENV"
 
@@ -106,7 +104,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
-          key: manifold-v3.4.1-${{ matrix.platform }}-r1
+          key: manifold-v3.4.1-${{ matrix.platform }}-r2
 
       - name: Build Manifold (Linux/macOS)
         if: steps.manifold-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
@@ -131,9 +129,13 @@ jobs:
         if: steps.manifold-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
         shell: bash
         run: |
-          export PATH="/c/msys64/mingw64/bin:$PATH"
+          # Build with the same C:\mingw64 gcc that cgo links with, so the
+          # static libstdc++ ABI matches. Use the runner's preinstalled
+          # cmake + ninja as the build driver.
+          export PATH="/c/mingw64/bin:$PATH"
           git clone --depth 1 --branch v3.4.1 https://github.com/elalish/manifold.git /tmp/manifold-src
           cmake -S /tmp/manifold-src -B /tmp/manifold-src/build -G Ninja \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DMANIFOLD_CROSS_SECTION=ON -DMANIFOLD_PAR=OFF -DMANIFOLD_TEST=OFF \
             -DMANIFOLD_CBIND=ON -DMANIFOLD_USE_BUILTIN_CLIPPER2=ON \
@@ -153,7 +155,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
-          key: manifold-v3.4.1-${{ matrix.platform }}-r1
+          key: manifold-v3.4.1-${{ matrix.platform }}-r2
 
       - name: Install Manifold (Linux/macOS)
         if: runner.os != 'Windows'
@@ -169,9 +171,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp -R /c/manifold-install/include/manifold /c/msys64/mingw64/include/
-          cp /c/manifold-install/lib/libmanifoldc.a /c/manifold-install/lib/libmanifold.a /c/msys64/mingw64/lib/
-          echo "CGO_CFLAGS=-IC:/msys64/mingw64/include" >> "$GITHUB_ENV"
+          # cgo links with C:\mingw64, which doesn't search the install
+          # prefix; point at it explicitly (append, don't clobber the
+          # gmp/mpfr CGO_LDFLAGS set above).
+          echo "CGO_CFLAGS=-IC:/manifold-install/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS} -LC:/manifold-install/lib" >> "$GITHUB_ENV"
 
       - name: Extract version
         id: version
