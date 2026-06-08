@@ -26,4 +26,21 @@ go 1.24.0
 
 require github.com/rtwfroody/ditherforge v0.0.0
 
+require (
+	github.com/ctessum/go.clipper v0.1.2 // indirect
+	github.com/hschendel/stl v1.0.4 // indirect
+	github.com/james-bowman/sparse v0.0.0-20260216202247-495ee4f84d35 // indirect
+	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
+	github.com/qmuntal/draco-go v0.4.0 // indirect
+	github.com/qmuntal/gltf v0.27.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/schollz/progressbar/v3 v3.19.0 // indirect
+	golang.org/x/image v0.25.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/term v0.29.0 // indirect
+	gonum.org/v1/gonum v0.17.0 // indirect
+)
+
 replace github.com/rtwfroody/ditherforge => ..
