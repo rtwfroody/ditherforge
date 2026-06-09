@@ -161,8 +161,11 @@ func FromMesh(verts [][3]float32, faces [][3]uint32) (*Manifold, error) {
 	// run_original_id entries in any Boolean output. Without this
 	// the Manifold returned from manifold_of_meshgl carries
 	// originalID=-1 (derived), which would defeat ToMeshFiltered.
-	asOrig := m.asOriginal()
+	asOrig, err := m.asOriginal()
 	m.Close()
+	if err != nil {
+		return nil, err
+	}
 	return asOrig, nil
 }
 
@@ -171,10 +174,15 @@ func FromMesh(verts [][3]float32, faces [][3]uint32) (*Manifold, error) {
 // for downstream boolean ops. Caller takes ownership of the returned
 // Manifold; the receiver is unchanged (but no longer load-bearing
 // for this lineage).
-func (m *Manifold) asOriginal() *Manifold {
+func (m *Manifold) asOriginal() (*Manifold, error) {
 	mem := alloc()
 	ptr := C.manifold_as_original(mem, m.ptr)
-	return &Manifold{ptr: ptr, mem: mem}
+	out := &Manifold{ptr: ptr, mem: mem}
+	if err := out.statusErr(); err != nil {
+		out.Close()
+		return nil, err
+	}
+	return out, nil
 }
 
 // ExtrudePolygon extrudes a single CCW outer polygon between zBot and
@@ -258,8 +266,11 @@ func ExtrudePolygons(contours [][][2]float32, zBot, zTop float32) (*Manifold, er
 		return nil, err
 	}
 	if zBot != 0 {
-		shifted := ext.translate(0, 0, float64(zBot))
+		shifted, err := ext.translate(0, 0, float64(zBot))
 		ext.Close()
+		if err != nil {
+			return nil, err
+		}
 		return shifted, nil
 	}
 	return ext, nil
@@ -267,10 +278,15 @@ func ExtrudePolygons(contours [][][2]float32, zBot, zTop float32) (*Manifold, er
 
 // translate returns a fresh Manifold positioned at (dx, dy, dz). The
 // receiver is unchanged.
-func (m *Manifold) translate(dx, dy, dz float64) *Manifold {
+func (m *Manifold) translate(dx, dy, dz float64) (*Manifold, error) {
 	mem := alloc()
 	ptr := C.manifold_translate(mem, m.ptr, C.double(dx), C.double(dy), C.double(dz))
-	return &Manifold{ptr: ptr, mem: mem}
+	out := &Manifold{ptr: ptr, mem: mem}
+	if err := out.statusErr(); err != nil {
+		out.Close()
+		return nil, err
+	}
+	return out, nil
 }
 
 // Intersection returns a ∩ b. Both inputs survive the call. Returns

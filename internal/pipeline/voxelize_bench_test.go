@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -11,17 +12,18 @@ import (
 )
 
 // TestVoxelizeBench drives the Voxelize stage on each test model
-// and prints wall-time plus the new substep timing log line. Run
-// manually with:
+// and prints wall-time plus the substep timing log line. It asserts
+// nothing about correctness — it's a cold-cost timing probe — so it's
+// gated behind DF_VOXELIZE_BENCH rather than -short: running it in CI
+// would spend tens of CPU-seconds verifying nothing. Run manually:
 //
-//	go test ./internal/pipeline -run TestVoxelizeBench -v -count=1
+//	DF_VOXELIZE_BENCH=1 go test ./internal/pipeline -run TestVoxelizeBench -v -count=1
 //
-// Skipped under `-short` so it stays out of the normal test loop.
 // Uses a fresh in-memory StageCache per model to defeat caching
 // — we want the *cold* cost of Voxelize each time.
 func TestVoxelizeBench(t *testing.T) {
-	if testing.Short() {
-		t.Skip("benchmark (-short)")
+	if os.Getenv("DF_VOXELIZE_BENCH") == "" {
+		t.Skip("timing probe; set DF_VOXELIZE_BENCH=1 to run")
 	}
 
 	models := []string{

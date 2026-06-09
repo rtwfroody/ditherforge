@@ -707,6 +707,17 @@ type clipSettings struct {
 	MergeCells bool
 }
 
+// effectiveMergeCells reports whether the Clip stage merges same-color
+// cells per slab. It is the single source of truth for that predicate:
+// the Clip stage (run.go) and the Clip cache key (stageFnv) MUST agree,
+// or the cache serves a merged-cell blob for a per-cell request (or vice
+// versa). Merging is the default win (clip time + triangle count);
+// NoCellMerge opts out, and ShowSampledColors forces per-cell so the
+// diagnostic keeps exact per-cell face provenance.
+func effectiveMergeCells(opts Options) bool {
+	return !opts.NoCellMerge && !opts.ShowSampledColors
+}
+
 type mergeSettings struct {
 	NoMerge bool
 }
@@ -819,7 +830,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
 	case StageClip:
-		return clipSettings{MergeCells: !opts.NoCellMerge && !opts.ShowSampledColors}
+		return clipSettings{MergeCells: effectiveMergeCells(opts)}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
 	}

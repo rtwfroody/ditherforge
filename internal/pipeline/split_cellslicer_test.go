@@ -110,17 +110,18 @@ func TestSplitCellslicer_TwoHalves(t *testing.T) {
 		}
 	}
 
-	// Watertightness of the combined surface shell is logged, not
-	// asserted: ClipMeshToCellsManifold emits a colored surface shell
-	// (prism walls filtered), so open edges along the cut/cap can be
-	// present in both the split and unsplit outputs. The signal we
-	// care about is "no worse than unsplit", checked below.
+	// ClipMeshToCellsManifold emits a colored surface shell (prism
+	// walls filtered), so open edges along the cut/cap are expected in
+	// both the split and unsplit outputs — exact watertightness is not
+	// the signal. Splitting legitimately adds some: the two cap
+	// perimeters along the cut plane plus the seam where the halves'
+	// shells meet. What we guard against is a *blow-up* — a regression
+	// that drops whole slabs or fails to re-integrate a half would
+	// multiply the open-edge population several-fold.
 	wt := voxel.CheckWatertight(mo.ShellFaces)
 	t.Logf("split output: %s", wt.String())
 
-	// Compare against the unsplit run on the same model: the split
-	// output should not introduce a large new population of boundary
-	// edges beyond the two cap perimeters.
+	// Compare against the unsplit run on the same model.
 	rNo := &pipelineRun{ctx: context.Background(), cache: cache, opts: base, tracker: progress.NullTracker{}}
 	moNo, err := rNo.Merge()
 	if err != nil {
@@ -131,4 +132,16 @@ func TestSplitCellslicer_TwoHalves(t *testing.T) {
 	}
 	wtNo := voxel.CheckWatertight(moNo.ShellFaces)
 	t.Logf("unsplit output: %s", wtNo.String())
+
+	// The cap-perimeter overhead is modest (measured ~1.26× boundary
+	// edges at the time of writing). The 2× ceiling is a deliberately
+	// generous catastrophe detector, not a tight bound: it tolerates
+	// the legitimate cut overhead while still failing loudly if a half
+	// is dropped or mis-reintegrated and the shell opens up wholesale.
+	splitBoundary := len(wt.BoundaryEdges)
+	unsplitBoundary := len(wtNo.BoundaryEdges)
+	if splitBoundary > 2*unsplitBoundary {
+		t.Errorf("split introduced too many boundary edges: split=%d unsplit=%d (>2× — a slab/half was likely dropped)",
+			splitBoundary, unsplitBoundary)
+	}
 }

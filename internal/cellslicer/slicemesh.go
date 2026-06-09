@@ -408,8 +408,9 @@ func collapseCollinearKeepTris(points []Point2, edgeTris []int32) ([]Point2, []i
 	return outPts, outTris
 }
 
-// signedArea returns 2× the signed area of the closed polygon given
-// by points (no repeated final vertex). Positive = CCW.
+// signedArea returns the signed area of the closed polygon given by
+// points (no repeated final vertex). Positive = CCW. The shoelace sum
+// is twice the area, so it is halved before returning.
 func signedArea(points []Point2) float32 {
 	n := len(points)
 	if n < 3 {

@@ -134,6 +134,9 @@ struct CResult run_boolean(
         r.num_vertices = 0; r.num_faces = 0;
         r.error = strdup(e.what());
     } catch (...) {
+        free(r.vertices); free(r.faces);
+        r.vertices = NULL; r.faces = NULL;
+        r.num_vertices = 0; r.num_faces = 0;
         r.error = strdup("unknown C++ exception in boolean");
     }
     return r;
@@ -237,6 +240,9 @@ struct CResult cb_clip_surface(
         r.num_vertices = 0; r.num_faces = 0;
         r.error = strdup(e.what());
     } catch (...) {
+        free(r.vertices); free(r.faces);
+        r.vertices = NULL; r.faces = NULL;
+        r.num_vertices = 0; r.num_faces = 0;
         r.error = strdup("unknown C++ exception in clip_surface");
     }
     return r;

@@ -1404,8 +1404,9 @@ func (r *pipelineRun) Clip() (*clipOutput, error) {
 		// index), but it would smear the per-cell sampled view. So the
 		// diagnostic runs the per-cell clip to keep its provenance exact.
 		// Merging is ON by default (clip-time / triangle-count win); NoCellMerge
-		// opts out per-cell.
-		mergeCells := !r.opts.NoCellMerge && !r.opts.ShowSampledColors
+		// opts out per-cell. Shared with the Clip cache key via
+		// effectiveMergeCells so the two can never diverge.
+		mergeCells := effectiveMergeCells(r.opts)
 		if mergeCells {
 			plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.3gmm)",
 				cellslicer.OpenEdgeBloatMM)

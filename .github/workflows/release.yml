@@ -237,7 +237,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ./ditherforge-cli-linux-amd64 --version
-          go test -timeout 2m ./internal/...
+          # ./... (not ./internal/...) so the package `tests` behavioral
+          # suites (sampled_match_input, cell_merge_equiv) gate too. No
+          # -short: the heavy coverage tests opt out under -short, and
+          # they're the ones worth running here. The `tests` package is
+          # CPU-bound (per-model voxelize/clip) and runs ~5min locally;
+          # on a 4-vCPU runner it's slower, so the per-package timeout is
+          # a generous hang-backstop, not a target.
+          go test -timeout 15m ./...
 
       # --- Package ---
 
