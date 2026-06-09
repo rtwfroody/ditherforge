@@ -33,23 +33,24 @@ import (
 // App is the Wails application backend.
 type App struct {
 	ctx      context.Context
-	mu       sync.Mutex               // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
-	cancelMu sync.Mutex               // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
-	cancel   context.CancelFunc       // cancels in-flight pipeline work
-	cache    *pipeline.StageCache     // per-stage cache across runs
+	mu       sync.Mutex           // protects cache and the last* mesh-handler IDs; held during pipeline execution and Export3MF
+	cancelMu sync.Mutex           // protects cancel func; separate from mu so ProcessPipeline can cancel without blocking
+	cancel   context.CancelFunc   // cancels in-flight pipeline work
+	cache    *pipeline.StageCache // per-stage cache across runs
 	// lastOpts is the last successfully processed Options. Uses
 	// atomic.Pointer so SplitPreview (and other read-only Wails
 	// methods) can snapshot it without blocking on `mu`, which the
 	// pipeline worker holds for the entire duration of a run.
-	lastOpts atomic.Pointer[pipeline.Options]
-	pipeGen      atomic.Int64         // generation counter for pipeline requests
-	meshes       *meshHandler         // serves binary mesh data over HTTP
-	lastInputID   string              // mesh handler ID for last input mesh (protected by mu)
-	lastOverlayID string              // mesh handler ID for the alpha-wrap sticker overlay
-	lastOutputID  string              // mesh handler ID for last output mesh (protected by mu)
-	reqCh         chan pipelineRequest    // buffered channel for pipeline requests; worker drains to latest
-	collections   *collection.Manager    // filament collection manager
-	sweepInFlight atomic.Bool             // true while a disk-cache sweep goroutine is running
+	lastOpts      atomic.Pointer[pipeline.Options]
+	pipeGen       atomic.Int64         // generation counter for pipeline requests
+	meshes        *meshHandler         // serves binary mesh data over HTTP
+	lastInputID   string               // mesh handler ID for last input mesh (protected by mu)
+	lastOverlayID string               // mesh handler ID for the alpha-wrap sticker overlay
+	lastWrappedID string               // mesh handler ID for the alpha-wrapped geometry preview
+	lastOutputID  string               // mesh handler ID for last output mesh (protected by mu)
+	reqCh         chan pipelineRequest // buffered channel for pipeline requests; worker drains to latest
+	collections   *collection.Manager  // filament collection manager
+	sweepInFlight atomic.Bool          // true while a disk-cache sweep goroutine is running
 }
 
 // pipelineRequest is sent from ProcessPipeline to the worker goroutine.
@@ -189,6 +190,13 @@ func (a *App) kickDiskCacheSweep() {
 		if c == nil {
 			return
 		}
+		// Wait for in-flight async writes to land their meta sidecars
+		// before sweeping. Without this, a freshly-written data file
+		// whose cost-stamp goroutine hasn't run yet appears to Sweep
+		// with costMs=0 — top eviction bait — and gets dropped under
+		// size pressure. The next ExportFile then misses on the
+		// just-written entry and surfaces "pipeline has not been run yet".
+		a.cache.WaitForDiskWrites()
 		stats, err := c.Sweep(diskCacheMaxAge, diskCacheMaxBytes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "disk cache sweep: %v\n", err)
@@ -453,16 +461,24 @@ func (a *App) processOne(req pipelineRequest) {
 
 	plog.Printf("Pipeline gen %d starting: %s (reloadSeq=%d)",
 		req.gen, req.opts.Input, req.opts.ReloadSeq)
+	plog.Printf("Pipeline gen %d opts: %+v", req.gen, req.opts)
 
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelMu.Lock()
 	a.cancel = cancel
 	a.cancelMu.Unlock()
 
+	// lastPreviewScale captures the pipeline's pvScale (unitScale /
+	// totalScale) so the output-mesh emit below can convert the
+	// pipeline-mm pr.OutputMesh back to the GUI's preview-mm frame.
+	// Tests read pr.OutputMesh directly and want pipeline-mm, so the
+	// pipeline returns it unscaled; the GUI scaling lives here.
+	var lastPreviewScale float32 = 1
 	result, err := pipeline.RunCached(ctx, a.cache, req.opts, &pipeline.Callbacks{
 		OnInputMesh: func(mesh *pipeline.MeshData, pvScale float32, extentMM float32, bboxMin, bboxMax [3]float32) {
 			// Input mesh available — emit immediately so the preview appears
 			// before later pipeline stages finish.
+			lastPreviewScale = pvScale
 			if a.lastInputID != "" {
 				a.meshes.Remove(a.lastInputID)
 			}
@@ -475,6 +491,22 @@ func (a *App) processOne(req pipelineRequest) {
 				BBoxMin:      bboxMin,
 				BBoxMax:      bboxMax,
 			})
+		},
+		OnAlphaWrappedMesh: func(mesh *pipeline.MeshData, pvScale float32) {
+			// Mirrors OnStickerOverlay: mesh=nil clears the wrapped
+			// preview so the frontend can fall back to the input view
+			// when alpha-wrap is toggled off.
+			if a.lastWrappedID != "" {
+				a.meshes.Remove(a.lastWrappedID)
+				a.lastWrappedID = ""
+			}
+			url := ""
+			if mesh != nil {
+				a.lastWrappedID = a.meshes.Store(mesh)
+				url = "/mesh/" + a.lastWrappedID
+			}
+			wailsRuntime.EventsEmit(a.ctx, "wrapped-mesh",
+				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
 		},
 		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Alpha-wrap mode: stickers are carried by a separate mesh
@@ -539,8 +571,21 @@ func (a *App) processOne(req pipelineRequest) {
 		if a.lastOutputID != "" {
 			a.meshes.Remove(a.lastOutputID)
 		}
-		a.lastOutputID = a.meshes.Store(result.OutputMesh)
-		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{Gen: req.gen, URL: "/mesh/" + a.lastOutputID})
+		// Scale pipeline-mm OutputMesh back to the GUI's preview-mm
+		// frame so it lines up with the input mesh (which is already
+		// pre-scaled inside the pipeline; see pipeline.RunCached's
+		// onInputMesh path). PreviewScale rides on the event so the
+		// frontend can derive scale-dependent things — same pattern
+		// as input-mesh / wrapped-mesh / input-overlay-mesh.
+		scaled := pipeline.ScalePreviewMesh(result.OutputMesh, lastPreviewScale)
+		a.lastOutputID = a.meshes.Store(scaled)
+		plog.Printf("Pipeline gen %d output mesh: %d verts, %d faces",
+			req.gen, len(scaled.Vertices)/3, len(scaled.Faces)/3)
+		wailsRuntime.EventsEmit(a.ctx, "output-mesh", meshEvent{
+			Gen:          req.gen,
+			URL:          "/mesh/" + a.lastOutputID,
+			PreviewScale: lastPreviewScale,
+		})
 	}
 
 	if result.NeedsForce {
@@ -562,6 +607,44 @@ func (a *App) processOne(req pipelineRequest) {
 // LogMessage prints a message from the frontend to stdout.
 func (a *App) LogMessage(level, msg string) {
 	plog.Printf("[JS %s] %s", level, msg)
+}
+
+// DebugCellsSlabResult is the payload returned by DebugCellsSlabSVG:
+// the SVG markup for one slab plus the total slab count so the
+// frontend can bound its slab-index slider without a second call.
+//
+// SVG is preferred over PNG here because the per-slab payload is
+// produced from cell polygons directly — no rasterize+encode pass,
+// no base64 inflation, and the browser handles render+scaling. This
+// is what makes the slab slider responsive while dragging.
+type DebugCellsSlabResult struct {
+	SVG       string `json:"svg"`
+	SlabCount int    `json:"slabCount"`
+	// MedianCellAreaMM2 is the median cell polygon area (mm²) for the
+	// returned slab, summarizing cell size for the debug view. 0 when the
+	// slab has no cells.
+	MedianCellAreaMM2 float32 `json:"medianCellAreaMM2"`
+}
+
+// DebugCellsSlabSVG renders one slab's cell partition (colored by
+// sampled RGB) and returns the SVG markup. Requires the pipeline to
+// have run through Voxelize at least once for the currently loaded
+// options; returns an error otherwise. An empty SVG with SlabCount
+// set is returned for slabs that have no footprint geometry.
+func (a *App) DebugCellsSlabSVG(slabIdx int) (*DebugCellsSlabResult, error) {
+	last := a.lastOpts.Load()
+	if last == nil {
+		return nil, fmt.Errorf("no model loaded yet — run the pipeline first")
+	}
+	svg, slabCount, medianArea, err := pipeline.CellsSlabSVG(a.cache, *last, slabIdx)
+	if err != nil {
+		return nil, err
+	}
+	return &DebugCellsSlabResult{
+		SVG:               svg,
+		SlabCount:         slabCount,
+		MedianCellAreaMM2: medianArea,
+	}, nil
 }
 
 // Version returns the application version string.
@@ -594,9 +677,9 @@ func (a *App) SplitPreview(s pipeline.SplitSettings) (*pipeline.SplitPreviewResu
 // PrinterOption describes one printer + its nozzle/layer-height options for
 // the frontend printer selector. Layer heights are in mm.
 type PrinterOption struct {
-	ID          string          `json:"id"`
-	DisplayName string          `json:"displayName"`
-	Nozzles     []NozzleOption  `json:"nozzles"`
+	ID          string         `json:"id"`
+	DisplayName string         `json:"displayName"`
+	Nozzles     []NozzleOption `json:"nozzles"`
 }
 
 // NozzleOption lists the layer heights available for one nozzle variant.
@@ -707,6 +790,31 @@ func (a *App) ImportCollection() (string, error) {
 		return "", err
 	}
 	return col.Name, nil
+}
+
+// ExportCollection opens a native save dialog and writes the named
+// collection (built-in or user) to a text file in the same
+// "#RRGGBB Label" format ImportCollection reads. Returns the saved
+// path, or empty if the user cancelled.
+func (a *App) ExportCollection(name string) (string, error) {
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "Export Filament Collection",
+		DefaultFilename: name + ".txt",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "All Files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+	if err := a.collections.Export(name, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // RenameCollection renames a user collection.
@@ -846,9 +954,9 @@ type StickerSetting struct {
 
 // WarpPinSetting is the JSON representation of a color warp pin.
 type WarpPinSetting struct {
-	SourceHex   string `json:"sourceHex"`
-	TargetHex   string `json:"targetHex"`
-	TargetLabel string `json:"targetLabel,omitempty"`
+	SourceHex   string  `json:"sourceHex"`
+	TargetHex   string  `json:"targetHex"`
+	TargetLabel string  `json:"targetLabel,omitempty"`
 	Sigma       float64 `json:"sigma"`
 }
 
@@ -898,17 +1006,17 @@ type ColorSlotSetting struct {
 // in defaultSettings, but that's a visible "wrong initial value"
 // failure on legacy files, not silent data loss.
 type Settings struct {
-	InputFile           string              `json:"inputFile,omitempty"`
+	InputFile string `json:"inputFile,omitempty"`
 	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
 	// the frontend maps nil → -1 ("all objects"), which differs from 0 ("first object").
-	ObjectIndex         *int                `json:"objectIndex,omitempty"`
-	SizeMode            string              `json:"sizeMode"`
-	SizeValue           string              `json:"sizeValue"`
-	ScaleValue          string              `json:"scaleValue"`
-	Printer             string              `json:"printer,omitempty"`
-	NozzleDiameter      string              `json:"nozzleDiameter"`
-	LayerHeight         string              `json:"layerHeight"`
-	BaseColor           *ColorSlotSetting   `json:"baseColor,omitempty"`
+	ObjectIndex    *int              `json:"objectIndex,omitempty"`
+	SizeMode       string            `json:"sizeMode"`
+	SizeValue      string            `json:"sizeValue"`
+	ScaleValue     string            `json:"scaleValue"`
+	Printer        string            `json:"printer,omitempty"`
+	NozzleDiameter string            `json:"nozzleDiameter"`
+	LayerHeight    string            `json:"layerHeight"`
+	BaseColor      *ColorSlotSetting `json:"baseColor,omitempty"`
 	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
 	// file or .zip archive. The pipeline reads the file at run time —
 	// settings only stores the path, so projects assume the asset
@@ -916,15 +1024,15 @@ type Settings struct {
 	// BaseMaterialXTileMM is the procedural-to-mm scale.
 	// BaseMaterialXTriplanarSharpness controls image-backed graphs'
 	// triplanar projection blend (ignored by procedural .mtlx).
-	BaseMaterialXPath                string  `json:"baseMaterialXPath,omitempty"`
-	BaseMaterialXTileMM              float64 `json:"baseMaterialXTileMM,omitempty"`
-	BaseMaterialXTriplanarSharpness  float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
+	BaseMaterialXPath               string  `json:"baseMaterialXPath,omitempty"`
+	BaseMaterialXTileMM             float64 `json:"baseMaterialXTileMM,omitempty"`
+	BaseMaterialXTriplanarSharpness float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
 	// BaseColorMode is "solid" or "texture" — UI mode toggle that
 	// decides which of (BaseColor, BaseMaterialXPath) is sent to the
 	// pipeline. The unselected mode's fields are kept around (so the
 	// user can flip the toggle without losing their other choice) but
 	// don't reach the backend Options.
-	BaseColorMode                    string  `json:"baseColorMode,omitempty"`
+	BaseColorMode       string              `json:"baseColorMode,omitempty"`
 	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
 	InventoryCollection string              `json:"inventoryCollection"`
 	Brightness          float64             `json:"brightness"`
@@ -937,8 +1045,10 @@ type Settings struct {
 	BlueNoiseTol        float64             `json:"blueNoiseTol"`
 	ColorSnap           float64             `json:"colorSnap"`
 	NoMerge             bool                `json:"noMerge"`
+	NoCellMerge         bool                `json:"noCellMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
 	Stats               bool                `json:"stats"`
+	ShowSampledColors   bool                `json:"showSampledColors"`
 	AlphaWrap           bool                `json:"alphaWrap"`
 	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
 	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
@@ -947,8 +1057,8 @@ type Settings struct {
 	// UpperLayerXYScale tunes upper-layer cell width relative to the
 	// slicer line width. See defaultSettings for the default values
 	// missing-from-JSON keys are filled with on load.
-	Layer0AdhesionXYScale float64             `json:"layer0AdhesionXYScale"`
-	UpperLayerXYScale     float64             `json:"upperLayerXYScale"`
+	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
+	UpperLayerXYScale     float64 `json:"upperLayerXYScale"`
 	// Split panel state. Plain values matching the rest of the struct.
 	// Files saved before these fields existed lack the keys, which
 	// decode as zero in Go and serialise back as the explicit zero
@@ -1015,8 +1125,10 @@ func defaultSettings() Settings {
 		BlueNoiseTol:          20,
 		ColorSnap:             5,
 		NoMerge:               false,
+		NoCellMerge:           false,
 		NoSimplify:            false,
 		Stats:                 false,
+		ShowSampledColors:     false,
 		AlphaWrap:             false,
 		AlphaWrapAlpha:        "",
 		AlphaWrapOffset:       "",

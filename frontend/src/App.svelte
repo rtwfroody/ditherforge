@@ -22,6 +22,8 @@
   import CollectionManager from '$lib/components/CollectionManager.svelte';
   import StickerPanel from '$lib/components/StickerPanel.svelte';
   import ObjectPicker from '$lib/components/ObjectPicker.svelte';
+  import DebugCellsDialog from '$lib/components/DebugCellsDialog.svelte';
+  import TriangleInfoDialog from '$lib/components/TriangleInfoDialog.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
@@ -42,7 +44,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -182,8 +184,14 @@
   let colorSnap = $state(5);
   let committedColorSnap = $state(5);
   let noMerge = $state(false);
+  let noCellMerge = $state(false);
   let noSimplify = $state(false);
   let stats = $state(false);
+  // Debug: when true, the output mesh is colored by each face's
+  // originating section's raw sampled RGB instead of the dithered
+  // palette. Lets us visually distinguish sampling bugs from
+  // dither / mesh-emission bugs in the GUI viewer.
+  let showSampledColors = $state(false);
   let alphaWrap = $state(false);
   let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
@@ -388,12 +396,62 @@
   let version = $state('');
   let forceDialogOpen = $state(false);
   let forceExtentMM = $state(0);
+  let debugCellsDialogOpen = $state(false);
+  let triangleSelectMode = $state(false);
+  let triangleInfoDialogOpen = $state(false);
+  let pickedTriangle = $state<null | {
+    viewerId: string;
+    viewerLabel: string;
+    faceIndex: number;
+    vertices: [
+      [number, number, number],
+      [number, number, number],
+      [number, number, number],
+    ];
+  }>(null);
+  function handleTrianglePick(hit: {
+    viewerId: string;
+    viewerLabel: string;
+    faceIndex: number;
+    vertices: [
+      [number, number, number],
+      [number, number, number],
+      [number, number, number],
+    ];
+  }) {
+    pickedTriangle = hit;
+    triangleSelectMode = false;
+    triangleInfoDialogOpen = true;
+  }
 
   // Binary mesh URLs for 3D viewers.
   let inputMeshUrl: string | undefined = $state(undefined);
   // Optional alpha-wrap sticker overlay. Rendered just outside the input
   // mesh in the input viewer; carries decals when alpha-wrap is on.
   let inputOverlayMeshUrl: string | undefined = $state(undefined);
+  // Alpha-wrapped geometry preview (untextured, flat-shaded). Set when
+  // alpha-wrap is enabled; cleared on the next clear/disable event.
+  let wrappedMeshUrl: string | undefined = $state(undefined);
+  // 'input' = show the textured input mesh; 'wrapped' = show the
+  // alpha-wrapped geometry. Toggle disabled when alpha-wrap is off.
+  let inputViewMode: 'input' | 'wrapped' = $state('input');
+  // Overlay "View" popup state for the Input Model viewer.
+  let viewMenuOpen = $state(false);
+  let viewMenuRef: HTMLDivElement | undefined = $state(undefined);
+  let outputViewMenuOpen = $state(false);
+  let outputViewMenuRef: HTMLDivElement | undefined = $state(undefined);
+  type ViewMode = 'solid' | 'hidden-line';
+  let inputViewStyle: ViewMode = $state('solid');
+  let outputViewStyle: ViewMode = $state('solid');
+  function handleViewMenuOutside(e: MouseEvent) {
+    const target = e.target instanceof Node ? e.target : null;
+    if (viewMenuOpen && viewMenuRef && target && !viewMenuRef.contains(target)) {
+      viewMenuOpen = false;
+    }
+    if (outputViewMenuOpen && outputViewMenuRef && target && !outputViewMenuRef.contains(target)) {
+      outputViewMenuOpen = false;
+    }
+  }
   let outputMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
   // Pipeline error from a backend stage failure. Rendered as a final
@@ -494,6 +552,15 @@
     // Empty url means the pipeline explicitly told us there's no overlay
     // (e.g. alpha-wrap turned off). Clear the previous overlay if any.
     inputOverlayMeshUrl = event.url || undefined;
+  });
+  EventsOn('wrapped-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen < latestGen) return;
+    // Empty url = alpha-wrap is off; drop the wrapped preview and
+    // force the toggle back to the input view.
+    wrappedMeshUrl = event.url || undefined;
+    if (!wrappedMeshUrl && inputViewMode === 'wrapped') {
+      inputViewMode = 'input';
+    }
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
@@ -816,6 +883,8 @@
   function clearViewportMesh() {
     inputMeshUrl = undefined;
     inputOverlayMeshUrl = undefined;
+    wrappedMeshUrl = undefined;
+    inputViewMode = 'input';
     outputMeshUrl = undefined;
     modelBBoxMin = null;
     modelBBoxMax = null;
@@ -901,8 +970,10 @@
       blueNoiseTol,
       colorSnap,
       noMerge,
+      noCellMerge,
       noSimplify,
       stats,
+      showSampledColors,
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
@@ -1092,8 +1163,10 @@
     { key: 'blueNoiseTol',                    validate: pickNumber,                                        apply: (v) => { blueNoiseTol = v; committedBlueNoiseTol = v; } },
     { key: 'colorSnap',                       validate: pickNumber,                                        apply: (v) => { colorSnap = v; committedColorSnap = v; } },
     { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
+    { key: 'noCellMerge',                       validate: pickBool,                                          apply: (v) => { noCellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
+    { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
@@ -1300,6 +1373,16 @@
     }
   }
 
+  async function handleExportCollection() {
+    const name = collectionStore.activeCollection;
+    if (!name) return;
+    try {
+      await ExportCollection(name);
+    } catch (err) {
+      console.error('Failed to export collection:', err);
+    }
+  }
+
   async function handleDeleteCollection() {
     const name = collectionStore.activeCollection;
     if (!name) return;
@@ -1391,6 +1474,8 @@
       RiemersmaInputBias: committedRiemersmaBias,
       BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
+      NoCellMerge: noCellMerge,
+      ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
       AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
@@ -1481,6 +1566,17 @@
   }
 </script>
 
+<svelte:window
+  onclick={handleViewMenuOutside}
+  onkeydown={(e) => {
+    if (e.key === 'Escape') {
+      if (triangleSelectMode) { triangleSelectMode = false; }
+      viewMenuOpen = false;
+      outputViewMenuOpen = false;
+    }
+  }}
+/>
+
 <Tooltip.Provider>
 
 <main class="h-screen flex flex-col">
@@ -1526,6 +1622,17 @@
         {/if}
         <Menubar.Item onSelect={() => { newCollectionName = ''; newCollectionDialogOpen = true; }}>New...</Menubar.Item>
         <Menubar.Item onSelect={handleImportCollection}>Import...</Menubar.Item>
+      </Menubar.Content>
+    </Menubar.Menu>
+    <Menubar.Menu>
+      <Menubar.Trigger>Debug</Menubar.Trigger>
+      <Menubar.Content>
+        <Menubar.Item onSelect={() => { debugCellsDialogOpen = true; }} disabled={!outputMeshUrl || running}>
+          View Cells…
+        </Menubar.Item>
+        <Menubar.Item onSelect={() => { triangleSelectMode = true; }} disabled={!inputMeshUrl && !outputMeshUrl}>
+          Select Triangle…
+        </Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
     <div class="ml-auto flex items-center gap-2 pr-2">
@@ -2094,9 +2201,9 @@
             <div class="flex flex-wrap gap-x-6 gap-y-3">
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={noMerge} />
-                No merge
+                No coplanar merge
                 <HelpTip>
-                  Skip merging adjacent same-color voxels into larger regions. Produces more primitives but can preserve fine dither detail.
+                  Skip merging coplanar same-color triangles into larger polygons after clipping. Produces more triangles but keeps the raw clipped geometry.
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
@@ -2107,10 +2214,24 @@
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={noCellMerge} />
+                No cell merge
+                <HelpTip>
+                  Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
+                </HelpTip>
+              </label>
+              <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={stats} />
                 Stats
                 <HelpTip>
                   Log summary statistics (triangle counts, color usage, timings) to the terminal.
+                </HelpTip>
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={showSampledColors} />
+                Show sampled colors (debug)
+                <HelpTip>
+                  Color the output mesh by each face's raw pre-dither sampled RGB instead of its dithered palette index. Bypasses Merge so per-face provenance survives. Use to isolate sampling bugs from dither / palette / mesh-emission bugs: if an artifact is visible in this mode it's in section sampling (or upstream slicer geometry); if only visible with the box off it's in the dither stack.
                 </HelpTip>
               </label>
             </div>
@@ -2132,11 +2253,93 @@
 
   <!-- Right column: 3D viewers -->
   <div class="flex-1 flex flex-col p-4 gap-4 min-w-0">
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={inputMeshUrl} overlayMeshUrl={inputOverlayMeshUrl} label={inputFile ? `Input Model: ${shortenPath(inputFile)}` : 'Input Model'} viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation} pickMode={pickingPinIndex >= 0} stickerPlaceMode={placingStickerIndex >= 0} stickerImage={placingSticker?.thumbnail ?? ''} stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)} stickerRotation={placingSticker?.rotation ?? 0} onColorPick={handleColorPick} onStickerPlace={handleStickerPlace} warpPins={pickingPinIndex >= 0 ? [] : warpPins} loading={inputFile ? inputFile.split('/').pop() ?? '' : ''} errorMessage={inputError} cutPlane={cutPlanePreview} />
+    <div class="flex-1 min-h-0 relative">
+      <ModelViewer
+        meshUrl={inputViewMode === 'wrapped' && wrappedMeshUrl ? wrappedMeshUrl : inputMeshUrl}
+        overlayMeshUrl={inputViewMode === 'wrapped' ? undefined : inputOverlayMeshUrl}
+        label={inputFile ? `${inputViewMode === 'wrapped' ? 'Alpha-wrapped Model: ' : 'Input Model: '}${shortenPath(inputFile)}` : 'Input Model'}
+        viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation}
+        pickMode={inputViewMode === 'input' && pickingPinIndex >= 0}
+        pickTriangleMode={triangleSelectMode}
+        stickerPlaceMode={inputViewMode === 'input' && placingStickerIndex >= 0}
+        stickerImage={placingSticker?.thumbnail ?? ''}
+        stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)}
+        stickerRotation={placingSticker?.rotation ?? 0}
+        onColorPick={handleColorPick}
+        onTrianglePick={handleTrianglePick}
+        onStickerPlace={handleStickerPlace}
+        warpPins={inputViewMode === 'input' && pickingPinIndex < 0 ? warpPins : []}
+        loading={inputFile ? inputFile.split('/').pop() ?? '' : ''}
+        errorMessage={inputError}
+        cutPlane={cutPlanePreview}
+        viewMode={inputViewStyle}
+      />
+      <div
+        bind:this={viewMenuRef}
+        class="absolute top-2 right-2 z-10 text-xs"
+      >
+        <button
+          type="button"
+          class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
+          aria-haspopup="true"
+          aria-expanded={viewMenuOpen}
+          onclick={() => { viewMenuOpen = !viewMenuOpen; }}
+        >View</button>
+        {#if viewMenuOpen}
+          <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+            {#if wrappedMeshUrl}
+              <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Source</div>
+              <button
+                type="button"
+                class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'input' ? 'font-medium bg-muted/60' : ''}"
+                onclick={() => { inputViewMode = 'input'; viewMenuOpen = false; }}
+              >Input model</button>
+              <button
+                type="button"
+                class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'wrapped' ? 'font-medium bg-muted/60' : ''}"
+                onclick={() => { inputViewMode = 'wrapped'; viewMenuOpen = false; }}
+              >Alpha-wrapped</button>
+              <div class="border-t border-border"></div>
+            {/if}
+            <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Style</div>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="solid" />
+              <span>Solid</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="input-view-style" bind:group={inputViewStyle} value="hidden-line" />
+              <span>Hidden line</span>
+            </label>
+          </div>
+        {/if}
+      </div>
     </div>
-    <div class="flex-1 min-h-0">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} />
+    <div class="flex-1 min-h-0 relative">
+      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
+      <div
+        bind:this={outputViewMenuRef}
+        class="absolute top-2 right-2 z-10 text-xs"
+      >
+        <button
+          type="button"
+          class="px-2 py-1 rounded border border-border bg-background/90 hover:bg-muted shadow-sm"
+          aria-haspopup="true"
+          aria-expanded={outputViewMenuOpen}
+          onclick={() => { outputViewMenuOpen = !outputViewMenuOpen; }}
+        >View</button>
+        {#if outputViewMenuOpen}
+          <div class="absolute top-full right-0 mt-1 min-w-[10rem] rounded border border-border bg-popover shadow-md overflow-hidden">
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="solid" />
+              <span>Solid</span>
+            </label>
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
+              <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="hidden-line" />
+              <span>Hidden line</span>
+            </label>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
   </div>
@@ -2190,11 +2393,12 @@
       <Dialog.Title>{collectionStore.activeCollection}</Dialog.Title>
     </Dialog.Header>
     <CollectionManager />
-    {#if collectionStore.isEditable}
-      <Dialog.Footer>
+    <Dialog.Footer>
+      <Button variant="outline" size="sm" onclick={handleExportCollection}>Export...</Button>
+      {#if collectionStore.isEditable}
         <Button variant="destructive" size="sm" class="text-foreground" onclick={() => { deleteCollectionDialogOpen = true; }}>Delete Collection</Button>
-      </Dialog.Footer>
-    {/if}
+      {/if}
+    </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
 
@@ -2240,5 +2444,8 @@
   bind:open={objectPickerOpen}
   onSelect={onObjectSelected}
 />
+
+<DebugCellsDialog bind:open={debugCellsDialogOpen} />
+<TriangleInfoDialog bind:open={triangleInfoDialogOpen} pick={pickedTriangle} />
 
 </Tooltip.Provider>

@@ -23,6 +23,12 @@ type Op int
 const (
 	Union Op = iota
 	Difference
+	Intersection
+	// ClipSurface is the per-cell open-mesh clip used by the
+	// cellslicer pipeline: takes an open polygon-soup A and a
+	// closed clipper B, returns the part of A's surface inside B.
+	// A may be non-orientable along its boundary; B must be closed.
+	ClipSurface
 )
 
 // Compute runs the requested boolean op on (a, b). Inputs are triangle
@@ -75,6 +81,14 @@ func Compute(
 		r = C.cb_difference(
 			&aV[0], C.int(len(aVerts)), &aF[0], C.int(len(aFaces)),
 			&bV[0], C.int(len(bVerts)), &bF[0], C.int(len(bFaces)))
+	case Intersection:
+		r = C.cb_intersection(
+			&aV[0], C.int(len(aVerts)), &aF[0], C.int(len(aFaces)),
+			&bV[0], C.int(len(bVerts)), &bF[0], C.int(len(bFaces)))
+	case ClipSurface:
+		r = C.cb_clip_surface(
+			&aV[0], C.int(len(aVerts)), &aF[0], C.int(len(aFaces)),
+			&bV[0], C.int(len(bVerts)), &bF[0], C.int(len(bFaces)))
 	default:
 		return nil, nil, fmt.Errorf("cgalbool: unknown op %d", op)
 	}
@@ -86,6 +100,11 @@ func Compute(
 
 	onv := int(r.num_vertices)
 	onf := int(r.num_faces)
+	if onv == 0 || onf == 0 {
+		// Empty result is legitimate for ClipSurface when the cell
+		// missed every candidate triangle.
+		return nil, nil, nil
+	}
 	outVerts := make([][3]float32, onv)
 	rv := unsafe.Slice((*C.float)(unsafe.Pointer(r.vertices)), onv*3)
 	for i := range onv {

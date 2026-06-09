@@ -69,6 +69,22 @@ export namespace main {
 	        this.collection = source["collection"];
 	    }
 	}
+	export class DebugCellsSlabResult {
+	    svg: string;
+	    slabCount: number;
+	    medianCellAreaMM2: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DebugCellsSlabResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.svg = source["svg"];
+	        this.slabCount = source["slabCount"];
+	        this.medianCellAreaMM2 = source["medianCellAreaMM2"];
+	    }
+	}
 	export class StickerSetting {
 	    imagePath: string;
 	    center: number[];
@@ -139,8 +155,10 @@ export namespace main {
 	    blueNoiseTol: number;
 	    colorSnap: number;
 	    noMerge: boolean;
+	    noCellMerge: boolean;
 	    noSimplify: boolean;
 	    stats: boolean;
+	    showSampledColors: boolean;
 	    alphaWrap: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
@@ -188,8 +206,10 @@ export namespace main {
 	        this.blueNoiseTol = source["blueNoiseTol"];
 	        this.colorSnap = source["colorSnap"];
 	        this.noMerge = source["noMerge"];
+	        this.noCellMerge = source["noCellMerge"];
 	        this.noSimplify = source["noSimplify"];
 	        this.stats = source["stats"];
+	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
@@ -432,6 +452,9 @@ export namespace pipeline {
 	    Layer0AdhesionXYScale: number;
 	    UpperLayerXYScale: number;
 	    Split?: SplitSettings;
+	    NoInteriorFaceFootprint?: boolean;
+	    NoCellMerge?: boolean;
+	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -476,6 +499,9 @@ export namespace pipeline {
 	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
 	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
+	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
+	        this.NoCellMerge = source["NoCellMerge"];
+	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

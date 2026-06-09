@@ -282,10 +282,18 @@ func Render(vertices [][3]float32, faces [][3]uint32, azimuth, elevation float64
 }
 
 // ColorImage holds a rendered color buffer.
+//
+// Depth carries the per-pixel z-buffer value at the same indexing as
+// R/G/B/HasPixel. Pixels where HasPixel is false hold the sentinel
+// +Inf. DepthMin/DepthMax span the *projected* depth range of all
+// input vertices (regardless of culling), giving callers a scene-
+// scale denominator for normalising per-pixel depth differences.
 type ColorImage struct {
-	Width, Height int
-	R, G, B       []uint8
-	HasPixel      []bool
+	Width, Height      int
+	R, G, B            []uint8
+	HasPixel           []bool
+	Depth              []float64
+	DepthMin, DepthMax float64
 }
 
 // ToRGBA converts the color buffer to an RGBA image with transparent background.
@@ -356,11 +364,13 @@ func RenderColor(
 		G:        make([]uint8, n),
 		B:        make([]uint8, n),
 		HasPixel: make([]bool, n),
+		Depth:    make([]float64, n),
 	}
-	zbuf := make([]float64, n)
-	for i := range zbuf {
-		zbuf[i] = math.Inf(1)
+	for i := range img.Depth {
+		img.Depth[i] = math.Inf(1)
 	}
+	img.DepthMin = bounds.DMin
+	img.DepthMax = bounds.DMax
 
 	for fi, f := range faces {
 		v0, v1, v2 := pv[f[0]], pv[f[1]], pv[f[2]]
@@ -418,8 +428,8 @@ func RenderColor(
 
 				d := v0.d + u*(v1.d-v0.d) + v*(v2.d-v0.d)
 				idx := py*resolution + px
-				if d < zbuf[idx] {
-					zbuf[idx] = d
+				if d < img.Depth[idx] {
+					img.Depth[idx] = d
 					c := colorFn(fi, u, v)
 					img.R[idx] = c[0]
 					img.G[idx] = c[1]
@@ -584,6 +594,9 @@ func renderColorRect(
 		B:        make([]uint8, n),
 		HasPixel: make([]bool, n),
 	}
+	// TODO(depth): if a caller of RenderColorStrip ever needs the
+	// per-pixel depth buffer, promote zbuf onto ColorImage the way
+	// RenderColor does (see ColorImage.Depth at the type definition).
 	zbuf := make([]float64, n)
 	for i := range zbuf {
 		zbuf[i] = math.Inf(1)

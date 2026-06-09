@@ -9,8 +9,8 @@ import (
 //	bed_pos = Rotation · orig_pos + Translation
 //
 // where Rotation is a 3×3 rotation matrix stored row-major. The inverse
-// (used by Voxelize for color sampling on the unmoved ColorModel /
-// SampleModel / sticker meshes) is the transpose of Rotation:
+// (used by Voxelize for color sampling on the unmoved ColorModel and
+// sticker meshes) is the transpose of Rotation:
 //
 //	orig_pos = Rotationᵀ · (bed_pos − Translation)
 type Transform struct {
@@ -36,7 +36,7 @@ func (t Transform) Apply(p [3]float32) [3]float32 {
 // ApplyInverse maps p from bed coords back to original-mesh coords.
 // Phase-6 voxelize uses this for color sampling: the cell centroid
 // arrives in bed coords, this returns the corresponding original-mesh
-// coord where ColorModel / SampleModel / sticker decals live.
+// coord where ColorModel and sticker decals live.
 func (t Transform) ApplyInverse(p [3]float32) [3]float32 {
 	px := float64(p[0]) - t.Translation[0]
 	py := float64(p[1]) - t.Translation[1]

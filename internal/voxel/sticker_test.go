@@ -291,19 +291,18 @@ func TestBuildStickerDecalSubdividesPathologicalTriangle(t *testing.T) {
 	t.Logf("subdivided decal covers %d triangles", len(decal.TriUVs))
 }
 
-// TestBuildStickerDecalRespectsCallerIsolation: guards the shared-Faces
-// aliasing regression that caused an alpha-wrap + sticker crash before the
-// pipeline started deep-cloning via loader.DeepCloneForMutation. When
-// alpha-wrap is on, InflateAlongNormals → CloneForEdit produces a
-// SampleModel that SHARES its Faces backing with ColorModel. If the sticker
-// stage mutates ColorModel.Faces in place, those writes reach SampleModel
-// and the voxelizer panics indexing SampleModel.Vertices with midpoint
-// indices that only exist in ColorModel.Vertices.
+// TestBuildStickerDecalRespectsCallerIsolation: asserts the boundary
+// contract that BuildStickerDecal must not mutate any mesh outside its
+// "scratch" argument, even when that scratch shares backing slices with a
+// sibling. CloneForEdit shallow-copies Faces; if a caller hands
+// BuildStickerDecal a shallow clone (instead of a DeepCloneForMutation
+// result), the subdivision's in-place Faces writes would corrupt the
+// caller-visible sibling.
 //
-// This test proves the property at the BuildStickerDecal boundary: given a
-// deep-cloned "scratch" model, the subdivision must not touch any shallow
-// sibling that still holds the pre-clone Faces backing. It catches a
-// regression where DeepCloneForMutation reverts to a shallow copy. It does
+// No production caller currently produces that aliased layout — runSticker
+// always passes a DeepCloneForMutation result. The test remains a boundary
+// guard against (a) DeepCloneForMutation reverting to a shallow copy and
+// (b) any future caller that builds its scratch via CloneForEdit. It does
 // NOT catch the orthogonal regression of `runSticker` (or a future caller)
 // dropping the DeepCloneForMutation call and passing lo.ColorModel directly
 // — that would require a pipeline-layer smoke test.
@@ -322,9 +321,9 @@ func TestBuildStickerDecalRespectsCallerIsolation(t *testing.T) {
 		FaceBaseColor: [][4]uint8{{128, 128, 128, 255}},
 	}
 
-	// Simulate the alpha-wrap layout: a shallow clone that shares the
-	// Faces backing with orig. InflateAlongNormals does exactly this —
-	// it uses CloneForEdit which only duplicates Vertices/FaceBaseColor.
+	// Shallow clone that shares the Faces backing with orig — CloneForEdit
+	// only duplicates Vertices/FaceBaseColor. Any caller that relies on this
+	// shape needs the sticker stage to leave orig.Faces intact.
 	sibling := loader.CloneForEdit(orig)
 	// Confirm the alias up front: if CloneForEdit ever starts deep-copying
 	// Faces, this whole test becomes vacuous, so fail loudly here rather

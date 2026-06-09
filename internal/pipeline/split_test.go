@@ -100,15 +100,16 @@ func TestSplitEnabled_FieldCascade(t *testing.T) {
 
 // TestMergeSplitFaces_PerHalfMergeAndConcat — mergeSplitFaces should
 // run MergeCoplanarTriangles once per half (faces are grouped by
-// halfIdx in clipSplit's output) and concatenate, preserving the
-// per-face HalfIdx parallel array on the result. Constructs a tiny
-// shell with two coplanar quads on each half (4 triangles per half,
-// expecting merge to reduce to 2 triangles per half).
+// halfIdx in clipSplit's output) and concatenate, keeping the per-face
+// HalfIdx parallel array and the faces' vertex indices valid against the
+// concatenated welded vertex table. This test covers that plumbing
+// (concat order, parallel-array lengths, index offsetting) — not the
+// face-count reduction, which these tiny strips don't trigger (a 1×2
+// strip's boundary ear-clips back to the same 2 triangles per quad).
 func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
-	// Half 0: a quad in the z=0 plane at x=[0,1], y=[0,2], split into
-	// 2 triangles, with a coplanar adjacent quad at y=[2,4]. Result:
-	// 4 triangles that merge into 2 (since coplanar same-color groups
-	// re-triangulate to a quad = 2 tris).
+	// Half 0: a quad in the z=0 plane at x=[0,1], y=[0,2], with a
+	// coplanar adjacent quad at y=[2,4]; half 1 is the same shifted in x.
+	// 4 coplanar same-color triangles per half.
 	verts := [][3]float32{
 		// half 0 (8 verts)
 		{0, 0, 0}, {1, 0, 0}, {1, 2, 0}, {0, 2, 0},
@@ -130,7 +131,7 @@ func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
 	}
 	assignments := []int32{0, 0, 0, 0, 1, 1, 1, 1}
 	halfIdx := []byte{0, 0, 0, 0, 1, 1, 1, 1}
-	outFaces, outAssign, outHalf, err := mergeSplitFaces(
+	outVerts, outFaces, outAssign, outHalf, err := mergeSplitFaces(
 		context.Background(), verts, faces, assignments, halfIdx, progress.NullTracker{},
 	)
 	if err != nil {
@@ -138,6 +139,14 @@ func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
 	}
 	if len(outFaces) != len(outAssign) || len(outFaces) != len(outHalf) {
 		t.Errorf("output array lengths differ: faces=%d assign=%d half=%d", len(outFaces), len(outAssign), len(outHalf))
+	}
+	// Every face must index into the concatenated welded vertex table.
+	for fi, f := range outFaces {
+		for _, vi := range f {
+			if int(vi) >= len(outVerts) {
+				t.Fatalf("face %d references vert %d out of range (verts=%d)", fi, vi, len(outVerts))
+			}
+		}
 	}
 	// Count faces per half. Should be > 0 and grouped (all 0s come
 	// before all 1s after concat).
@@ -200,52 +209,6 @@ func TestClipSplit_FiltersPatchMapByHalf(t *testing.T) {
 	}
 	if _, ok := halfPatchMaps[1][voxel.CellKey{Grid: 0, Col: 5, Row: 0, Layer: 0}]; !ok {
 		t.Errorf("half 1 map missing the col=5 cell")
-	}
-}
-
-// TestFloodFillTwoGrids_PartitionsByHalfIdx — the load-bearing
-// safety check from the phase-7 review: flood fill must NOT bridge
-// two halves whose CellKey columns happen to be index-adjacent.
-// floodFillTwoGrids partitions by (Grid, HalfIdx); cells in
-// different halves can never end up in the same patch even if their
-// column indices are 1 apart and they share a color assignment.
-func TestFloodFillTwoGrids_PartitionsByHalfIdx(t *testing.T) {
-	cells := []voxel.ActiveCell{
-		// Two halves with column-adjacent cells, both assigned color 0.
-		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 0},
-		{Grid: 0, Col: 1, Row: 0, Layer: 0, HalfIdx: 1},
-	}
-	assignments := []int32{0, 0}
-	patchMap, numPatches, err := floodFillTwoGrids(context.Background(), cells, assignments, progress.NullTracker{})
-	if err != nil {
-		t.Fatalf("floodFillTwoGrids: %v", err)
-	}
-	if numPatches != 2 {
-		t.Errorf("got %d patches, want 2 (one per half — adjacent columns must NOT bridge)", numPatches)
-	}
-	p0 := patchMap[voxel.CellKey{Grid: 0, Col: 0, Row: 0, Layer: 0}]
-	p1 := patchMap[voxel.CellKey{Grid: 0, Col: 1, Row: 0, Layer: 0}]
-	if p0 == p1 {
-		t.Errorf("cells in different halves got the same patch ID %d (would silently merge in Clip)", p0)
-	}
-}
-
-// TestFloodFillTwoGrids_PartitionsByGridAndHalf — broader smoke
-// test: each (Grid, HalfIdx) combo gets its own patch space.
-func TestFloodFillTwoGrids_PartitionsByGridAndHalf(t *testing.T) {
-	cells := []voxel.ActiveCell{
-		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 0},
-		{Grid: 0, Col: 0, Row: 0, Layer: 0, HalfIdx: 1},
-		{Grid: 1, Col: 0, Row: 0, Layer: 1, HalfIdx: 0},
-		{Grid: 1, Col: 0, Row: 0, Layer: 1, HalfIdx: 1},
-	}
-	assignments := []int32{0, 0, 0, 0}
-	_, numPatches, err := floodFillTwoGrids(context.Background(), cells, assignments, progress.NullTracker{})
-	if err != nil {
-		t.Fatalf("floodFillTwoGrids: %v", err)
-	}
-	if numPatches != 4 {
-		t.Errorf("got %d patches, want 4 (one per (Grid, HalfIdx) combo)", numPatches)
 	}
 }
 

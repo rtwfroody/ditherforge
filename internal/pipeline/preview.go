@@ -77,6 +77,16 @@ func flattenMesh(model *loader.LoadedModel, colorFn func(fi int) (uint8, uint8, 
 	}
 }
 
+// buildWrappedMeshData creates a MeshData from the alpha-wrapped
+// geometry mesh for the "Show wrapped" preview toggle. The wrap has
+// no UVs, textures, or per-face colour, so faces are filled with a
+// neutral grey — the user is inspecting topology, not appearance.
+func buildWrappedMeshData(model *loader.LoadedModel) *MeshData {
+	return flattenMesh(model, func(fi int) (uint8, uint8, uint8) {
+		return defaultGray, defaultGray, defaultGray
+	})
+}
+
 // buildInputMeshData creates a MeshData from a loaded model, including texture
 // and UV data when available for proper texture-mapped rendering.
 func buildInputMeshData(model *loader.LoadedModel) *MeshData {
@@ -300,10 +310,12 @@ func encodeAtlasTexture(img image.Image) string {
 	return "png:" + base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-// scalePreviewMesh applies a uniform scale to a MeshData's vertices.
+// ScalePreviewMesh applies a uniform scale to a MeshData's vertices.
 // scale==1 returns the mesh unchanged; otherwise a shallow copy with a
-// scaled Vertices slice is returned (other slices are shared).
-func scalePreviewMesh(mesh *MeshData, scale float32) *MeshData {
+// scaled Vertices slice is returned (other slices are shared). Used by
+// callers that want to convert pipeline-mm coords back to the GUI's
+// preview-mm frame (multiply by lo.PreviewScale).
+func ScalePreviewMesh(mesh *MeshData, scale float32) *MeshData {
 	if mesh == nil || scale == 1 {
 		return mesh
 	}

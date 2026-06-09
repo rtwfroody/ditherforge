@@ -108,6 +108,133 @@ func filterInventory(inv []palette.InventoryEntry, locked []palette.InventoryEnt
 	return filtered
 }
 
+// BoxSample averages a (2*radiusU+1) × (2*radiusV+1) box of texels
+// around the UV point. radiusU/V are integer pixel radii. UV wraps
+// in both dimensions to match BilinearSample.
+//
+// Intended for sliced-mesh sampling where each output face covers
+// multiple texels and a point-sample produces visible aliasing:
+// the section's UV footprint (cellSize × layerH translated through
+// the source-triangle UV gradient) is large enough that adjacent
+// sections land on different texels of a high-detail texture
+// (earth.glb's coastlines and bathymetry). Averaging over the
+// section's footprint kills the per-section noise without losing
+// the texture's coarse structure.
+func BoxSample(img image.Image, u, v float32, radiusU, radiusV int) [4]uint8 {
+	if radiusU <= 0 && radiusV <= 0 {
+		return BilinearSample(img, u, v)
+	}
+	bounds := img.Bounds()
+	W := bounds.Max.X - bounds.Min.X
+	H := bounds.Max.Y - bounds.Min.Y
+	if W <= 0 || H <= 0 {
+		return [4]uint8{}
+	}
+	u = u - float32(math.Floor(float64(u)))
+	v = v - float32(math.Floor(float64(v)))
+	cx := int(u*float32(W-1)) + bounds.Min.X
+	cy := int(v*float32(H-1)) + bounds.Min.Y
+
+	switch src := img.(type) {
+	case *image.NRGBA:
+		return boxSampleNRGBA(src, cx, cy, radiusU, radiusV, W, H)
+	case *image.RGBA:
+		return boxSampleRGBA(src, cx, cy, radiusU, radiusV, W, H)
+	default:
+		return boxSampleGeneric(img, cx, cy, radiusU, radiusV, W, H, bounds.Min.X, bounds.Min.Y)
+	}
+}
+
+func boxSampleNRGBA(src *image.NRGBA, cx, cy, rU, rV, W, H int) [4]uint8 {
+	pix := src.Pix
+	stride := src.Stride
+	origX := src.Rect.Min.X
+	origY := src.Rect.Min.Y
+	var sumR, sumG, sumB, sumA uint32
+	var n uint32
+	for dy := -rV; dy <= rV; dy++ {
+		y := cy + dy
+		if y < origY {
+			y = origY
+		}
+		if y >= origY+H {
+			y = origY + H - 1
+		}
+		for dx := -rU; dx <= rU; dx++ {
+			x := ((cx + dx - origX) % W + W) % W + origX
+			i := (y-origY)*stride + (x-origX)*4
+			r, g, b, a := nrgbaPremul(pix, i)
+			sumR += uint32(r)
+			sumG += uint32(g)
+			sumB += uint32(b)
+			sumA += uint32(a)
+			n++
+		}
+	}
+	if n == 0 {
+		return [4]uint8{}
+	}
+	return [4]uint8{uint8(sumR / n), uint8(sumG / n), uint8(sumB / n), uint8(sumA / n)}
+}
+
+func boxSampleRGBA(src *image.RGBA, cx, cy, rU, rV, W, H int) [4]uint8 {
+	pix := src.Pix
+	stride := src.Stride
+	origX := src.Rect.Min.X
+	origY := src.Rect.Min.Y
+	var sumR, sumG, sumB, sumA uint32
+	var n uint32
+	for dy := -rV; dy <= rV; dy++ {
+		y := cy + dy
+		if y < origY {
+			y = origY
+		}
+		if y >= origY+H {
+			y = origY + H - 1
+		}
+		for dx := -rU; dx <= rU; dx++ {
+			x := ((cx + dx - origX) % W + W) % W + origX
+			i := (y-origY)*stride + (x-origX)*4
+			sumR += uint32(pix[i])
+			sumG += uint32(pix[i+1])
+			sumB += uint32(pix[i+2])
+			sumA += uint32(pix[i+3])
+			n++
+		}
+	}
+	if n == 0 {
+		return [4]uint8{}
+	}
+	return [4]uint8{uint8(sumR / n), uint8(sumG / n), uint8(sumB / n), uint8(sumA / n)}
+}
+
+func boxSampleGeneric(img image.Image, cx, cy, rU, rV, W, H, minX, minY int) [4]uint8 {
+	var sumR, sumG, sumB, sumA uint32
+	var n uint32
+	for dy := -rV; dy <= rV; dy++ {
+		y := cy + dy
+		if y < minY {
+			y = minY
+		}
+		if y >= minY+H {
+			y = minY + H - 1
+		}
+		for dx := -rU; dx <= rU; dx++ {
+			x := ((cx + dx - minX) % W + W) % W + minX
+			r, g, b, a := img.At(x, y).RGBA()
+			sumR += r >> 8
+			sumG += g >> 8
+			sumB += b >> 8
+			sumA += a >> 8
+			n++
+		}
+	}
+	if n == 0 {
+		return [4]uint8{}
+	}
+	return [4]uint8{uint8(sumR / n), uint8(sumG / n), uint8(sumB / n), uint8(sumA / n)}
+}
+
 // BilinearSample samples a texture at normalized UV coordinates.
 // Returns RGBA; alpha is 255 for textures without transparency.
 //
@@ -380,7 +507,17 @@ func SampleNearestColorWithSticker(
 	}
 
 	if bestTri < 0 {
-		return [4]uint8{128, 128, 128, 255}
+		// No triangle within the search radius (in XY and the Z
+		// window). This is "no surface found here," not a real grey
+		// sample — return fully transparent so multi-point cell
+		// samplers (SampleSlab) skip it instead of averaging an
+		// opaque mid-grey into the cell. Painting misses grey
+		// silently darkened cells whose nearest surface sat just
+		// beyond the radius (e.g. inner-ring cells ~1 cell-width in
+		// from a wall), and a grid-bucket boundary asymmetry made it
+		// hit the max-coordinate walls but not the min ones — turning
+		// a uniform cube into a two-tone one after quantization.
+		return [4]uint8{0, 0, 0, 0}
 	}
 
 	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
@@ -475,6 +612,160 @@ func SampleNearestColorWithSticker(
 type Neighbor struct {
 	Idx    int
 	Weight float32
+}
+
+// sampleBaryAt returns the barycentric coords of `p` on triangle
+// (v0,v1,v2) via 3D closest-point. For points lying on the
+// triangle (ribbon section midpoints) this returns the exact
+// barycentric. For points off the surface (cap-tile XY centers
+// at z = cap_z, where the dome surface curves above/below the
+// tile) it returns the barycentric of the nearest surface point,
+// which is what we want — sample the model's color at the
+// closest piece of geometry.
+func sampleBaryAt(p, v0, v1, v2 [3]float32) [3]float32 {
+	r := ClosestPointOnTriangle(p, v0, v1, v2)
+	return [3]float32{1 - r.S - r.T, r.S, r.T}
+}
+
+// SampleByTriangle samples the model's color at a point assumed to
+// be at or near a specific triangle's surface. Computes barycentric
+// of p on triangle triIdx and looks up texture / vertex color /
+// base color from those coords. Unlike SampleNearestColor, this
+// performs no spatial-index search — the caller asserts which
+// triangle the point belongs to. Used when the slicer already
+// knows the source triangle for a sample point and we want to
+// avoid nearest-tri picking up unrelated triangles from a nearby
+// object.
+func SampleByTriangle(p [3]float32, model *loader.LoadedModel, triIdx int32) [4]uint8 {
+	return SampleByTriangleFootprint(p, model, triIdx, 0, 0)
+}
+
+// SampleByTriangleFootprint is SampleByTriangle with an explicit
+// texture-domain box filter: the texture is sampled as the average
+// of a (2*radiusU+1) × (2*radiusV+1) texel box, instead of one
+// bilinear texel. Use this when one section covers many texels of
+// the source texture (high-detail textures like earth.glb): each
+// section gets a single sample whose value represents the texture
+// AVERAGE across the section's UV footprint, not one arbitrary
+// texel inside it. With radiusU=radiusV=0 this collapses to the
+// plain bilinear sample.
+//
+// Caller computes the section's UV footprint and converts to pixel
+// radii using the texture dimensions; this function doesn't know
+// the section.
+func SampleByTriangleFootprint(p [3]float32, model *loader.LoadedModel, triIdx int32, radiusU, radiusV int) [4]uint8 {
+	if triIdx < 0 || int(triIdx) >= len(model.Faces) {
+		return [4]uint8{128, 128, 128, 255}
+	}
+	f := model.Faces[triIdx]
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	bary := sampleBaryAt(p, v0, v1, v2)
+	matAlpha, bc, texIdx := faceMaterial(int(triIdx), model)
+
+	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
+		uv0 := model.UVs[f[0]]
+		uv1 := model.UVs[f[1]]
+		uv2 := model.UVs[f[2]]
+		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+		var rgba [4]uint8
+		if radiusU > 0 || radiusV > 0 {
+			rgba = BoxSample(model.Textures[texIdx], u, v, radiusU, radiusV)
+		} else {
+			rgba = BilinearSample(model.Textures[texIdx], u, v)
+		}
+		texA := float32(rgba[3]) / 255
+		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
+		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
+		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
+		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
+		return rgba
+	}
+	if model.VertexColors != nil {
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		rr := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
+		gg := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
+		bb := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
+		aa := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
+		return [4]uint8{
+			uint8(ClampF(rr*float32(bc[0])/255+0.5, 0, 255)),
+			uint8(ClampF(gg*float32(bc[1])/255+0.5, 0, 255)),
+			uint8(ClampF(bb*float32(bc[2])/255+0.5, 0, 255)),
+			uint8(ClampF(aa*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+		}
+	}
+	a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+	return [4]uint8{bc[0], bc[1], bc[2], a}
+}
+
+// SampleByTrianglePoints is a legacy multi-point averaging path
+// kept for callers that don't yet compute footprint radii. Each
+// point is single-sampled and the results are averaged.
+func SampleByTrianglePoints(model *loader.LoadedModel, triIdx int32, pts [][3]float32) [4]uint8 {
+	if triIdx < 0 || int(triIdx) >= len(model.Faces) || len(pts) == 0 {
+		return [4]uint8{128, 128, 128, 255}
+	}
+	f := model.Faces[triIdx]
+	v0 := model.Vertices[f[0]]
+	v1 := model.Vertices[f[1]]
+	v2 := model.Vertices[f[2]]
+	matAlpha, bc, texIdx := faceMaterial(int(triIdx), model)
+
+	var sumR, sumG, sumB, sumA float32
+	n := float32(len(pts))
+
+	switch {
+	case texIdx >= 0 && int(texIdx) < len(model.Textures):
+		uv0 := model.UVs[f[0]]
+		uv1 := model.UVs[f[1]]
+		uv2 := model.UVs[f[2]]
+		tex := model.Textures[texIdx]
+		for _, p := range pts {
+			bary := sampleBaryAt(p, v0, v1, v2)
+			u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+			v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+			rgba := BilinearSample(tex, u, v)
+			texA := float32(rgba[3]) / 255
+			sumR += float32(rgba[0])*texA + float32(bc[0])*(1-texA)
+			sumG += float32(rgba[1])*texA + float32(bc[1])*(1-texA)
+			sumB += float32(rgba[2])*texA + float32(bc[2])*(1-texA)
+			sumA += texA * float32(bc[3]) * matAlpha
+		}
+		return [4]uint8{
+			uint8(ClampF(sumR/n+0.5, 0, 255)),
+			uint8(ClampF(sumG/n+0.5, 0, 255)),
+			uint8(ClampF(sumB/n+0.5, 0, 255)),
+			uint8(ClampF(sumA/n+0.5, 0, 255)),
+		}
+	case model.VertexColors != nil:
+		c0 := model.VertexColors[f[0]]
+		c1 := model.VertexColors[f[1]]
+		c2 := model.VertexColors[f[2]]
+		for _, p := range pts {
+			bary := sampleBaryAt(p, v0, v1, v2)
+			rr := bary[0]*float32(c0[0]) + bary[1]*float32(c1[0]) + bary[2]*float32(c2[0])
+			gg := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
+			bb := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
+			aa := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
+			sumR += rr * float32(bc[0]) / 255
+			sumG += gg * float32(bc[1]) / 255
+			sumB += bb * float32(bc[2]) / 255
+			sumA += aa * float32(bc[3]) / 255 * matAlpha
+		}
+		return [4]uint8{
+			uint8(ClampF(sumR/n+0.5, 0, 255)),
+			uint8(ClampF(sumG/n+0.5, 0, 255)),
+			uint8(ClampF(sumB/n+0.5, 0, 255)),
+			uint8(ClampF(sumA/n+0.5, 0, 255)),
+		}
+	default:
+		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+		return [4]uint8{bc[0], bc[1], bc[2], a}
+	}
 }
 
 // effectiveAreas returns a per-cell area slice for use by area-weighted

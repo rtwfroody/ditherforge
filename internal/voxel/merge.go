@@ -7,17 +7,95 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
+// weldScale is the quantisation grid (units per mm) used to weld
+// position-coincident vertices before grouping. 1000 = a 1µm bucket,
+// matching the cellslicer's canonical grid (cellslicer.clipperScale), so
+// vertices the clip emitted via Snap land in the same bucket here. We
+// can't import cellslicer's DedupVertsByPosition directly — cellslicer
+// imports voxel, so the reverse would be an import cycle — hence this
+// local weld on the same grid.
+const weldScale = 1000.0
+
+// weldVertsByPosition collapses position-coincident vertices (same 1µm
+// bucket) into one, drops vertices no face references, and re-indexes
+// faces (filtering assignments in lockstep). Faces that become
+// degenerate after welding — two corners landing in the same bucket, i.e.
+// zero-area slivers — are dropped.
+//
+// This is the load-bearing fix for merging cellslicer clip output: that
+// clip concatenates each cell/group's mesh with offset vertex indices, so
+// coincident vertices along shared cell boundaries get DISTINCT indices.
+// MergeCoplanarTriangles keys face adjacency by vertex index, so without
+// welding it never sees two cells' coplanar faces as edge-adjacent and
+// merges nothing. Welding by position makes the shared boundary a single
+// shared index, which both enables cross-cell merging and welds the seam
+// shut (so the output is watertight where the surface is closed).
+//
+// Only referenced vertices are emitted, and representatives are chosen
+// among the faces' own vertices, so callers that merge disjoint submeshes
+// (e.g. per split half) stay isolated: two submeshes welded separately
+// never share an index even where their positions coincide.
+func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]float32, [][3]uint32, []int32) {
+	type bucket struct{ x, y, z int64 }
+	quant := func(v [3]float32) bucket {
+		return bucket{
+			int64(math.Round(float64(v[0]) * weldScale)),
+			int64(math.Round(float64(v[1]) * weldScale)),
+			int64(math.Round(float64(v[2]) * weldScale)),
+		}
+	}
+	bucketIdx := make(map[bucket]uint32, len(faces)*2)
+	remap := make([]int32, len(verts))
+	for i := range remap {
+		remap[i] = -1
+	}
+	outV := make([][3]float32, 0, len(faces))
+	canon := func(old uint32) uint32 {
+		if remap[old] >= 0 {
+			return uint32(remap[old])
+		}
+		b := quant(verts[old])
+		if j, ok := bucketIdx[b]; ok {
+			remap[old] = int32(j)
+			return j
+		}
+		j := uint32(len(outV))
+		bucketIdx[b] = j
+		remap[old] = int32(j)
+		outV = append(outV, verts[old])
+		return j
+	}
+	outF := make([][3]uint32, 0, len(faces))
+	outA := make([]int32, 0, len(faces))
+	for fi, f := range faces {
+		a, b, c := canon(f[0]), canon(f[1]), canon(f[2])
+		if a == b || b == c || a == c {
+			continue // zero-area after welding
+		}
+		outF = append(outF, [3]uint32{a, b, c})
+		outA = append(outA, assignments[fi])
+	}
+	return outV, outF, outA
+}
+
 // MergeCoplanarTriangles reduces triangle count by finding connected groups of
 // coplanar same-material triangles, extracting each group's boundary polygon,
 // and re-triangulating with ear clipping.
 //
+// It first welds position-coincident vertices (see weldVertsByPosition):
+// the cellslicer clip emits coincident cell-boundary vertices with distinct
+// indices, and the index-keyed adjacency below would otherwise treat every
+// cell as an island and merge nothing. The returned verts are the welded,
+// compacted set the returned faces index into.
+//
 // Emits two stages: "Grouping faces" (BFS over faces) and "Merging" (per-group
 // ear clipping). The caller should not also emit StageStart/StageDone for
 // these stages.
-func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32, tracker progress.Tracker) ([][3]uint32, []int32, error) {
+func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32, tracker progress.Tracker) ([][3]float32, [][3]uint32, []int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
+	verts, faces, assignments = weldVertsByPosition(verts, faces, assignments)
 	nFaces := len(faces)
 
 	type edgeKey struct{ a, b uint32 }
@@ -53,7 +131,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 	for fi := 0; fi < nFaces; fi++ {
 		if fi%1000 == 0 {
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return nil, nil, nil, ctx.Err()
 			}
 			grouping.Progress(fi)
 		}
@@ -103,7 +181,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 	for gi, group := range groups {
 		if gi%1000 == 0 {
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return nil, nil, nil, ctx.Err()
 			}
 			merging.Progress(gi)
 		}
@@ -225,7 +303,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 		}
 	}
 
-	return newFaces, newAssignments, nil
+	return verts, newFaces, newAssignments, nil
 }
 
 func earClip(pts [][2]float64) [][3]int {

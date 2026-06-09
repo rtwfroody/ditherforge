@@ -105,9 +105,9 @@ func writeMtlxTempFile(t *testing.T, body string) string {
 // TestStickerStageKeyDependsOnBaseColor guards a cache-coherency contract:
 // the Sticker stage body deep-clones lo.ColorModel into so.Model, including
 // FaceBaseColor. The per-run applyBaseColor reapplies the override to
-// lo.ColorModel/lo.SampleModel but not to so.Model. So a base-color change
-// must invalidate the sticker stage; otherwise voxelize samples colors from
-// a stale so.Model.FaceBaseColor.
+// lo.ColorModel but not to so.Model. So a base-color change must invalidate
+// the sticker stage; otherwise voxelize samples colors from a stale
+// so.Model.FaceBaseColor.
 func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 	c := NewStageCache()
 	base := Options{
@@ -126,11 +126,11 @@ func TestStickerStageKeyDependsOnBaseColor(t *testing.T) {
 	}
 }
 
-// TestLoadAndDecimateStageKeysIndependentOfBaseColor protects the design
-// intent stated in voxelizeSettings's doc comment: load/decimate caches
-// survive base-color changes because applyBaseColor patches the cached
-// ColorModel/SampleModel in place.
-func TestLoadAndDecimateStageKeysIndependentOfBaseColor(t *testing.T) {
+// TestLoadStageKeyIndependentOfBaseColor protects the design intent
+// stated in voxelizeSettings's doc comment: the load cache survives
+// base-color changes because applyBaseColor patches the cached
+// ColorModel in place.
+func TestLoadStageKeyIndependentOfBaseColor(t *testing.T) {
 	c := NewStageCache()
 	base := Options{Input: "model.glb", BaseColor: "#FF0000"}
 	changed := base
@@ -138,9 +138,6 @@ func TestLoadAndDecimateStageKeysIndependentOfBaseColor(t *testing.T) {
 
 	if c.stageFnv(StageLoad, base) != c.stageFnv(StageLoad, changed) {
 		t.Error("StageLoad key changed on BaseColor change; load cache should survive")
-	}
-	if c.stageFnv(StageDecimate, base) != c.stageFnv(StageDecimate, changed) {
-		t.Error("StageDecimate key changed on BaseColor change; decimate cache should survive")
 	}
 }
 
@@ -243,11 +240,10 @@ func TestStickerStageKeyDependsOnMaterialX(t *testing.T) {
 	}
 }
 
-// TestLoadAndDecimateStageKeysIndependentOfMaterialX mirrors the design
-// intent that the per-run applyBaseColor patches caches in place — load
-// and decimate must survive .mtlx changes the same way they survive hex
-// changes.
-func TestLoadAndDecimateStageKeysIndependentOfMaterialX(t *testing.T) {
+// TestLoadStageKeyIndependentOfMaterialX mirrors the design intent that
+// the per-run applyBaseColor patches caches in place — load must survive
+// .mtlx changes the same way it survives hex changes.
+func TestLoadStageKeyIndependentOfMaterialX(t *testing.T) {
 	c := NewStageCache()
 	mtlxA := writeMtlxTempFile(t, "<materialx version=\"1.39\"/>")
 	mtlxB := writeMtlxTempFile(t, "<materialx version=\"1.39\"><nodegraph/></materialx>")
@@ -264,9 +260,6 @@ func TestLoadAndDecimateStageKeysIndependentOfMaterialX(t *testing.T) {
 
 	if c.stageFnv(StageLoad, base) != c.stageFnv(StageLoad, changed) {
 		t.Error("StageLoad key changed on MaterialX change; load cache should survive")
-	}
-	if c.stageFnv(StageDecimate, base) != c.stageFnv(StageDecimate, changed) {
-		t.Error("StageDecimate key changed on MaterialX change; decimate cache should survive")
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
@@ -23,7 +22,6 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
-	"github.com/rtwfroody/ditherforge/internal/squarevoxel"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
@@ -97,17 +95,51 @@ type Options struct {
 	AlphaWrap          bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
 	AlphaWrapAlpha     float32   // mm; 0 = auto (5 × NozzleDiameter)
 	AlphaWrapOffset    float32   // mm; 0 = auto (alpha / 30)
-	// Layer0AdhesionXYScale enlarges layer-0 voxel cells in XY beyond
-	// the slicer's first-layer line width so heavily dithered first
-	// layers print as larger plastic blobs that stick to the bed.
-	// 0 (zero value) or negative falls back to
-	// squarevoxel.Layer0AdhesionXYScale; 1 = no enlargement.
+	// Layer0AdhesionXYScale multiplies the layer-0 minimum feature
+	// size — the printer-profile InitialLayerLineWidth when a profile
+	// is resolved, else the bare nozzle diameter. >1 enlarges first-
+	// layer cells for bed adhesion (heavily dithered first layers
+	// print as larger plastic blobs that stick). 0 / negative treats
+	// as 1.
 	Layer0AdhesionXYScale float32
-	// UpperLayerXYScale multiplies upper-layer voxel cell XY size
-	// relative to the slicer's line width. 0 (zero value) or negative
-	// falls back to squarevoxel.UpperLayerXYScale; 1 = unchanged.
+	// UpperLayerXYScale multiplies the upper-layer minimum feature
+	// size — the printer-profile LineWidth when a profile is
+	// resolved, else the bare nozzle diameter. >1 gives coarser
+	// color detail with fewer primitives. 0 / negative treats as 1.
 	UpperLayerXYScale float32
 	Split             SplitSettings `json:"Split,omitempty"`
+	// NoInteriorFaceFootprint disables the interior-horizontal-face
+	// footprint augmentation in Voxelize (see
+	// cellslicer.InteriorHorizontalFootprints). Default false = feature
+	// ON: thin horizontal sheets that fall between two slab planes (e.g.
+	// an alpha-wrapped single-surface roof) are projected into the slab
+	// footprint so cap detection sees them. Set true to fall back to the
+	// pure bounding-plane footprint — an advanced/diagnostic knob, mainly
+	// for A/B timing of the augmentation's cost.
+	NoInteriorFaceFootprint bool `json:"NoInteriorFaceFootprint,omitempty"`
+
+	// NoCellMerge disables same-color cell merging in the Clip stage (see
+	// cellslicer.ClipMeshToMergedCellsManifold). Default false = merging is
+	// ON: within each slab, adjacent same-kind cells of the same dithered
+	// color are paired (at most two per group) and clipped against one
+	// merged prism in a single Manifold intersection instead of one per
+	// cell, cutting boolean count and removing internal seams between
+	// same-color cells. Because colors come from Dither, it never affects
+	// the dithered output — it only changes clip time and triangle count
+	// (faster, fewer triangles). Set true to clip every cell individually.
+	// Merging is also forced off under ShowSampledColors, which needs
+	// per-cell face provenance.
+	NoCellMerge bool `json:"NoCellMerge,omitempty"`
+
+	// ShowSampledColors is a diagnostic mode: when true, the output
+	// mesh's per-face colors come from each face's originating
+	// section's RAW SAMPLED RGB instead of its dithered palette
+	// index. Bypasses the palette/dither stage for visualization
+	// only. Use to isolate sampling bugs from dither/palette bugs:
+	// if an artifact is visible in the sampled-color view, it's in
+	// SampleSectionColors (or upstream slicer geometry); if only in
+	// the normal view, it's in dither/palette/mesh-emission.
+	ShowSampledColors bool `json:"ShowSampledColors,omitempty"`
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -166,7 +198,14 @@ type Callbacks struct {
 	// alpha-wrap is off (the overlay is already baked into the input
 	// mesh's StickerUVs in that case).
 	OnStickerOverlay func(*MeshData, float32)
-	OnPalette        func([][3]uint8, []string)
+	// OnAlphaWrappedMesh fires after the load stage when alpha-wrap
+	// is enabled, carrying the wrapped geometry mesh (flat-shaded,
+	// no UVs or textures) so the frontend can offer a "show wrapped"
+	// toggle in the Input Model panel. Called with mesh=nil when
+	// alpha-wrap is off so the frontend can drop any stale wrapped
+	// mesh and force the toggle back to the input view.
+	OnAlphaWrappedMesh func(*MeshData, float32)
+	OnPalette          func([][3]uint8, []string)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -183,7 +222,6 @@ var stageNames = map[StageID]string{
 	StageSplit:       "Splitting",
 	StageVoxelize:    "Voxelizing",
 	StageSticker:     "Applying stickers",
-	StageDecimate:    "Decimating",
 	StageColorAdjust: "Adjusting colors",
 	StageColorWarp:   "Warping colors",
 	StagePalette:     "Building palette",
@@ -271,7 +309,15 @@ type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
 	OutputMesh    *MeshData `json:"-"` // sent async via events, not in JSON response
-	Duration      time.Duration
+	// WrappedMesh is the alpha-wrap output (post-decimate) in the same
+	// coord system as OutputMesh. Populated only when opts.AlphaWrap is
+	// true; nil otherwise. Used by tests that want to compare the
+	// sampled mesh against the *actual* input to the cellslicer (the
+	// wrap) rather than the original model — wrap-induced divergence
+	// (e.g. sealing open windows with surfaces at unexpected depths)
+	// would otherwise pollute cellslicer-correctness metrics.
+	WrappedMesh *MeshData `json:"-"`
+	Duration    time.Duration
 }
 
 // PrepareResult summarizes the Prepare phase (kept for CLI backward compat).
@@ -306,12 +352,14 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Extract callbacks, using safe defaults for nil.
 	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
+	var onAlphaWrappedMesh func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
 		onInputMesh = cb.OnInputMesh
 		onStickerOverlay = cb.OnStickerOverlay
+		onAlphaWrappedMesh = cb.OnAlphaWrappedMesh
 		onPalette = cb.OnPalette
 		onWarning = cb.OnWarning
 		if cb.Progress != nil {
@@ -377,7 +425,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		if len(bakedDecals) > 0 {
 			mesh = attachStickerOverlay(mesh, bakedDecals)
 		}
-		mesh = scalePreviewMesh(mesh, lo.PreviewScale)
+		mesh = ScalePreviewMesh(mesh, lo.PreviewScale)
 		// Compute the original-mesh-coord bbox (in mm, post-scale,
 		// post-normalizeZ). Used by the Split UI to size the offset
 		// slider per axis.
@@ -398,12 +446,21 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		}
 		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
 
+		if onAlphaWrappedMesh != nil {
+			var wrapped *MeshData
+			if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+				wrapped = buildWrappedMeshData(lo.Model)
+				wrapped = ScalePreviewMesh(wrapped, lo.PreviewScale)
+			}
+			onAlphaWrappedMesh(wrapped, lo.PreviewScale)
+		}
+
 		if onStickerOverlay != nil {
 			var overlay *MeshData
 			if so != nil && so.FromAlphaWrap && len(so.Decals) > 0 {
 				overlay = buildStickerOverlayMesh(so.Model, so.Decals)
 				if overlay != nil {
-					overlay = scalePreviewMesh(overlay, lo.PreviewScale)
+					overlay = ScalePreviewMesh(overlay, lo.PreviewScale)
 				}
 			}
 			onStickerOverlay(overlay, lo.PreviewScale)
@@ -427,27 +484,59 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Merge — the final output mesh. On a warm cache this is the
 	// only intermediate stage we touch; Voxelize/ColorAdjust/Warp/
 	// Dither/Clip stay on disk and are never read.
-	mo, err := r.Merge()
-	if err != nil {
-		return nil, err
+	//
+	// ShowSampledColors debug bypass: skip Merge (which would erase
+	// per-face section provenance via coplanar coalescing) and
+	// synthesize the mergeOutput from the unmerged Clip output. The
+	// post-processing below uses mo.ShellSectionIdx + the
+	// voxelizeOutput's per-section sampled colors to recolor faces.
+	var mo *mergeOutput
+	if opts.ShowSampledColors {
+		co, err := r.Clip()
+		if err != nil {
+			return nil, err
+		}
+		mo = &mergeOutput{
+			ShellVerts:       co.ShellVerts,
+			ShellFaces:       co.ShellFaces,
+			ShellAssignments: co.ShellAssignments,
+			ShellSectionIdx:  co.ShellSectionIdx,
+			ShellHalfIdx:     co.ShellHalfIdx,
+		}
+	} else {
+		mo, err = r.Merge()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Build output preview mesh from merge result + palette.
 	outModel := buildOutputModel(lo.ColorModel, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
-	if lo.PreviewScale != 1 {
-		for i := range outputMesh.Vertices {
-			outputMesh.Vertices[i] *= lo.PreviewScale
+	if opts.ShowSampledColors && mo.ShellSectionIdx != nil {
+		vo, err := r.Voxelize()
+		if err != nil {
+			return nil, err
 		}
+		cellColors := make([][3]uint8, len(vo.CellSamples))
+		for i, s := range vo.CellSamples {
+			cellColors[i] = s.Color
+		}
+		overrideFaceColorsFromSamples(outputMesh, mo.ShellSectionIdx, cellColors)
 	}
-
 	if opts.Stats {
 		printStats(mo.ShellAssignments, po.Palette)
 	}
 
+	var wrappedMesh *MeshData
+	if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+		wrappedMesh = buildWrappedMeshData(lo.Model)
+	}
+
 	return &ProcessResult{
-		OutputMesh: outputMesh,
-		Duration:   time.Since(start),
+		OutputMesh:  outputMesh,
+		WrappedMesh: wrappedMesh,
+		Duration:    time.Since(start),
 	}, nil
 }
 
@@ -530,12 +619,37 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 //
 // When the merge output carries a per-face HalfIdx (Split was
 // enabled), the result's FaceMeshIdx is populated from it and
-// NumMeshes is set to 2. NO CURRENT CONSUMER READS THESE FIELDS —
-// the wiring is preparatory for the Phase 7 follow-up in
-// internal/export3mf, which will iterate per FaceMeshIdx group to
-// emit two `<object>` entries. Until that lands, the export path
-// emits a single `<object>` containing both halves with the
-// bed-layout gap between them.
+// NumMeshes is set to 2. export3mf.splitModelByMesh reads these to
+// emit one `<object>` entry per half (each with its own vertex
+// table), so the two laid-out halves export as sibling parts the
+// slicer treats as independent printable objects.
+// overrideFaceColorsFromSamples rewrites outputMesh.FaceColors so
+// each face's RGB is its originating section's raw sampled color
+// (looked up by faceSection[fi] in sectionColors). Faces with
+// faceSection[fi] < 0 (interior fill triangles that don't trace back
+// to a sampled cell) are left at their dithered-palette color so the
+// unsampled fallback geometry still has *some* color. Used only when
+// opts.ShowSampledColors is set.
+func overrideFaceColorsFromSamples(mesh *MeshData, faceSection []int32, sectionColors [][3]uint8) {
+	if mesh == nil || len(mesh.FaceColors) == 0 {
+		return
+	}
+	nFaces := len(mesh.FaceColors) / 3
+	if len(faceSection) != nFaces {
+		return
+	}
+	for fi := 0; fi < nFaces; fi++ {
+		sid := faceSection[fi]
+		if sid < 0 || int(sid) >= len(sectionColors) {
+			continue
+		}
+		c := sectionColors[sid]
+		mesh.FaceColors[3*fi+0] = uint16(c[0])
+		mesh.FaceColors[3*fi+1] = uint16(c[1])
+		mesh.FaceColors[3*fi+2] = uint16(c[2])
+	}
+}
+
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {
 	placeholder := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	placeholder.SetNRGBA(0, 0, color.NRGBA{128, 128, 128, 255})
@@ -615,33 +729,36 @@ var offGridWarned sync.Map
 // In fallback mode Layer0Z = UpperZ = opts.LayerHeight so the grid
 // stays uniform — there's no slicer setting available to derive a
 // taller first-layer height from.
-func voxelCellSizes(opts Options) (cells voxelCells) {
-	cells = voxelCells{
-		Layer0XY: opts.NozzleDiameter * squarevoxel.Layer0CellScale,
-		UpperXY:  opts.NozzleDiameter * squarevoxel.UpperCellScale,
-		Layer0Z:  opts.LayerHeight,
-		UpperZ:   opts.LayerHeight,
-	}
-	// Apply Layer0AdhesionXYScale and UpperLayerXYScale at the very
-	// end so they stack on top of whichever Layer0XY/UpperXY source
-	// wins below (slicer profile or nozzle×constant fallback). The
-	// named return lets the defer mutate the value the caller sees.
-	// Zero/negative on either field falls back to the squarevoxel
-	// package default so library callers using Options{} (and tests)
-	// see the same behavior they did before the field existed; the
-	// CLI defaults and GUI slider mins both keep 0 unreachable.
-	adhesionScale := opts.Layer0AdhesionXYScale
-	if adhesionScale <= 0 {
-		adhesionScale = squarevoxel.Layer0AdhesionXYScale
+func voxelCellSizes(opts Options) voxelCells {
+	// Resolve the unscaled minimum-feature-size base from the printer
+	// profile (or nozzle fallback), then multiply by the user-facing
+	// XY scale knobs. Two-step split so future early returns in the
+	// base resolver can't accidentally bypass the scales.
+	cells := voxelCellSizesBase(opts)
+	layer0Scale := opts.Layer0AdhesionXYScale
+	if layer0Scale <= 0 {
+		layer0Scale = 1
 	}
 	upperScale := opts.UpperLayerXYScale
 	if upperScale <= 0 {
-		upperScale = squarevoxel.UpperLayerXYScale
+		upperScale = 1
 	}
-	defer func() {
-		cells.Layer0XY *= adhesionScale
-		cells.UpperXY *= upperScale
-	}()
+	cells.Layer0XY *= layer0Scale
+	cells.UpperXY *= upperScale
+	return cells
+}
+
+// voxelCellSizesBase resolves the unscaled minimum-feature sizes:
+// printer-profile InitialLayerLineWidth / LineWidth when a profile
+// matches, else the bare nozzle diameter. Caller (voxelCellSizes)
+// applies the XY scale multipliers on top.
+func voxelCellSizesBase(opts Options) (cells voxelCells) {
+	cells = voxelCells{
+		Layer0XY: opts.NozzleDiameter,
+		UpperXY:  opts.NozzleDiameter,
+		Layer0Z:  opts.LayerHeight,
+		UpperZ:   opts.LayerHeight,
+	}
 	// Match the export side's printer-default behavior (export3mf.go
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
 	// voxel grid agrees with what the emitted 3MF claims to be.
@@ -719,10 +836,10 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 	}
 }
 
-// applyBaseColor resets lo.ColorModel / lo.SampleModel FaceBaseColor from the
-// pristine parse output and reapplies the active base-color override, then
-// rebuilds lo.InputMesh so the preview reflects the new colors. Idempotent —
-// a no-op when the applied state already matches opts.
+// applyBaseColor resets lo.ColorModel.FaceBaseColor from the pristine parse
+// output and reapplies the active base-color override, then rebuilds
+// lo.InputMesh so the preview reflects the new colors. Idempotent — a no-op
+// when the applied state already matches opts.
 //
 // Two override sources are supported, mutually exclusive at apply time:
 //   - opts.BaseColorMaterialX (with TileMM): per-face centroid sample of the
@@ -733,12 +850,11 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 //   - opts.BaseColor: legacy uniform hex override.
 //
 // This intentionally violates the cache's "outputs are immutable after set"
-// contract for loadOutput: ColorModel.FaceBaseColor and SampleModel.FaceBaseColor
-// are mutated in place every run. Safe today because (a) the pipeline runs
-// single-threaded under app.pipelineWorker, so no other reader is active when
-// this runs; (b) the base-color settings are excluded from loadSettings, so
-// multiple cached loadOutput entries don't exist for the same load key with
-// different colors.
+// contract for loadOutput: ColorModel.FaceBaseColor is mutated in place every
+// run. Safe today because (a) the pipeline runs single-threaded under
+// app.pipelineWorker, so no other reader is active when this runs; (b) the
+// base-color settings are excluded from loadSettings, so multiple cached
+// loadOutput entries don't exist for the same load key with different colors.
 //
 // Invariant: whenever lo is present, parse output is reachable via
 // cache.getParse — but only when an override was previously applied do we
@@ -763,9 +879,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 			panic("applyBaseColor: parse output missing but load cache mutated")
 		}
 		copy(lo.ColorModel.FaceBaseColor, raw.FaceBaseColor)
-		if lo.SampleModel != lo.ColorModel {
-			copy(lo.SampleModel.FaceBaseColor, raw.FaceBaseColor)
-		}
 	}
 	lo.BaseColorAtlas = nil
 	switch {
@@ -783,9 +896,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 		)
 		if err == nil && override != nil {
 			bakeMaterialXBaseColor(lo.ColorModel, override)
-			if lo.SampleModel != lo.ColorModel {
-				bakeMaterialXBaseColor(lo.SampleModel, override)
-			}
 			// Per-triangle atlas bake for the input preview. Each
 			// face's patch dims (W × H) come from a 2D tier
 			// classification (longest-edge bbox extent × third-
@@ -810,9 +920,6 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 		_ = err // baseColorOverride already routed the warning through tracker.
 	case opts.BaseColor != "":
 		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
-		if lo.SampleModel != lo.ColorModel {
-			applyBaseColorOverride(lo.SampleModel, opts.BaseColor)
-		}
 	}
 	lo.InputMesh = buildInputMeshData(lo.ColorModel)
 	lo.InputMesh.BaseColorAtlas = lo.BaseColorAtlas
@@ -847,68 +954,6 @@ func bakeMaterialXBaseColor(model *loader.LoadedModel, override voxel.BaseColorO
 		})
 		model.FaceBaseColor[i] = [4]uint8{rgb[0], rgb[1], rgb[2], 255}
 	}
-}
-
-// floodFillTwoGrids runs flood fill separately for each (Grid,
-// HalfIdx) partition and merges results. Partitioning by HalfIdx is
-// load-bearing for the Split path: FloodFillPatches operates on
-// CellKey index-arithmetic adjacency, not spatial adjacency, so two
-// halves whose CellKey columns happen to be adjacent in index space
-// (which can happen when the bed-layout gap is small relative to
-// cellSize) would otherwise have patches bridging across the
-// bed-layout gap. With this partition,
-// patches are guaranteed to live in exactly one (Grid, HalfIdx) pair.
-func floodFillTwoGrids(ctx context.Context, cells []voxel.ActiveCell, assignments []int32, tracker progress.Tracker) (map[voxel.CellKey]int, int, error) {
-	// Up to 4 partitions: (Grid 0/1) × (HalfIdx 0/1). Empty groups are
-	// skipped; the unsplit path produces only HalfIdx=0 entries.
-	type partKey struct {
-		grid    uint8
-		halfIdx uint8
-	}
-	parts := make(map[partKey]*struct {
-		cells   []voxel.ActiveCell
-		assigns []int32
-	})
-	for i, c := range cells {
-		k := partKey{grid: c.Grid, halfIdx: c.HalfIdx}
-		p, ok := parts[k]
-		if !ok {
-			p = &struct {
-				cells   []voxel.ActiveCell
-				assigns []int32
-			}{}
-			parts[k] = p
-		}
-		p.cells = append(p.cells, c)
-		p.assigns = append(p.assigns, assignments[i])
-	}
-
-	var counter atomic.Int64
-	merged := make(map[voxel.CellKey]int, len(cells))
-	totalPatches := 0
-	// Iterate parts in a deterministic order so patch IDs are stable
-	// across runs (matters for cache stability on downstream stages).
-	order := []partKey{
-		{grid: 0, halfIdx: 0},
-		{grid: 0, halfIdx: 1},
-		{grid: 1, halfIdx: 0},
-		{grid: 1, halfIdx: 1},
-	}
-	for _, k := range order {
-		p, ok := parts[k]
-		if !ok {
-			continue
-		}
-		pm, n, err := voxel.FloodFillPatches(ctx, p.cells, p.assigns, tracker, &counter)
-		if err != nil {
-			return nil, 0, err
-		}
-		for ck, v := range pm {
-			merged[ck] = v + totalPatches
-		}
-		totalPatches += n
-	}
-	return merged, totalPatches, nil
 }
 
 func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {

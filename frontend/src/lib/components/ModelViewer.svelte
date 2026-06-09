@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { Canvas, T } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
   import Invalidator from './Invalidator.svelte';
   import AxesGizmo from './AxesGizmo.svelte';
   import ColorPicker3D from './ColorPicker3D.svelte';
   import StickerPlacer from './StickerPlacer.svelte';
+  import TrianglePicker3D from './TrianglePicker3D.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -49,11 +50,13 @@
     contrast = 0,
     saturation = 0,
     pickMode = false,
+    pickTriangleMode = false,
     stickerPlaceMode = false,
     stickerImage = '',
     stickerSize = 1,
     stickerRotation = 0,
     onColorPick,
+    onTrianglePick,
     onStickerPlace,
     warpPins = [],
     loading = '',
@@ -61,6 +64,7 @@
     stageTick = 0,
     cutPlane = null,
     pipelineError = '',
+    viewMode = 'solid',
   }: {
     meshUrl?: string;
     overlayMeshUrl?: string;
@@ -72,11 +76,22 @@
     contrast?: number;
     saturation?: number;
     pickMode?: boolean;
+    pickTriangleMode?: boolean;
     stickerPlaceMode?: boolean;
     stickerImage?: string;
     stickerSize?: number;
     stickerRotation?: number;
     onColorPick?: (hex: string) => void;
+    onTrianglePick?: (hit: {
+      viewerId: string;
+      viewerLabel: string;
+      faceIndex: number;
+      vertices: [
+        [number, number, number],
+        [number, number, number],
+        [number, number, number],
+      ];
+    }) => void;
     onStickerPlace?: (point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) => void;
     warpPins?: WarpPin[];
     loading?: string;
@@ -84,7 +99,32 @@
     stageTick?: number;
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
+    viewMode?: 'solid' | 'hidden-line';
   } = $props();
+
+  // Non-solid view modes use dedicated materials rather than mutating the
+  // colored scene materials in place — keeps lifecycle simple (the scene's
+  // materials own their textures/uniforms and shouldn't be toggled out from
+  // under their build path).
+  //   Hidden-line mode: render `viewSolidMat` first (white, with polygonOffset
+  //     to push it slightly back in z) to fill the depth buffer (hiding back
+  //     edges) and lay down a white base, then a translucent clone of each
+  //     real material on top (see `paleMaterials`) so the true colors wash
+  //     toward white ("pale"), then `viewWireMat` on top.
+  const viewSolidMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
+  const viewWireMat = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    wireframe: true,
+  });
+  onDestroy(() => {
+    viewSolidMat.dispose();
+    viewWireMat.dispose();
+  });
 
   // Compute live elapsed time for a running stage. The _tick parameter
   // creates a Svelte reactive dependency so this re-evaluates on each tick.
@@ -996,6 +1036,39 @@
     if (lightTargetRef && fillLightRef) fillLightRef.target = lightTargetRef;
   });
 
+  // Hidden-line mode wants pale versions of the real colors, not flat white.
+  // Clone each real material and make it translucent so it blends over the
+  // white solid pass (40% real + 60% white = pale). Cloning avoids mutating
+  // the colored scene materials in place (they own their textures/build path).
+  // clone() copies the map *reference*, so disposing a clone won't free the
+  // shared texture — disposeScene() still owns those.
+  //   The pale pass is transparent, so Three draws it after the opaque white
+  //   and wireframe passes. Give it the same polygonOffset as the white base
+  //   so its depth is pushed back to match: it still draws over the faces
+  //   (only the further-back white depth is there), but at the line fragments
+  //   the un-offset wireframe already wrote nearer depth, so the pale pass
+  //   fails the depth test there and the lines stay crisp black.
+  let paleMaterials = $state<THREE.Material[]>([]);
+  $effect(() => {
+    const s = scene;
+    const pales = s
+      ? s.meshes.map((m) => {
+          const p = m.material.clone();
+          p.transparent = true;
+          p.opacity = 0.4;
+          p.depthWrite = false;
+          p.polygonOffset = true;
+          p.polygonOffsetFactor = 1;
+          p.polygonOffsetUnits = 1;
+          return p;
+        })
+      : [];
+    paleMaterials = pales;
+    return () => {
+      for (const p of pales) p.dispose();
+    };
+  });
+
   let buildId = 0;
 
   $effect(() => {
@@ -1273,7 +1346,7 @@
             bind:ref={controlsRef}
             target={cameraSetup.target}
             enableDamping
-            enabled={!pickMode && !stickerPlaceMode}
+            enabled={!pickMode && !pickTriangleMode && !stickerPlaceMode}
             onchange={handleControlsChange}
           />
           <!-- Lights + target parented to the camera so lighting is view-space
@@ -1298,11 +1371,31 @@
         <!-- Ambient is direction-less, so it stays world-space. -->
         <T.AmbientLight intensity={0.2} />
 
-        {#each scene.meshes as mesh}
-          <T.Mesh geometry={mesh.geometry} material={mesh.material} />
+        {#each scene.meshes as mesh, i}
+          {#if viewMode === 'solid'}
+            <T.Mesh geometry={mesh.geometry} material={mesh.material} />
+          {:else}
+            <T.Mesh geometry={mesh.geometry} material={viewSolidMat} />
+            <!-- Pale pass: translucent real colors over the white base.
+                 Opt out of raycasting so the picker keeps hitting the
+                 white solid mesh deterministically (same reason as the
+                 wireframe pass below). -->
+            {#if paleMaterials[i]}
+              <T.Mesh geometry={mesh.geometry} material={paleMaterials[i]} raycast={() => {}} />
+            {/if}
+            <!-- Wireframe pass shares the solid pass's geometry; opt it
+                 out of raycasting so the triangle picker (and color
+                 picker) hit the solid mesh deterministically rather
+                 than relying on Three.js iteration order. -->
+            <T.Mesh geometry={mesh.geometry} material={viewWireMat} raycast={() => {}} />
+          {/if}
         {/each}
 
-        {#if overlayScene}
+        <!-- Overlay is the alpha-wrap sticker carrier — translucent, designed
+             to layer onto a colored base mesh. In hidden-line mode it would
+             just add an opaque white shell with black lines that mask the
+             base, so skip it entirely. -->
+        {#if overlayScene && viewMode === 'solid'}
           <T.Group bind:ref={overlayGroupRef}>
             {#each overlayScene.meshes as mesh}
               <T.Mesh geometry={mesh.geometry} material={mesh.material} />
@@ -1314,9 +1407,10 @@
           <T.Mesh geometry={cutPlaneGeo} material={cutPlaneMat} renderOrder={999} />
         {/if}
 
-        <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}`} />
+        <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}|vm${viewMode}`} />
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
+        <TrianglePicker3D pickMode={pickTriangleMode} onPick={(h) => onTrianglePick?.({ viewerId, viewerLabel: label, ...h })} />
         <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
       </Canvas>
     {:else if errorMessage}

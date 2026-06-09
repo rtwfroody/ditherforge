@@ -31,6 +31,24 @@ struct CResult cb_difference(
     const float *b_vertices, int b_num_vertices,
     const int *b_faces, int b_num_faces);
 
+/* Compute (a ∩ b). Returns the intersection as a closed triangle mesh. */
+struct CResult cb_intersection(
+    const float *a_vertices, int a_num_vertices,
+    const int *a_faces, int a_num_faces,
+    const float *b_vertices, int b_num_vertices,
+    const int *b_faces, int b_num_faces);
+
+/* Clip the surface of (open) mesh A against the closed clipper B
+ * (PMP::clip with clip_volume(false)). Returns the part of A's
+ * surface that lies inside B; the output is open (no caps). A's
+ * winding is preserved. Empty result is signaled with num_faces=0
+ * and error=NULL (i.e. not an error). */
+struct CResult cb_clip_surface(
+    const float *a_vertices, int a_num_vertices,
+    const int *a_faces, int a_num_faces,
+    const float *b_vertices, int b_num_vertices,
+    const int *b_faces, int b_num_faces);
+
 void cb_free(struct CResult result);
 
 #ifdef __cplusplus

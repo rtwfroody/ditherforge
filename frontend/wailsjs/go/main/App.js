@@ -6,6 +6,10 @@ export function CreateCollection(arg1) {
   return window['go']['main']['App']['CreateCollection'](arg1);
 }
 
+export function DebugCellsSlabSVG(arg1) {
+  return window['go']['main']['App']['DebugCellsSlabSVG'](arg1);
+}
+
 export function DefaultSettingsPath(arg1) {
   return window['go']['main']['App']['DefaultSettingsPath'](arg1);
 }
@@ -20,6 +24,10 @@ export function EnumerateObjects(arg1) {
 
 export function Export3MF() {
   return window['go']['main']['App']['Export3MF']();
+}
+
+export function ExportCollection(arg1) {
+  return window['go']['main']['App']['ExportCollection'](arg1);
 }
 
 export function GetCollectionColors(arg1) {

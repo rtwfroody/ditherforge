@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/cacheblob"
+	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/materialx"
@@ -39,11 +40,10 @@ const (
 	StageLoad
 	// StageSplit cuts the watertight loaded mesh in two and lays the
 	// halves out side-by-side on the bed (see docs/SPLIT.md). The
-	// Decimate, Voxelize, and downstream stages consume the split
-	// output when Options.Split.Enabled is true. When disabled, the
-	// stage is a passthrough.
+	// Voxelize and downstream stages consume the split output when
+	// Options.Split.Enabled is true. When disabled, the stage is a
+	// passthrough.
 	StageSplit
-	StageDecimate
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
 	StageColorAdjust
@@ -65,8 +65,6 @@ func stageSubdir(s StageID) string {
 		return "load"
 	case StageSplit:
 		return "split"
-	case StageDecimate:
-		return "decimate"
 	case StageSticker:
 		return "sticker"
 	case StageVoxelize:
@@ -113,8 +111,6 @@ func stageDescription(stage StageID, opts Options) string {
 		}
 		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
 			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
-	case StageDecimate:
-		return fmt.Sprintf("Decimate: %s @ %.2fmm", base, opts.NozzleDiameter)
 	case StageSticker:
 		return fmt.Sprintf("Stickers: %s (%d)", base, len(opts.Stickers))
 	case StageVoxelize:
@@ -376,7 +372,6 @@ func (c *StageCache) stageKey(stage StageID, opts Options) string {
 	return diskcache.Key(parts...)
 }
 
-
 // sizeKeyPart formats opts.Size (*float32) into a stable key string. nil is
 // distinct from any concrete value.
 func sizeKeyPart(s *float32) string {
@@ -396,13 +391,7 @@ type loadOutput struct {
 	// ColorModel is the original loaded mesh, carrying UVs, textures, and
 	// materials. Used for color sampling and sticker placement. When
 	// alpha-wrap is disabled, Model == ColorModel.
-	ColorModel *loader.LoadedModel
-	// SampleModel is the mesh used for per-voxel color sampling. When the
-	// geometry mesh (Model) has been grown by a step like alpha-wrap,
-	// SampleModel is the original mesh inflated along vertex normals so its
-	// surface roughly matches Model's. Otherwise SampleModel aliases
-	// ColorModel.
-	SampleModel  *loader.LoadedModel
+	ColorModel   *loader.LoadedModel
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
@@ -413,8 +402,8 @@ type loadOutput struct {
 	// override is active.
 	BaseColorAtlas *BaseColorAtlas
 	// appliedBaseColor / appliedBaseColorMaterialX{,TileMM,TriplanarSharpness}
-	// track the base-color override currently baked into ColorModel /
-	// SampleModel FaceBaseColor. The tuple is the cache key for the
+	// track the base-color override currently baked into
+	// ColorModel.FaceBaseColor. The tuple is the cache key for the
 	// in-place mutation: when any field diverges from the corresponding
 	// opts.* value, applyBaseColor resets from the parse cache and re-bakes.
 	// All empty/zero means pristine.
@@ -425,41 +414,33 @@ type loadOutput struct {
 }
 
 type voxelizeOutput struct {
-	Cells         []voxel.ActiveCell
-	CellAssignMap map[voxel.CellKey]int
-	MinV          [3]float32
-	Layer0Size    float32
-	UpperSize     float32
-	// Per-grid Z heights. Layer0H == UpperH for printers that don't
-	// differentiate; Snapmaker-style profiles run a taller first
-	// layer for adhesion (e.g. 0.25 vs 0.20). Layer 0's center sits
-	// at MinV[2]; layer N (N≥1)'s center sits at MinV[2] +
-	// Layer0H/2 + (N-0.5)*UpperH.
-	Layer0H float32
-	UpperH  float32
+	// Cells holds one ActiveCell per visible cellslicer cell, with
+	// the cell's centroid XYZ, sampled Color, and XY area times
+	// LayerHeight. Produced by the Voxelize stage from the cellslicer
+	// partition; consumed by ColorAdjust / ColorWarp / Palette /
+	// Dither without their needing to know the cell topology.
+	Cells []voxel.ActiveCell
 
-	// neighbors caches the two-grid neighbor table. Voxel topology only
-	// changes on StageVoxelize, so dither re-runs (same cells, different
-	// dither mode) can reuse the table instead of rebuilding it. Valid for
-	// the lifetime of this voxelizeOutput; never mutate Cells in place.
-	// Unexported so gob skips it on the disk round-trip; rebuilt on demand
-	// by getNeighbors().
-	neighbors    [][]voxel.Neighbor
-	neighborOnce sync.Once
-}
+	// CellSlabs is the full slab/cell partition (visible AND hidden
+	// cells) needed by the Clip stage to extrude per-cell prisms.
+	CellSlabs []cellslicer.Slab
+	// CellSamples is one entry per cell across all slabs, parallel
+	// to flattening CellSlabs[*].Cells. Carries sampled colors,
+	// alpha, and slab index so Clip can color output fragments by
+	// dithered palette index even for hidden cells.
+	CellSamples []cellslicer.CellSample
+	// Neighbors is the cell adjacency graph used by Dither, indexed
+	// by visible-cell position (parallel to Cells). Empty in the
+	// Phase-2 transition until Phase 3 lands; dither modes that need
+	// neighbors degrade to "no error diffusion" until then.
+	Neighbors [][]voxel.Neighbor
+	// VisibleToCell[v] = global cell index (into the flattened
+	// CellSamples list) for the v-th visible Cell. Used by Clip to
+	// look up the dithered palette index per cell.
+	VisibleToCell []int
 
-// getNeighbors returns the two-grid neighbor table, building it on first
-// call. sync.Once makes the lazy build safe even if a future change
-// introduces concurrent readers — without it, a downstream reader and the
-// disk-encode goroutine kicked off by setVoxelize would race on the
-// neighbors field. (gob skips unexported fields so the encode goroutine
-// doesn't touch this directly, but the invariant is easier to keep when
-// the synchronization is explicit.)
-func (vo *voxelizeOutput) getNeighbors() [][]voxel.Neighbor {
-	vo.neighborOnce.Do(func() {
-		vo.neighbors = voxel.BuildTwoGridNeighbors(vo.Cells, vo.Layer0Size, vo.UpperSize, vo.MinV)
-	})
-	return vo.neighbors
+	LayerH   float32
+	CellSize float32
 }
 
 type stickerOutput struct {
@@ -506,15 +487,6 @@ type colorWarpOutput struct {
 	Cells []voxel.ActiveCell
 }
 
-type decimateOutput struct {
-	// DecimModel is populated for the unsplit path. nil when split is
-	// enabled.
-	DecimModel *loader.LoadedModel
-	// Halves is populated for the split path: per-half decimated
-	// laid-out meshes. Both indices nil when split is disabled.
-	Halves [2]*loader.LoadedModel
-}
-
 // splitOutput is the result of cutting a watertight model in two and
 // laying the halves out side-by-side on the bed. Halves are in bed
 // coordinates (post-Layout); Xform[i] is the forward transform from
@@ -555,6 +527,12 @@ type clipOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
+	// ShellSectionIdx is parallel to ShellFaces; each entry is the
+	// index into voxelizeOutput.Sections of the section that
+	// produced this face, or -1 for faces that have no single
+	// section (earcut cap interior triangles). Used by the
+	// ShowSampledColors debug mode in RunCached.
+	ShellSectionIdx []int32
 	// ShellHalfIdx is parallel to ShellFaces; non-nil only when Split
 	// is enabled, in which case each face is tagged with the half it
 	// came from. Downstream Merge keeps it parallel through the
@@ -570,7 +548,13 @@ type mergeOutput struct {
 	ShellVerts       [][3]float32
 	ShellFaces       [][3]uint32
 	ShellAssignments []int32
-	ShellHalfIdx     []byte // parallel to ShellFaces; nil when Split disabled
+	// ShellSectionIdx is parallel to ShellFaces. Carried through
+	// only on the NoMerge path (and via the ShowSampledColors
+	// debug bypass in RunCached); set to nil when merging because
+	// MergeCoplanarTriangles groups faces by color and can't
+	// preserve per-face section provenance.
+	ShellSectionIdx []int32
+	ShellHalfIdx    []byte // parallel to ShellFaces; nil when Split disabled
 }
 
 // --- Per-stage settings structs for cache key computation ---
@@ -612,9 +596,10 @@ type loadSettings struct {
 	// budget inside Load. Including it here so changing the nozzle
 	// invalidates Load when alpha-wrap is on.
 	NozzleDiameter float32
-	// NoSimplify gates the pre- and post-wrap decimate substeps. With
-	// NoSimplify on, alpha-wrap input/output are passed through verbatim,
-	// so the cached loadOutput differs from the simplified case.
+	// NoSimplify gates the load-time decimate (every load) and the
+	// post-wrap decimate substep. With NoSimplify on, the geometry mesh
+	// and any alpha-wrap output are passed through verbatim, so the
+	// cached loadOutput differs from the simplified case.
 	NoSimplify bool
 }
 
@@ -641,11 +626,15 @@ type voxelizeSettings struct {
 	Layer0Z                              float32
 	UpperZ                               float32
 	BaseColor                            string
-	BaseColorMaterialX                   string  // path
-	BaseColorMaterialXMTime              int64   // ns; 0 if file is missing/inaccessible
-	BaseColorMaterialXSize               int64   // bytes; 0 if file is missing/inaccessible
+	BaseColorMaterialX                   string // path
+	BaseColorMaterialXMTime              int64  // ns; 0 if file is missing/inaccessible
+	BaseColorMaterialXSize               int64  // bytes; 0 if file is missing/inaccessible
 	BaseColorMaterialXTileMM             float64
 	BaseColorMaterialXTriplanarSharpness float64
+	// NoInteriorFaceFootprint changes which footprint the cellslicer
+	// builds (and thus which cap cells exist), so it must invalidate the
+	// voxelize cache when toggled.
+	NoInteriorFaceFootprint bool
 }
 
 type stickerSettings struct {
@@ -676,23 +665,17 @@ type colorWarpSettings struct {
 	WarpPins []WarpPin
 }
 
-type decimateSettings struct {
-	NoSimplify     bool
-	NozzleDiameter float32
-	LayerHeight    float32
-}
-
 // splitSettings is what affects StageSplit's output. When Enabled is
 // false, only the Enabled bit is hashed so a disabled-Split run
 // produces the same downstream cache keys it would have produced
 // before the Split feature shipped. Toggling other fields while
 // Enabled=false does not invalidate the cache.
 type splitSettings struct {
-	Enabled         bool
-	Axis            int
-	Offset          float64
-	ConnectorStyle  string
-	ConnectorCount  int
+	Enabled          bool
+	Axis             int
+	Offset           float64
+	ConnectorStyle   string
+	ConnectorCount   int
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
@@ -715,8 +698,25 @@ type ditherSettings struct {
 	BlueNoiseTolerance float64
 }
 
-// clipSettings has no fields: clip is invalidated only by dependency cascade.
-type clipSettings struct{}
+// clipSettings carries the clip-stage knobs. Beyond these the stage is
+// invalidated by dependency cascade from Dither / Voxelize. MergeCells
+// is the *effective* same-color-cell merge decision (see Clip): on only
+// when NoCellMerge is unset and not under ShowSampledColors, so the cache key
+// tracks exactly which clip path produced the output.
+type clipSettings struct {
+	MergeCells bool
+}
+
+// effectiveMergeCells reports whether the Clip stage merges same-color
+// cells per slab. It is the single source of truth for that predicate:
+// the Clip stage (run.go) and the Clip cache key (stageFnv) MUST agree,
+// or the cache serves a merged-cell blob for a per-cell request (or vice
+// versa). Merging is the default win (clip time + triangle count);
+// NoCellMerge opts out, and ShowSampledColors forces per-cell so the
+// diagnostic keeps exact per-cell face provenance.
+func effectiveMergeCells(opts Options) bool {
+	return !opts.NoCellMerge && !opts.ShowSampledColors
+}
 
 type mergeSettings struct {
 	NoMerge bool
@@ -782,6 +782,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			BaseColorMaterialXSize:               size,
 			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
 			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
+			NoInteriorFaceFootprint:              opts.NoInteriorFaceFootprint,
 		}
 	case StageSticker:
 		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
@@ -816,8 +817,6 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 			ClearanceMM:      opts.Split.ClearanceMM,
 			Orientation:      opts.Split.Orientation,
 		}
-	case StageDecimate:
-		return decimateSettings{NoSimplify: opts.NoSimplify, NozzleDiameter: opts.NozzleDiameter, LayerHeight: opts.LayerHeight}
 	case StagePalette:
 		return paletteSettings{
 			NumColors:         opts.NumColors,
@@ -831,7 +830,7 @@ func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
 	case StageDither:
 		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
 	case StageClip:
-		return clipSettings{}
+		return clipSettings{MergeCells: effectiveMergeCells(opts)}
 	case StageMerge:
 		return mergeSettings{NoMerge: opts.NoMerge}
 	}
@@ -915,6 +914,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
 		writeFloat64(h, v.BaseColorMaterialXTileMM)
 		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
+		writeBool(h, v.NoInteriorFaceFootprint)
 	case stickerSettings:
 		writeString(h, v.BaseColor)
 		writeString(h, v.BaseColorMaterialX)
@@ -968,10 +968,6 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 			writeString(h, v.Orientation[0])
 			writeString(h, v.Orientation[1])
 		}
-	case decimateSettings:
-		writeBool(h, v.NoSimplify)
-		writeFloat32(h, v.NozzleDiameter)
-		writeFloat32(h, v.LayerHeight)
 	case paletteSettings:
 		writeInt(h, v.NumColors)
 		writeString(h, v.LockedColors)
@@ -993,7 +989,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat64(h, v.RiemersmaInputBias)
 		writeFloat64(h, v.BlueNoiseTolerance)
 	case clipSettings:
-		// No independent settings.
+		writeBool(h, v.MergeCells)
 	case mergeSettings:
 		writeBool(h, v.NoMerge)
 	}
@@ -1011,8 +1007,6 @@ func allocOutput(stage StageID) any {
 		return &loadOutput{}
 	case StageSplit:
 		return &splitOutput{}
-	case StageDecimate:
-		return &decimateOutput{}
 	case StageSticker:
 		return &stickerOutput{}
 	case StageVoxelize:
@@ -1157,6 +1151,14 @@ func (c *StageCache) getLoad(opts Options) *loadOutput {
 	return v.(*loadOutput)
 }
 
+func (c *StageCache) getVoxelize(opts Options) *voxelizeOutput {
+	v := c.get(StageVoxelize, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*voxelizeOutput)
+}
+
 func (c *StageCache) getPalette(opts Options) *paletteOutput {
 	v := c.get(StagePalette, opts)
 	if v == nil {
@@ -1172,4 +1174,3 @@ func (c *StageCache) getMerge(opts Options) *mergeOutput {
 	}
 	return v.(*mergeOutput)
 }
-
