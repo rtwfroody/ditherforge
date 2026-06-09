@@ -658,6 +658,21 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		colorModel := lo.ColorModel
 		spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
 
+		// MaterialX base-color override for untextured faces, plumbed
+		// into the per-cell sampler. Without it every cell on an
+		// untextured face falls back to that face's single centroid-
+		// baked FaceBaseColor (the preview approximation), so a
+		// triplanar-textured face collapses to one flat color and the
+		// dither turns it into noise. Memoized on StageCache, so this
+		// shares Load's XML parse + image decode (nil when no MaterialX
+		// is configured). Any parse error was already surfaced in Load.
+		baseColorOverride, _ := r.cache.baseColorOverride(
+			r.opts.BaseColorMaterialX,
+			r.opts.BaseColorMaterialXTileMM,
+			r.opts.BaseColorMaterialXTriplanarSharpness,
+			r.tracker,
+		)
+
 		// Sticker substrate + its spatial index for the per-cell decal
 		// lookup. All nil when no stickers were placed, in which case
 		// SampleSlab falls straight through to the base-color-only path.
@@ -716,7 +731,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			// whole bar).
 			progLo := ui * progress.ScaleTotal / len(units)
 			progHi := (ui + 1) * progress.ScaleTotal / len(units)
-			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, u.colorXform, u.halfIdx, cellSizeForSlab, layerH, stage, progLo, progHi)
+			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, layerH, stage, progLo, progHi)
 			if herr != nil {
 				return nil, herr
 			}
@@ -866,6 +881,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	stickerModel *loader.LoadedModel,
 	stickerSI *voxel.SpatialIndex,
 	decals []*voxel.StickerDecal,
+	override voxel.BaseColorOverride,
 	colorXform func([3]float32) [3]float32,
 	halfIdx byte,
 	cellSizeForSlab func(int) float32,
@@ -1014,7 +1030,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
-		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, nil, colorXform, buf, bufs.sticker)
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker)
 		sampleNs.Add(int64(time.Since(t1)))
 		progSlab(int(slabDone.Add(1)), nSlabs)
 	})
