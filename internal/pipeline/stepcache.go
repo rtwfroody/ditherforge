@@ -916,6 +916,11 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		writeFloat32(h, v.NozzleDiameter)
 		writeBool(h, v.NoSimplify)
 	case voxelizeSettings:
+		// Cache salt: bump when the slab-partition geometry changes in a
+		// way that the hashed settings above don't capture. "v2" = slab 0
+		// now spans the first-layer height (SlabBoundaryPlanesFirst), so
+		// caches built by the old uniform-layerH grid must be rebuilt.
+		writeString(h, "slab-partition-v2")
 		writeFloat32(h, v.Layer0XY)
 		writeFloat32(h, v.UpperXY)
 		writeFloat32(h, v.Layer0Z)

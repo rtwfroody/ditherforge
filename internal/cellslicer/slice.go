@@ -9,26 +9,65 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
 
-// SlabBoundaryPlanes returns nSlabs+1 Z planes at uniform layerH
-// spacing covering [zMin, zMax]. A tiny per-plane offset shifts each
-// plane off the integer slab grid so on-plane vertices don't fall
-// exactly on a slicing plane (matches the prototype's nudge).
+// SlabBoundaryPlanes returns boundary planes for uniform layerH slabs
+// covering [zMin, zMax]. Equivalent to SlabBoundaryPlanesFirst with the
+// first slab the same height as the rest; kept for the prototype/tests
+// that don't model a taller initial layer.
+func SlabBoundaryPlanes(zMin, zMax, layerH float32) []float32 {
+	return SlabBoundaryPlanesFirst(zMin, zMax, layerH, layerH)
+}
+
+// SlabBoundaryPlanesFirst returns Z planes partitioning [zMin, zMax] into
+// slabs whose heights match the printer's real layer schedule: the first
+// slab spans firstLayerH (the profile's initial-layer print height), and
+// every slab above it spans layerH. This makes each mesh slab line up
+// 1:1 with a print layer, so the slicer cuts through the MIDDLE of a slab
+// (vertical cell walls) instead of landing on a horizontal slab seam.
 //
+// Why this matters: the slicer samples each layer's contour at its
+// mid-height (print_z - height/2). With a uniform layerH grid starting at
+// zMin but a taller first layer (e.g. Snapmaker U1: 0.2mm initial, 0.08mm
+// upper), every upper layer's mid-height coincides exactly with a uniform
+// 0.08mm slab boundary — i.e. the slicer slices ON the coincident
+// top/bottom cap faces between two slabs. That degenerate slice drops
+// whole layers (observed: empty layers 3/5/8 on a 0.08mm Benchy). Sizing
+// the first slab to firstLayerH shifts every upper seam onto a print-layer
+// boundary, moving the slice planes to safe slab interiors.
+//
+// A tiny per-plane offset shifts each plane off the integer slab grid so
+// on-plane vertices don't fall exactly on ditherforge's own slicing plane.
 // Plane 0 is pulled BELOW zMin by a small epsilon so the model's
 // bottommost triangles (which sit exactly at z=zMin after loader
-// normalization) are unambiguously inside slab 0. Without this,
-// a flat-bottomed model (e.g. cube) loses its entire bottom face:
-// every other plane has a positive nudge, so slab 0's ZBot would
-// be > zMin and the bottom triangles' zMax (= zMin) falls outside
-// every slab's [ZBot, ZTop] range.
-func SlabBoundaryPlanes(zMin, zMax, layerH float32) []float32 {
-	nSlabs := int(math.Ceil(float64((zMax - zMin) / layerH)))
-	if nSlabs < 1 {
-		nSlabs = 1
+// normalization) are unambiguously inside slab 0. Without this, a
+// flat-bottomed model (e.g. cube) loses its entire bottom face: every
+// other plane has a positive nudge, so slab 0's ZBot would be > zMin and
+// the bottom triangles' zMax (= zMin) falls outside every slab's range.
+func SlabBoundaryPlanesFirst(zMin, zMax, firstLayerH, layerH float32) []float32 {
+	if layerH <= 0 {
+		layerH = 0.2
 	}
+	if firstLayerH <= 0 {
+		firstLayerH = layerH
+	}
+	total := zMax - zMin
+	// One firstLayerH slab at the bottom, then enough layerH slabs to
+	// cover the rest. Ceil so the final plane reaches or passes zMax and
+	// the top slab fully contains it.
+	nUpper := 0
+	if total > firstLayerH {
+		nUpper = int(math.Ceil(float64((total - firstLayerH) / layerH)))
+	}
+	nSlabs := 1 + nUpper
 	planes := make([]float32, nSlabs+1)
 	for i := 0; i <= nSlabs; i++ {
-		planes[i] = zMin + float32(i)*layerH + float32((i+1)*53)*1e-6
+		// Height of boundary i above zMin: 0, firstLayerH,
+		// firstLayerH+layerH, … computed with a single multiply (no
+		// repeated-addition drift across hundreds of slabs).
+		var hgt float32
+		if i >= 1 {
+			hgt = firstLayerH + float32(i-1)*layerH
+		}
+		planes[i] = zMin + hgt + float32((i+1)*53)*1e-6
 	}
 	planes[0] = zMin - 53e-6
 	return planes

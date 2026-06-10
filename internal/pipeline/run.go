@@ -646,6 +646,15 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 		if layerH <= 0 {
 			layerH = 0.2
 		}
+		// The printer's first layer is typically taller than the rest
+		// (e.g. Snapmaker U1 prints 0.2mm initial under 0.08mm layers).
+		// Size the bottom slab to match so each mesh slab aligns 1:1 with
+		// a print layer and the slicer cuts through slab interiors, not
+		// the horizontal seams between them. See SlabBoundaryPlanesFirst.
+		firstLayerH := voxelSizes.Layer0Z
+		if firstLayerH <= 0 {
+			firstLayerH = layerH
+		}
 
 		// The slab count (the natural work unit) is only known after
 		// slicing, so the bar is normalized to ScaleTotal and each
@@ -735,7 +744,7 @@ func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 			// whole bar).
 			progLo := ui * progress.ScaleTotal / len(units)
 			progHi := (ui + 1) * progress.ScaleTotal / len(units)
-			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, layerH, stage, progLo, progHi)
+			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
 			if herr != nil {
 				return nil, herr
 			}
@@ -889,7 +898,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	colorXform func([3]float32) [3]float32,
 	halfIdx byte,
 	cellSizeForSlab func(int) float32,
-	layerH float32,
+	firstLayerH, layerH float32,
 	stage *progress.Stage,
 	progLo, progHi int,
 ) (halfVoxels, error) {
@@ -907,7 +916,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	if zMax <= zMin {
 		return halfVoxels{}, fmt.Errorf("cellslicer: degenerate Z range")
 	}
-	planes := cellslicer.SlabBoundaryPlanes(zMin, zMax, layerH)
+	planes := cellslicer.SlabBoundaryPlanesFirst(zMin, zMax, firstLayerH, layerH)
 	layers := cellslicer.SliceMeshProgress(geom, planes, progSlice)
 	nSlabs := len(layers) - 1
 	if nSlabs < 1 {
