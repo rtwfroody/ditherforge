@@ -95,8 +95,9 @@ The **Base color** section of the settings panel offers two modes:
 - **Texture** — load a [MaterialX](https://materialx.org/) shader graph
   (`.mtlx` file, or a `.zip` archive containing the `.mtlx` and its
   textures) and apply it as a procedural or image-backed pattern. Procedural
-  graphs (marble, brick) are sampled per voxel in 3D, so the pattern looks
-  carved-from-the-block rather than projected. Image-backed PBR packs
+  graphs (marble, brick, conditional banding such as rainbow stripes) are
+  sampled per voxel in 3D, so the pattern looks carved-from-the-block rather
+  than projected. Image-backed PBR packs
   (Quixel, AmbientCG, …) are projected via triplanar mapping, so they wrap
   cleanly across faces without requiring authored UVs on the mesh.
 
