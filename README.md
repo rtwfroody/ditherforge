@@ -229,10 +229,10 @@ average output color match the average input?) against local pattern
 
 The dropdown offers:
 
-- **Riemersma** (default) — walks voxels along a locally-coherent tour and
+- **Riemersma** — walks voxels along a locally-coherent tour and
   diffuses each cell's quantization error into a sliding window of recent
   cells. Preserves average color exactly (zero drift) and avoids the
-  scanline directionality of Floyd-Steinberg. Best general-purpose pick.
+  scanline directionality of Floyd-Steinberg.
 - **Riemersma pair** — like Riemersma but scores each voxel jointly with its
   tour-neighbour and prefers picks whose residuals cancel. On a flat-gray
   area with a black/white palette this prefers `(black, white)` instead of
@@ -246,8 +246,9 @@ The dropdown offers:
 - **Dizzy** — randomized error-diffusion (Liam Appelbe's blue-noise dizzy,
   iterated three times with drift correction). Blue-noise look with no
   directional structure on flat areas.
-- **Floyd-Steinberg** — deterministic scanline order. Preserves average
-  chroma exactly, but produces visible directional structure on flat areas.
+- **Floyd-Steinberg** (default) — deterministic scanline order. Preserves
+  average chroma exactly, but produces visible directional structure on flat
+  areas.
 - **none** — no dithering; each cell snaps to the nearest palette color.
 
 When **Riemersma** or **Riemersma pair** is selected, an **Alpha** slider
@@ -362,12 +363,11 @@ compatible with OrcaSlicer and BambuStudio.
 7. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
 8. **Dither** — assigns a palette color to each cell to approximate the original
-   texture. The default `riemersma` mode walks the cells along a locally-
-   coherent tour and diffuses each cell's quantization error into a sliding
-   window of recent cells. Five other modes are available — `riemersma-pair`,
-   `blue-noise`, `dizzy-corrected`, `floyd-steinberg`, and `none` — each with
-   different drift/wander/structure trade-offs. See [How to Choose a Dither
-   Mode](#how-to-choose-a-dither-mode).
+   texture. The default `floyd-steinberg` mode assigns palette colors in a
+   deterministic scanline order, preserving average chroma exactly. Five other
+   modes are available — `riemersma`, `riemersma-pair`, `blue-noise`,
+   `dizzy-corrected`, and `none` — each with different drift/wander/structure
+   trade-offs. See [How to Choose a Dither Mode](#how-to-choose-a-dither-mode).
 9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
    each fragment a palette color.
 10. **Merge** — merges coplanar triangles to reduce face count.
