@@ -857,10 +857,20 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // loadOutput entries don't exist for the same load key with different colors.
 //
 // Invariant: whenever lo is present, parse output is reachable via
-// cache.getParse — but only when an override was previously applied do we
-// actually fetch it (the pristine case skips the parse cache lookup).
+// cache.getParse. We fetch it whenever FaceBaseColor might not be pristine:
+// either an override was previously applied this run, or lo was decoded from
+// disk (markersValid false), where a baked FaceBaseColor can hide behind
+// pristine-looking markers. A fresh, never-overridden load skips the lookup.
 func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
-	tupleMatches := lo.appliedBaseColor == opts.BaseColor &&
+	// markersValid is false for any disk-decoded loadOutput (the markers
+	// are unexported, so gob can't persist them — they always decode to the
+	// zero/pristine value even when FaceBaseColor was baked by an override
+	// before encoding). Treat the markers as trustworthy only when the
+	// loadOutput was built fresh this run; otherwise force a full reset from
+	// the parse cache below so a baked-but-pristine-looking blob can't leak
+	// a texture remnant into a subsequent no-override ("solid") run.
+	tupleMatches := lo.markersValid &&
+		lo.appliedBaseColor == opts.BaseColor &&
 		lo.appliedBaseColorMaterialX == opts.BaseColorMaterialX &&
 		lo.appliedBaseColorMaterialXTileMM == opts.BaseColorMaterialXTileMM &&
 		lo.appliedBaseColorMaterialXTriplanarSharpness == opts.BaseColorMaterialXTriplanarSharpness
@@ -872,7 +882,7 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 	if tupleMatches && !bakeMissing {
 		return
 	}
-	pristine := lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
+	pristine := lo.markersValid && lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
 	if !pristine {
 		raw := cache.getParse(opts)
 		if raw == nil {
@@ -927,6 +937,9 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 	lo.appliedBaseColorMaterialX = opts.BaseColorMaterialX
 	lo.appliedBaseColorMaterialXTileMM = opts.BaseColorMaterialXTileMM
 	lo.appliedBaseColorMaterialXTriplanarSharpness = opts.BaseColorMaterialXTriplanarSharpness
+	// FaceBaseColor and the markers above now agree (this in-memory object
+	// won't be re-encoded), so later same-run calls can trust the fast path.
+	lo.markersValid = true
 }
 
 // bakeMaterialXBaseColor evaluates the procedural at every untextured

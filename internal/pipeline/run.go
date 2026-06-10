@@ -368,6 +368,10 @@ func (r *pipelineRun) Load() (*loadOutput, error) {
 			InputMesh:    buildInputMeshData(model),
 			PreviewScale: unitScale / totalScale,
 			ExtentMM:     nativeExtentMM,
+			// Freshly built: FaceBaseColor is pristine and the (empty)
+			// appliedBaseColor* markers describe it accurately. A
+			// disk-decoded loadOutput leaves this false; see the field doc.
+			markersValid: true,
 		}, nil
 	})
 	if err != nil {

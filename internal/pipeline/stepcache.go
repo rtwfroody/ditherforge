@@ -411,6 +411,18 @@ type loadOutput struct {
 	appliedBaseColorMaterialX                   string
 	appliedBaseColorMaterialXTileMM             float64
 	appliedBaseColorMaterialXTriplanarSharpness float64
+	// markersValid reports whether the appliedBaseColor* fields above
+	// accurately describe what is currently baked into
+	// ColorModel.FaceBaseColor. True only for a loadOutput produced fresh
+	// by the Load stage body. It is unexported, so gob drops it on the disk
+	// round-trip: a decoded loadOutput always reads markersValid==false.
+	// That is the point — applyBaseColor can mutate FaceBaseColor in place
+	// after the async cache.set has already encoded the blob, so a decoded
+	// blob may hold baked colors while its (also-unexported) markers decode
+	// to the zero/pristine value. With markersValid false, applyBaseColor
+	// refuses to trust the pristine-looking markers and restores
+	// FaceBaseColor from the parse cache before reapplying the override.
+	markersValid bool
 }
 
 type voxelizeOutput struct {
