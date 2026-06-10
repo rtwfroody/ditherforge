@@ -264,6 +264,16 @@ func (c *compiler) compileInput(in *input) (evalFn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("input %q: %w", in.Name, err)
 		}
+		// A component-named output (outr/outx, outg/outy, …) selects one
+		// channel of a multi-output node's value — the separate* family.
+		// Any other output name (empty or "out") reads the whole value.
+		// broadcast replicates a scalar source across channels (matching
+		// the rest of the evaluator) rather than reading the zeroed Vec.
+		if idx, ok := componentOutputIndex(in.OutputName); ok {
+			return func(_ *SampleContext, scratch []Value) Value {
+				return FloatValue(broadcast(scratch[slot])[idx])
+			}, nil
+		}
 		return func(_ *SampleContext, scratch []Value) Value { return scratch[slot] }, nil
 	case in.InterfaceName != "":
 		gi, ok := c.ng.inputsByName[in.InterfaceName]
@@ -321,25 +331,31 @@ var nodeBuilders map[string]nodeBuilder
 
 func init() {
 	nodeBuilders = map[string]nodeBuilder{
-		"position":   buildPosition,
-		"texcoord":   buildTexcoord,
-		"constant":   buildConstant,
-		"dotproduct": buildDotProduct,
-		"multiply":   buildArithmetic(func(a, b float64) float64 { return a * b }),
-		"add":        buildArithmetic(func(a, b float64) float64 { return a + b }),
-		"subtract":   buildArithmetic(func(a, b float64) float64 { return a - b }),
-		"fractal3d":  buildFractal3D,
-		"noise3d":    buildNoise3D,
-		"sin":        buildUnary(math.Sin),
-		"cos":        buildUnary(math.Cos),
-		"power":      buildPower,
-		"clamp":      buildClamp,
-		"floor":      buildUnary(math.Floor),
-		"mix":        buildMix,
-		"image":      buildImage,
-		"tiledimage": buildTiledImage,
-		"extract":    buildExtract,
-		"hsvadjust":  buildHSVAdjust,
+		"position":    buildPosition,
+		"texcoord":    buildTexcoord,
+		"constant":    buildConstant,
+		"dotproduct":  buildDotProduct,
+		"multiply":    buildArithmetic(func(a, b float64) float64 { return a * b }),
+		"add":         buildArithmetic(func(a, b float64) float64 { return a + b }),
+		"subtract":    buildArithmetic(func(a, b float64) float64 { return a - b }),
+		"fractal3d":   buildFractal3D,
+		"noise3d":     buildNoise3D,
+		"sin":         buildUnary(math.Sin),
+		"cos":         buildUnary(math.Cos),
+		"power":       buildPower,
+		"clamp":       buildClamp,
+		"floor":       buildUnary(math.Floor),
+		"mix":         buildMix,
+		"image":       buildImage,
+		"tiledimage":  buildTiledImage,
+		"extract":     buildExtract,
+		"hsvadjust":   buildHSVAdjust,
+		"separate2":   buildSeparate,
+		"separate3":   buildSeparate,
+		"separate4":   buildSeparate,
+		"ifgreater":   buildCompare(1, func(a, b float64) bool { return a > b }),
+		"ifgreatereq": buildCompare(1, func(a, b float64) bool { return a >= b }),
+		"ifequal":     buildCompare(0, func(a, b float64) bool { return a == b }),
 	}
 }
 
@@ -865,6 +881,75 @@ func buildExtract(c *compiler, n *node) (evalFn, error) {
 	}, nil
 }
 
+// buildSeparate implements MaterialX's separate2/3/4 channel nodes.
+// These split a vector/color into per-channel float outputs (outr/outx,
+// outg/outy, …). In this evaluator a node owns a single slot, so the
+// separate node is a pass-through that parks the source value in its
+// slot; the actual channel pick happens at each consuming wire via the
+// connection's component-named output (see compileInput). The output
+// count is irrelevant here — extraction is by index at the consumer.
+func buildSeparate(c *compiler, n *node) (evalFn, error) {
+	return c.compileRequired(n, "in")
+}
+
+// componentOutputIndex maps a separate* node's component-named output
+// to a Vec index, returning ok=false for the default ("out") or empty
+// output name. r/g/b/a and x/y/z/w are accepted as aliases per spec.
+func componentOutputIndex(name string) (int, bool) {
+	switch name {
+	case "outx", "outr":
+		return 0, true
+	case "outy", "outg":
+		return 1, true
+	case "outz", "outb":
+		return 2, true
+	case "outw", "outa":
+		return 3, true
+	}
+	return 0, false
+}
+
+// buildCompare implements MaterialX's conditional nodes (ifgreater,
+// ifgreatereq, ifequal): out = cmp(value1, value2) ? in1 : in2. The
+// value1/value2 operands are compared as floats — the integer-typed
+// stdlib variants coerce cleanly through AsFloat (exact for the
+// magnitudes a banding/thresholding graph uses). in1/in2 carry the
+// output type (per the type-specific stdlib nodedefs) and pass straight
+// through; no broadcasting is needed since the selected branch already
+// matches the output. Defaults follow the stdlib nodedefs: value2=0 and
+// in1/in2=0 throughout, while value1's default differs by node —
+// ifgreater/ifgreatereq use 1 (so an unwired node takes the in1
+// branch), ifequal uses 0 (so 0==0 also takes in1) — passed in as
+// value1Default.
+func buildCompare(value1Default float64, cmp func(a, b float64) bool) nodeBuilder {
+	return func(c *compiler, n *node) (evalFn, error) {
+		v1Fn, err := c.compileOptional(n, "value1")
+		if err != nil {
+			return nil, err
+		}
+		v2Fn, err := c.compileOptional(n, "value2")
+		if err != nil {
+			return nil, err
+		}
+		in1Fn, err := c.compileOptional(n, "in1")
+		if err != nil {
+			return nil, err
+		}
+		in2Fn, err := c.compileOptional(n, "in2")
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx *SampleContext, scratch []Value) Value {
+			v1 := floatOrDefault(v1Fn, ctx, scratch, value1Default)
+			v2 := floatOrDefault(v2Fn, ctx, scratch, 0)
+			if cmp(v1, v2) {
+				return valueOrZero(in1Fn, ctx, scratch)
+			}
+			return valueOrZero(in2Fn, ctx, scratch)
+		}, nil
+	}
+}
+
 // --- helpers ---
 
 // broadcast widens a scalar Value into a 4-component vector by
@@ -904,6 +989,16 @@ func vec2OrDefault(fn evalFn, ctx *SampleContext, scratch []Value, def [2]float6
 	}
 	b := broadcast(fn(ctx, scratch))
 	return [2]float64{b[0], b[1]}
+}
+
+// valueOrZero evaluates fn, or returns a float zero Value when the
+// input was absent — the typed branch of a conditional whose in1/in2
+// the author left unwired (AsVec3 reads it as black).
+func valueOrZero(fn evalFn, ctx *SampleContext, scratch []Value) Value {
+	if fn == nil {
+		return FloatValue(0)
+	}
+	return fn(ctx, scratch)
 }
 
 func clampF(v, lo, hi float64) float64 {

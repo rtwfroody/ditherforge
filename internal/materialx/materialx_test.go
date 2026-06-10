@@ -1202,3 +1202,155 @@ func TestZipResolverMissingTextureStillErrors(t *testing.T) {
 		t.Errorf("expected 'not found in zip' in error, got: %v", err)
 	}
 }
+
+// TestSeparate3ChannelSelect verifies that separate3 splits a vector3
+// into per-channel floats addressed by the consumer's component output
+// name. It mirrors the pride_rainbow.mtlx chain — separate3 feeding a
+// conditional — pulling the Y channel of position and thresholding it,
+// while routing the unselected X/Z channels to confirm the right one is
+// picked. Two samples differing only in Y must straddle the band.
+func TestSeparate3ChannelSelect(t *testing.T) {
+	src := strings.NewReader(`<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <position name="p" type="vector3" space="object"/>
+    <separate3 name="pos_xyz" type="vector3">
+      <input name="in" type="vector3" nodename="p"/>
+    </separate3>
+    <ifgreatereq name="band" type="color3">
+      <input name="value1" type="float" nodename="pos_xyz" output="outy"/>
+      <input name="value2" type="float" value="0.5"/>
+      <input name="in1" type="color3" value="1, 0, 0"/>
+      <input name="in2" type="color3" value="0, 0, 1"/>
+    </ifgreatereq>
+    <output name="out" type="color3" nodename="band"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>
+`)
+	doc, err := materialx.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("separate3 must compile: %v", err)
+	}
+	// Vary only Y; X and Z are off-band noise the node must ignore.
+	above := s.Sample([3]float64{9, 0.9, -9}) // Y>=0.5 -> in1 (red)
+	below := s.Sample([3]float64{9, 0.1, -9}) // Y<0.5  -> in2 (blue)
+	if want := [3]float64{1, 0, 0}; !approxVec(above, want) {
+		t.Errorf("Y=0.9: got %v, want %v (outy channel)", above, want)
+	}
+	if want := [3]float64{0, 0, 1}; !approxVec(below, want) {
+		t.Errorf("Y=0.1: got %v, want %v (outy channel)", below, want)
+	}
+}
+
+// TestIfEqualDefaults verifies ifequal's stdlib defaults differ from
+// the ordered comparators: value1 defaults to 0 (not 1), so an ifequal
+// with value1 unwired evaluates 0==value2. With value2 also defaulting
+// to 0, the node must take the in1 branch (0==0 is true).
+func TestIfEqualDefaults(t *testing.T) {
+	// value1 left unwired (default 0); value2 wired to 0 -> equal -> in1.
+	src := strings.NewReader(`<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <ifequal name="eq" type="color3">
+      <input name="value2" type="float" value="0.0"/>
+      <input name="in1" type="color3" value="0, 1, 0"/>
+      <input name="in2" type="color3" value="1, 0, 0"/>
+    </ifequal>
+    <output name="out" type="color3" nodename="eq"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>
+`)
+	doc, err := materialx.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := s.Sample([3]float64{0, 0, 0}), [3]float64{0, 1, 0}; !approxVec(got, want) {
+		t.Errorf("ifequal unwired value1: got %v, want %v (0==0 -> in1)", got, want)
+	}
+}
+
+func approxVec(got, want [3]float64) bool {
+	for i := range 3 {
+		if math.Abs(got[i]-want[i]) > 1e-9 {
+			return false
+		}
+	}
+	return true
+}
+
+// TestIfGreaterEqBanding exercises the ifgreatereq conditional in a
+// position-thresholded two-color band (the "band5"-style pattern that
+// previously failed to compile). It pulls the X component of position,
+// compares it against a literal threshold, and selects between two
+// colors — checking both branches and the inclusive boundary (X == 0.5
+// must take the in1 branch under >= semantics).
+func TestIfGreaterEqBanding(t *testing.T) {
+	src := strings.NewReader(`<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="ng">
+    <position name="p" type="vector3" space="object"/>
+    <extract name="px" type="float">
+      <input name="in" type="vector3" nodename="p"/>
+      <input name="index" type="integer" value="0"/>
+    </extract>
+    <ifgreatereq name="band" type="color3">
+      <input name="value1" type="float" nodename="px"/>
+      <input name="value2" type="float" value="0.5"/>
+      <input name="in1" type="color3" value="1, 0, 0"/>
+      <input name="in2" type="color3" value="0, 0, 1"/>
+    </ifgreatereq>
+    <output name="out" type="color3" nodename="band"/>
+  </nodegraph>
+  <standard_surface name="ss" type="surfaceshader">
+    <input name="base_color" type="color3" nodegraph="ng" output="out"/>
+  </standard_surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ss"/>
+  </surfacematerial>
+</materialx>
+`)
+	doc, err := materialx.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := doc.DefaultBaseColorSampler()
+	if err != nil {
+		t.Fatalf("ifgreatereq must compile: %v", err)
+	}
+	cases := []struct {
+		x    float64
+		want [3]float64
+	}{
+		{0.9, [3]float64{1, 0, 0}}, // above threshold -> in1
+		{0.1, [3]float64{0, 0, 1}}, // below threshold -> in2
+		{0.5, [3]float64{1, 0, 0}}, // boundary is inclusive (>=) -> in1
+	}
+	for _, c := range cases {
+		got := s.Sample([3]float64{c.x, 0, 0})
+		for i := range 3 {
+			if math.Abs(got[i]-c.want[i]) > 1e-9 {
+				t.Errorf("x=%v channel %d: got %v, want %v", c.x, i, got[i], c.want[i])
+			}
+		}
+	}
+}
