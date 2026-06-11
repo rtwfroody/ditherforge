@@ -215,21 +215,6 @@ type Callbacks struct {
 	Progress  progress.Tracker
 }
 
-// stageNames maps StageID to a human-readable name for progress reporting.
-var stageNames = map[StageID]string{
-	StageParse:       "Parsing",
-	StageLoad:        "Loading",
-	StageSplit:       "Splitting",
-	StageVoxelize:    "Voxelizing",
-	StageSticker:     "Applying stickers",
-	StageColorAdjust: "Adjusting colors",
-	StageColorWarp:   "Warping colors",
-	StagePalette:     "Building palette",
-	StageDither:      "Dithering",
-	StageClip:        "Clipping",
-	StageMerge:       "Merging",
-}
-
 // MeshData holds flat arrays for 3D preview rendering.
 type MeshData struct {
 	Vertices       []float32 `json:"Vertices"`                 // flat [x,y,z, x,y,z, ...]

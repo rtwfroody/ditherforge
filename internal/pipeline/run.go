@@ -114,13 +114,16 @@ func reportHolesIfEnabled(stage string, faces [][3]uint32) {
 }
 
 // pipelineRun is a demand-driven driver for one pipeline invocation.
-// Each stage is a method that:
+// The stage graph itself — names, dependencies, cache policy, bodies —
+// is declared as data in the stageDefs table (stagedef.go); resolve
+// walks it. Each typed accessor below (Parse, Load, …, Merge) is a
+// thin facade over resolve(StageX), which:
 //
 //  1. Returns memoized output if this Run has already computed it.
-//  2. Otherwise asks the cache. If the cache hits (memory or disk),
+//  2. Otherwise asks the cache. If the cache hits (disk),
 //     runStageCached emits a UI marker and the body never runs.
-//  3. On a cache miss, the body lazily resolves upstream stages by
-//     calling r.Upstream(), then computes its own output.
+//  3. On a cache miss, resolves the stage's declared Deps, then runs
+//     its body.
 //
 // A "make"-like dependency graph: top-level callers ask for the
 // outputs they need (typically Load/Sticker for previews, Merge/
@@ -134,19 +137,56 @@ type pipelineRun struct {
 	tracker   progress.Tracker
 	onWarning func(kind, message string)
 
-	// Per-Run memos: once a stage has been resolved, subsequent
-	// consumers within the same Run skip the cache lookup.
-	parse       *loader.LoadedModel
-	load        *loadOutput
-	split       *splitOutput
-	sticker     *stickerOutput
-	voxelize    *voxelizeOutput
-	colorAdjust *colorAdjustOutput
-	colorWarp   *colorWarpOutput
-	palette     *paletteOutput
-	dither      *ditherOutput
-	clip        *clipOutput
-	merge       *mergeOutput
+	// memo holds per-Run resolved stage outputs: once a stage has been
+	// resolved, subsequent consumers within the same Run skip the
+	// cache lookup. Lazily allocated by resolve.
+	memo map[StageID]any
+}
+
+// Typed stage accessors — the public face of the stageDefs table.
+
+func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
+	return resolveTyped[loader.LoadedModel](r, StageParse)
+}
+
+func (r *pipelineRun) Load() (*loadOutput, error) {
+	return resolveTyped[loadOutput](r, StageLoad)
+}
+
+func (r *pipelineRun) Split() (*splitOutput, error) {
+	return resolveTyped[splitOutput](r, StageSplit)
+}
+
+func (r *pipelineRun) Sticker() (*stickerOutput, error) {
+	return resolveTyped[stickerOutput](r, StageSticker)
+}
+
+func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
+	return resolveTyped[voxelizeOutput](r, StageVoxelize)
+}
+
+func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
+	return resolveTyped[colorAdjustOutput](r, StageColorAdjust)
+}
+
+func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
+	return resolveTyped[colorWarpOutput](r, StageColorWarp)
+}
+
+func (r *pipelineRun) Palette() (*paletteOutput, error) {
+	return resolveTyped[paletteOutput](r, StagePalette)
+}
+
+func (r *pipelineRun) Dither() (*ditherOutput, error) {
+	return resolveTyped[ditherOutput](r, StageDither)
+}
+
+func (r *pipelineRun) Clip() (*clipOutput, error) {
+	return resolveTyped[clipOutput](r, StageClip)
+}
+
+func (r *pipelineRun) Merge() (*mergeOutput, error) {
+	return resolveTyped[mergeOutput](r, StageMerge)
 }
 
 func (r *pipelineRun) checkCancel() error {
@@ -154,69 +194,6 @@ func (r *pipelineRun) checkCancel() error {
 		return r.ctx.Err()
 	}
 	return nil
-}
-
-// runStage is the shared scaffold for every per-run stage method. The
-// per-method boilerplate (memoization slot, body invocation, cache
-// set, cache-hit fallback) is identical across stages and varies only
-// in the output type, the slot pointer, the StageID, and the body —
-// which this helper takes as parameters.
-//
-// Behavior:
-//
-//  1. If the slot already holds a value (this Run already produced or
-//     decoded it), return immediately.
-//  2. Run the cache-aware wrapper. On a cache hit it returns the
-//     decoded value, which we stash directly into the slot. On a miss
-//     the body produces the value, stores it in the slot, and
-//     async-writes the encoded blob to the disk cache.
-//
-// The slot-then-cache-set ordering is load-bearing: a downstream call
-// to the typed getter (e.g. cache.getX) cannot return a value the
-// disk-write goroutine hasn't yet flushed. Memoizing into the slot
-// before kicking the async write ensures the same Run's downstream
-// consumers see the live pointer immediately.
-func runStage[T any](
-	r *pipelineRun,
-	stage StageID,
-	slot **T,
-	body func() (*T, error),
-) (*T, error) {
-	if *slot != nil {
-		return *slot, nil
-	}
-	cached, err := runStageCached(r.cache, stage, r.opts, r.tracker, func() error {
-		out, err := body()
-		if err != nil {
-			return err
-		}
-		// Order is load-bearing: write the slot before kicking
-		// the async cache.set. Within-run consumers read the
-		// slot via pipelineRun memoization and would race the
-		// disk-write goroutine if we set the cache first.
-		*slot = out
-		r.cache.set(stage, r.opts, out)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if cached != nil {
-		// Cache-hit path: stash the wrapper's already-decoded value
-		// instead of doing a second cache.get. A second call would
-		// race the background disk-cache sweep (kicked at the end of
-		// every pipeline run) and could observe the file as deleted,
-		// leaving the slot nil and the caller dereferencing it.
-		*slot = cached.(*T)
-	}
-	if *slot == nil {
-		// Defensive: succeeded with neither a cache hit nor a body
-		// that populated the slot. Should be unreachable; surface
-		// loudly rather than return a nil pointer that downstream
-		// consumers will dereference.
-		return nil, fmt.Errorf("pipeline: stage %s succeeded with no result (cache file vanished?)", stageNames[stage])
-	}
-	return *slot, nil
 }
 
 // ----- Stage methods -----
@@ -234,222 +211,220 @@ func decimateErrorBudget(cellSize float32) float64 {
 	return half * half
 }
 
-func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
-	return runStage(r, StageParse, &r.parse, func() (*loader.LoadedModel, error) {
-		stage := progress.BeginStage(r.tracker, stageNames[StageParse], false, 0)
-		defer stage.Done()
-		plog.Printf("Parsing %s...", r.opts.Input)
-		t := time.Now()
-		loaded, err := loadModel(r.opts.Input, r.opts.ObjectIndex)
-		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", filepath.Ext(r.opts.Input), err)
-		}
-		plog.Printf("  Parsed: %d vertices, %d faces in %.1fs",
-			len(loaded.Vertices), len(loaded.Faces), time.Since(t).Seconds())
-		return loaded, nil
-	})
+// runParse is StageParse's body (see stageDefs).
+func (r *pipelineRun) runParse() (any, error) {
+	stage := progress.BeginStage(r.tracker, stageNames[StageParse], false, 0)
+	defer stage.Done()
+	plog.Printf("Parsing %s...", r.opts.Input)
+	t := time.Now()
+	loaded, err := loadModel(r.opts.Input, r.opts.ObjectIndex)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", filepath.Ext(r.opts.Input), err)
+	}
+	plog.Printf("  Parsed: %d vertices, %d faces in %.1fs",
+		len(loaded.Vertices), len(loaded.Faces), time.Since(t).Seconds())
+	return loaded, nil
 }
 
-func (r *pipelineRun) Load() (*loadOutput, error) {
-	lo, err := runStage(r, StageLoad, &r.load, func() (*loadOutput, error) {
-		raw, err := r.Parse()
-		if err != nil {
-			return nil, err
-		}
-		label := stageNames[StageLoad]
-		if r.opts.AlphaWrap {
-			label += " (including alpha-wrap)"
-		}
-		stage := progress.BeginStage(r.tracker, label, false, 0)
-		defer stage.Done()
+// afterLoad is StageLoad's After hook: it reapplies the base-color
+// override on top of the (possibly cached) load output on EVERY
+// resolve. Cheap and idempotent. On a fresh disk hit
+// (lo.appliedBaseColor=="") this skips the parse cache lookup.
+func afterLoad(r *pipelineRun, out any) error {
+	applyBaseColor(r.ctx, r.cache, out.(*loadOutput), r.opts, r.tracker)
+	return nil
+}
 
-		inputExt := strings.ToLower(filepath.Ext(r.opts.Input))
-		unitScale := unitScaleForExt(inputExt)
-		scale := unitScale * r.opts.Scale
+// runLoad is StageLoad's body (see stageDefs).
+func (r *pipelineRun) runLoad() (any, error) {
+	raw, err := r.Parse()
+	if err != nil {
+		return nil, err
+	}
+	label := stageNames[StageLoad]
+	if r.opts.AlphaWrap {
+		label += " (including alpha-wrap)"
+	}
+	stage := progress.BeginStage(r.tracker, label, false, 0)
+	defer stage.Done()
 
-		model := loader.CloneForEdit(raw)
-		totalScale := scale
-		if r.opts.Size != nil {
-			ext := modelMaxExtent(model) * scale
-			if ext != *r.opts.Size {
-				totalScale = scale * (*r.opts.Size / ext)
-			}
+	inputExt := strings.ToLower(filepath.Ext(r.opts.Input))
+	unitScale := unitScaleForExt(inputExt)
+	scale := unitScale * r.opts.Scale
+
+	model := loader.CloneForEdit(raw)
+	totalScale := scale
+	if r.opts.Size != nil {
+		ext := modelMaxExtent(model) * scale
+		if ext != *r.opts.Size {
+			totalScale = scale * (*r.opts.Size / ext)
 		}
-		if totalScale != 1 {
-			loader.ScaleModel(model, totalScale)
+	}
+	if totalScale != 1 {
+		loader.ScaleModel(model, totalScale)
+	}
+	normalizeZ(model)
+
+	ex := modelExtents(model)
+	plog.Printf("  Extent: %.1f x %.1f x %.1f mm", ex[0], ex[1], ex[2])
+
+	if err := r.checkCancel(); err != nil {
+		return nil, err
+	}
+	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
+
+	// Load-time decimation: prune geometry to voxel resolution on every
+	// load, alpha-wrap or not. errorBudget bounds geometric drift to ~½ a
+	// voxel cell -- finer detail than that won't survive voxelization
+	// downstream, so it's safe to discard here. Only the geometry `model`
+	// is decimated; the pristine mesh stays intact for ColorModel below
+	// (UVs, textures, and per-face colors feed color sampling at full
+	// resolution). When alpha-wrap is enabled this decimated mesh is also
+	// the wrap input, so the wrapper rebuilds from an already-pruned
+	// surface.
+	geomModel := model
+	if !r.opts.NoSimplify {
+		cellSize := voxelCellSizes(r.opts).UpperXY
+		budget := decimateErrorBudget(cellSize)
+		dec, derr := voxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
+		if derr != nil {
+			return nil, fmt.Errorf("load decimate: %w", derr)
 		}
-		normalizeZ(model)
-
-		ex := modelExtents(model)
-		plog.Printf("  Extent: %.1f x %.1f x %.1f mm", ex[0], ex[1], ex[2])
-
+		if len(dec.Faces) < len(model.Faces) {
+			plog.Printf("  Decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+				len(model.Faces), len(dec.Faces), cellSize)
+			geomModel = dec
+		}
 		if err := r.checkCancel(); err != nil {
 			return nil, err
 		}
-		nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
+	}
 
-		// Load-time decimation: prune geometry to voxel resolution on every
-		// load, alpha-wrap or not. errorBudget bounds geometric drift to ~½ a
-		// voxel cell -- finer detail than that won't survive voxelization
-		// downstream, so it's safe to discard here. Only the geometry `model`
-		// is decimated; the pristine mesh stays intact for ColorModel below
-		// (UVs, textures, and per-face colors feed color sampling at full
-		// resolution). When alpha-wrap is enabled this decimated mesh is also
-		// the wrap input, so the wrapper rebuilds from an already-pruned
-		// surface.
-		geomModel := model
+	if r.opts.AlphaWrap {
+		alpha := r.opts.AlphaWrapAlpha
+		if alpha <= 0 {
+			alpha = r.opts.NozzleDiameter
+		}
+		offset := r.opts.AlphaWrapOffset
+		if offset <= 0 {
+			offset = alpha / 30
+		}
+
+		plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
+		tWrap := time.Now()
+		wrapped, werr := alphawrap.Wrap(geomModel, alpha, offset)
+		if werr != nil {
+			return nil, fmt.Errorf("alpha-wrap: %w", werr)
+		}
+		plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
+			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
+		geomModel = wrapped
+		reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
+
+		// Post-wrap decimation: alpha-wrap output is dense (~one face
+		// per α² of surface area), but downstream stages (Sticker,
+		// Voxelize) only need detail at voxel cell resolution.
+		// errorBudget caps drift at ½ a cell, so flat regions
+		// collapse aggressively while curved silhouettes stop being
+		// thinned once cumulative drift would exceed what
+		// voxelization can resolve.
 		if !r.opts.NoSimplify {
 			cellSize := voxelCellSizes(r.opts).UpperXY
 			budget := decimateErrorBudget(cellSize)
-			dec, derr := voxel.DecimateMesh(r.ctx, model, 1, cellSize, budget, false, progress.NullTracker{})
+			postDec, derr := voxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
 			if derr != nil {
-				return nil, fmt.Errorf("load decimate: %w", derr)
+				return nil, fmt.Errorf("post-wrap decimate: %w", derr)
 			}
-			if len(dec.Faces) < len(model.Faces) {
-				plog.Printf("  Decimate: %d faces -> %d faces (cellSize=%.3f mm)",
-					len(model.Faces), len(dec.Faces), cellSize)
-				geomModel = dec
+			if len(postDec.Faces) < len(geomModel.Faces) {
+				plog.Printf("  Post-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+					len(geomModel.Faces), len(postDec.Faces), cellSize)
+				geomModel = postDec
 			}
+			reportHolesIfEnabled("post-wrap decimate output", geomModel.Faces)
 			if err := r.checkCancel(); err != nil {
 				return nil, err
 			}
 		}
+	}
 
-		if r.opts.AlphaWrap {
-			alpha := r.opts.AlphaWrapAlpha
-			if alpha <= 0 {
-				alpha = r.opts.NozzleDiameter
-			}
-			offset := r.opts.AlphaWrapOffset
-			if offset <= 0 {
-				offset = alpha / 30
-			}
+	return &loadOutput{
+		Model:        geomModel,
+		ColorModel:   model,
+		InputMesh:    buildInputMeshData(model),
+		PreviewScale: unitScale / totalScale,
+		ExtentMM:     nativeExtentMM,
+		// Freshly built: FaceBaseColor is pristine and the (empty)
+		// appliedBaseColor* markers describe it accurately. A
+		// disk-decoded loadOutput leaves this false; see the field doc.
+		markersValid: true,
+	}, nil
+}
 
-			plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
-			tWrap := time.Now()
-			wrapped, werr := alphawrap.Wrap(geomModel, alpha, offset)
-			if werr != nil {
-				return nil, fmt.Errorf("alpha-wrap: %w", werr)
-			}
-			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
-				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
-			geomModel = wrapped
-			reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
-
-			// Post-wrap decimation: alpha-wrap output is dense (~one face
-			// per α² of surface area), but downstream stages (Sticker,
-			// Voxelize) only need detail at voxel cell resolution.
-			// errorBudget caps drift at ½ a cell, so flat regions
-			// collapse aggressively while curved silhouettes stop being
-			// thinned once cumulative drift would exceed what
-			// voxelization can resolve.
-			if !r.opts.NoSimplify {
-				cellSize := voxelCellSizes(r.opts).UpperXY
-				budget := decimateErrorBudget(cellSize)
-				postDec, derr := voxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
-				if derr != nil {
-					return nil, fmt.Errorf("post-wrap decimate: %w", derr)
-				}
-				if len(postDec.Faces) < len(geomModel.Faces) {
-					plog.Printf("  Post-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
-						len(geomModel.Faces), len(postDec.Faces), cellSize)
-					geomModel = postDec
-				}
-				reportHolesIfEnabled("post-wrap decimate output", geomModel.Faces)
-				if err := r.checkCancel(); err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		return &loadOutput{
-			Model:        geomModel,
-			ColorModel:   model,
-			InputMesh:    buildInputMeshData(model),
-			PreviewScale: unitScale / totalScale,
-			ExtentMM:     nativeExtentMM,
-			// Freshly built: FaceBaseColor is pristine and the (empty)
-			// appliedBaseColor* markers describe it accurately. A
-			// disk-decoded loadOutput leaves this false; see the field doc.
-			markersValid: true,
-		}, nil
-	})
+// runSplit is StageSplit's body (see stageDefs).
+func (r *pipelineRun) runSplit() (any, error) {
+	lo, err := r.Load()
 	if err != nil {
 		return nil, err
 	}
-	// Apply base-color override on top of the (possibly cached)
-	// load output. Cheap and idempotent. On a fresh disk hit
-	// (lo.appliedBaseColor=="") this skips the parse cache lookup.
-	applyBaseColor(r.ctx, r.cache, lo, r.opts, r.tracker)
-	return lo, nil
-}
+	stage := progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0)
+	defer stage.Done()
 
-func (r *pipelineRun) Split() (*splitOutput, error) {
-	return runStage(r, StageSplit, &r.split, func() (*splitOutput, error) {
-		lo, err := r.Load()
-		if err != nil {
-			return nil, err
-		}
-		stage := progress.BeginStage(r.tracker, stageNames[StageSplit], false, 0)
-		defer stage.Done()
+	// Disabled-passthrough: emit the stage event so the UI shows
+	// "Splitting" ticking by, then return a marker output that
+	// downstream stages treat as "no split."
+	if !r.opts.Split.Enabled {
+		return &splitOutput{Enabled: false}, nil
+	}
 
-		// Disabled-passthrough: emit the stage event so the UI shows
-		// "Splitting" ticking by, then return a marker output that
-		// downstream stages treat as "no split."
-		if !r.opts.Split.Enabled {
-			return &splitOutput{Enabled: false}, nil
-		}
+	// Split requires a watertight input; the design doc says the
+	// frontend forces AlphaWrap=true when Split is enabled.
+	// Surface the precondition violation here so the user sees a
+	// clear error rather than a downstream "non-manifold cut
+	// polygon" message from split.Cut.
+	if !r.opts.AlphaWrap {
+		return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
+	}
 
-		// Split requires a watertight input; the design doc says the
-		// frontend forces AlphaWrap=true when Split is enabled.
-		// Surface the precondition violation here so the user sees a
-		// clear error rather than a downstream "non-manifold cut
-		// polygon" message from split.Cut.
-		if !r.opts.AlphaWrap {
-			return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
-		}
+	tSplit := time.Now()
 
-		tSplit := time.Now()
+	// Translate Options.Split into split.Cut + split.Layout calls.
+	plane := split.AxisPlane(r.opts.Split.Axis, r.opts.Split.Offset)
+	conn := split.ConnectorSettings{
+		Style:       parseConnectorStyle(r.opts.Split.ConnectorStyle),
+		Count:       r.opts.Split.ConnectorCount,
+		DiamMM:      r.opts.Split.ConnectorDiamMM,
+		DepthMM:     r.opts.Split.ConnectorDepthMM,
+		ClearanceMM: r.opts.Split.ClearanceMM,
+	}
+	// Cut runs on lo.Model. The frontend forces AlphaWrap=true
+	// when Split is enabled (see docs/SPLIT.md "Watertight
+	// requirement"), so lo.Model is watertight under correct
+	// frontend wiring. If a caller bypasses that guard,
+	// split.Cut surfaces a clear error.
+	res, err := split.Cut(lo.Model, plane, conn)
+	if err != nil {
+		return nil, fmt.Errorf("split.Cut: %w", err)
+	}
+	res.Orientation = [2]split.Orientation{
+		parseOrientation(r.opts.Split.Orientation[0]),
+		parseOrientation(r.opts.Split.Orientation[1]),
+	}
+	// Bed gap between the two laid-out halves. Hardcoded — users
+	// who need a different layout rearrange in the slicer.
+	const bedGapMM = 5.0
+	xforms := split.Layout(res, bedGapMM)
 
-		// Translate Options.Split into split.Cut + split.Layout calls.
-		plane := split.AxisPlane(r.opts.Split.Axis, r.opts.Split.Offset)
-		conn := split.ConnectorSettings{
-			Style:       parseConnectorStyle(r.opts.Split.ConnectorStyle),
-			Count:       r.opts.Split.ConnectorCount,
-			DiamMM:      r.opts.Split.ConnectorDiamMM,
-			DepthMM:     r.opts.Split.ConnectorDepthMM,
-			ClearanceMM: r.opts.Split.ClearanceMM,
-		}
-		// Cut runs on lo.Model. The frontend forces AlphaWrap=true
-		// when Split is enabled (see docs/SPLIT.md "Watertight
-		// requirement"), so lo.Model is watertight under correct
-		// frontend wiring. If a caller bypasses that guard,
-		// split.Cut surfaces a clear error.
-		res, err := split.Cut(lo.Model, plane, conn)
-		if err != nil {
-			return nil, fmt.Errorf("split.Cut: %w", err)
-		}
-		res.Orientation = [2]split.Orientation{
-			parseOrientation(r.opts.Split.Orientation[0]),
-			parseOrientation(r.opts.Split.Orientation[1]),
-		}
-		// Bed gap between the two laid-out halves. Hardcoded — users
-		// who need a different layout rearrange in the slicer.
-		const bedGapMM = 5.0
-		xforms := split.Layout(res, bedGapMM)
-
-		plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
-			time.Since(tSplit).Seconds(),
-			len(res.Halves[0].Vertices), len(res.Halves[0].Faces),
-			len(res.Halves[1].Vertices), len(res.Halves[1].Faces))
-		return &splitOutput{
-			Enabled:   true,
-			Halves:    res.Halves,
-			Xform:     xforms,
-			CutNormal: plane.Normal,
-			CutPlaneD: plane.D,
-		}, nil
-	})
+	plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
+		time.Since(tSplit).Seconds(),
+		len(res.Halves[0].Vertices), len(res.Halves[0].Faces),
+		len(res.Halves[1].Vertices), len(res.Halves[1].Faces))
+	return &splitOutput{
+		Enabled:   true,
+		Halves:    res.Halves,
+		Xform:     xforms,
+		CutNormal: plane.Normal,
+		CutPlaneD: plane.D,
+	}, nil
 }
 
 // parseConnectorStyle converts the Options string into the typed
@@ -483,14 +458,13 @@ func parseOrientation(s string) split.Orientation {
 	}
 }
 
-func (r *pipelineRun) Sticker() (*stickerOutput, error) {
-	return runStage(r, StageSticker, &r.sticker, func() (*stickerOutput, error) {
-		lo, err := r.Load()
-		if err != nil {
-			return nil, err
-		}
-		return r.computeSticker(lo)
-	})
+// runSticker is StageSticker's body (see stageDefs).
+func (r *pipelineRun) runSticker() (any, error) {
+	lo, err := r.Load()
+	if err != nil {
+		return nil, err
+	}
+	return r.computeSticker(lo)
 }
 
 func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
@@ -598,263 +572,262 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 // mesh, and builds the cell-adjacency graph used by Dither. Output
 // cells (visible only) feed ColorAdjust → Dither; the full per-slab
 // cell polygons (vo.CellSlabs) feed Clip.
-func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
-	return runStage(r, StageVoxelize, &r.voxelize, func() (*voxelizeOutput, error) {
-		lo, err := r.Load()
-		if err != nil {
-			return nil, err
-		}
-		// Resolve the sticker stage and feed its decals into cell
-		// sampling below. Base color always comes from ColorModel; each
-		// decal is composited via a second nearest-tri lookup against the
-		// sticker substrate (stickerOut.Model) — a clone of ColorModel
-		// (projection/unfold) or the alpha-wrap mesh. Both configurations
-		// use the same two-lookup path, so there is no alpha-wrap special
-		// case here. stickerOut.Model lives in the same original-mesh
-		// frame ColorModel does, so the per-half colorXform maps sample
-		// points correctly for both lookups.
-		stickerOut, err := r.Sticker()
-		if err != nil {
-			return nil, err
-		}
-		// Split, when enabled, drives the per-half cellslicer pass
-		// below: each half's bed-space geometry is sliced and sampled
-		// independently. See docs/split-cellslicer.md.
-		so, err := r.Split()
-		if err != nil {
-			return nil, err
-		}
+// runVoxelize is StageVoxelize's body (see stageDefs).
+func (r *pipelineRun) runVoxelize() (any, error) {
+	lo, err := r.Load()
+	if err != nil {
+		return nil, err
+	}
+	// Resolve the sticker stage and feed its decals into cell
+	// sampling below. Base color always comes from ColorModel; each
+	// decal is composited via a second nearest-tri lookup against the
+	// sticker substrate (stickerOut.Model) — a clone of ColorModel
+	// (projection/unfold) or the alpha-wrap mesh. Both configurations
+	// use the same two-lookup path, so there is no alpha-wrap special
+	// case here. stickerOut.Model lives in the same original-mesh
+	// frame ColorModel does, so the per-half colorXform maps sample
+	// points correctly for both lookups.
+	stickerOut, err := r.Sticker()
+	if err != nil {
+		return nil, err
+	}
+	// Split, when enabled, drives the per-half cellslicer pass
+	// below: each half's bed-space geometry is sliced and sampled
+	// independently. See docs/split-cellslicer.md.
+	so, err := r.Split()
+	if err != nil {
+		return nil, err
+	}
 
-		voxelSizes := voxelCellSizes(r.opts)
-		cellSizeUpper := voxelSizes.UpperXY
-		if cellSizeUpper <= 0 {
-			cellSizeUpper = 0.4
+	voxelSizes := voxelCellSizes(r.opts)
+	cellSizeUpper := voxelSizes.UpperXY
+	if cellSizeUpper <= 0 {
+		cellSizeUpper = 0.4
+	}
+	cellSizeLayer0 := voxelSizes.Layer0XY
+	if cellSizeLayer0 <= 0 {
+		cellSizeLayer0 = cellSizeUpper
+	}
+	// Single policy point: layer 0 = the bottom slab. Used by
+	// PartitionSlabAnalytic, SampleSlab, and AddWithinSlabAdjacency.
+	cellSizeForSlab := func(i int) float32 {
+		if i == 0 {
+			return cellSizeLayer0
 		}
-		cellSizeLayer0 := voxelSizes.Layer0XY
-		if cellSizeLayer0 <= 0 {
-			cellSizeLayer0 = cellSizeUpper
-		}
-		// Single policy point: layer 0 = the bottom slab. Used by
-		// PartitionSlabAnalytic, SampleSlab, and AddWithinSlabAdjacency.
-		cellSizeForSlab := func(i int) float32 {
-			if i == 0 {
-				return cellSizeLayer0
-			}
-			return cellSizeUpper
-		}
-		layerH := r.opts.LayerHeight
-		if layerH <= 0 {
-			layerH = 0.2
-		}
-		// The printer's first layer is typically taller than the rest
-		// (e.g. Snapmaker U1 prints 0.2mm initial under 0.08mm layers).
-		// Size the bottom slab to match so each mesh slab aligns 1:1 with
-		// a print layer and the slicer cuts through slab interiors, not
-		// the horizontal seams between them. See SlabBoundaryPlanesFirst.
-		firstLayerH := voxelSizes.Layer0Z
-		if firstLayerH <= 0 {
-			firstLayerH = layerH
-		}
+		return cellSizeUpper
+	}
+	layerH := r.opts.LayerHeight
+	if layerH <= 0 {
+		layerH = 0.2
+	}
+	// The printer's first layer is typically taller than the rest
+	// (e.g. Snapmaker U1 prints 0.2mm initial under 0.08mm layers).
+	// Size the bottom slab to match so each mesh slab aligns 1:1 with
+	// a print layer and the slicer cuts through slab interiors, not
+	// the horizontal seams between them. See SlabBoundaryPlanesFirst.
+	firstLayerH := voxelSizes.Layer0Z
+	if firstLayerH <= 0 {
+		firstLayerH = layerH
+	}
 
-		// The slab count (the natural work unit) is only known after
-		// slicing, so the bar is normalized to ScaleTotal and each
-		// unit/phase maps onto a weighted window of it — see Stage.Span.
-		stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], true, progress.ScaleTotal)
-		defer stage.Done()
+	// The slab count (the natural work unit) is only known after
+	// slicing, so the bar is normalized to ScaleTotal and each
+	// unit/phase maps onto a weighted window of it — see Stage.Span.
+	stage := progress.BeginStage(r.tracker, stageNames[StageVoxelize], true, progress.ScaleTotal)
+	defer stage.Done()
 
-		// Color sampling reads from ColorModel (original-mesh coords,
-		// uncut and unmoved by Split). The spatial index is built once
-		// and shared across both halves. When Split is enabled, each
-		// half's geometry is sliced in its own bed-space frame and a
-		// per-half inverse layout transform maps sample points back to
-		// ColorModel coords. See docs/split-cellslicer.md.
-		colorModel := lo.ColorModel
-		spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
+	// Color sampling reads from ColorModel (original-mesh coords,
+	// uncut and unmoved by Split). The spatial index is built once
+	// and shared across both halves. When Split is enabled, each
+	// half's geometry is sliced in its own bed-space frame and a
+	// per-half inverse layout transform maps sample points back to
+	// ColorModel coords. See docs/split-cellslicer.md.
+	colorModel := lo.ColorModel
+	spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
 
-		// MaterialX base-color override for untextured faces, plumbed
-		// into the per-cell sampler. Without it every cell on an
-		// untextured face falls back to that face's single centroid-
-		// baked FaceBaseColor (the preview approximation), so a
-		// triplanar-textured face collapses to one flat color and the
-		// dither turns it into noise. Memoized on StageCache, so this
-		// shares Load's XML parse + image decode (nil when no MaterialX
-		// is configured). Any parse error was already surfaced in Load.
-		baseColorOverride, _ := r.cache.baseColorOverride(
-			r.opts.BaseColorMaterialX,
-			r.opts.BaseColorMaterialXTileMM,
-			r.opts.BaseColorMaterialXTriplanarSharpness,
-			r.tracker,
-		)
+	// MaterialX base-color override for untextured faces, plumbed
+	// into the per-cell sampler. Without it every cell on an
+	// untextured face falls back to that face's single centroid-
+	// baked FaceBaseColor (the preview approximation), so a
+	// triplanar-textured face collapses to one flat color and the
+	// dither turns it into noise. Memoized on StageCache, so this
+	// shares Load's XML parse + image decode (nil when no MaterialX
+	// is configured). Any parse error was already surfaced in Load.
+	baseColorOverride, _ := r.cache.baseColorOverride(
+		r.opts.BaseColorMaterialX,
+		r.opts.BaseColorMaterialXTileMM,
+		r.opts.BaseColorMaterialXTriplanarSharpness,
+		r.tracker,
+	)
 
-		// Sticker substrate + its spatial index for the per-cell decal
-		// lookup. All nil when no stickers were placed, in which case
-		// SampleSlab falls straight through to the base-color-only path.
-		var (
-			stickerModel *loader.LoadedModel
-			stickerSI    *voxel.SpatialIndex
-			decals       []*voxel.StickerDecal
-		)
-		if len(stickerOut.Decals) > 0 {
-			stickerModel = stickerOut.Model
-			stickerSI = stickerOut.ensureSI()
-			decals = stickerOut.Decals
-		}
+	// Sticker substrate + its spatial index for the per-cell decal
+	// lookup. All nil when no stickers were placed, in which case
+	// SampleSlab falls straight through to the base-color-only path.
+	var (
+		stickerModel *loader.LoadedModel
+		stickerSI    *voxel.SpatialIndex
+		decals       []*voxel.StickerDecal
+	)
+	if len(stickerOut.Decals) > 0 {
+		stickerModel = stickerOut.Model
+		stickerSI = stickerOut.ensureSI()
+		decals = stickerOut.Decals
+	}
 
-		// Work units: one per split half (geometry already laid out in
-		// bed coords by split.Layout), or a single unit on the whole
-		// model when Split is off. colorXform maps a unit's sample
-		// points back into ColorModel coords; nil = identity.
-		type voxUnit struct {
-			geom       *loader.LoadedModel
-			colorXform func([3]float32) [3]float32
-			halfIdx    byte
-		}
-		var units []voxUnit
-		if so.Enabled {
-			for h := 0; h < 2; h++ {
-				// Each half's geometry is in bed coords; ApplyInverse maps
-				// a sample point back to the original-mesh coords where
-				// ColorModel (and sticker decals) live.
-				units = append(units, voxUnit{
-					geom:       so.Halves[h],
-					colorXform: so.Xform[h].ApplyInverse,
-					halfIdx:    byte(h),
-				})
-			}
-		} else {
-			units = []voxUnit{{geom: lo.Model, colorXform: nil, halfIdx: 0}}
-		}
-
-		// Run the cellslicer chain (slice → footprint → partition →
-		// sample → adjacency) once per unit, then concatenate. The
-		// global cell index is the position in the flattened CellSlabs
-		// (unit 0 first), which matches CellSamples and the neighbor
-		// graph. Neighbor indices from unit N are shifted by the count
-		// of cells already emitted; halves never share adjacency edges
-		// (they are physically separate on the bed).
-		var (
-			slabs           []cellslicer.Slab
-			samples         []cellslicer.CellSample
-			globalNeighbors [][]voxel.Neighbor
-			agg             cellslicer.PartitionStats
-		)
-		for ui, u := range units {
-			// Each unit owns an equal window of the normalized bar
-			// (split halves are roughly equal work; unsplit = the
-			// whole bar).
-			progLo := ui * progress.ScaleTotal / len(units)
-			progHi := (ui + 1) * progress.ScaleTotal / len(units)
-			hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
-			if herr != nil {
-				return nil, herr
-			}
-			cellOffset := len(samples)
-			slabOffset := len(slabs)
-			// Renumber this unit's slabs and samples from unit-local to
-			// global indices. Slab.Index and CellSample.SlabIdx must
-			// both address the flattened CellSlabs list, or anything
-			// indexing slabs[SlabIdx] (debug cell dumps) and any
-			// Layer-keyed adjacency (ActiveCell.Layer → BuildNeighbors,
-			// FloydSteinberg's layer sort) would collide half 1's cells
-			// onto half 0's slabs.
-			for i := range hv.slabs {
-				hv.slabs[i].Index = slabOffset + i
-			}
-			for i := range hv.samples {
-				hv.samples[i].SlabIdx += slabOffset
-			}
-			slabs = append(slabs, hv.slabs...)
-			samples = append(samples, hv.samples...)
-			for _, nbrs := range hv.neighbors {
-				if cellOffset == 0 {
-					// First unit (and the whole unsplit graph): indices
-					// are already global, so reuse the rows as-is.
-					globalNeighbors = append(globalNeighbors, nbrs)
-					continue
-				}
-				shifted := make([]voxel.Neighbor, len(nbrs))
-				for k, n := range nbrs {
-					shifted[k] = voxel.Neighbor{Idx: n.Idx + cellOffset, Weight: n.Weight}
-				}
-				globalNeighbors = append(globalNeighbors, shifted)
-			}
-			agg.RawRing += hv.stats.RawRing
-			agg.RawHex += hv.stats.RawHex
-			agg.Final += hv.stats.Final
-		}
-		nCells := len(samples)
-
-		// Build ActiveCells: one per visible cell. Hidden
-		// (Alpha == false) cells are dropped so palette selection
-		// and dither operate only on visible color. cellToVisible
-		// maps global cell index → visible index, used to reindex
-		// the adjacency graph below.
-		cells := make([]voxel.ActiveCell, 0, len(samples))
-		visibleToCell := make([]int, 0, len(samples))
-		cellToVisible := make([]int, len(samples))
-		for i := range cellToVisible {
-			cellToVisible[i] = -1
-		}
-		for gi, s := range samples {
-			if !s.Alpha {
-				continue
-			}
-			cellToVisible[gi] = len(cells)
-			visibleToCell = append(visibleToCell, gi)
-			cells = append(cells, voxel.ActiveCell{
-				Grid:  0,
-				Col:   s.CellIdx,
-				Row:   0,
-				Layer: s.SlabIdx,
-				Cx:    s.Centroid[0],
-				Cy:    s.Centroid[1],
-				Cz:    s.Centroid[2],
-				Color: s.Color,
-				Area:  s.Area,
+	// Work units: one per split half (geometry already laid out in
+	// bed coords by split.Layout), or a single unit on the whole
+	// model when Split is off. colorXform maps a unit's sample
+	// points back into ColorModel coords; nil = identity.
+	type voxUnit struct {
+		geom       *loader.LoadedModel
+		colorXform func([3]float32) [3]float32
+		halfIdx    byte
+	}
+	var units []voxUnit
+	if so.Enabled {
+		for h := 0; h < 2; h++ {
+			// Each half's geometry is in bed coords; ApplyInverse maps
+			// a sample point back to the original-mesh coords where
+			// ColorModel (and sticker decals) live.
+			units = append(units, voxUnit{
+				geom:       so.Halves[h],
+				colorXform: so.Xform[h].ApplyInverse,
+				halfIdx:    byte(h),
 			})
 		}
-		visibleNeighbors := make([][]voxel.Neighbor, len(cells))
-		nEdges := 0
-		for gi, nbrs := range globalNeighbors {
-			vi := cellToVisible[gi]
-			if vi < 0 {
+	} else {
+		units = []voxUnit{{geom: lo.Model, colorXform: nil, halfIdx: 0}}
+	}
+
+	// Run the cellslicer chain (slice → footprint → partition →
+	// sample → adjacency) once per unit, then concatenate. The
+	// global cell index is the position in the flattened CellSlabs
+	// (unit 0 first), which matches CellSamples and the neighbor
+	// graph. Neighbor indices from unit N are shifted by the count
+	// of cells already emitted; halves never share adjacency edges
+	// (they are physically separate on the bed).
+	var (
+		slabs           []cellslicer.Slab
+		samples         []cellslicer.CellSample
+		globalNeighbors [][]voxel.Neighbor
+		agg             cellslicer.PartitionStats
+	)
+	for ui, u := range units {
+		// Each unit owns an equal window of the normalized bar
+		// (split halves are roughly equal work; unsplit = the
+		// whole bar).
+		progLo := ui * progress.ScaleTotal / len(units)
+		progHi := (ui + 1) * progress.ScaleTotal / len(units)
+		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
+		if herr != nil {
+			return nil, herr
+		}
+		cellOffset := len(samples)
+		slabOffset := len(slabs)
+		// Renumber this unit's slabs and samples from unit-local to
+		// global indices. Slab.Index and CellSample.SlabIdx must
+		// both address the flattened CellSlabs list, or anything
+		// indexing slabs[SlabIdx] (debug cell dumps) and any
+		// Layer-keyed adjacency (ActiveCell.Layer → BuildNeighbors,
+		// FloydSteinberg's layer sort) would collide half 1's cells
+		// onto half 0's slabs.
+		for i := range hv.slabs {
+			hv.slabs[i].Index = slabOffset + i
+		}
+		for i := range hv.samples {
+			hv.samples[i].SlabIdx += slabOffset
+		}
+		slabs = append(slabs, hv.slabs...)
+		samples = append(samples, hv.samples...)
+		for _, nbrs := range hv.neighbors {
+			if cellOffset == 0 {
+				// First unit (and the whole unsplit graph): indices
+				// are already global, so reuse the rows as-is.
+				globalNeighbors = append(globalNeighbors, nbrs)
 				continue
 			}
-			out := visibleNeighbors[vi]
-			for _, n := range nbrs {
-				vj := cellToVisible[n.Idx]
-				if vj < 0 {
-					continue
-				}
-				out = append(out, voxel.Neighbor{Idx: vj, Weight: n.Weight})
+			shifted := make([]voxel.Neighbor, len(nbrs))
+			for k, n := range nbrs {
+				shifted[k] = voxel.Neighbor{Idx: n.Idx + cellOffset, Weight: n.Weight}
 			}
-			visibleNeighbors[vi] = out
-			nEdges += len(out)
+			globalNeighbors = append(globalNeighbors, shifted)
 		}
+		agg.RawRing += hv.stats.RawRing
+		agg.RawHex += hv.stats.RawHex
+		agg.Final += hv.stats.Final
+	}
+	nCells := len(samples)
 
-		plog.Printf("  Cellslicer: %d units, %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm",
-			len(units), len(slabs), nCells, len(cells), nEdges/2,
-			cellSizeLayer0, cellSizeUpper, layerH)
+	// Build ActiveCells: one per visible cell. Hidden
+	// (Alpha == false) cells are dropped so palette selection
+	// and dither operate only on visible color. cellToVisible
+	// maps global cell index → visible index, used to reindex
+	// the adjacency graph below.
+	cells := make([]voxel.ActiveCell, 0, len(samples))
+	visibleToCell := make([]int, 0, len(samples))
+	cellToVisible := make([]int, len(samples))
+	for i := range cellToVisible {
+		cellToVisible[i] = -1
+	}
+	for gi, s := range samples {
+		if !s.Alpha {
+			continue
+		}
+		cellToVisible[gi] = len(cells)
+		visibleToCell = append(visibleToCell, gi)
+		cells = append(cells, voxel.ActiveCell{
+			Grid:  0,
+			Col:   s.CellIdx,
+			Row:   0,
+			Layer: s.SlabIdx,
+			Cx:    s.Centroid[0],
+			Cy:    s.Centroid[1],
+			Cz:    s.Centroid[2],
+			Color: s.Color,
+			Area:  s.Area,
+		})
+	}
+	visibleNeighbors := make([][]voxel.Neighbor, len(cells))
+	nEdges := 0
+	for gi, nbrs := range globalNeighbors {
+		vi := cellToVisible[gi]
+		if vi < 0 {
+			continue
+		}
+		out := visibleNeighbors[vi]
+		for _, n := range nbrs {
+			vj := cellToVisible[n.Idx]
+			if vj < 0 {
+				continue
+			}
+			out = append(out, voxel.Neighbor{Idx: vj, Weight: n.Weight})
+		}
+		visibleNeighbors[vi] = out
+		nEdges += len(out)
+	}
 
-		// agg accumulates per-slab partition stats across all units.
-		// RawRing+RawHex are the pre-clip generator output; Final is the
-		// surviving cell count after each raw cell is Clipper-clipped to
-		// its region (empty intersections are never emitted). The gap
-		// between RawRing+RawHex and Final is cells that clipped to
-		// nothing.
-		plog.Printf("  Partition: ring=%d hex=%d final=%d",
-			agg.RawRing, agg.RawHex, agg.Final)
+	plog.Printf("  Cellslicer: %d units, %d slabs, %d cells (%d visible), %d adj-edges; cellSize=%.3f/%.3fmm (layer0/upper) layerH=%.3fmm",
+		len(units), len(slabs), nCells, len(cells), nEdges/2,
+		cellSizeLayer0, cellSizeUpper, layerH)
 
-		return &voxelizeOutput{
-			Cells:         cells,
-			CellSlabs:     slabs,
-			CellSamples:   samples,
-			Neighbors:     visibleNeighbors,
-			VisibleToCell: visibleToCell,
-			LayerH:        layerH,
-			CellSize:      cellSizeUpper,
-		}, nil
-	})
+	// agg accumulates per-slab partition stats across all units.
+	// RawRing+RawHex are the pre-clip generator output; Final is the
+	// surviving cell count after each raw cell is Clipper-clipped to
+	// its region (empty intersections are never emitted). The gap
+	// between RawRing+RawHex and Final is cells that clipped to
+	// nothing.
+	plog.Printf("  Partition: ring=%d hex=%d final=%d",
+		agg.RawRing, agg.RawHex, agg.Final)
+
+	return &voxelizeOutput{
+		Cells:         cells,
+		CellSlabs:     slabs,
+		CellSamples:   samples,
+		Neighbors:     visibleNeighbors,
+		VisibleToCell: visibleToCell,
+		LayerH:        layerH,
+		CellSize:      cellSizeUpper,
+	}, nil
 }
 
 // halfVoxels is one work unit's cellslicer output, before the global
@@ -1134,246 +1107,242 @@ func modelZRange(m *loader.LoadedModel) (zMin, zMax float32) {
 	return
 }
 
-func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
-	return runStage(r, StageColorAdjust, &r.colorAdjust, func() (*colorAdjustOutput, error) {
-		vo, err := r.Voxelize()
-		if err != nil {
-			return nil, err
-		}
-		stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
-		defer stage.Done()
-		adj := voxel.ColorAdjustment{
-			Brightness: r.opts.Brightness,
-			Contrast:   r.opts.Contrast,
-			Saturation: r.opts.Saturation,
-		}
-		tAdj := time.Now()
-		cells, cerr := voxel.AdjustCellColors(r.ctx, vo.Cells, adj)
-		if cerr != nil {
-			return nil, cerr
-		}
-		if !adj.IsIdentity() {
-			plog.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs",
-				r.opts.Brightness, r.opts.Contrast, r.opts.Saturation, time.Since(tAdj).Seconds())
-		}
-		return &colorAdjustOutput{Cells: cells}, nil
-	})
+// runColorAdjust is StageColorAdjust's body (see stageDefs).
+func (r *pipelineRun) runColorAdjust() (any, error) {
+	vo, err := r.Voxelize()
+	if err != nil {
+		return nil, err
+	}
+	stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
+	defer stage.Done()
+	adj := voxel.ColorAdjustment{
+		Brightness: r.opts.Brightness,
+		Contrast:   r.opts.Contrast,
+		Saturation: r.opts.Saturation,
+	}
+	tAdj := time.Now()
+	cells, cerr := voxel.AdjustCellColors(r.ctx, vo.Cells, adj)
+	if cerr != nil {
+		return nil, cerr
+	}
+	if !adj.IsIdentity() {
+		plog.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs",
+			r.opts.Brightness, r.opts.Contrast, r.opts.Saturation, time.Since(tAdj).Seconds())
+	}
+	return &colorAdjustOutput{Cells: cells}, nil
 }
 
-func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
-	return runStage(r, StageColorWarp, &r.colorWarp, func() (*colorWarpOutput, error) {
-		cao, err := r.ColorAdjust()
-		if err != nil {
-			return nil, err
-		}
-		stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
-		defer stage.Done()
-		if len(r.opts.WarpPins) == 0 {
-			cells := make([]voxel.ActiveCell, len(cao.Cells))
-			copy(cells, cao.Cells)
-			return &colorWarpOutput{Cells: cells}, nil
-		}
-		pins := make([]voxel.ColorWarpPin, len(r.opts.WarpPins))
-		for i, p := range r.opts.WarpPins {
-			src, perr := palette.ParsePalette([]string{p.SourceHex})
-			if perr != nil {
-				return nil, fmt.Errorf("warp pin %d source: %w", i, perr)
-			}
-			tgt, perr := palette.ParsePalette([]string{p.TargetHex})
-			if perr != nil {
-				return nil, fmt.Errorf("warp pin %d target: %w", i, perr)
-			}
-			pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0], Sigma: p.Sigma}
-		}
-		tWarp := time.Now()
-		cells, werr := voxel.WarpCellColors(r.ctx, cao.Cells, pins)
-		if werr != nil {
-			return nil, werr
-		}
-		plog.Printf("  Warped colors (%d pins) in %.1fs", len(pins), time.Since(tWarp).Seconds())
+// runColorWarp is StageColorWarp's body (see stageDefs).
+func (r *pipelineRun) runColorWarp() (any, error) {
+	cao, err := r.ColorAdjust()
+	if err != nil {
+		return nil, err
+	}
+	stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
+	defer stage.Done()
+	if len(r.opts.WarpPins) == 0 {
+		cells := make([]voxel.ActiveCell, len(cao.Cells))
+		copy(cells, cao.Cells)
 		return &colorWarpOutput{Cells: cells}, nil
-	})
+	}
+	pins := make([]voxel.ColorWarpPin, len(r.opts.WarpPins))
+	for i, p := range r.opts.WarpPins {
+		src, perr := palette.ParsePalette([]string{p.SourceHex})
+		if perr != nil {
+			return nil, fmt.Errorf("warp pin %d source: %w", i, perr)
+		}
+		tgt, perr := palette.ParsePalette([]string{p.TargetHex})
+		if perr != nil {
+			return nil, fmt.Errorf("warp pin %d target: %w", i, perr)
+		}
+		pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0], Sigma: p.Sigma}
+	}
+	tWarp := time.Now()
+	cells, werr := voxel.WarpCellColors(r.ctx, cao.Cells, pins)
+	if werr != nil {
+		return nil, werr
+	}
+	plog.Printf("  Warped colors (%d pins) in %.1fs", len(pins), time.Since(tWarp).Seconds())
+	return &colorWarpOutput{Cells: cells}, nil
 }
 
-func (r *pipelineRun) Palette() (*paletteOutput, error) {
-	return runStage(r, StagePalette, &r.palette, func() (*paletteOutput, error) {
-		cwo, err := r.ColorWarp()
-		if err != nil {
-			return nil, err
-		}
-		stage := progress.BeginStage(r.tracker, stageNames[StagePalette], false, 0)
-		defer stage.Done()
+// runPalette is StagePalette's body (see stageDefs).
+func (r *pipelineRun) runPalette() (any, error) {
+	cwo, err := r.ColorWarp()
+	if err != nil {
+		return nil, err
+	}
+	stage := progress.BeginStage(r.tracker, stageNames[StagePalette], false, 0)
+	defer stage.Done()
 
-		pcfg, perr := buildPaletteConfig(r.opts)
-		if perr != nil {
-			return nil, perr
+	pcfg, perr := buildPaletteConfig(r.opts)
+	if perr != nil {
+		return nil, perr
+	}
+	if pcfg.NumColors > export3mf.MaxFilaments {
+		return nil, fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
+	}
+	cells := make([]voxel.ActiveCell, len(cwo.Cells))
+	copy(cells, cwo.Cells)
+	ditherMode := r.opts.Dither
+	pal, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
+	if perr != nil {
+		return nil, perr
+	}
+	if palDisplay != "" {
+		plog.Printf("%s", palDisplay)
+	}
+	if len(pal) == 0 {
+		return nil, fmt.Errorf("no palette colors")
+	}
+	if r.opts.ColorSnap > 0 {
+		if serr := voxel.SnapColors(r.ctx, cells, pal, r.opts.ColorSnap); serr != nil {
+			return nil, serr
 		}
-		if pcfg.NumColors > export3mf.MaxFilaments {
-			return nil, fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
+		plog.Printf("  Snapped cell colors toward palette by delta E %.1f", r.opts.ColorSnap)
+	}
+	if len(pcfg.Locked) == 0 && len(pal) > 1 {
+		assigns, aerr := voxel.AssignColors(r.ctx, cells, pal)
+		if aerr != nil {
+			return nil, aerr
 		}
-		cells := make([]voxel.ActiveCell, len(cwo.Cells))
-		copy(cells, cwo.Cells)
-		ditherMode := r.opts.Dither
-		pal, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
-		if perr != nil {
-			return nil, perr
+		counts := make([]int, len(pal))
+		for _, a := range assigns {
+			counts[a]++
 		}
-		if palDisplay != "" {
-			plog.Printf("%s", palDisplay)
-		}
-		if len(pal) == 0 {
-			return nil, fmt.Errorf("no palette colors")
-		}
-		if r.opts.ColorSnap > 0 {
-			if serr := voxel.SnapColors(r.ctx, cells, pal, r.opts.ColorSnap); serr != nil {
-				return nil, serr
-			}
-			plog.Printf("  Snapped cell colors toward palette by delta E %.1f", r.opts.ColorSnap)
-		}
-		if len(pcfg.Locked) == 0 && len(pal) > 1 {
-			assigns, aerr := voxel.AssignColors(r.ctx, cells, pal)
-			if aerr != nil {
-				return nil, aerr
-			}
-			counts := make([]int, len(pal))
-			for _, a := range assigns {
-				counts[a]++
-			}
-			best := 0
-			for i := 1; i < len(counts); i++ {
-				if counts[i] > counts[best] {
-					best = i
-				}
-			}
-			if best != 0 {
-				pal[0], pal[best] = pal[best], pal[0]
-				palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
+		best := 0
+		for i := 1; i < len(counts); i++ {
+			if counts[i] > counts[best] {
+				best = i
 			}
 		}
-		return &paletteOutput{
-			Palette:       pal,
-			PaletteLabels: palLabels,
-			Cells:         cells,
-		}, nil
-	})
+		if best != 0 {
+			pal[0], pal[best] = pal[best], pal[0]
+			palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
+		}
+	}
+	return &paletteOutput{
+		Palette:       pal,
+		PaletteLabels: palLabels,
+		Cells:         cells,
+	}, nil
 }
 
-func (r *pipelineRun) Dither() (*ditherOutput, error) {
-	return runStage(r, StageDither, &r.dither, func() (*ditherOutput, error) {
-		po, err := r.Palette()
-		if err != nil {
-			return nil, err
-		}
-		vo, err := r.Voxelize()
-		if err != nil {
-			return nil, err
-		}
-		// Budget: dither work units + flood-fill work units. Most modes
-		// do one dither pass over n cells, so dither = n. dizzy-
-		// corrected runs voxel.DizzyCorrectionPasses passes back-to-
-		// back, so its dither budget scales accordingly. The internal
-		// passes use a tracker wrapper that offsets per-pass progress
-		// onto a single continuous bar -- see ditherPassTracker.
-		ditherMode := r.opts.Dither
-		ditherUnits := len(po.Cells)
-		if ditherMode == "dizzy-corrected" {
-			ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
-		}
-		stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
-		defer stage.Done()
-		cells := po.Cells
-		pal := po.Palette
-		tDither := time.Now()
-		var assignments []int32
-		var derr error
-		// Phase 2 transition: cellslicer Voxelize doesn't yet
-		// populate the adjacency graph (Phase 3 will). Error-
-		// diffusion dithers degenerate to nearest-palette without
-		// neighbors, so short-circuit to AssignColors when the
-		// graph is empty, regardless of requested mode.
-		if len(vo.Neighbors) == 0 {
-			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
-			if derr != nil {
-				return nil, derr
-			}
-			plog.Printf("  Dithered (none; cell-adjacency graph empty, Phase 3 TODO) %d cells in %.1fs",
-				len(cells), time.Since(tDither).Seconds())
-			return &ditherOutput{Assignments: assignments}, nil
-		}
-		switch ditherMode {
-		case "dizzy-corrected":
-			neighbors := vo.Neighbors
-			assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
-		case "dizzy-2hop":
-			// Single-pass dizzy with an expanded 2-hop neighbor
-			// stencil so stranded cells (no unprocessed 1-hop
-			// neighbors) can still distribute error to 2-hop
-			// neighbors instead of dropping it.
-			neighbors := voxel.BuildNeighbors2Hop(cells)
-			assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
-		case "dizzy-recover":
-			// Single-pass dizzy with a local-solve recovery on
-			// stranded cells: instead of dropping the residual,
-			// search neighbor palette swaps for one that absorbs
-			// it in the global-drift sense.
-			neighbors := vo.Neighbors
-			assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, neighbors, r.tracker)
-		case "floyd-steinberg":
-			neighbors := vo.Neighbors
-			assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
-		case "riemersma":
-			neighbors := vo.Neighbors
-			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
-		case "riemersma-pair":
-			// Sliding 2-cell Riemersma with residual-cancellation
-			// coupling. Same drift as base Riemersma; lower wander on
-			// flat/textured fixtures at ≈2× the per-cell cost.
-			neighbors := vo.Neighbors
-			assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
-		case "blue-noise":
-			// Adaptive simplex blue-noise threshold dither: per-cell
-			// best-K simplex (1..palette_size) selected by per-cell
-			// projection-error tolerance, with LDS-driven choice
-			// among simplex vertices. Trades a small drift for big
-			// reductions in wander on uniform/near-flat regions
-			// (where Riemersma's window accumulator forces visible
-			// far-palette picks).
-			neighbors := vo.Neighbors
-			tol := r.opts.BlueNoiseTolerance
-			if tol <= 0 {
-				tol = voxel.BlueNoiseAdaptiveTolDefault
-			}
-			assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, neighbors, tol, r.tracker)
-		default:
-			assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
-		}
+// runDither is StageDither's body (see stageDefs).
+func (r *pipelineRun) runDither() (any, error) {
+	po, err := r.Palette()
+	if err != nil {
+		return nil, err
+	}
+	vo, err := r.Voxelize()
+	if err != nil {
+		return nil, err
+	}
+	// Budget: dither work units + flood-fill work units. Most modes
+	// do one dither pass over n cells, so dither = n. dizzy-
+	// corrected runs voxel.DizzyCorrectionPasses passes back-to-
+	// back, so its dither budget scales accordingly. The internal
+	// passes use a tracker wrapper that offsets per-pass progress
+	// onto a single continuous bar -- see ditherPassTracker.
+	ditherMode := r.opts.Dither
+	ditherUnits := len(po.Cells)
+	if ditherMode == "dizzy-corrected" {
+		ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
+	}
+	stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
+	defer stage.Done()
+	cells := po.Cells
+	pal := po.Palette
+	tDither := time.Now()
+	var assignments []int32
+	var derr error
+	// Phase 2 transition: cellslicer Voxelize doesn't yet
+	// populate the adjacency graph (Phase 3 will). Error-
+	// diffusion dithers degenerate to nearest-palette without
+	// neighbors, so short-circuit to AssignColors when the
+	// graph is empty, regardless of requested mode.
+	if len(vo.Neighbors) == 0 {
+		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 		if derr != nil {
 			return nil, derr
 		}
-		plog.Printf("  Dithered (%s) %d cells in %.1fs", ditherMode, len(cells), time.Since(tDither).Seconds())
-		counts := make([]int, len(pal))
-		for _, a := range assignments {
-			counts[a]++
+		plog.Printf("  Dithered (none; cell-adjacency graph empty, Phase 3 TODO) %d cells in %.1fs",
+			len(cells), time.Since(tDither).Seconds())
+		return &ditherOutput{Assignments: assignments}, nil
+	}
+	switch ditherMode {
+	case "dizzy-corrected":
+		neighbors := vo.Neighbors
+		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
+	case "dizzy-2hop":
+		// Single-pass dizzy with an expanded 2-hop neighbor
+		// stencil so stranded cells (no unprocessed 1-hop
+		// neighbors) can still distribute error to 2-hop
+		// neighbors instead of dropping it.
+		neighbors := voxel.BuildNeighbors2Hop(cells)
+		assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
+	case "dizzy-recover":
+		// Single-pass dizzy with a local-solve recovery on
+		// stranded cells: instead of dropping the residual,
+		// search neighbor palette swaps for one that absorbs
+		// it in the global-drift sense.
+		neighbors := vo.Neighbors
+		assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, neighbors, r.tracker)
+	case "floyd-steinberg":
+		neighbors := vo.Neighbors
+		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
+	case "riemersma":
+		neighbors := vo.Neighbors
+		assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
+	case "riemersma-pair":
+		// Sliding 2-cell Riemersma with residual-cancellation
+		// coupling. Same drift as base Riemersma; lower wander on
+		// flat/textured fixtures at ≈2× the per-cell cost.
+		neighbors := vo.Neighbors
+		assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
+	case "blue-noise":
+		// Adaptive simplex blue-noise threshold dither: per-cell
+		// best-K simplex (1..palette_size) selected by per-cell
+		// projection-error tolerance, with LDS-driven choice
+		// among simplex vertices. Trades a small drift for big
+		// reductions in wander on uniform/near-flat regions
+		// (where Riemersma's window accumulator forces visible
+		// far-palette picks).
+		neighbors := vo.Neighbors
+		tol := r.opts.BlueNoiseTolerance
+		if tol <= 0 {
+			tol = voxel.BlueNoiseAdaptiveTolDefault
 		}
-		total := len(assignments)
-		order := make([]int, len(pal))
-		for i := range order {
-			order[i] = i
-		}
-		sort.Slice(order, func(a, b int) bool { return counts[order[a]] > counts[order[b]] })
-		for _, i := range order {
-			c := pal[i]
-			plog.Printf("    #%02X%02X%02X: %d cells (%.1f%%)", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
-		}
-		// The minislicer pipeline doesn't need flood-fill patches:
-		// each section is its own colored region in the prism wall,
-		// and Mesh3D extrudes per-section walls directly from
-		// `assignments`. Leaving PatchMap/NumPatches/PatchAssignment
-		// nil keeps the cached struct shape stable.
-		return &ditherOutput{
-			Assignments: assignments,
-		}, nil
-	})
+		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, neighbors, tol, r.tracker)
+	default:
+		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
+	}
+	if derr != nil {
+		return nil, derr
+	}
+	plog.Printf("  Dithered (%s) %d cells in %.1fs", ditherMode, len(cells), time.Since(tDither).Seconds())
+	counts := make([]int, len(pal))
+	for _, a := range assignments {
+		counts[a]++
+	}
+	total := len(assignments)
+	order := make([]int, len(pal))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return counts[order[a]] > counts[order[b]] })
+	for _, i := range order {
+		c := pal[i]
+		plog.Printf("    #%02X%02X%02X: %d cells (%.1f%%)", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
+	}
+	// The minislicer pipeline doesn't need flood-fill patches:
+	// each section is its own colored region in the prism wall,
+	// and Mesh3D extrudes per-section walls directly from
+	// `assignments`. Leaving PatchMap/NumPatches/PatchAssignment
+	// nil keeps the cached struct shape stable.
+	return &ditherOutput{
+		Assignments: assignments,
+	}, nil
 }
 
 // Clip cuts the geometry mesh into per-cell fragments via
@@ -1384,266 +1353,265 @@ func (r *pipelineRun) Dither() (*ditherOutput, error) {
 // palette index. The geometry mesh must be closed and orientable —
 // the alpha-wrap path produces this directly; for raw meshes the
 // pipeline relies on opts.AlphaWrap.
-func (r *pipelineRun) Clip() (*clipOutput, error) {
-	return runStage(r, StageClip, &r.clip, func() (*clipOutput, error) {
-		do, err := r.Dither()
-		if err != nil {
-			return nil, err
-		}
-		vo, err := r.Voxelize()
-		if err != nil {
-			return nil, err
-		}
-		lo, err := r.Load()
-		if err != nil {
-			return nil, err
-		}
-		// Split, when enabled, makes the clip run once per half against
-		// that half's bed-space geometry. See docs/split-cellslicer.md.
-		so, err := r.Split()
-		if err != nil {
-			return nil, err
-		}
+// runClip is StageClip's body (see stageDefs).
+func (r *pipelineRun) runClip() (any, error) {
+	do, err := r.Dither()
+	if err != nil {
+		return nil, err
+	}
+	vo, err := r.Voxelize()
+	if err != nil {
+		return nil, err
+	}
+	lo, err := r.Load()
+	if err != nil {
+		return nil, err
+	}
+	// Split, when enabled, makes the clip run once per half against
+	// that half's bed-space geometry. See docs/split-cellslicer.md.
+	so, err := r.Split()
+	if err != nil {
+		return nil, err
+	}
 
-		// The clip job count (cells, or merged groups) is only known
-		// mid-stage, so the bar is normalized to ScaleTotal. Each
-		// half/window gives its first ~15% to the sequential per-slab
-		// source pre-split and the rest to the clip jobs.
-		stage := progress.BeginStage(r.tracker, stageNames[StageClip], true, progress.ScaleTotal)
-		defer stage.Done()
-		clipProgFor := func(lo, hi int) *cellslicer.ClipProgress {
-			mid := lo + (hi-lo)*15/100
-			return &cellslicer.ClipProgress{
-				SlabSplit: stage.Span(lo, mid),
-				Jobs:      stage.Span(mid, hi),
+	// The clip job count (cells, or merged groups) is only known
+	// mid-stage, so the bar is normalized to ScaleTotal. Each
+	// half/window gives its first ~15% to the sequential per-slab
+	// source pre-split and the rest to the clip jobs.
+	stage := progress.BeginStage(r.tracker, stageNames[StageClip], true, progress.ScaleTotal)
+	defer stage.Done()
+	clipProgFor := func(lo, hi int) *cellslicer.ClipProgress {
+		mid := lo + (hi-lo)*15/100
+		return &cellslicer.ClipProgress{
+			SlabSplit: stage.Span(lo, mid),
+			Jobs:      stage.Span(mid, hi),
+		}
+	}
+	tClip := time.Now()
+
+	// Build a global-cell-index → palette-assignment lookup.
+	// Visible cells have a valid Dither output; hidden cells
+	// (currently none, since SampleCells marks every textured
+	// surface alpha=true) get -1.
+	nGlobal := len(vo.CellSamples)
+	cellAssign := make([]int32, nGlobal)
+	for i := range cellAssign {
+		cellAssign[i] = -1
+	}
+	for vi, gi := range vo.VisibleToCell {
+		cellAssign[gi] = do.Assignments[vi]
+	}
+
+	// Cell merging groups same-kind, same-color cells within each
+	// slab and clips the model against each group's merged prism in
+	// one Manifold intersection (instead of one per cell), cutting
+	// boolean count and removing internal seams between same-color
+	// cells. Colors come from Dither, so this is purely a clip-time
+	// /geometry optimisation with no effect on the dithered output.
+	//
+	// It is forced off under ShowSampledColors: that diagnostic colours
+	// each output face by its source cell's SAMPLED input colour
+	// (overrideFaceColorsFromSamples via ShellSectionIdx), which
+	// needs per-cell face provenance. Merging same-palette cells
+	// intentionally coarsens that provenance — fine for the real
+	// palette-coloured output (a merge group shares one palette
+	// index), but it would smear the per-cell sampled view. So the
+	// diagnostic runs the per-cell clip to keep its provenance exact.
+	// Merging is ON by default (clip-time / triangle-count win); NoCellMerge
+	// opts out per-cell. Shared with the Clip cache key via
+	// effectiveMergeCells so the two can never diverge.
+	mergeCells := effectiveMergeCells(r.opts)
+	if mergeCells {
+		plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.3gmm)",
+			cellslicer.OpenEdgeBloatMM)
+	} else {
+		plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.3gmm)",
+			cellslicer.OpenEdgeBloatMM)
+	}
+	var (
+		clipped      cellslicer.ClipResult
+		shellHalfIdx []byte
+		cerr         error
+	)
+	if so.Enabled {
+		// One clip per half, against that half's bed-space geometry.
+		// clipPerHalf concatenates the two results (half 0 first,
+		// unified vertex table) and tags each face with its half;
+		// FaceCellIdx is remapped to the global flattened-CellSlabs
+		// index space so the per-cell bookkeeping below is unchanged.
+		// Each half's progress window is proportional to its share
+		// of the cells.
+		mkHalfProg := func(cellOffset, nSub, total int) *cellslicer.ClipProgress {
+			if total <= 0 {
+				return nil
 			}
+			return clipProgFor(progress.ScaleTotal*cellOffset/total,
+				progress.ScaleTotal*(cellOffset+nSub)/total)
 		}
-		tClip := time.Now()
-
-		// Build a global-cell-index → palette-assignment lookup.
-		// Visible cells have a valid Dither output; hidden cells
-		// (currently none, since SampleCells marks every textured
-		// surface alpha=true) get -1.
-		nGlobal := len(vo.CellSamples)
-		cellAssign := make([]int32, nGlobal)
-		for i := range cellAssign {
-			cellAssign[i] = -1
-		}
-		for vi, gi := range vo.VisibleToCell {
-			cellAssign[gi] = do.Assignments[vi]
-		}
-
-		// Cell merging groups same-kind, same-color cells within each
-		// slab and clips the model against each group's merged prism in
-		// one Manifold intersection (instead of one per cell), cutting
-		// boolean count and removing internal seams between same-color
-		// cells. Colors come from Dither, so this is purely a clip-time
-		// /geometry optimisation with no effect on the dithered output.
-		//
-		// It is forced off under ShowSampledColors: that diagnostic colours
-		// each output face by its source cell's SAMPLED input colour
-		// (overrideFaceColorsFromSamples via ShellSectionIdx), which
-		// needs per-cell face provenance. Merging same-palette cells
-		// intentionally coarsens that provenance — fine for the real
-		// palette-coloured output (a merge group shares one palette
-		// index), but it would smear the per-cell sampled view. So the
-		// diagnostic runs the per-cell clip to keep its provenance exact.
-		// Merging is ON by default (clip-time / triangle-count win); NoCellMerge
-		// opts out per-cell. Shared with the Clip cache key via
-		// effectiveMergeCells so the two can never diverge.
-		mergeCells := effectiveMergeCells(r.opts)
 		if mergeCells {
-			plog.Printf("  Clip: Manifold merged-cell intersect (same-color cells per slab, open-edge bloat=%.3gmm)",
-				cellslicer.OpenEdgeBloatMM)
+			clipped, shellHalfIdx, cerr = clipPerHalfMerged(r.ctx, so, vo.CellSlabs, cellAssign, mkHalfProg)
 		} else {
-			plog.Printf("  Clip: Manifold per-cell intersect (open-edge bloat=%.3gmm)",
-				cellslicer.OpenEdgeBloatMM)
+			clipped, shellHalfIdx, cerr = clipPerHalf(r.ctx, so, vo.CellSlabs, mkHalfProg)
 		}
-		var (
-			clipped      cellslicer.ClipResult
-			shellHalfIdx []byte
-			cerr         error
-		)
-		if so.Enabled {
-			// One clip per half, against that half's bed-space geometry.
-			// clipPerHalf concatenates the two results (half 0 first,
-			// unified vertex table) and tags each face with its half;
-			// FaceCellIdx is remapped to the global flattened-CellSlabs
-			// index space so the per-cell bookkeeping below is unchanged.
-			// Each half's progress window is proportional to its share
-			// of the cells.
-			mkHalfProg := func(cellOffset, nSub, total int) *cellslicer.ClipProgress {
-				if total <= 0 {
-					return nil
-				}
-				return clipProgFor(progress.ScaleTotal*cellOffset/total,
-					progress.ScaleTotal*(cellOffset+nSub)/total)
-			}
-			if mergeCells {
-				clipped, shellHalfIdx, cerr = clipPerHalfMerged(r.ctx, so, vo.CellSlabs, cellAssign, mkHalfProg)
-			} else {
-				clipped, shellHalfIdx, cerr = clipPerHalf(r.ctx, so, vo.CellSlabs, mkHalfProg)
-			}
+	} else {
+		prog := clipProgFor(0, progress.ScaleTotal)
+		if mergeCells {
+			clipped, cerr = cellslicer.ClipMeshToMergedCellsManifoldProgress(r.ctx, lo.Model, vo.CellSlabs, cellAssign, prog)
 		} else {
-			prog := clipProgFor(0, progress.ScaleTotal)
-			if mergeCells {
-				clipped, cerr = cellslicer.ClipMeshToMergedCellsManifoldProgress(r.ctx, lo.Model, vo.CellSlabs, cellAssign, prog)
-			} else {
-				clipped, cerr = cellslicer.ClipMeshToCellsManifoldProgress(r.ctx, lo.Model, vo.CellSlabs, prog)
-			}
+			clipped, cerr = cellslicer.ClipMeshToCellsManifoldProgress(r.ctx, lo.Model, vo.CellSlabs, prog)
 		}
-		if cerr != nil {
-			return nil, fmt.Errorf("cellslicer clip: %w", cerr)
+	}
+	if cerr != nil {
+		return nil, fmt.Errorf("cellslicer clip: %w", cerr)
+	}
+	if clipped.CellRep != nil {
+		plog.Printf("  Clip merged %d cells → %d groups", len(clipped.CellRep), distinctReps(clipped.CellRep))
+	}
+	// Map per-face cell index → palette assignment. Faces from
+	// cells with no assignment (-1) get -1, downstream
+	// SafeAssignments will substitute the fallback.
+	faceAssign := make([]int32, len(clipped.Faces))
+	for i, gi := range clipped.FaceCellIdx {
+		if gi >= 0 && int(gi) < len(cellAssign) {
+			faceAssign[i] = cellAssign[gi]
+		} else {
+			faceAssign[i] = -1
 		}
-		if clipped.CellRep != nil {
-			plog.Printf("  Clip merged %d cells → %d groups", len(clipped.CellRep), distinctReps(clipped.CellRep))
+	}
+	fallback := mostCommonNonNeg(faceAssign)
+	for i, a := range faceAssign {
+		if a < 0 {
+			faceAssign[i] = fallback
 		}
-		// Map per-face cell index → palette assignment. Faces from
-		// cells with no assignment (-1) get -1, downstream
-		// SafeAssignments will substitute the fallback.
-		faceAssign := make([]int32, len(clipped.Faces))
-		for i, gi := range clipped.FaceCellIdx {
-			if gi >= 0 && int(gi) < len(cellAssign) {
-				faceAssign[i] = cellAssign[gi]
-			} else {
-				faceAssign[i] = -1
-			}
-		}
-		fallback := mostCommonNonNeg(faceAssign)
-		for i, a := range faceAssign {
-			if a < 0 {
-				faceAssign[i] = fallback
-			}
-		}
+	}
 
-		plog.Printf("  Clip: %d verts, %d faces in %.1fs",
-			len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
-		reportHolesIfEnabled("clip output", clipped.Faces)
+	plog.Printf("  Clip: %d verts, %d faces in %.1fs",
+		len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
+	reportHolesIfEnabled("clip output", clipped.Faces)
 
-		// Per-cell face-count cross-tab against partition pixel
-		// bucket. Identifies the "missing geometry" suspects:
-		// small cells whose outline is too thin for any source-tri
-		// fragment to land inside, producing 0 faces in the clip
-		// output. A high zero-face fraction in the 1-px / 2-4 px
-		// buckets means surface area visible in the input mesh is
-		// silently dropped at clip time.
-		facesPerCell := make([]int, nGlobal)
-		for _, gi := range clipped.FaceCellIdx {
-			if gi >= 0 && int(gi) < nGlobal {
-				facesPerCell[gi]++
+	// Per-cell face-count cross-tab against partition pixel
+	// bucket. Identifies the "missing geometry" suspects:
+	// small cells whose outline is too thin for any source-tri
+	// fragment to land inside, producing 0 faces in the clip
+	// output. A high zero-face fraction in the 1-px / 2-4 px
+	// buckets means surface area visible in the input mesh is
+	// silently dropped at clip time.
+	facesPerCell := make([]int, nGlobal)
+	for _, gi := range clipped.FaceCellIdx {
+		if gi >= 0 && int(gi) < nGlobal {
+			facesPerCell[gi]++
+		}
+	}
+	// Under cell merging, faces are tagged with their group's
+	// representative cell, so a non-representative member's own
+	// slot is 0 even though its surface was clipped (as part of the
+	// group). repOf maps each cell to the representative whose face
+	// count reflects the whole group, keeping "zero-face" honest.
+	repOf := func(gi int) int {
+		if clipped.CellRep != nil && gi < len(clipped.CellRep) {
+			return int(clipped.CellRep[gi])
+		}
+		return gi
+	}
+	bucketOf := func(px int) int {
+		switch {
+		case px <= 1:
+			return 0
+		case px <= 4:
+			return 1
+		case px <= 16:
+			return 2
+		case px <= 64:
+			return 3
+		default:
+			return 4
+		}
+	}
+	// [kind][bucket]: [0]=ring [1]=hex
+	var totalByBucket, zeroByBucket [2][5]int
+	// Per-slab counters: ring/hex × total/zero-face.
+	type slabStat struct {
+		ringTotal, ringZero int
+		hexTotal, hexZero   int
+	}
+	perSlab := make([]slabStat, len(vo.CellSlabs))
+	gi := 0
+	for si := range vo.CellSlabs {
+		for ci := range vo.CellSlabs[si].Cells {
+			c := &vo.CellSlabs[si].Cells[ci]
+			k := 0
+			if c.Kind == cellslicer.KindHex {
+				k = 1
 			}
-		}
-		// Under cell merging, faces are tagged with their group's
-		// representative cell, so a non-representative member's own
-		// slot is 0 even though its surface was clipped (as part of the
-		// group). repOf maps each cell to the representative whose face
-		// count reflects the whole group, keeping "zero-face" honest.
-		repOf := func(gi int) int {
-			if clipped.CellRep != nil && gi < len(clipped.CellRep) {
-				return int(clipped.CellRep[gi])
+			b := bucketOf(c.Pixels)
+			totalByBucket[k][b]++
+			zero := facesPerCell[repOf(gi)] == 0
+			if zero {
+				zeroByBucket[k][b]++
 			}
-			return gi
-		}
-		bucketOf := func(px int) int {
-			switch {
-			case px <= 1:
-				return 0
-			case px <= 4:
-				return 1
-			case px <= 16:
-				return 2
-			case px <= 64:
-				return 3
-			default:
-				return 4
-			}
-		}
-		// [kind][bucket]: [0]=ring [1]=hex
-		var totalByBucket, zeroByBucket [2][5]int
-		// Per-slab counters: ring/hex × total/zero-face.
-		type slabStat struct {
-			ringTotal, ringZero int
-			hexTotal, hexZero   int
-		}
-		perSlab := make([]slabStat, len(vo.CellSlabs))
-		gi := 0
-		for si := range vo.CellSlabs {
-			for ci := range vo.CellSlabs[si].Cells {
-				c := &vo.CellSlabs[si].Cells[ci]
-				k := 0
-				if c.Kind == cellslicer.KindHex {
-					k = 1
-				}
-				b := bucketOf(c.Pixels)
-				totalByBucket[k][b]++
-				zero := facesPerCell[repOf(gi)] == 0
+			if k == 0 {
+				perSlab[si].ringTotal++
 				if zero {
-					zeroByBucket[k][b]++
+					perSlab[si].ringZero++
 				}
-				if k == 0 {
-					perSlab[si].ringTotal++
-					if zero {
-						perSlab[si].ringZero++
-					}
-				} else {
-					perSlab[si].hexTotal++
-					if zero {
-						perSlab[si].hexZero++
-					}
+			} else {
+				perSlab[si].hexTotal++
+				if zero {
+					perSlab[si].hexZero++
 				}
-				gi++
 			}
+			gi++
 		}
-		plog.Printf("  Clip cell→face ring: 1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
-			zeroByBucket[0][0], totalByBucket[0][0],
-			zeroByBucket[0][1], totalByBucket[0][1],
-			zeroByBucket[0][2], totalByBucket[0][2],
-			zeroByBucket[0][3], totalByBucket[0][3],
-			zeroByBucket[0][4], totalByBucket[0][4])
-		plog.Printf("  Clip cell→face hex:  1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
-			zeroByBucket[1][0], totalByBucket[1][0],
-			zeroByBucket[1][1], totalByBucket[1][1],
-			zeroByBucket[1][2], totalByBucket[1][2],
-			zeroByBucket[1][3], totalByBucket[1][3],
-			zeroByBucket[1][4], totalByBucket[1][4])
-		// Top 10 slabs by zero-face cell count. Includes Z range so
-		// we can correlate with what's at that height in the input
-		// (caps vs walls, horizontal trim features, etc.).
-		type slabIdxStat struct {
-			si    int
-			total int
-			zero  int
-			ring  int // zero-face ring count
-			hex   int // zero-face hex count
+	}
+	plog.Printf("  Clip cell→face ring: 1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
+		zeroByBucket[0][0], totalByBucket[0][0],
+		zeroByBucket[0][1], totalByBucket[0][1],
+		zeroByBucket[0][2], totalByBucket[0][2],
+		zeroByBucket[0][3], totalByBucket[0][3],
+		zeroByBucket[0][4], totalByBucket[0][4])
+	plog.Printf("  Clip cell→face hex:  1px=%d/%d 2-4=%d/%d 5-16=%d/%d 17-64=%d/%d 65+=%d/%d (zero-face/total)",
+		zeroByBucket[1][0], totalByBucket[1][0],
+		zeroByBucket[1][1], totalByBucket[1][1],
+		zeroByBucket[1][2], totalByBucket[1][2],
+		zeroByBucket[1][3], totalByBucket[1][3],
+		zeroByBucket[1][4], totalByBucket[1][4])
+	// Top 10 slabs by zero-face cell count. Includes Z range so
+	// we can correlate with what's at that height in the input
+	// (caps vs walls, horizontal trim features, etc.).
+	type slabIdxStat struct {
+		si    int
+		total int
+		zero  int
+		ring  int // zero-face ring count
+		hex   int // zero-face hex count
+	}
+	ranked := make([]slabIdxStat, 0, len(perSlab))
+	for si, s := range perSlab {
+		z := s.ringZero + s.hexZero
+		if z == 0 {
+			continue
 		}
-		ranked := make([]slabIdxStat, 0, len(perSlab))
-		for si, s := range perSlab {
-			z := s.ringZero + s.hexZero
-			if z == 0 {
-				continue
-			}
-			ranked = append(ranked, slabIdxStat{si: si, total: s.ringTotal + s.hexTotal, zero: z, ring: s.ringZero, hex: s.hexZero})
-		}
-		sort.Slice(ranked, func(i, j int) bool { return ranked[i].zero > ranked[j].zero })
-		topN := len(ranked)
-		if topN > 10 {
-			topN = 10
-		}
-		for k := 0; k < topN; k++ {
-			entry := ranked[k]
-			s := &vo.CellSlabs[entry.si]
-			plog.Printf("    zero-face slab %d Z=[%.2f..%.2f]mm: %d/%d cells (ring=%d hex=%d)",
-				entry.si, s.ZBot, s.ZTop, entry.zero, entry.total, entry.ring, entry.hex)
-		}
+		ranked = append(ranked, slabIdxStat{si: si, total: s.ringTotal + s.hexTotal, zero: z, ring: s.ringZero, hex: s.hexZero})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].zero > ranked[j].zero })
+	topN := len(ranked)
+	if topN > 10 {
+		topN = 10
+	}
+	for k := 0; k < topN; k++ {
+		entry := ranked[k]
+		s := &vo.CellSlabs[entry.si]
+		plog.Printf("    zero-face slab %d Z=[%.2f..%.2f]mm: %d/%d cells (ring=%d hex=%d)",
+			entry.si, s.ZBot, s.ZTop, entry.zero, entry.total, entry.ring, entry.hex)
+	}
 
-		return &clipOutput{
-			ShellVerts:       clipped.Verts,
-			ShellFaces:       clipped.Faces,
-			ShellAssignments: faceAssign,
-			ShellSectionIdx:  clipped.FaceCellIdx,
-			ShellHalfIdx:     shellHalfIdx,
-		}, nil
-	})
+	return &clipOutput{
+		ShellVerts:       clipped.Verts,
+		ShellFaces:       clipped.Faces,
+		ShellAssignments: faceAssign,
+		ShellSectionIdx:  clipped.FaceCellIdx,
+		ShellHalfIdx:     shellHalfIdx,
+	}, nil
 }
 
 // clipPerHalf clips each split half's bed-space geometry against its own
@@ -1770,55 +1738,54 @@ func mostCommonNonNeg(a []int32) int32 {
 	return best
 }
 
-func (r *pipelineRun) Merge() (*mergeOutput, error) {
-	return runStage(r, StageMerge, &r.merge, func() (*mergeOutput, error) {
-		co, err := r.Clip()
-		if err != nil {
-			return nil, err
-		}
-		shellVerts := co.ShellVerts
-		shellFaces := co.ShellFaces
-		shellAssignments := co.ShellAssignments
-		shellHalfIdx := co.ShellHalfIdx
-		shellSectionIdx := co.ShellSectionIdx
-		if !r.opts.NoMerge {
-			tMerge := time.Now()
-			before := len(shellFaces)
-			var merr error
-			if shellHalfIdx != nil {
-				// Per-half merge: halves don't share vertices (clipPerHalf
-				// offsets each half's vertex indices), so
-				// MergeCoplanarTriangles run on the full mesh would not
-				// merge across halves anyway, but the per-face HalfIdx
-				// parallel array needs to track the merged face count.
-				// Simplest: extract per-half slices, merge each, then
-				// concatenate. Faces in clipPerHalf's output are already
-				// grouped by half (h=0 then h=1), so the slice ranges
-				// are contiguous.
-				shellVerts, shellFaces, shellAssignments, shellHalfIdx, merr =
-					mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, r.tracker)
-			} else {
-				shellVerts, shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
-			}
-			if merr != nil {
-				return nil, fmt.Errorf("merge: %w", merr)
-			}
-			plog.Printf("  Merged shell: %d -> %d faces in %.1fs", before, len(shellFaces), time.Since(tMerge).Seconds())
-			// Merge groups faces by color and re-triangulates;
-			// section provenance is no longer per-face.
-			shellSectionIdx = nil
+// runMerge is StageMerge's body (see stageDefs).
+func (r *pipelineRun) runMerge() (any, error) {
+	co, err := r.Clip()
+	if err != nil {
+		return nil, err
+	}
+	shellVerts := co.ShellVerts
+	shellFaces := co.ShellFaces
+	shellAssignments := co.ShellAssignments
+	shellHalfIdx := co.ShellHalfIdx
+	shellSectionIdx := co.ShellSectionIdx
+	if !r.opts.NoMerge {
+		tMerge := time.Now()
+		before := len(shellFaces)
+		var merr error
+		if shellHalfIdx != nil {
+			// Per-half merge: halves don't share vertices (clipPerHalf
+			// offsets each half's vertex indices), so
+			// MergeCoplanarTriangles run on the full mesh would not
+			// merge across halves anyway, but the per-face HalfIdx
+			// parallel array needs to track the merged face count.
+			// Simplest: extract per-half slices, merge each, then
+			// concatenate. Faces in clipPerHalf's output are already
+			// grouped by half (h=0 then h=1), so the slice ranges
+			// are contiguous.
+			shellVerts, shellFaces, shellAssignments, shellHalfIdx, merr =
+				mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, r.tracker)
 		} else {
-			progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
+			shellVerts, shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
 		}
-		plog.Printf("  Output mesh: %s", voxel.CheckWatertight(shellFaces))
-		return &mergeOutput{
-			ShellVerts:       shellVerts,
-			ShellFaces:       shellFaces,
-			ShellAssignments: shellAssignments,
-			ShellSectionIdx:  shellSectionIdx,
-			ShellHalfIdx:     shellHalfIdx,
-		}, nil
-	})
+		if merr != nil {
+			return nil, fmt.Errorf("merge: %w", merr)
+		}
+		plog.Printf("  Merged shell: %d -> %d faces in %.1fs", before, len(shellFaces), time.Since(tMerge).Seconds())
+		// Merge groups faces by color and re-triangulates;
+		// section provenance is no longer per-face.
+		shellSectionIdx = nil
+	} else {
+		progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
+	}
+	plog.Printf("  Output mesh: %s", voxel.CheckWatertight(shellFaces))
+	return &mergeOutput{
+		ShellVerts:       shellVerts,
+		ShellFaces:       shellFaces,
+		ShellAssignments: shellAssignments,
+		ShellSectionIdx:  shellSectionIdx,
+		ShellHalfIdx:     shellHalfIdx,
+	}, nil
 }
 
 // mergeSplitFaces runs MergeCoplanarTriangles independently on each

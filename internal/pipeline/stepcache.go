@@ -59,31 +59,7 @@ const (
 // stageSubdir returns the on-disk subdirectory for a stage. Used as the
 // "stage" argument to diskcache.Cache.{Get,Set}.
 func stageSubdir(s StageID) string {
-	switch s {
-	case StageParse:
-		return "parse"
-	case StageLoad:
-		return "load"
-	case StageSplit:
-		return "split"
-	case StageSticker:
-		return "sticker"
-	case StageVoxelize:
-		return "voxelize"
-	case StageColorAdjust:
-		return "coloradjust"
-	case StageColorWarp:
-		return "colorwarp"
-	case StagePalette:
-		return "palette"
-	case StageDither:
-		return "dither"
-	case StageClip:
-		return "clip"
-	case StageMerge:
-		return "merge"
-	}
-	return "unknown"
+	return stageDefs[s].Subdir
 }
 
 // stageDescription returns a short human-readable summary of what an
@@ -91,50 +67,72 @@ func stageSubdir(s StageID) string {
 // sidecar and printed during sweeps so the operator can see what's
 // being evicted ("Load: foo.glb (alpha-wrap)" beats an opaque hash).
 func stageDescription(stage StageID, opts Options) string {
-	base := filepath.Base(opts.Input)
-	switch stage {
-	case StageParse:
-		return fmt.Sprintf("Parse: %s", base)
-	case StageLoad:
-		s := fmt.Sprintf("Load: %s", base)
-		if opts.AlphaWrap {
-			s += " (alpha-wrap)"
-		}
-		return s
-	case StageSplit:
-		if !opts.Split.Enabled {
-			return fmt.Sprintf("Split: %s (off)", base)
-		}
-		axisName := []string{"X", "Y", "Z"}[opts.Split.Axis]
-		countStr := fmt.Sprintf("×%d", opts.Split.ConnectorCount)
-		if opts.Split.ConnectorCount == 0 {
-			countStr = "×auto"
-		}
-		return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
-			base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
-	case StageSticker:
-		return fmt.Sprintf("Stickers: %s (%d)", base, len(opts.Stickers))
-	case StageVoxelize:
-		return fmt.Sprintf("Voxelize: %s @ %.2f/%.2fmm", base, opts.NozzleDiameter, opts.LayerHeight)
-	case StageColorAdjust:
-		return fmt.Sprintf("Color adjust: %s (B%+.0f C%+.0f S%+.0f)",
-			base, opts.Brightness, opts.Contrast, opts.Saturation)
-	case StageColorWarp:
-		return fmt.Sprintf("Color warp: %s (%d pins)", base, len(opts.WarpPins))
-	case StagePalette:
-		return fmt.Sprintf("Palette: %s (%d colors)", base, opts.NumColors)
-	case StageDither:
-		mode := opts.Dither
-		if mode == "" {
-			mode = "default"
-		}
-		return fmt.Sprintf("Dither: %s (%s)", base, mode)
-	case StageClip:
-		return fmt.Sprintf("Clip: %s", base)
-	case StageMerge:
-		return fmt.Sprintf("Merge: %s", base)
+	return stageDefs[stage].Description(opts)
+}
+
+// Per-stage description builders, referenced by the stageDefs table.
+
+func describeParse(opts Options) string {
+	return fmt.Sprintf("Parse: %s", filepath.Base(opts.Input))
+}
+
+func describeLoad(opts Options) string {
+	s := fmt.Sprintf("Load: %s", filepath.Base(opts.Input))
+	if opts.AlphaWrap {
+		s += " (alpha-wrap)"
 	}
-	return base
+	return s
+}
+
+func describeSplit(opts Options) string {
+	base := filepath.Base(opts.Input)
+	if !opts.Split.Enabled {
+		return fmt.Sprintf("Split: %s (off)", base)
+	}
+	axisName := []string{"X", "Y", "Z"}[opts.Split.Axis]
+	countStr := fmt.Sprintf("×%d", opts.Split.ConnectorCount)
+	if opts.Split.ConnectorCount == 0 {
+		countStr = "×auto"
+	}
+	return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
+		base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
+}
+
+func describeSticker(opts Options) string {
+	return fmt.Sprintf("Stickers: %s (%d)", filepath.Base(opts.Input), len(opts.Stickers))
+}
+
+func describeVoxelize(opts Options) string {
+	return fmt.Sprintf("Voxelize: %s @ %.2f/%.2fmm", filepath.Base(opts.Input), opts.NozzleDiameter, opts.LayerHeight)
+}
+
+func describeColorAdjust(opts Options) string {
+	return fmt.Sprintf("Color adjust: %s (B%+.0f C%+.0f S%+.0f)",
+		filepath.Base(opts.Input), opts.Brightness, opts.Contrast, opts.Saturation)
+}
+
+func describeColorWarp(opts Options) string {
+	return fmt.Sprintf("Color warp: %s (%d pins)", filepath.Base(opts.Input), len(opts.WarpPins))
+}
+
+func describePalette(opts Options) string {
+	return fmt.Sprintf("Palette: %s (%d colors)", filepath.Base(opts.Input), opts.NumColors)
+}
+
+func describeDither(opts Options) string {
+	mode := opts.Dither
+	if mode == "" {
+		mode = "default"
+	}
+	return fmt.Sprintf("Dither: %s (%s)", filepath.Base(opts.Input), mode)
+}
+
+func describeClip(opts Options) string {
+	return fmt.Sprintf("Clip: %s", filepath.Base(opts.Input))
+}
+
+func describeMerge(opts Options) string {
+	return fmt.Sprintf("Merge: %s", filepath.Base(opts.Input))
 }
 
 // StageCache holds per-stage cached outputs as compressed cacheblob
@@ -630,123 +628,15 @@ type loadSettings struct {
 	NoSimplify bool
 }
 
-// BaseColor lives on voxelizeSettings (not loadSettings) because it only
-// affects voxel cell coloring. A cheap per-run step reapplies the override
-// to the cached ColorModel before voxelize, so Load/Decimate caches
-// survive base-color changes. Sticker is invalidated on base-color change
-// because the Sticker stage body deep-clones ColorModel into so.Model and the per-run
-// reapply step does not patch that scratch copy.
-type voxelizeSettings struct {
-	// Layer0XY/UpperXY/Layer0Z/UpperZ are the resolved voxel cell
-	// dimensions from voxelCellSizes (= the actual grid the stage
-	// builds against; that helper is the canonical computation —
-	// future readers wondering "where does Layer0XY come from?"
-	// should start there). Hashing the resolved sizes — rather than
-	// the inputs that produce them (Printer, NozzleDiameter,
-	// LayerHeight, the OrcaSlicer process registry, the
-	// Layer0CellScale / Layer0AdhesionXYScale constants, …) — means
-	// any future change to cell-size derivation automatically
-	// invalidates the cache without anyone having to remember to add
-	// a field here.
-	Layer0XY                             float32
-	UpperXY                              float32
-	Layer0Z                              float32
-	UpperZ                               float32
-	BaseColor                            string
-	BaseColorMaterialX                   string // path
-	BaseColorMaterialXMTime              int64  // ns; 0 if file is missing/inaccessible
-	BaseColorMaterialXSize               int64  // bytes; 0 if file is missing/inaccessible
-	BaseColorMaterialXTileMM             float64
-	BaseColorMaterialXTriplanarSharpness float64
-	// NoInteriorFaceFootprint changes which footprint the cellslicer
-	// builds (and thus which cap cells exist), so it must invalidate the
-	// voxelize cache when toggled.
-	NoInteriorFaceFootprint bool
-}
-
-type stickerSettings struct {
-	Stickers []Sticker
-	// BaseColor / BaseColorMaterialX{,MTime,Size,TileMM,TriplanarSharpness}
-	// are included so any base-color change invalidates the sticker
-	// stage. See voxelizeSettings doc above for the reason.
-	BaseColor                            string
-	BaseColorMaterialX                   string
-	BaseColorMaterialXMTime              int64
-	BaseColorMaterialXSize               int64
-	BaseColorMaterialXTileMM             float64
-	BaseColorMaterialXTriplanarSharpness float64
-	// AlphaWrap toggling changes the sticker substrate (wrap mesh vs.
-	// original mesh), so decals built for one substrate are invalid when
-	// the toggle changes. AlphaWrapAlpha and AlphaWrapOffset live in
-	// loadSettings; the cumulative stage key cascade picks them up.
-	AlphaWrap bool
-}
-
-type colorAdjustSettings struct {
-	Brightness float32
-	Contrast   float32
-	Saturation float32
-}
-
-type colorWarpSettings struct {
-	WarpPins []WarpPin
-}
-
-// splitSettings is what affects StageSplit's output. When Enabled is
-// false, only the Enabled bit is hashed so a disabled-Split run
-// produces the same downstream cache keys it would have produced
-// before the Split feature shipped. Toggling other fields while
-// Enabled=false does not invalidate the cache.
-type splitSettings struct {
-	Enabled          bool
-	Axis             int
-	Offset           float64
-	ConnectorStyle   string
-	ConnectorCount   int
-	ConnectorDiamMM  float64
-	ConnectorDepthMM float64
-	ClearanceMM      float64
-	Orientation      [2]string
-}
-
-type paletteSettings struct {
-	NumColors         int
-	LockedColors      string // joined for hashing
-	InventoryFile     string
-	InventoryContents string // file contents for hashing; empty if no file
-	InventoryColors   [][3]uint8
-	InventoryLabels   []string
-	ColorSnap         float64
-}
-
-type ditherSettings struct {
-	Dither             string
-	RiemersmaInputBias float64
-	BlueNoiseTolerance float64
-}
-
-// clipSettings carries the clip-stage knobs. Beyond these the stage is
-// invalidated by dependency cascade from Dither / Voxelize. MergeCells
-// is the *effective* same-color-cell merge decision (see Clip): on only
-// when NoCellMerge is unset and not under ShowSampledColors, so the cache key
-// tracks exactly which clip path produced the output.
-type clipSettings struct {
-	MergeCells bool
-}
-
 // effectiveMergeCells reports whether the Clip stage merges same-color
 // cells per slab. It is the single source of truth for that predicate:
-// the Clip stage (run.go) and the Clip cache key (stageFnv) MUST agree,
-// or the cache serves a merged-cell blob for a per-cell request (or vice
-// versa). Merging is the default win (clip time + triangle count);
-// NoCellMerge opts out, and ShowSampledColors forces per-cell so the
-// diagnostic keeps exact per-cell face provenance.
+// the Clip stage (run.go) and the Clip cache key (hashClipSettings) MUST
+// agree, or the cache serves a merged-cell blob for a per-cell request
+// (or vice versa). Merging is the default win (clip time + triangle
+// count); NoCellMerge opts out, and ShowSampledColors forces per-cell so
+// the diagnostic keeps exact per-cell face provenance.
 func effectiveMergeCells(opts Options) bool {
 	return !opts.NoCellMerge && !opts.ShowSampledColors
-}
-
-type mergeSettings struct {
-	NoMerge bool
 }
 
 func writeString(h hash.Hash64, s string) {
@@ -774,94 +664,205 @@ func writeInt(h hash.Hash64, i int) {
 	binary.Write(h, binary.LittleEndian, int64(i))
 }
 
-func (c *StageCache) settingsForStage(stage StageID, opts Options) any {
-	switch stage {
-	case StageParse:
-		return parseSettings{
-			Input:       opts.Input,
-			ObjectIndex: opts.ObjectIndex,
-		}
-	case StageLoad:
-		s := loadSettings{
-			Scale:           opts.Scale,
-			AlphaWrap:       opts.AlphaWrap,
-			AlphaWrapAlpha:  opts.AlphaWrapAlpha,
-			AlphaWrapOffset: opts.AlphaWrapOffset,
-			NozzleDiameter:  opts.NozzleDiameter,
-			NoSimplify:      opts.NoSimplify,
-		}
-		if opts.Size != nil {
-			s.HasSize = true
-			s.Size = *opts.Size
-		}
-		return s
-	case StageVoxelize:
-		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
-		cells := voxelCellSizes(opts)
-		return voxelizeSettings{
-			Layer0XY:                             cells.Layer0XY,
-			UpperXY:                              cells.UpperXY,
-			Layer0Z:                              cells.Layer0Z,
-			UpperZ:                               cells.UpperZ,
-			BaseColor:                            opts.BaseColor,
-			BaseColorMaterialX:                   opts.BaseColorMaterialX,
-			BaseColorMaterialXMTime:              mtime,
-			BaseColorMaterialXSize:               size,
-			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
-			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
-			NoInteriorFaceFootprint:              opts.NoInteriorFaceFootprint,
-		}
-	case StageSticker:
-		mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
-		return stickerSettings{
-			Stickers:                             opts.Stickers,
-			BaseColor:                            opts.BaseColor,
-			BaseColorMaterialX:                   opts.BaseColorMaterialX,
-			BaseColorMaterialXMTime:              mtime,
-			BaseColorMaterialXSize:               size,
-			BaseColorMaterialXTileMM:             opts.BaseColorMaterialXTileMM,
-			BaseColorMaterialXTriplanarSharpness: opts.BaseColorMaterialXTriplanarSharpness,
-			AlphaWrap:                            opts.AlphaWrap,
-		}
-	case StageColorAdjust:
-		return colorAdjustSettings{Brightness: opts.Brightness, Contrast: opts.Contrast, Saturation: opts.Saturation}
-	case StageColorWarp:
-		return colorWarpSettings{WarpPins: opts.WarpPins}
-	case StageSplit:
-		// When disabled, only the Enabled bit affects the key; this
-		// preserves cache-hit equivalence with the pre-Split path.
-		if !opts.Split.Enabled {
-			return splitSettings{Enabled: false}
-		}
-		return splitSettings{
-			Enabled:          true,
-			Axis:             opts.Split.Axis,
-			Offset:           opts.Split.Offset,
-			ConnectorStyle:   opts.Split.ConnectorStyle,
-			ConnectorCount:   opts.Split.ConnectorCount,
-			ConnectorDiamMM:  opts.Split.ConnectorDiamMM,
-			ConnectorDepthMM: opts.Split.ConnectorDepthMM,
-			ClearanceMM:      opts.Split.ClearanceMM,
-			Orientation:      opts.Split.Orientation,
-		}
-	case StagePalette:
-		return paletteSettings{
-			NumColors:         opts.NumColors,
-			LockedColors:      strings.Join(opts.LockedColors, ","),
-			InventoryFile:     opts.InventoryFile,
-			InventoryContents: c.inventoryContents(opts.InventoryFile),
-			InventoryColors:   opts.InventoryColors,
-			InventoryLabels:   opts.InventoryLabels,
-			ColorSnap:         opts.ColorSnap,
-		}
-	case StageDither:
-		return ditherSettings{Dither: opts.Dither, RiemersmaInputBias: opts.RiemersmaInputBias, BlueNoiseTolerance: opts.BlueNoiseTolerance}
-	case StageClip:
-		return clipSettings{MergeCells: effectiveMergeCells(opts)}
-	case StageMerge:
-		return mergeSettings{NoMerge: opts.NoMerge}
+// Per-stage settings hashers, referenced by the stageDefs table. Each
+// builds the stage's settings snapshot and writes its fingerprint —
+// the byte sequence is the cache-compat contract (see
+// StageDef.HashSettings). Salts (voxelize, dither) are written first
+// so a deliberate invalidation is one added line.
+
+func hashParseSettings(c *StageCache, h hash.Hash64, opts Options) {
+	v := parseSettings{
+		Input:       opts.Input,
+		ObjectIndex: opts.ObjectIndex,
 	}
-	return nil
+	writeString(h, v.Input)
+	writeInt(h, v.ObjectIndex)
+}
+
+func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
+	v := loadSettings{
+		Scale:           opts.Scale,
+		AlphaWrap:       opts.AlphaWrap,
+		AlphaWrapAlpha:  opts.AlphaWrapAlpha,
+		AlphaWrapOffset: opts.AlphaWrapOffset,
+		NozzleDiameter:  opts.NozzleDiameter,
+		NoSimplify:      opts.NoSimplify,
+	}
+	if opts.Size != nil {
+		v.HasSize = true
+		v.Size = *opts.Size
+	}
+	writeFloat32(h, v.Scale)
+	writeBool(h, v.HasSize)
+	writeFloat32(h, v.Size)
+	writeBool(h, v.AlphaWrap)
+	writeFloat32(h, v.AlphaWrapAlpha)
+	writeFloat32(h, v.AlphaWrapOffset)
+	writeFloat32(h, v.NozzleDiameter)
+	writeBool(h, v.NoSimplify)
+}
+
+// hashSplitSettings fingerprints what affects StageSplit's output.
+// When Enabled is false, only the Enabled bit is hashed so a
+// disabled-Split run produces the same downstream cache keys it would
+// have produced before the Split feature shipped. Toggling other
+// fields while Enabled=false does not invalidate the cache.
+func hashSplitSettings(c *StageCache, h hash.Hash64, opts Options) {
+	// When disabled, only the Enabled bit affects the key; this
+	// preserves cache-hit equivalence with the pre-Split path.
+	writeBool(h, opts.Split.Enabled)
+	if opts.Split.Enabled {
+		writeInt(h, opts.Split.Axis)
+		writeFloat64(h, opts.Split.Offset)
+		writeString(h, opts.Split.ConnectorStyle)
+		writeInt(h, opts.Split.ConnectorCount)
+		writeFloat64(h, opts.Split.ConnectorDiamMM)
+		writeFloat64(h, opts.Split.ConnectorDepthMM)
+		writeFloat64(h, opts.Split.ClearanceMM)
+		writeString(h, opts.Split.Orientation[0])
+		writeString(h, opts.Split.Orientation[1])
+	}
+}
+
+// hashStickerSettings fingerprints the Sticker stage. BaseColor /
+// BaseColorMaterialX{,MTime,Size,TileMM,TriplanarSharpness} are
+// included so any base-color change invalidates the sticker stage (the
+// stage body deep-clones ColorModel into so.Model and the per-run
+// base-color reapply does not patch that scratch copy — see
+// hashVoxelizeSettings). AlphaWrap toggling changes the sticker
+// substrate (wrap mesh vs. original mesh), so decals built for one
+// substrate are invalid when the toggle changes; AlphaWrapAlpha and
+// AlphaWrapOffset live in the Load fingerprint, picked up via the
+// cumulative stage-key cascade.
+func hashStickerSettings(c *StageCache, h hash.Hash64, opts Options) {
+	mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
+	writeString(h, opts.BaseColor)
+	writeString(h, opts.BaseColorMaterialX)
+	binary.Write(h, binary.LittleEndian, mtime)
+	binary.Write(h, binary.LittleEndian, size)
+	writeFloat64(h, opts.BaseColorMaterialXTileMM)
+	writeFloat64(h, opts.BaseColorMaterialXTriplanarSharpness)
+	writeBool(h, opts.AlphaWrap)
+	writeInt(h, len(opts.Stickers))
+	for _, s := range opts.Stickers {
+		writeString(h, s.ImagePath)
+		// Include image file mod time so changes to the PNG invalidate cache.
+		if info, err := os.Stat(s.ImagePath); err == nil {
+			binary.Write(h, binary.LittleEndian, info.ModTime().UnixNano())
+		}
+		for _, c := range s.Center {
+			writeFloat64(h, c)
+		}
+		for _, n := range s.Normal {
+			writeFloat64(h, n)
+		}
+		for _, u := range s.Up {
+			writeFloat64(h, u)
+		}
+		writeFloat64(h, s.Scale)
+		writeFloat64(h, s.Rotation)
+		writeFloat64(h, s.MaxAngle)
+		writeString(h, s.Mode)
+	}
+}
+
+// hashVoxelizeSettings fingerprints the Voxelize stage.
+//
+// BaseColor lives here (not in the Load fingerprint) because it only
+// affects voxel cell coloring: a cheap per-run step (applyBaseColor)
+// reapplies the override to the cached ColorModel, so Load caches
+// survive base-color changes.
+//
+// Layer0XY/UpperXY/Layer0Z/UpperZ are the resolved voxel cell
+// dimensions from voxelCellSizes (= the actual grid the stage builds
+// against; that helper is the canonical computation). Hashing the
+// resolved sizes — rather than the inputs that produce them (Printer,
+// NozzleDiameter, LayerHeight, the OrcaSlicer process registry, the
+// XY-scale knobs, …) — means any future change to cell-size derivation
+// automatically invalidates the cache without anyone having to
+// remember to add a field here.
+//
+// NoInteriorFaceFootprint changes which footprint the cellslicer
+// builds (and thus which cap cells exist), so it must invalidate the
+// voxelize cache when toggled.
+func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
+	mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
+	cells := voxelCellSizes(opts)
+	// Cache salt: bump when the slab-partition geometry changes in a
+	// way that the hashed settings below don't capture. "v2" = slab 0
+	// now spans the first-layer height (SlabBoundaryPlanesFirst), so
+	// caches built by the old uniform-layerH grid must be rebuilt.
+	writeString(h, "slab-partition-v2")
+	writeFloat32(h, cells.Layer0XY)
+	writeFloat32(h, cells.UpperXY)
+	writeFloat32(h, cells.Layer0Z)
+	writeFloat32(h, cells.UpperZ)
+	writeString(h, opts.BaseColor)
+	writeString(h, opts.BaseColorMaterialX)
+	binary.Write(h, binary.LittleEndian, mtime)
+	binary.Write(h, binary.LittleEndian, size)
+	writeFloat64(h, opts.BaseColorMaterialXTileMM)
+	writeFloat64(h, opts.BaseColorMaterialXTriplanarSharpness)
+	writeBool(h, opts.NoInteriorFaceFootprint)
+}
+
+func hashColorAdjustSettings(c *StageCache, h hash.Hash64, opts Options) {
+	writeFloat32(h, opts.Brightness)
+	writeFloat32(h, opts.Contrast)
+	writeFloat32(h, opts.Saturation)
+}
+
+func hashColorWarpSettings(c *StageCache, h hash.Hash64, opts Options) {
+	writeInt(h, len(opts.WarpPins))
+	for _, p := range opts.WarpPins {
+		writeString(h, p.SourceHex)
+		writeString(h, p.TargetHex)
+		writeFloat64(h, p.Sigma)
+	}
+}
+
+func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
+	writeInt(h, opts.NumColors)
+	writeString(h, strings.Join(opts.LockedColors, ","))
+	writeString(h, opts.InventoryFile)
+	writeString(h, c.inventoryContents(opts.InventoryFile))
+	writeInt(h, len(opts.InventoryColors))
+	for _, col := range opts.InventoryColors {
+		h.Write(col[:])
+	}
+	// Labels are length-prefixed strings, so a shorter InventoryLabels
+	// slice produces a different hash than a longer one even without an
+	// explicit count. This is intentional — label count tracks color count.
+	for _, l := range opts.InventoryLabels {
+		writeString(h, l)
+	}
+	writeFloat64(h, opts.ColorSnap)
+}
+
+func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
+	// Salt: bump when the dither *algorithm* changes (settings are
+	// unchanged but cached outputs are stale). "perceptual-v1" =
+	// every dither mode (dizzy/dizzy-corrected/dizzy-2hop/dizzy-
+	// recover, floyd-steinberg, riemersma, riemersma-pair,
+	// blue-noise) moved to a CIELAB nearest-color decision with
+	// linear-light error/residual handling.
+	writeString(h, "perceptual-v1")
+	writeString(h, opts.Dither)
+	writeFloat64(h, opts.RiemersmaInputBias)
+	writeFloat64(h, opts.BlueNoiseTolerance)
+}
+
+// hashClipSettings fingerprints the clip-stage knobs. Beyond these the
+// stage is invalidated by dependency cascade from Dither / Voxelize.
+// The hashed bit is the *effective* same-color-cell merge decision
+// (see effectiveMergeCells), so the cache key tracks exactly which
+// clip path produced the output.
+func hashClipSettings(c *StageCache, h hash.Hash64, opts Options) {
+	writeBool(h, effectiveMergeCells(opts))
+}
+
+func hashMergeSettings(c *StageCache, h hash.Hash64, opts Options) {
+	writeBool(h, opts.NoMerge)
 }
 
 // materialXFileStamp returns the mtime (ns) and size (bytes) of the
@@ -916,122 +917,7 @@ func (c *StageCache) materialXSampler(path string) (materialx.Sampler, error) {
 // per-stage component of the cumulative stageKey.
 func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 	h := fnv.New64a()
-	s := c.settingsForStage(stage, opts)
-	switch v := s.(type) {
-	case parseSettings:
-		writeString(h, v.Input)
-		writeInt(h, v.ObjectIndex)
-	case loadSettings:
-		writeFloat32(h, v.Scale)
-		writeBool(h, v.HasSize)
-		writeFloat32(h, v.Size)
-		writeBool(h, v.AlphaWrap)
-		writeFloat32(h, v.AlphaWrapAlpha)
-		writeFloat32(h, v.AlphaWrapOffset)
-		writeFloat32(h, v.NozzleDiameter)
-		writeBool(h, v.NoSimplify)
-	case voxelizeSettings:
-		// Cache salt: bump when the slab-partition geometry changes in a
-		// way that the hashed settings above don't capture. "v2" = slab 0
-		// now spans the first-layer height (SlabBoundaryPlanesFirst), so
-		// caches built by the old uniform-layerH grid must be rebuilt.
-		writeString(h, "slab-partition-v2")
-		writeFloat32(h, v.Layer0XY)
-		writeFloat32(h, v.UpperXY)
-		writeFloat32(h, v.Layer0Z)
-		writeFloat32(h, v.UpperZ)
-		writeString(h, v.BaseColor)
-		writeString(h, v.BaseColorMaterialX)
-		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
-		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
-		writeFloat64(h, v.BaseColorMaterialXTileMM)
-		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
-		writeBool(h, v.NoInteriorFaceFootprint)
-	case stickerSettings:
-		writeString(h, v.BaseColor)
-		writeString(h, v.BaseColorMaterialX)
-		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXMTime)
-		binary.Write(h, binary.LittleEndian, v.BaseColorMaterialXSize)
-		writeFloat64(h, v.BaseColorMaterialXTileMM)
-		writeFloat64(h, v.BaseColorMaterialXTriplanarSharpness)
-		writeBool(h, v.AlphaWrap)
-		writeInt(h, len(v.Stickers))
-		for _, s := range v.Stickers {
-			writeString(h, s.ImagePath)
-			// Include image file mod time so changes to the PNG invalidate cache.
-			if info, err := os.Stat(s.ImagePath); err == nil {
-				binary.Write(h, binary.LittleEndian, info.ModTime().UnixNano())
-			}
-			for _, c := range s.Center {
-				writeFloat64(h, c)
-			}
-			for _, n := range s.Normal {
-				writeFloat64(h, n)
-			}
-			for _, u := range s.Up {
-				writeFloat64(h, u)
-			}
-			writeFloat64(h, s.Scale)
-			writeFloat64(h, s.Rotation)
-			writeFloat64(h, s.MaxAngle)
-			writeString(h, s.Mode)
-		}
-	case colorAdjustSettings:
-		writeFloat32(h, v.Brightness)
-		writeFloat32(h, v.Contrast)
-		writeFloat32(h, v.Saturation)
-	case colorWarpSettings:
-		writeInt(h, len(v.WarpPins))
-		for _, p := range v.WarpPins {
-			writeString(h, p.SourceHex)
-			writeString(h, p.TargetHex)
-			writeFloat64(h, p.Sigma)
-		}
-	case splitSettings:
-		writeBool(h, v.Enabled)
-		if v.Enabled {
-			writeInt(h, v.Axis)
-			writeFloat64(h, v.Offset)
-			writeString(h, v.ConnectorStyle)
-			writeInt(h, v.ConnectorCount)
-			writeFloat64(h, v.ConnectorDiamMM)
-			writeFloat64(h, v.ConnectorDepthMM)
-			writeFloat64(h, v.ClearanceMM)
-			writeString(h, v.Orientation[0])
-			writeString(h, v.Orientation[1])
-		}
-	case paletteSettings:
-		writeInt(h, v.NumColors)
-		writeString(h, v.LockedColors)
-		writeString(h, v.InventoryFile)
-		writeString(h, v.InventoryContents)
-		writeInt(h, len(v.InventoryColors))
-		for _, c := range v.InventoryColors {
-			h.Write(c[:])
-		}
-		// Labels are length-prefixed strings, so a shorter InventoryLabels
-		// slice produces a different hash than a longer one even without an
-		// explicit count. This is intentional — label count tracks color count.
-		for _, l := range v.InventoryLabels {
-			writeString(h, l)
-		}
-		writeFloat64(h, v.ColorSnap)
-	case ditherSettings:
-		// Salt: bump when the dither *algorithm* changes (settings are
-		// unchanged but cached outputs are stale). "perceptual-v1" =
-		// every dither mode (dizzy/dizzy-corrected/dizzy-2hop/dizzy-
-		// recover, floyd-steinberg, riemersma, riemersma-pair,
-		// blue-noise) moved to a CIELAB nearest-color decision with
-		// linear-light error/residual handling.
-		writeString(h, "perceptual-v1")
-		writeString(h, v.Dither)
-		writeFloat64(h, v.RiemersmaInputBias)
-		writeFloat64(h, v.BlueNoiseTolerance)
-	case clipSettings:
-		writeBool(h, v.MergeCells)
-	case mergeSettings:
-		writeBool(h, v.NoMerge)
-	}
+	stageDefs[stage].HashSettings(c, h, opts)
 	return h.Sum64()
 }
 
@@ -1039,31 +925,7 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 // given stage, suitable for gob-decoding into. Returning a typed pointer (not
 // "any") matters because gob.Decode needs the concrete type behind any.
 func allocOutput(stage StageID) any {
-	switch stage {
-	case StageParse:
-		return &loader.LoadedModel{}
-	case StageLoad:
-		return &loadOutput{}
-	case StageSplit:
-		return &splitOutput{}
-	case StageSticker:
-		return &stickerOutput{}
-	case StageVoxelize:
-		return &voxelizeOutput{}
-	case StageColorAdjust:
-		return &colorAdjustOutput{}
-	case StageColorWarp:
-		return &colorWarpOutput{}
-	case StagePalette:
-		return &paletteOutput{}
-	case StageDither:
-		return &ditherOutput{}
-	case StageClip:
-		return &clipOutput{}
-	case StageMerge:
-		return &mergeOutput{}
-	}
-	return nil
+	return stageDefs[stage].Alloc()
 }
 
 // hitSource indicates where a cache hit came from. Currently only the

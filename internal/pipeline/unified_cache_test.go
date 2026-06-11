@@ -200,10 +200,10 @@ func TestStageKeyEmptyOnHashFailure(t *testing.T) {
 	}
 }
 
-// TestRunStageCacheHitReturnsValue is the basic post-refactor invariant:
-// when the disk cache contains a usable entry for the stage, runStage
-// returns it without invoking the body, and the returned pointer is
-// non-nil. Caller code (Load → applyBaseColor) dereferences the
+// TestRunStageCacheHitReturnsValue is the basic driver invariant:
+// when the disk cache contains a usable entry for the stage, resolve
+// returns it without invoking the stage body, and the returned pointer
+// is non-nil. Caller code (Load → applyBaseColor) dereferences the
 // pointer immediately, so a (nil, nil) return would be a crash.
 func TestRunStageCacheHitReturnsValue(t *testing.T) {
 	c := NewStageCache()
@@ -221,28 +221,34 @@ func TestRunStageCacheHitReturnsValue(t *testing.T) {
 	c.set(StageSplit, opts, want)
 	c.WaitForDiskWrites()
 
+	// Instrument the table entry's body so an unexpected execution is
+	// observable; restore it so other tests see the real body.
+	def := &stageDefs[StageSplit]
+	origRun := def.Run
 	bodyRan := false
+	def.Run = func(r *pipelineRun) (any, error) {
+		bodyRan = true
+		return origRun(r)
+	}
+	defer func() { def.Run = origRun }()
+
 	r := &pipelineRun{
 		ctx:     context.Background(),
 		cache:   c,
 		opts:    opts,
 		tracker: progress.NullTracker{},
 	}
-	got, err := runStage(r, StageSplit, &r.split, func() (*splitOutput, error) {
-		bodyRan = true
-		return &splitOutput{}, nil
-	})
+	got, err := r.Split()
 	if err != nil {
-		t.Fatalf("runStage: %v", err)
+		t.Fatalf("Split: %v", err)
 	}
 	if got == nil {
-		t.Fatal("runStage returned nil on a cache hit")
+		t.Fatal("resolve returned nil on a cache hit")
 	}
 	if bodyRan {
 		t.Error("body executed despite a cache hit being available")
 	}
 }
-
 
 // TestCorruptStageBlobIsAMissNotAnError: a corrupted on-disk stage
 // blob (app killed mid-write, filesystem truncation) must read as a
