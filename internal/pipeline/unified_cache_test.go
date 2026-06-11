@@ -243,3 +243,55 @@ func TestRunStageCacheHitReturnsValue(t *testing.T) {
 	}
 }
 
+
+// TestCorruptStageBlobIsAMissNotAnError: a corrupted on-disk stage
+// blob (app killed mid-write, filesystem truncation) must read as a
+// clean cache miss — the stage recomputes — and the bad file must be
+// deleted so it can't poison every subsequent run. It must never
+// surface as an error or crash. This is the StageCache-level
+// counterpart of diskcache's TestTruncatedBlobIsRemoved.
+func TestCorruptStageBlobIsAMissNotAnError(t *testing.T) {
+	c := NewStageCache()
+	dir := t.TempDir()
+	d, err := diskcache.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetDisk(d)
+	defer c.WaitForDiskWrites()
+
+	path := makeFakeInput(t)
+	opts := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
+
+	c.set(StageMerge, opts, &mergeOutput{ShellAssignments: []int32{1, 2, 3}})
+	c.WaitForDiskWrites()
+	if _, src := c.getWithSource(StageMerge, opts); src != hitDisk {
+		t.Fatalf("precondition: expected disk hit before corruption, got %v", src)
+	}
+
+	// Truncate the blob to half its size — valid zstd prefix, cut
+	// mid-stream.
+	blobPath := filepath.Join(dir, stageSubdir(StageMerge), c.stageKey(StageMerge, opts)+".gob.zst")
+	st, err := os.Stat(blobPath)
+	if err != nil {
+		t.Fatalf("stat stage blob (did the on-disk layout change?): %v", err)
+	}
+	if err := os.Truncate(blobPath, st.Size()/2); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	out, src := c.getWithSource(StageMerge, opts)
+	if src != hitMiss || out != nil {
+		t.Errorf("corrupt blob: got (out=%v, src=%v), want clean miss", out, src)
+	}
+	if _, err := os.Stat(blobPath); !os.IsNotExist(err) {
+		t.Error("corrupt blob was not deleted; it would poison every subsequent run")
+	}
+
+	// The slot must be rewritable and readable again.
+	c.set(StageMerge, opts, &mergeOutput{ShellAssignments: []int32{4}})
+	c.WaitForDiskWrites()
+	if _, src := c.getWithSource(StageMerge, opts); src != hitDisk {
+		t.Errorf("after rewrite: hit source %v, want hitDisk", src)
+	}
+}

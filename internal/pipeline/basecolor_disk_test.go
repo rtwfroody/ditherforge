@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
@@ -69,7 +70,7 @@ func TestApplyBaseColorClearsRemnantAfterDiskHit(t *testing.T) {
 	}
 
 	// User switched back to "solid": no base-color override at all.
-	applyBaseColor(c, lo, opts, progress.NullTracker{})
+	applyBaseColor(context.Background(), c, lo, opts, progress.NullTracker{})
 
 	for i, got := range lo.ColorModel.FaceBaseColor {
 		if got != gray {

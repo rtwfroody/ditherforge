@@ -1,9 +1,11 @@
 package cellslicer
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -130,7 +132,7 @@ func (p *ClipProgress) jobs() func(done, total int) {
 // pre-splits it into one Manifold per slab (see the per-slab rationale
 // in ClipMeshToCellsManifold). The caller must call close() when done.
 // onSplit (may be nil) ticks once per plane cut during the pre-split.
-func buildSlabSrc(model *loader.LoadedModel, slabs []Slab, onSplit func(done, total int)) (*slabSrc, error) {
+func buildSlabSrc(ctx context.Context, model *loader.LoadedModel, slabs []Slab, onSplit func(done, total int)) (*slabSrc, error) {
 	verts, faces := DedupVertsByPosition(model.Vertices, model.Faces)
 	if len(verts) == 0 || len(faces) == 0 {
 		return nil, fmt.Errorf("cellslicer/manifold: source mesh has no faces")
@@ -146,7 +148,7 @@ func buildSlabSrc(model *loader.LoadedModel, slabs []Slab, onSplit func(done, to
 	// carry srcID via per-face run_original_id, so ToMeshFiltered(srcID)
 	// downstream still recovers source-surface-only output and drops
 	// the plane-cut faces split_by_plane adds.
-	perSlab, err := splitSrcBySlabs(src, slabs, onSplit)
+	perSlab, err := splitSrcBySlabs(ctx, src, slabs, onSplit)
 	if err != nil {
 		src.Close()
 		return nil, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
@@ -170,13 +172,18 @@ func (s *slabSrc) close() {
 }
 
 func ClipMeshToCellsManifold(model *loader.LoadedModel, slabs []Slab) (ClipResult, error) {
-	return ClipMeshToCellsManifoldProgress(model, slabs, nil)
+	return ClipMeshToCellsManifoldProgress(context.Background(), model, slabs, nil)
 }
 
 // ClipMeshToCellsManifoldProgress is ClipMeshToCellsManifold with
 // optional progress reporting (prog may be nil).
-func ClipMeshToCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, prog *ClipProgress) (ClipResult, error) {
-	ss, err := buildSlabSrc(model, slabs, prog.slabSplit())
+//
+// Cancellation: checked between pre-split plane cuts and before each
+// per-cell clip job; returns ctx.Err() when cancelled. A single
+// in-flight Manifold boolean runs to completion (each is one short
+// cgo call), so cancellation lands within one job's duration.
+func ClipMeshToCellsManifoldProgress(ctx context.Context, model *loader.LoadedModel, slabs []Slab, prog *ClipProgress) (ClipResult, error) {
+	ss, err := buildSlabSrc(ctx, model, slabs, prog.slabSplit())
 	if err != nil {
 		return ClipResult{}, err
 	}
@@ -191,7 +198,7 @@ func ClipMeshToCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, pr
 			refs = append(refs, cellRef{globalOffsets[si] + ci, si, ci})
 		}
 	}
-	return runClipJobs(len(refs), func(i int) (int, [][3]float32, [][3]uint32, error) {
+	return runClipJobs(ctx, len(refs), func(i int) (int, [][3]float32, [][3]uint32, error) {
 		r := refs[i]
 		s := &slabs[r.slabIdx]
 		v, f, cerr := clipOneCellManifold(ss.slabManifold(r.slabIdx), ss.srcID, &s.Cells[r.cellIdx], s.ZBot, s.ZTop)
@@ -221,7 +228,15 @@ func ClipMeshToCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, pr
 // done values come from a shared atomic counter, so each tick carries a
 // distinct increasing count — but workers may deliver them out of
 // order; consumers must tolerate that (progress.Stage.Span does).
-func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error), onJob func(done, total int)) (ClipResult, error) {
+//
+// Cancellation: workers check ctx before each job and stop picking up
+// new ones once it is done; runClipJobs then returns ctx.Err().
+//
+// Panic containment: a panic in clip is captured as the job's error
+// (stack preserved) instead of crashing the process — goroutine panics
+// can't be recovered anywhere else, and the clip jobs call into native
+// Manifold code where a malformed cell is most likely to blow up.
+func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error), onJob func(done, total int)) (ClipResult, error) {
 	type result struct {
 		rep   int
 		verts [][3]float32
@@ -247,12 +262,25 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 		firstE error
 		nDone  atomic.Int64
 	)
+	// safeClip converts a panicking clip job into an error result so
+	// the worker goroutine survives (see the doc comment).
+	safeClip := func(ji int) (rep int, v [][3]float32, f [][3]uint32, cerr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				cerr = fmt.Errorf("clip job %d: panic: %v\n%s", ji, r, debug.Stack())
+			}
+		}()
+		return clip(ji)
+	}
 	for w := 0; w < nWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for ji := range jobCh {
-				rep, v, f, cerr := clip(ji)
+				if ctx.Err() != nil {
+					return
+				}
+				rep, v, f, cerr := safeClip(ji)
 				if onJob != nil {
 					onJob(int(nDone.Add(1)), n)
 				}
@@ -272,6 +300,9 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 		}()
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return ClipResult{}, err
+	}
 	if firstE != nil {
 		return ClipResult{}, firstE
 	}
@@ -313,7 +344,10 @@ func runClipJobs(n int, clip func(i int) (rep int, verts [][3]float32, faces [][
 //
 // onSplit (may be nil) ticks once per plane cut with (cuts done,
 // len(slabs)-1); the cuts run sequentially bottom-up.
-func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab, onSplit func(done, total int)) ([]*manifoldbool.Manifold, error) {
+//
+// Cancellation: checked between plane cuts. On cancel the pieces
+// allocated so far are rolled back (closed) and ctx.Err() is returned.
+func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Slab, onSplit func(done, total int)) ([]*manifoldbool.Manifold, error) {
 	perSlab := make([]*manifoldbool.Manifold, len(slabs))
 	if len(slabs) <= 1 {
 		// One (or zero) slabs — no split needed; per-cell workers use
@@ -361,6 +395,10 @@ func splitSrcBySlabs(src *manifoldbool.Manifold, slabs []Slab, onSplit func(done
 		}
 	}
 	for k := 0; k < len(order)-1; k++ {
+		if err := ctx.Err(); err != nil {
+			rollback(k)
+			return nil, err
+		}
 		si := order[k]
 		// Plane is the boundary between slab order[k] and slab order[k+1].
 		// Contiguity is checked above, so slabs[si].ZTop ==

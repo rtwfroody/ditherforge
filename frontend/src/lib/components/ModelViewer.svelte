@@ -37,7 +37,18 @@
     total: number;
     startedAt: number;
     elapsed: number;
+    lastBeatAt: number;
   };
+
+  // The backend guarantees a liveness signal (progress or heartbeat)
+  // at least every ~500ms per running stage. Past this silence
+  // threshold the stage renders as stalled. 4× the heartbeat interval
+  // tolerates event-loop jitter without false positives.
+  const STALL_THRESHOLD_MS = 2000;
+
+  function isStalled(stage: StageInfo, _tick: number): boolean {
+    return stage.status === 'running' && Date.now() - stage.lastBeatAt > STALL_THRESHOLD_MS;
+  }
 
   let {
     meshUrl,
@@ -1423,11 +1434,13 @@
           <div class="flex items-center gap-2">
             {#if stage.status === 'done'}
               <CheckIcon class="w-4 h-4 text-green-500 shrink-0" />
+            {:else if isStalled(stage, stageTick)}
+              <LoaderCircleIcon class="w-4 h-4 animate-spin text-amber-500 shrink-0" />
             {:else}
               <LoaderCircleIcon class="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
             {/if}
             <span class={stage.status === 'done' ? 'text-muted-foreground' : ''}>
-              {stage.name}
+              {stage.name}{#if isStalled(stage, stageTick)}<span class="text-amber-500 text-xs ml-1">(not responding)</span>{/if}
             </span>
             <span class="ml-auto text-xs text-muted-foreground tabular-nums">
               {#if stage.status === 'done' && stage.elapsed >= 0.1}

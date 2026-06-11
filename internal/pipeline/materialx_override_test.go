@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"image/png"
 	"math"
@@ -21,7 +22,7 @@ type fakeSampler struct {
 	usesUV bool
 }
 
-func (f *fakeSampler) Sample(p [3]float64) [3]float64 { return f.cb(materialx.SampleContext{Pos: p}) }
+func (f *fakeSampler) Sample(p [3]float64) [3]float64                  { return f.cb(materialx.SampleContext{Pos: p}) }
 func (f *fakeSampler) SampleAt(ctx materialx.SampleContext) [3]float64 { return f.cb(ctx) }
 func (f *fakeSampler) UsesUV() bool                                    { return f.usesUV }
 
@@ -240,7 +241,7 @@ func TestBakeMaterialXAtlasLongThinTriangle(t *testing.T) {
 
 	fake := &fakeSampler{cb: func(materialx.SampleContext) [3]float64 { return [3]float64{0.5, 0.5, 0.5} }}
 	override := &materialxOverride{sampler: fake, invTileMM: 1, useUV: false, sharpness: 4}
-	atlas, err := bakeMaterialXAtlas(model, override, nil)
+	atlas, err := bakeMaterialXAtlas(context.Background(), model, override, nil)
 	if err != nil {
 		t.Fatalf("bakeMaterialXAtlas: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestBakeMaterialXAtlasMixedTiers(t *testing.T) {
 
 	fake := &fakeSampler{cb: func(materialx.SampleContext) [3]float64 { return [3]float64{0, 0, 0} }}
 	override := &materialxOverride{sampler: fake, invTileMM: 1, useUV: false, sharpness: 4}
-	atlas, err := bakeMaterialXAtlas(model, override, nil)
+	atlas, err := bakeMaterialXAtlas(context.Background(), model, override, nil)
 	if err != nil {
 		t.Fatalf("bakeMaterialXAtlas: %v", err)
 	}
@@ -336,7 +337,7 @@ func TestBakeMaterialXAtlasUVsAndPixelsForRightTriangle(t *testing.T) {
 		},
 	}
 	override := &materialxOverride{sampler: fake, invTileMM: 1, useUV: false, sharpness: 4}
-	atlas, err := bakeMaterialXAtlas(model, override, nil)
+	atlas, err := bakeMaterialXAtlas(context.Background(), model, override, nil)
 	if err != nil || atlas == nil {
 		t.Fatalf("bakeMaterialXAtlas: atlas=%v err=%v", atlas, err)
 	}
@@ -399,7 +400,7 @@ func TestBakeMaterialXAtlasObtuseTriangle(t *testing.T) {
 		},
 	}
 	override := &materialxOverride{sampler: fake, invTileMM: 1, useUV: false, sharpness: 4}
-	atlas, err := bakeMaterialXAtlas(model, override, nil)
+	atlas, err := bakeMaterialXAtlas(context.Background(), model, override, nil)
 	if err != nil || atlas == nil {
 		t.Fatalf("bakeMaterialXAtlas: atlas=%v err=%v", atlas, err)
 	}
@@ -430,11 +431,11 @@ func TestBakeMaterialXAtlasObtuseTriangle(t *testing.T) {
 func TestBakeMaterialXAtlasEdgeCases(t *testing.T) {
 	fake := &fakeSampler{cb: func(materialx.SampleContext) [3]float64 { return [3]float64{} }}
 	override := &materialxOverride{sampler: fake, invTileMM: 1}
-	got, err := bakeMaterialXAtlas(nil, override, nil)
+	got, err := bakeMaterialXAtlas(context.Background(), nil, override, nil)
 	if err != nil || got != nil {
 		t.Errorf("nil model: got %+v err=%v, want nil/nil", got, err)
 	}
-	got, err = bakeMaterialXAtlas(&loader.LoadedModel{}, override, nil)
+	got, err = bakeMaterialXAtlas(context.Background(), &loader.LoadedModel{}, override, nil)
 	if err != nil || got != nil {
 		t.Errorf("empty model: got %+v err=%v, want nil/nil", got, err)
 	}

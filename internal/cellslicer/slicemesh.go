@@ -1,6 +1,7 @@
 package cellslicer
 
 import (
+	"context"
 	"math"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -17,15 +18,22 @@ import (
 // Triangles entirely on the plane (all three z's equal Z) are
 // skipped, matching how a real slicer treats top/bottom faces.
 func SliceMesh(model *loader.LoadedModel, zPlanes []float32) []Layer {
-	return SliceMeshProgress(model, zPlanes, nil)
+	return SliceMeshProgress(context.Background(), model, zPlanes, nil)
 }
 
 // SliceMeshProgress is SliceMesh with a per-plane progress callback.
 // onPlane (may be nil) receives (planes done, total planes) after each
 // plane is sliced; planes are processed sequentially.
-func SliceMeshProgress(model *loader.LoadedModel, zPlanes []float32, onPlane func(done, total int)) []Layer {
+//
+// Cancellation: checked between planes. On cancel the function returns
+// early with only the layers sliced so far populated; the caller must
+// check ctx and discard the result.
+func SliceMeshProgress(ctx context.Context, model *loader.LoadedModel, zPlanes []float32, onPlane func(done, total int)) []Layer {
 	layers := make([]Layer, len(zPlanes))
 	for i, z := range zPlanes {
+		if ctx.Err() != nil {
+			return layers
+		}
 		layers[i] = sliceAtZ(model, z, i)
 		if onPlane != nil {
 			onPlane(i+1, len(zPlanes))

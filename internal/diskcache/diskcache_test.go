@@ -62,6 +62,44 @@ func TestCorruptFileIsRemoved(t *testing.T) {
 	}
 }
 
+// TestTruncatedBlobIsRemoved: a blob with a valid zstd prefix that
+// cuts off partway (the killed-mid-write / power-loss shape — distinct
+// from TestCorruptFileIsRemoved's pure-garbage bytes, which fail at the
+// zstd magic immediately) must read as a miss, be deleted, and leave
+// the slot writable again. The atomic temp+rename in SetBlob makes this
+// rare, but filesystem truncation after a crash can still produce it.
+func TestTruncatedBlobIsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := Open(dir)
+	// Write a real entry big enough that cutting it in half lands
+	// mid-stream rather than mid-header.
+	in := payload{Name: "x", Data: make([]int, 10000)}
+	for i := range in.Data {
+		in.Data[i] = i * 7
+	}
+	c.Set("test", "key", in)
+	p := filepath.Join(dir, "test", "key.gob.zst")
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat written blob: %v", err)
+	}
+	if err := os.Truncate(p, st.Size()/2); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	var out payload
+	if c.Get("test", "key", &out) {
+		t.Error("Get returned true for truncated blob")
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("truncated blob was not removed on decode failure")
+	}
+	// The slot must be cleanly rewritable after the corruption miss.
+	c.Set("test", "key", in)
+	if !c.Get("test", "key", &out) {
+		t.Error("Get failed after rewriting the slot")
+	}
+}
+
 // TestGetTouchesMtime ensures a successful Get bumps the file's mtime so the
 // LRU sweep treats it as a recent access.
 func TestGetTouchesMtime(t *testing.T) {

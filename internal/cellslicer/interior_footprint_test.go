@@ -1,6 +1,8 @@
 package cellslicer
 
 import (
+	"context"
+
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -91,7 +93,7 @@ func TestInteriorHorizontalFootprints(t *testing.T) {
 	faces = append(faces, [3]uint32{base, base + 1, base + 2})
 
 	model := &loader.LoadedModel{Vertices: verts, Faces: faces}
-	out := InteriorHorizontalFootprints(model, planes)
+	out := InteriorHorizontalFootprints(context.Background(), model, planes)
 
 	if len(out) != 3 {
 		t.Fatalf("got %d slabs, want 3", len(out))
@@ -127,7 +129,7 @@ func TestInteriorHorizontalFootprints_CrossingPlaneExcluded(t *testing.T) {
 		[3]uint32{base, base + 1, base + 2}, [3]uint32{base, base + 2, base + 3})
 
 	model := &loader.LoadedModel{Vertices: verts, Faces: faces}
-	out := InteriorHorizontalFootprints(model, planes)
+	out := InteriorHorizontalFootprints(context.Background(), model, planes)
 	for i, fp := range out {
 		if fp != nil && fp.Contains(5, 5) {
 			t.Errorf("slab %d should not contain a plane-crossing plate at (5,5)", i)

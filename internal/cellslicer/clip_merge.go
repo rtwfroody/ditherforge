@@ -1,6 +1,7 @@
 package cellslicer
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -163,12 +164,16 @@ func growSameColorCellGroups(slabs []Slab, cellColor []int32) []mergeGroup {
 // clip is fewer, larger boolean ops and fewer internal seams between
 // same-color cells.
 func ClipMeshToMergedCellsManifold(model *loader.LoadedModel, slabs []Slab, cellColor []int32) (ClipResult, error) {
-	return ClipMeshToMergedCellsManifoldProgress(model, slabs, cellColor, nil)
+	return ClipMeshToMergedCellsManifoldProgress(context.Background(), model, slabs, cellColor, nil)
 }
 
 // ClipMeshToMergedCellsManifoldProgress is ClipMeshToMergedCellsManifold
 // with optional progress reporting (prog may be nil).
-func ClipMeshToMergedCellsManifoldProgress(model *loader.LoadedModel, slabs []Slab, cellColor []int32, prog *ClipProgress) (ClipResult, error) {
+//
+// Cancellation: checked between pre-split plane cuts and before each
+// group clip job; returns ctx.Err() when cancelled (see
+// ClipMeshToCellsManifoldProgress).
+func ClipMeshToMergedCellsManifoldProgress(ctx context.Context, model *loader.LoadedModel, slabs []Slab, cellColor []int32, prog *ClipProgress) (ClipResult, error) {
 	nCells := 0
 	for si := range slabs {
 		nCells += len(slabs[si].Cells)
@@ -177,7 +182,7 @@ func ClipMeshToMergedCellsManifoldProgress(model *loader.LoadedModel, slabs []Sl
 		return ClipResult{}, fmt.Errorf("cellslicer/manifold: cellColor has %d entries, want %d (one per cell)", len(cellColor), nCells)
 	}
 
-	ss, err := buildSlabSrc(model, slabs, prog.slabSplit())
+	ss, err := buildSlabSrc(ctx, model, slabs, prog.slabSplit())
 	if err != nil {
 		return ClipResult{}, err
 	}
@@ -187,7 +192,7 @@ func ClipMeshToMergedCellsManifoldProgress(model *loader.LoadedModel, slabs []Sl
 
 	// One job per merged group; faces are tagged with the group's
 	// representative global cell index.
-	cr, err := runClipJobs(len(groups), func(i int) (int, [][3]float32, [][3]uint32, error) {
+	cr, err := runClipJobs(ctx, len(groups), func(i int) (int, [][3]float32, [][3]uint32, error) {
 		g := &groups[i]
 		s := &slabs[g.slabIdx]
 		v, f, cerr := clipOneGroupManifold(ss.slabManifold(g.slabIdx), ss.srcID, s.Cells, g.cellIdxs, s.ZBot, s.ZTop)

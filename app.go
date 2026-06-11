@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -431,6 +432,23 @@ func (t *guiTracker) StageDone(stage string) {
 	})
 }
 
+type heartbeatEvent struct {
+	Gen       int64  `json:"gen"`
+	Stage     string `json:"stage"`
+	ElapsedMS int64  `json:"elapsedMs"`
+}
+
+// StageHeartbeat implements progress.Heartbeater: a liveness tick for
+// a running stage that has emitted no progress for a while (see
+// progress.Monitor). The frontend uses it to mark a stage as stalled
+// when even heartbeats stop arriving — without it, a hung backend is
+// indistinguishable from a busy one.
+func (t *guiTracker) StageHeartbeat(stage string, elapsed time.Duration) {
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-heartbeat", heartbeatEvent{
+		Gen: t.gen, Stage: stage, ElapsedMS: elapsed.Milliseconds(),
+	})
+}
+
 type warnEvent struct {
 	Gen int64 `json:"gen"`
 	// Kind is a stable identifier (e.g. "materialx-base-color") that
@@ -451,13 +469,35 @@ func (t *guiTracker) Warn(kind, message string) {
 	})
 }
 
-// Compile-time check that guiTracker implements progress.Tracker.
-var _ progress.Tracker = (*guiTracker)(nil)
+// Compile-time checks that guiTracker implements progress.Tracker and
+// the optional Heartbeater extension (so progress.Monitor's runtime
+// type assertion finds it — a silent regression here would disable
+// heartbeats entirely).
+var (
+	_ progress.Tracker     = (*guiTracker)(nil)
+	_ progress.Heartbeater = (*guiTracker)(nil)
+)
 
 // processOne runs a single pipeline request under the mutex.
 func (a *App) processOne(req pipelineRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Backstop panic containment: stage bodies and worker pools convert
+	// their own panics to errors (runStageCached, runParallel,
+	// runClipJobs), but a panic anywhere else on this goroutine (event
+	// emit, mesh post-processing) would kill pipelineWorker and leave
+	// the GUI permanently unresponsive with no indication why. Convert
+	// it to a pipeline-error event; the app survives and the next
+	// settings change starts a fresh run.
+	defer func() {
+		if r := recover(); r != nil {
+			plog.Printf("Pipeline gen %d PANIC: %v\n%s", req.gen, r, debug.Stack())
+			wailsRuntime.EventsEmit(a.ctx, "pipeline-error", pipelineEvent{
+				Gen:     req.gen,
+				Message: fmt.Sprintf("internal error: %v", r),
+			})
+		}
+	}()
 
 	plog.Printf("Pipeline gen %d starting: %s (reloadSeq=%d)",
 		req.gen, req.opts.Input, req.opts.ReloadSeq)

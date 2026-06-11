@@ -372,11 +372,19 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 
+	// Heartbeat guarantee: any running stage that goes silent for
+	// progress.HeartbeatInterval gets a liveness tick on trackers
+	// that implement progress.Heartbeater (the GUI), so the frontend
+	// can distinguish "still computing" from "hung". Trackers that
+	// don't implement it (CLI, tests) are forwarded unchanged.
+	mon := progress.NewMonitor(tracker)
+	defer mon.Stop()
+
 	r := &pipelineRun{
 		ctx:       ctx,
 		cache:     cache,
 		opts:      opts,
-		tracker:   tracker,
+		tracker:   mon,
 		onWarning: onWarning,
 	}
 
@@ -861,7 +869,7 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // either an override was previously applied this run, or lo was decoded from
 // disk (markersValid false), where a baked FaceBaseColor can hide behind
 // pristine-looking markers. A fresh, never-overridden load skips the lookup.
-func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
+func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
 	// markersValid is false for any disk-decoded loadOutput (the markers
 	// are unexported, so gob can't persist them — they always decode to the
 	// zero/pristine value even when FaceBaseColor was baked by an override
@@ -919,11 +927,15 @@ func applyBaseColor(cache *StageCache, lo *loadOutput, opts Options, tracker pro
 				totalSamples += baseColorAtlasTierSizes[lay.WT] * baseColorAtlasTierSizes[lay.HT]
 			}
 			stage := progress.BeginStage(tracker, "Baking MaterialX preview", true, totalSamples)
-			atlas, atlasErr := bakeMaterialXAtlas(lo.ColorModel, override, stage.Progress)
+			atlas, atlasErr := bakeMaterialXAtlas(ctx, lo.ColorModel, override, stage.Progress)
 			stage.Done()
-			if atlasErr != nil {
+			switch {
+			case atlasErr != nil && ctx.Err() != nil:
+				// Cancelled mid-bake: the run is being torn down; a
+				// warning banner would outlive it and mislead.
+			case atlasErr != nil:
 				tracker.Warn(progress.WarnKindMaterialXBaseColor, fmt.Sprintf("MaterialX preview atlas: %v", atlasErr))
-			} else {
+			default:
 				lo.BaseColorAtlas = atlas
 			}
 		}

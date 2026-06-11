@@ -472,6 +472,12 @@
     total: number;
     startedAt: number;  // Date.now() when stage started
     elapsed: number;    // final elapsed seconds (set on done)
+    // Date.now() of the last backend signal for this stage (start,
+    // progress, or heartbeat). The backend guarantees a liveness tick
+    // at least every ~500ms for running stages (progress.Monitor), so
+    // a running stage with no signal for a couple of seconds is
+    // genuinely stalled — ModelViewer renders it amber.
+    lastBeatAt: number;
   };
   let pipelineStages = $state<StageInfo[]>([]);
   let stageTick = $state(0);  // incremented to force timer re-render
@@ -635,6 +641,7 @@
         existing.current = 0;
         existing.startedAt = now;
         existing.elapsed = 0;
+        existing.lastBeatAt = now;
         pipelineStages = pipelineStages;
       } else {
         pipelineStages = [...pipelineStages, {
@@ -645,6 +652,7 @@
           total: event.total,
           startedAt: now,
           elapsed: 0,
+          lastBeatAt: now,
         }];
       }
       startStageTimer();
@@ -663,6 +671,7 @@
           total: 0,
           startedAt: now,
           elapsed: 0,
+          lastBeatAt: now,
         }];
       }
     }
@@ -672,6 +681,18 @@
     const existing = pipelineStages.find(s => s.name === event.stage);
     if (existing) {
       existing.current = event.current;
+      existing.lastBeatAt = Date.now();
+      pipelineStages = pipelineStages;
+    }
+  });
+  // Backend liveness ticks for running stages that emit no natural
+  // progress (see progress.Monitor on the Go side). Only refreshes
+  // lastBeatAt — the stalled indicator derives from its absence.
+  EventsOn('pipeline-heartbeat', (event: { gen: number; stage: string; elapsedMs: number }) => {
+    if (event.gen < latestGen) return;
+    const existing = pipelineStages.find(s => s.name === event.stage);
+    if (existing && existing.status === 'running') {
+      existing.lastBeatAt = Date.now();
       pipelineStages = pipelineStages;
     }
   });

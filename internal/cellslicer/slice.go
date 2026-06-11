@@ -1,6 +1,7 @@
 package cellslicer
 
 import (
+	"context"
 	"math"
 	"runtime"
 	"sync"
@@ -8,6 +9,11 @@ import (
 	clipper "github.com/ctessum/go.clipper"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 )
+
+// cancelCheckFaceStride is how many faces the footprint-projection
+// loops process between ctx checks. ~64k faces is well under 10ms of
+// work, so cancellation lands fast without measurable per-face cost.
+const cancelCheckFaceStride = 1 << 16
 
 // SlabBoundaryPlanes returns boundary planes for uniform layerH slabs
 // covering [zMin, zMax]. Equivalent to SlabBoundaryPlanesFirst with the
@@ -96,13 +102,19 @@ const horizNormalZAbs = 0.9
 // surface roof, ~0.03 mm) that sits between two planes is represented
 // in no slab and never gets a cap. A triangle that crosses a plane is
 // skipped here because the contour footprint already owns it.
-func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) []*Footprint {
+// Cancellation: checked every cancelCheckFaceStride faces and per
+// union job. On cancel the result is partial; the caller must check
+// ctx and discard it.
+func InteriorHorizontalFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) []*Footprint {
 	nSlabs := len(planes) - 1
 	if nSlabs < 1 {
 		return nil
 	}
 	perSlab := make([]clipper.Paths, nSlabs)
-	for _, f := range model.Faces {
+	for fi, f := range model.Faces {
+		if fi%cancelCheckFaceStride == 0 && ctx.Err() != nil {
+			return nil
+		}
 		a := model.Vertices[f[0]]
 		b := model.Vertices[f[1]]
 		c := model.Vertices[f[2]]
@@ -118,7 +130,7 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 		}
 		perSlab[ks] = append(perSlab[ks], triPathCCW(a, b, c))
 	}
-	return unionPerSlabFootprints(perSlab)
+	return unionPerSlabFootprints(ctx, perSlab)
 }
 
 // unionPerSlabFootprints unions each slab's accumulated CCW paths into a
@@ -131,7 +143,12 @@ func InteriorHorizontalFootprints(model *loader.LoadedModel, planes []float32) [
 // is a multi-minute stall (the golden_pheasant "stuck in voxelizing"
 // hang). The result is identical to a serial loop — out[i] depends only
 // on perSlab[i].
-func unionPerSlabFootprints(perSlab []clipper.Paths) []*Footprint {
+//
+// Cancellation: workers stop picking up new union jobs once ctx is
+// done. A single in-flight Clipper union runs to completion (it is one
+// opaque call); per-slab unions are normally far under 1s. On cancel
+// the result is partial; the caller must check ctx and discard it.
+func unionPerSlabFootprints(ctx context.Context, perSlab []clipper.Paths) []*Footprint {
 	out := make([]*Footprint, len(perSlab))
 	nWorkers := runtime.NumCPU()
 	if nWorkers > len(perSlab) {
@@ -153,6 +170,9 @@ func unionPerSlabFootprints(perSlab []clipper.Paths) []*Footprint {
 		go func() {
 			defer wg.Done()
 			for i := range jobCh {
+				if ctx.Err() != nil {
+					return
+				}
 				c := clipper.NewClipper(clipper.IoNone)
 				c.AddPaths(perSlab[i], clipper.PtSubject, true)
 				tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
@@ -207,7 +227,10 @@ type SurfaceDropStats struct {
 // ascending boundaries; the result has nSlabs entries, nil where a slab
 // has no surface. The second return accounts for the degenerate slivers
 // the projection discarded (see SurfaceDropStats).
-func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) ([]*Footprint, SurfaceDropStats) {
+// Cancellation: checked every cancelCheckFaceStride faces and per
+// union job. On cancel the result is partial; the caller must check
+// ctx and discard it.
+func SlabSurfaceFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) ([]*Footprint, SurfaceDropStats) {
 	var drop SurfaceDropStats
 	nSlabs := len(planes) - 1
 	if nSlabs < 1 {
@@ -215,7 +238,10 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) ([]*Foot
 	}
 	zLo, zHi := planes[0], planes[nSlabs]
 	perSlab := make([]clipper.Paths, nSlabs)
-	for _, f := range model.Faces {
+	for fi, f := range model.Faces {
+		if fi%cancelCheckFaceStride == 0 && ctx.Err() != nil {
+			return nil, drop
+		}
 		a := model.Vertices[f[0]]
 		b := model.Vertices[f[1]]
 		c := model.Vertices[f[2]]
@@ -260,7 +286,7 @@ func SlabSurfaceFootprints(model *loader.LoadedModel, planes []float32) ([]*Foot
 			}
 		}
 	}
-	return unionPerSlabFootprints(perSlab), drop
+	return unionPerSlabFootprints(ctx, perSlab), drop
 }
 
 // triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -248,7 +249,21 @@ func runStageCached(
 	}
 	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
-	if err := body(); err != nil {
+	// Panic containment: a panicking stage body becomes a stage error
+	// instead of a crashed app. The stack is preserved in the error so
+	// the GUI's error banner (and the log) still point at the bug.
+	// Worker-goroutine panics inside the stage are converted to errors
+	// at their own pools (runParallel, runClipJobs) and arrive here as
+	// ordinary body errors.
+	runBody := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%s: panic: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		return body()
+	}
+	if err := runBody(); err != nil {
 		// Errored runs don't record cost. The body may not have
 		// written its result (or wrote a partial), so a meta
 		// pointing at it would be misleading.

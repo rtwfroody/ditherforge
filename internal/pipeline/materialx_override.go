@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -271,7 +272,7 @@ func computeFaceLayout(model *loader.LoadedModel, fi int) faceLayout {
 // every ~1% so the GUI can render a bar; total = sum(W_b * H_b *
 // count_b) over (Wt, Ht) buckets. Workers split faces; each writes
 // a disjoint atlas region.
-func bakeMaterialXAtlas(model *loader.LoadedModel, override voxel.BaseColorOverride, progressCB func(current int)) (*BaseColorAtlas, error) {
+func bakeMaterialXAtlas(ctx context.Context, model *loader.LoadedModel, override voxel.BaseColorOverride, progressCB func(current int)) (*BaseColorAtlas, error) {
 	if model == nil || len(model.Faces) == 0 {
 		return nil, nil
 	}
@@ -403,6 +404,11 @@ func bakeMaterialXAtlas(model *loader.LoadedModel, override voxel.BaseColorOverr
 			defer wg.Done()
 			localBatch := 0
 			for fi := fLo; fi < fHi; fi++ {
+				// Cancellation: per-face check keeps the bake's abort
+				// latency at one patch (≤ 64×64 samples).
+				if ctx.Err() != nil {
+					return
+				}
 				lay := layouts[fi]
 				W := tiers[lay.WT]
 				H := tiers[lay.HT]
@@ -514,6 +520,9 @@ func bakeMaterialXAtlas(model *loader.LoadedModel, override voxel.BaseColorOverr
 		}(fLo, fHi)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if progressCB != nil {
 		progressCB(totalSamples)
 	}
