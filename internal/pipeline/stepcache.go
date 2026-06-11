@@ -1002,6 +1002,13 @@ func (c *StageCache) stageFnv(stage StageID, opts Options) uint64 {
 		}
 		writeFloat64(h, v.ColorSnap)
 	case ditherSettings:
+		// Salt: bump when the dither *algorithm* changes (settings are
+		// unchanged but cached outputs are stale). "perceptual-v1" =
+		// every dither mode (dizzy/dizzy-corrected/dizzy-2hop/dizzy-
+		// recover, floyd-steinberg, riemersma, riemersma-pair,
+		// blue-noise) moved to a CIELAB nearest-color decision with
+		// linear-light error/residual handling.
+		writeString(h, "perceptual-v1")
 		writeString(h, v.Dither)
 		writeFloat64(h, v.RiemersmaInputBias)
 		writeFloat64(h, v.BlueNoiseTolerance)

@@ -918,6 +918,119 @@ func BuildNeighbors2Hop(cells []ActiveCell) [][]Neighbor {
 	return neighbors
 }
 
+// --- Perceptual dithering color space ---
+//
+// Error-diffusion dithering decides the nearest filament in CIELAB
+// (perceptual) but accumulates and diffuses the quantization residual
+// in LINEAR light. The eye spatially integrates adjacent filament
+// tiles as photons (a linear sum), so error conservation is only
+// physically correct in linear space; the nearest-tile *choice* is
+// best judged perceptually. Plain gamma-sRGB (the historical
+// behavior) is wrong for both jobs: it under-mixes saturated/midtone
+// targets because the eye's linear integration of the tiles lands
+// brighter/different than the sRGB-space arithmetic the old diffusion
+// conserved.
+
+// srgbToLinearLUT maps an 8-bit sRGB channel to linear light in [0,1].
+var srgbToLinearLUT = func() [256]float32 {
+	var lut [256]float32
+	for i := range lut {
+		c := float64(i) / 255.0
+		if c <= 0.04045 {
+			lut[i] = float32(c / 12.92)
+		} else {
+			lut[i] = float32(math.Pow((c+0.055)/1.055, 2.4))
+		}
+	}
+	return lut
+}()
+
+// labF is the CIELAB nonlinearity. math.Cbrt handles the negative
+// arguments that arise when accumulated diffusion error pushes a
+// linear target below 0, so out-of-gamut targets never produce NaN.
+func labF(t float64) float64 {
+	const d = 6.0 / 29.0
+	if t > d*d*d {
+		return math.Cbrt(t)
+	}
+	return t/(3*d*d) + 4.0/29.0
+}
+
+// linearToLab converts linear-light RGB (D65), which may fall outside
+// [0,1] while carrying accumulated diffusion error, to CIELAB at
+// standard scale (L in [0,100]). Only relative distances matter for
+// the nearest-palette search, so the absolute scale is unimportant as
+// long as palette and target use this same function.
+func linearToLab(r, g, b float32) (float32, float32, float32) {
+	R, G, B := float64(r), float64(g), float64(b)
+	x := R*0.4124564 + G*0.3575761 + B*0.1804375
+	y := R*0.2126729 + G*0.7151522 + B*0.0721750
+	z := R*0.0193339 + G*0.1191920 + B*0.9503041
+	const xn, yn, zn = 0.95047, 1.0, 1.08883
+	fx, fy, fz := labF(x/xn), labF(y/yn), labF(z/zn)
+	return float32(116*fy - 16), float32(500 * (fx - fy)), float32(200 * (fy - fz))
+}
+
+// linearToSrgbByte encodes a linear-light channel [0,1] back to an
+// 8-bit sRGB value, the inverse of srgbToLinearLUT. Used where a
+// linear-domain computation must hand a color back to the uint8
+// ActiveCell.Color representation (DitherCorrected's input shift).
+func linearToSrgbByte(l float32) uint8 {
+	L := float64(l)
+	if L <= 0 {
+		return 0
+	}
+	if L >= 1 {
+		return 255
+	}
+	var s float64
+	if L <= 0.0031308 {
+		s = L * 12.92
+	} else {
+		s = 1.055*math.Pow(L, 1.0/2.4) - 0.055
+	}
+	v := s*255 + 0.5
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
+}
+
+// paletteLinearLab precomputes each palette color in both linear-light
+// RGB (for residual computation/diffusion) and CIELAB (for the
+// nearest-color decision).
+func paletteLinearLab(pal [][3]uint8) (lin [][3]float32, lab [][3]float32) {
+	lin = make([][3]float32, len(pal))
+	lab = make([][3]float32, len(pal))
+	for i, p := range pal {
+		lin[i] = [3]float32{srgbToLinearLUT[p[0]], srgbToLinearLUT[p[1]], srgbToLinearLUT[p[2]]}
+		l, a, b := linearToLab(lin[i][0], lin[i][1], lin[i][2])
+		lab[i] = [3]float32{l, a, b}
+	}
+	return lin, lab
+}
+
+// nearestPaletteLab returns the index of the palette entry closest to
+// (L,A,B) by squared CIELAB distance.
+func nearestPaletteLab(L, A, B float32, palLab [][3]float32) int {
+	best := 0
+	bestDist := float32(math.MaxFloat32)
+	for pi := range palLab {
+		dL := L - palLab[pi][0]
+		dA := A - palLab[pi][1]
+		dB := B - palLab[pi][2]
+		d := dL*dL + dA*dA + dB*dB
+		if d < bestDist {
+			bestDist = d
+			best = pi
+		}
+	}
+	return best
+}
+
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.
@@ -928,13 +1041,15 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 // If tracker is non-nil, emits StageProgress("Dithering", current) every 1000
 // cells. Caller owns StageStart/StageDone.
 //
+// Colors are handled in linear light with a perceptual (CIELAB)
+// nearest-filament decision; see "Perceptual dithering color space".
 // The (cell + accumulated error) target is fed to the nearest-palette
-// search WITHOUT clamping to [0, 255]: clamping there silently discards
-// the residual past the cap and biases the output toward the clamped
-// direction. The palette colors are themselves in [0, 255] so squared
-// distance stays finite, and the per-cell error term carries the full
-// unclamped discrepancy out to neighbors. This matches the reference
-// dizzy implementation (Liam Appelbe, 2020).
+// search WITHOUT clamping: clamping silently discards the residual
+// past the gamut boundary and biases the output toward the clamped
+// direction. linearToLab tolerates out-of-[0,1] (even negative)
+// targets, so the per-cell error term carries the full unclamped
+// discrepancy out to neighbors. This matches the structure of the
+// reference dizzy implementation (Liam Appelbe, 2020).
 func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -945,9 +1060,10 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	order := rng.Perm(n)
 
 	assignments := make([]int32, n)
-	errBuf := make([][3]float32, n)
+	errBuf := make([][3]float32, n) // accumulated residual in linear light
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -956,29 +1072,22 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
-		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
-		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+		// Target = linearized cell color + accumulated linear residual.
+		// Decide the nearest filament perceptually (CIELAB); diffuse
+		// the residual in linear light. See "Perceptual dithering
+		// color space" above.
+		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
+		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
+		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
-		bestIdx := 0
-		bestDist := float32(math.MaxFloat32)
-		for pi, p := range pal {
-			dr := r - float32(p[0])
-			dg := g - float32(p[1])
-			db := b - float32(p[2])
-			d := dr*dr + dg*dg + db*db
-			if d < bestDist {
-				bestDist = d
-				bestIdx = pi
-			}
-		}
+		tL, tA, tB := linearToLab(r, g, b)
+		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		chosen := pal[bestIdx]
-		eR := r - float32(chosen[0])
-		eG := g - float32(chosen[1])
-		eB := b - float32(chosen[2])
+		eR := r - palLin[bestIdx][0]
+		eG := g - palLin[bestIdx][1]
+		eB := b - palLin[bestIdx][2]
 
 		// Area-weighted error diffusion: outgoing mass is eR*aSender;
 		// each neighbor's color-domain shift = mass * adjacency_fraction
@@ -1020,15 +1129,21 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 // first term is per-cell quality (each cell wants its palette close
 // to its target), the second is regional residual (the region's net
 // rendered error wants to be small). λ = recoverQualityWeight.
-func regionObjective(region []int, combo []int32, targets [][3]float32, pal [][3]uint8) float32 {
+// regionObjective works in LINEAR light: both targets and palLin are
+// linear-light RGB. The regional-residual term |Σr_i|² is a diffusion
+// mass-conservation quantity, which is only meaningful in linear space
+// (the eye sums tiles linearly). λ is scale-invariant — both terms
+// scale as |r|² — so recoverQualityWeight is unchanged from the sRGB
+// era. See "Perceptual dithering color space".
+func regionObjective(region []int, combo []int32, targets [][3]float32, palLin [][3]float32) float32 {
 	var sumQ float32
 	var sumR, sumG, sumB float32
 	for i, ci := range region {
 		T := targets[ci]
-		p := pal[combo[i]]
-		rR := T[0] - float32(p[0])
-		rG := T[1] - float32(p[1])
-		rB := T[2] - float32(p[2])
+		p := palLin[combo[i]]
+		rR := T[0] - p[0]
+		rG := T[1] - p[1]
+		rB := T[2] - p[2]
 		sumQ += rR*rR + rG*rG + rB*rB
 		sumR += rR
 		sumG += rG
@@ -1090,10 +1205,11 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	order := rng.Perm(n)
 
 	assignments := make([]int32, n)
-	errBuf := make([][3]float32, n)
+	errBuf := make([][3]float32, n)  // accumulated residual in linear light
 	processed := make([]bool, n)
-	targets := make([][3]float32, n)
+	targets := make([][3]float32, n) // per-cell target in linear light
 	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1102,30 +1218,21 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
-		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
-		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+		// Perceptual decision (CIELAB), linear-light residual — see
+		// "Perceptual dithering color space" and DitherWithNeighbors.
+		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
+		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
+		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 		targets[idx] = [3]float32{r, g, b}
 
-		bestIdx := 0
-		bestDist := float32(math.MaxFloat32)
-		for pi, p := range pal {
-			dr := r - float32(p[0])
-			dg := g - float32(p[1])
-			db := b - float32(p[2])
-			d := dr*dr + dg*dg + db*db
-			if d < bestDist {
-				bestDist = d
-				bestIdx = pi
-			}
-		}
+		tL, tA, tB := linearToLab(r, g, b)
+		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		chosen := pal[bestIdx]
-		eR := r - float32(chosen[0])
-		eG := g - float32(chosen[1])
-		eB := b - float32(chosen[2])
+		eR := r - palLin[bestIdx][0]
+		eG := g - palLin[bestIdx][1]
+		eB := b - palLin[bestIdx][2]
 
 		// Area-weighted diffusion (see DitherWithNeighbors).
 		aSender := areas[idx]
@@ -1179,12 +1286,12 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		for i, ci := range region {
 			bestCombo[i] = assignments[ci]
 		}
-		bestObj := regionObjective(region, bestCombo, targets, pal)
+		bestObj := regionObjective(region, bestCombo, targets, palLin)
 		combo := make([]int32, regionLen)
 		var search func(depth int)
 		search = func(depth int) {
 			if depth == regionLen {
-				obj := regionObjective(region, combo, targets, pal)
+				obj := regionObjective(region, combo, targets, palLin)
 				if obj < bestObj {
 					bestObj = obj
 					copy(bestCombo, combo)
@@ -1256,9 +1363,10 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	})
 
 	assignments := make([]int32, n)
-	errBuf := make([][3]float32, n)
+	errBuf := make([][3]float32, n) // accumulated residual in linear light
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1267,29 +1375,20 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		r := float32(cells[idx].Color[0]) + errBuf[idx][0]
-		g := float32(cells[idx].Color[1]) + errBuf[idx][1]
-		b := float32(cells[idx].Color[2]) + errBuf[idx][2]
+		// Perceptual decision (CIELAB), linear-light residual — see
+		// "Perceptual dithering color space" and DitherWithNeighbors.
+		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
+		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
+		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
-		bestIdx := 0
-		bestDist := float32(math.MaxFloat32)
-		for pi, p := range pal {
-			dr := r - float32(p[0])
-			dg := g - float32(p[1])
-			db := b - float32(p[2])
-			d := dr*dr + dg*dg + db*db
-			if d < bestDist {
-				bestDist = d
-				bestIdx = pi
-			}
-		}
+		tL, tA, tB := linearToLab(r, g, b)
+		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		chosen := pal[bestIdx]
-		eR := r - float32(chosen[0])
-		eG := g - float32(chosen[1])
-		eB := b - float32(chosen[2])
+		eR := r - palLin[bestIdx][0]
+		eG := g - palLin[bestIdx][1]
+		eB := b - palLin[bestIdx][2]
 
 		// Forward neighbors: same predicate as dizzy. The only
 		// algorithmic difference between the two functions is the
@@ -1349,18 +1448,19 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 // per Riemersma call (--riemersma-bias / Settings → Dither slider).
 const RiemersmaInputBiasDefault = 0.85
 
-// RiemersmaInputBiasRange is the input-distance (in 8-bit RGB
-// units, Euclidean) at which α drops to 0. Inputs farther than
-// this from every palette are dithered with no input bias (pure
-// Riemersma). Inputs at distance d ∈ [0, range] get α =
-// RiemersmaInputBiasMax · (1 - d/range).
+// RiemersmaInputBiasRange is the input-distance (CIELAB ΔE) at which
+// α drops to 0. Inputs farther than this from every palette are
+// dithered with no input bias (pure Riemersma). Inputs at distance
+// d ∈ [0, range] get α = RiemersmaInputBiasMax · (1 - d/range).
 //
-// 30 chosen as roughly the half-radius of a typical Voronoi cell
-// for a 4-palette spanning 256 levels (mean palette spacing ~100,
-// half-radius ~50, but we want the snap region tighter so that
-// inputs only modestly close to a palette still get full
-// dithering).
-const RiemersmaInputBiasRange = 30.0
+// 20 is the perceptual-metric recalibration of the historical 30-in-
+// 8-bit-sRGB value: the dither now scores in CIELAB (see "Perceptual
+// dithering color space"), where ~20 ΔE is roughly the old 30-RGB
+// snap radius near mid-tones while keeping the snap region tighter
+// than a 4-palette Voronoi half-radius. The exact value is a
+// candidate for bench tuning; the user-facing --riemersma-bias slider
+// scales the overall bias (biasMax) independently.
+const RiemersmaInputBiasRange = 20.0
 
 // RiemersmaWindowSize is the sliding-window length used by
 // Riemersma — the number of past errors each cell sees, weighted by
@@ -1444,6 +1544,7 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 	assigns := make([]int32, n)
 	dI := make([]float32, len(pal))
 	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
 	for ti, idx := range tour {
 		if ti%1000 == 0 {
 			if ctx.Err() != nil {
@@ -1452,10 +1553,10 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			tracker.StageProgress("Dithering", ti)
 		}
 
-		// Mass-weighted average of in-window residuals: each slot
-		// contributes (weight × area) of vote toward that slot's
-		// residual color. Slot indexed by age: age 0 (newest) lives
-		// at (head - 1 + L) % L, age k at (head - 1 - k + L) % L.
+		// Mass-weighted average of in-window residuals (linear light):
+		// each slot contributes (weight × area) of vote toward that
+		// slot's residual color. Slot indexed by age: age 0 (newest)
+		// lives at (head - 1 + L) % L, age k at (head - 1 - k + L) % L.
 		var numR, numG, numB, den float32
 		for k := 0; k < L; k++ {
 			s := &window[(head+L-1-k)%L]
@@ -1472,24 +1573,29 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 			eB = numB / den
 		}
 
-		iR := float32(cells[idx].Color[0])
-		iG := float32(cells[idx].Color[1])
-		iB := float32(cells[idx].Color[2])
+		// Input and error-shifted target in linear light; nearest-
+		// palette decisions in CIELAB. See "Perceptual dithering
+		// color space".
+		iR := srgbToLinearLUT[cells[idx].Color[0]]
+		iG := srgbToLinearLUT[cells[idx].Color[1]]
+		iB := srgbToLinearLUT[cells[idx].Color[2]]
+		iL, iA, iBb := linearToLab(iR, iG, iB)
 		r := iR + eR
 		g := iG + eG
 		b := iB + eB
+		tL, tA, tBb := linearToLab(r, g, b)
 
-		// First pass: dist²(input, p) for each palette, plus min.
+		// First pass: ΔE²(input, p) for each palette, plus min.
 		// Second pass scores with α derived from the min-distance.
 		// α is high when input is near a palette (snap suppresses
 		// runaway oscillation in flat regions) and low when input
 		// is between palettes (dither smooths textured gradients).
 		var minDI float32 = math.MaxFloat32
-		for pi := range pal {
-			drI := iR - float32(pal[pi][0])
-			dgI := iG - float32(pal[pi][1])
-			dbI := iB - float32(pal[pi][2])
-			d := drI*drI + dgI*dgI + dbI*dbI
+		for pi := range palLab {
+			dl := iL - palLab[pi][0]
+			da := iA - palLab[pi][1]
+			db := iBb - palLab[pi][2]
+			d := dl*dl + da*da + db*db
 			dI[pi] = d
 			if d < minDI {
 				minDI = d
@@ -1504,11 +1610,11 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		wi := alpha
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
-		for pi, p := range pal {
-			drT := r - float32(p[0])
-			dgT := g - float32(p[1])
-			dbT := b - float32(p[2])
-			dT := drT*drT + dgT*dgT + dbT*dbT
+		for pi := range palLab {
+			dl := tL - palLab[pi][0]
+			da := tA - palLab[pi][1]
+			db := tBb - palLab[pi][2]
+			dT := dl*dl + da*da + db*db
 			d := wt*dT + wi*dI[pi]
 			if d < bestDist {
 				bestDist = d
@@ -1517,10 +1623,9 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		}
 		assigns[idx] = int32(bestIdx)
 
-		chosen := pal[bestIdx]
-		window[head].residual[0] = r - float32(chosen[0])
-		window[head].residual[1] = g - float32(chosen[1])
-		window[head].residual[2] = b - float32(chosen[2])
+		window[head].residual[0] = r - palLin[bestIdx][0]
+		window[head].residual[1] = g - palLin[bestIdx][1]
+		window[head].residual[2] = b - palLin[bestIdx][2]
 		window[head].area = areas[idx]
 		head = (head + 1) % L
 	}
@@ -1624,6 +1729,7 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	res0 := make([][3]float32, len(pal))
 	res1 := make([][3]float32, len(pal))
 	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
 
 	step := 2
 	if slide {
@@ -1665,20 +1771,26 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			idx1 = tour[ti+1]
 		}
 
+		// Linear-light targets, CIELAB decision scores; the residual
+		// vectors res0/res1 (and the window pushes + cancellation
+		// coupling) stay in linear light. See "Perceptual dithering
+		// color space".
 		a0 := areas[idx0]
-		i0R := float32(cells[idx0].Color[0])
-		i0G := float32(cells[idx0].Color[1])
-		i0B := float32(cells[idx0].Color[2])
+		i0R := srgbToLinearLUT[cells[idx0].Color[0]]
+		i0G := srgbToLinearLUT[cells[idx0].Color[1]]
+		i0B := srgbToLinearLUT[cells[idx0].Color[2]]
+		i0L, i0A, i0Bb := linearToLab(i0R, i0G, i0B)
 		r0R := i0R + eR
 		r0G := i0G + eG
 		r0B := i0B + eB
+		t0L, t0A, t0Bb := linearToLab(r0R, r0G, r0B)
 
 		var minDI0 float32 = math.MaxFloat32
-		for pi, p := range pal {
-			drI := i0R - float32(p[0])
-			dgI := i0G - float32(p[1])
-			dbI := i0B - float32(p[2])
-			d := drI*drI + dgI*dgI + dbI*dbI
+		for pi := range palLab {
+			dl := i0L - palLab[pi][0]
+			da := i0A - palLab[pi][1]
+			db := i0Bb - palLab[pi][2]
+			d := dl*dl + da*da + db*db
 			dI0[pi] = d
 			if d < minDI0 {
 				minDI0 = d
@@ -1692,15 +1804,21 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		wt0 := 1 - alpha0
 		wi0 := alpha0
 
-		for a, p := range pal {
-			drT := r0R - float32(p[0])
-			dgT := r0G - float32(p[1])
-			dbT := r0B - float32(p[2])
-			dT := drT*drT + dgT*dgT + dbT*dbT
+		// res0 holds the CIELAB residual (target − chosen) so the
+		// joint cancellation term λ·||res0+res1||² is in the same ΔE²
+		// units as s0/s1; the linear-light residual for the window
+		// push is recomputed at commit time. (If res were linear it
+		// would be ~10³× smaller than the Lab scores and λ would have
+		// no effect.)
+		for a := range palLab {
+			dl := t0L - palLab[a][0]
+			da := t0A - palLab[a][1]
+			db := t0Bb - palLab[a][2]
+			dT := dl*dl + da*da + db*db
 			s0[a] = wt0*dT + wi0*dI0[a]
-			res0[a][0] = drT
-			res0[a][1] = dgT
-			res0[a][2] = dbT
+			res0[a][0] = dl
+			res0[a][1] = da
+			res0[a][2] = db
 		}
 
 		if !hasPartner {
@@ -1714,28 +1832,30 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 				}
 			}
 			assigns[idx0] = int32(bestA)
-			window[head].residual[0] = res0[bestA][0]
-			window[head].residual[1] = res0[bestA][1]
-			window[head].residual[2] = res0[bestA][2]
+			window[head].residual[0] = r0R - palLin[bestA][0]
+			window[head].residual[1] = r0G - palLin[bestA][1]
+			window[head].residual[2] = r0B - palLin[bestA][2]
 			window[head].area = a0
 			head = (head + 1) % L
 			break
 		}
 
 		a1 := areas[idx1]
-		i1R := float32(cells[idx1].Color[0])
-		i1G := float32(cells[idx1].Color[1])
-		i1B := float32(cells[idx1].Color[2])
+		i1R := srgbToLinearLUT[cells[idx1].Color[0]]
+		i1G := srgbToLinearLUT[cells[idx1].Color[1]]
+		i1B := srgbToLinearLUT[cells[idx1].Color[2]]
+		i1L, i1A, i1Bb := linearToLab(i1R, i1G, i1B)
 		r1R := i1R + eR
 		r1G := i1G + eG
 		r1B := i1B + eB
+		t1L, t1A, t1Bb := linearToLab(r1R, r1G, r1B)
 
 		var minDI1 float32 = math.MaxFloat32
-		for pi, p := range pal {
-			drI := i1R - float32(p[0])
-			dgI := i1G - float32(p[1])
-			dbI := i1B - float32(p[2])
-			d := drI*drI + dgI*dgI + dbI*dbI
+		for pi := range palLab {
+			dl := i1L - palLab[pi][0]
+			da := i1A - palLab[pi][1]
+			db := i1Bb - palLab[pi][2]
+			d := dl*dl + da*da + db*db
 			dI1[pi] = d
 			if d < minDI1 {
 				minDI1 = d
@@ -1749,15 +1869,15 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		wt1 := 1 - alpha1
 		wi1 := alpha1
 
-		for b, p := range pal {
-			drT := r1R - float32(p[0])
-			dgT := r1G - float32(p[1])
-			dbT := r1B - float32(p[2])
-			dT := drT*drT + dgT*dgT + dbT*dbT
+		for b := range palLab {
+			dl := t1L - palLab[b][0]
+			da := t1A - palLab[b][1]
+			db := t1Bb - palLab[b][2]
+			dT := dl*dl + da*da + db*db
 			s1[b] = wt1*dT + wi1*dI1[b]
-			res1[b][0] = drT
-			res1[b][1] = dgT
-			res1[b][2] = dbT
+			res1[b][0] = dl
+			res1[b][1] = da
+			res1[b][2] = db
 		}
 
 		// Joint search: minimize s0[a] + s1[b] [+ λ·||r0_resid + r1_resid||²].
@@ -1782,9 +1902,9 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		}
 
 		assigns[idx0] = int32(bestA)
-		window[head].residual[0] = res0[bestA][0]
-		window[head].residual[1] = res0[bestA][1]
-		window[head].residual[2] = res0[bestA][2]
+		window[head].residual[0] = r0R - palLin[bestA][0]
+		window[head].residual[1] = r0G - palLin[bestA][1]
+		window[head].residual[2] = r0B - palLin[bestA][2]
 		window[head].area = a0
 		head = (head + 1) % L
 
@@ -1793,9 +1913,9 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			// residual. Sliding mode skips this — cell 1 will be
 			// re-evaluated jointly with cell 2 on the next iteration.
 			assigns[idx1] = int32(bestB)
-			window[head].residual[0] = res1[bestB][0]
-			window[head].residual[1] = res1[bestB][1]
-			window[head].residual[2] = res1[bestB][2]
+			window[head].residual[0] = r1R - palLin[bestB][0]
+			window[head].residual[1] = r1G - palLin[bestB][1]
+			window[head].residual[2] = r1B - palLin[bestB][2]
 			window[head].area = a1
 			head = (head + 1) % L
 		}
@@ -2120,14 +2240,20 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		return nil, nil
 	}
 
+	// All averaging/correction here is in LINEAR light, the space the
+	// inner DitherWithNeighbors now conserves (see "Perceptual
+	// dithering color space"). palLin maps each chosen index to its
+	// linear-light color for the output mean.
+	palLin, _ := paletteLinearLab(pal)
+
 	// Compute the static input average once; it doesn't change
 	// across passes (the SHIFTED inputs do, but the drift we measure
 	// each pass is relative to the ORIGINAL input).
 	var iR, iG, iB float64
 	for i := range cells {
-		iR += float64(cells[i].Color[0])
-		iG += float64(cells[i].Color[1])
-		iB += float64(cells[i].Color[2])
+		iR += float64(srgbToLinearLUT[cells[i].Color[0]])
+		iG += float64(srgbToLinearLUT[cells[i].Color[1]])
+		iB += float64(srgbToLinearLUT[cells[i].Color[2]])
 	}
 	n := float64(len(cells))
 	iR /= n
@@ -2168,12 +2294,12 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 			return nil, err
 		}
 
-		// Measure drift relative to ORIGINAL input.
+		// Measure drift relative to ORIGINAL input (linear light).
 		var oR, oG, oB float64
 		for _, a := range assigns {
-			oR += float64(pal[a][0])
-			oG += float64(pal[a][1])
-			oB += float64(pal[a][2])
+			oR += float64(palLin[a][0])
+			oG += float64(palLin[a][1])
+			oB += float64(palLin[a][2])
 		}
 		oR /= n
 		oG /= n
@@ -2193,30 +2319,32 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		}
 
 		// Roll the per-channel drift into the cumulative correction;
-		// shift the next pass's inputs by the new total.
+		// shift the next pass's inputs by the new total. The shift is
+		// applied in linear light, then re-encoded to the uint8 sRGB
+		// ActiveCell.Color the inner pass re-linearizes.
 		cR += oR - iR
 		cG += oG - iG
 		cB += oB - iB
 		for i := range shifted {
-			shifted[i].Color[0] = clampUint8(float64(cells[i].Color[0]) - cR)
-			shifted[i].Color[1] = clampUint8(float64(cells[i].Color[1]) - cG)
-			shifted[i].Color[2] = clampUint8(float64(cells[i].Color[2]) - cB)
+			shifted[i].Color[0] = linearToSrgbByte(float32(float64(srgbToLinearLUT[cells[i].Color[0]]) - cR))
+			shifted[i].Color[1] = linearToSrgbByte(float32(float64(srgbToLinearLUT[cells[i].Color[1]]) - cG))
+			shifted[i].Color[2] = linearToSrgbByte(float32(float64(srgbToLinearLUT[cells[i].Color[2]]) - cB))
 		}
 	}
 	return bestAssigns, nil
 }
 
-// computeDriftDEFromAvg returns the Lab ΔE between two
-// pre-computed average colors (each as 8-bit-style sRGB scalars in
-// [0, 255]). Inlined version of computeDriftDE for callers that
-// already have the input and output averages and don't want to
-// pay for a second pass over the cell array.
+// computeDriftDEFromAvg returns the Lab ΔE between two pre-computed
+// average colors given as LINEAR-light scalars in [0, 1]. The inner
+// dither now conserves the linear-light spatial average (see
+// "Perceptual dithering color space"), so drift must be measured in
+// that same space — measuring the sRGB-byte mean instead would report
+// a gamma-curvature offset (mean of a nonlinear map ≠ map of the mean)
+// as phantom drift and make the correction chase it.
 func computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB float64) float64 {
-	in := colorful.Color{R: iR / 255, G: iG / 255, B: iB / 255}
-	out := colorful.Color{R: oR / 255, G: oG / 255, B: oB / 255}
-	iL, iA, iBl := in.Lab()
-	oL, oA, oBl := out.Lab()
-	dL, dA, dB := (iL-oL)*100, (iA-oA)*100, (iBl-oBl)*100
+	iL, iA, iBl := linearToLab(float32(iR), float32(iG), float32(iB))
+	oL, oA, oBl := linearToLab(float32(oR), float32(oG), float32(oB))
+	dL, dA, dB := float64(iL-oL), float64(iA-oA), float64(iBl-oBl)
 	return math.Sqrt(dL*dL + dA*dA + dB*dB)
 }
 
@@ -2247,17 +2375,6 @@ func (ditherPassTracker) StageDone(string)             {}
 func (t ditherPassTracker) Warn(kind, s string)        { t.real.Warn(kind, s) }
 func (t ditherPassTracker) StageProgress(stage string, current int) {
 	t.real.StageProgress(stage, t.offset+current)
-}
-
-// clampUint8 rounds v to the nearest uint8, clamping to [0, 255].
-func clampUint8(v float64) uint8 {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return uint8(v + 0.5)
 }
 
 // SnapColors moves each cell's color toward its nearest palette color by up

@@ -1640,6 +1640,14 @@ func BlueNoiseSimplexFull(ctx context.Context, cells []ActiveCell, pal [][3]uint
 	if K == 1 {
 		return make([]int32, n), nil
 	}
+	// Research variant: stays in 8-bit sRGB (unlike production
+	// BlueNoiseAdaptive, which runs in linear light). palF just
+	// widens the palette to the float64 form simplexBarycentric now
+	// expects.
+	palF := make([][3]float64, K)
+	for k, p := range pal {
+		palF[k] = [3]float64{float64(p[0]), float64(p[1]), float64(p[2])}
+	}
 
 	tour := buildRiemersmaTour(cells, neighbors)
 	tourPos := make([]int, n)
@@ -1666,7 +1674,7 @@ func BlueNoiseSimplexFull(ctx context.Context, cells []ActiveCell, pal [][3]uint
 		// For K=4 in 3D this is exact (tetrahedron barycentric); for
 		// K>4 it's a min-norm solution which may have negative
 		// weights even for in-hull inputs but they'll get clipped.
-		simplexBarycentric(pal, iR, iG, iB, weights)
+		simplexBarycentric(palF, iR, iG, iB, weights)
 		// Clip negatives, renormalize. One round of projected
 		// iteration. For most palettes this is good enough.
 		clipAndRenormalize(weights)
