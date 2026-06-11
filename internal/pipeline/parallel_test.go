@@ -53,6 +53,22 @@ func TestRunParallelCancellation(t *testing.T) {
 	}
 }
 
+// TestRunParallelPanicBeatsCancellation: when a worker panic and a
+// cancellation coincide, the panic error (which carries the bug's
+// stack) must win over the information-free ctx.Err(). The GUI still
+// shows "cancelled" (processOne checks ctx, not the error value), so
+// this only improves the log.
+func TestRunParallelPanicBeatsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	err := runParallel(ctx, 1, 4, nil, func(i int, _ any) {
+		cancel() // cancellation is in flight...
+		panic("the real bug")
+	})
+	if err == nil || !strings.Contains(err.Error(), "the real bug") {
+		t.Fatalf("expected the panic error to win over ctx.Err(), got: %v", err)
+	}
+}
+
 // TestRunParallelCompletes: the happy path runs every task exactly once.
 func TestRunParallelCompletes(t *testing.T) {
 	var ran atomic.Int64

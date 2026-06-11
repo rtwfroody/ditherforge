@@ -2,8 +2,10 @@ package cellslicer
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"sync"
 
 	clipper "github.com/ctessum/go.clipper"
@@ -105,15 +107,19 @@ const horizNormalZAbs = 0.9
 // Cancellation: checked every cancelCheckFaceStride faces and per
 // union job. On cancel the result is partial; the caller must check
 // ctx and discard it.
-func InteriorHorizontalFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) []*Footprint {
+//
+// The error return is panic containment only: a panicking Clipper
+// union surfaces as an error (see unionPerSlabFootprints) instead of
+// killing the process.
+func InteriorHorizontalFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) ([]*Footprint, error) {
 	nSlabs := len(planes) - 1
 	if nSlabs < 1 {
-		return nil
+		return nil, nil
 	}
 	perSlab := make([]clipper.Paths, nSlabs)
 	for fi, f := range model.Faces {
 		if fi%cancelCheckFaceStride == 0 && ctx.Err() != nil {
-			return nil
+			return nil, nil
 		}
 		a := model.Vertices[f[0]]
 		b := model.Vertices[f[1]]
@@ -148,7 +154,14 @@ func InteriorHorizontalFootprints(ctx context.Context, model *loader.LoadedModel
 // done. A single in-flight Clipper union runs to completion (it is one
 // opaque call); per-slab unions are normally far under 1s. On cancel
 // the result is partial; the caller must check ctx and discard it.
-func unionPerSlabFootprints(ctx context.Context, perSlab []clipper.Paths) []*Footprint {
+//
+// Panic containment: a panic in one slab's Clipper union is captured as
+// an error (stack preserved) instead of crashing the process — these
+// workers are goroutines, so no outer recover (runStageCached's
+// stage-level one included) could catch them. Mirrors runClipJobs'
+// safeClip. The first panic wins and the remaining workers stop picking
+// up jobs.
+func unionPerSlabFootprints(ctx context.Context, perSlab []clipper.Paths) ([]*Footprint, error) {
 	out := make([]*Footprint, len(perSlab))
 	nWorkers := runtime.NumCPU()
 	if nWorkers > len(perSlab) {
@@ -164,7 +177,34 @@ func unionPerSlabFootprints(ctx context.Context, perSlab []clipper.Paths) []*Foo
 		}
 	}
 	close(jobCh)
-	var wg sync.WaitGroup
+	var (
+		wg      sync.WaitGroup
+		panicMu sync.Mutex
+		panicE  error
+	)
+	// unionOne unions one slab's paths, converting a panic into an
+	// error result so the worker goroutine survives.
+	unionOne := func(i int) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("slab %d footprint union: panic: %v\n%s", i, r, debug.Stack())
+			}
+		}()
+		c := clipper.NewClipper(clipper.IoNone)
+		c.AddPaths(perSlab[i], clipper.PtSubject, true)
+		tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
+		if !ok || tree == nil {
+			return nil
+		}
+		fp := &Footprint{}
+		for _, child := range tree.Childs() {
+			collectFootprintLoops(child, fp)
+		}
+		if len(fp.Loops) > 0 {
+			out[i] = fp
+		}
+		return nil
+	}
 	for w := 0; w < nWorkers; w++ {
 		wg.Add(1)
 		go func() {
@@ -173,24 +213,27 @@ func unionPerSlabFootprints(ctx context.Context, perSlab []clipper.Paths) []*Foo
 				if ctx.Err() != nil {
 					return
 				}
-				c := clipper.NewClipper(clipper.IoNone)
-				c.AddPaths(perSlab[i], clipper.PtSubject, true)
-				tree, ok := c.Execute2(clipper.CtUnion, clipper.PftNonZero, clipper.PftNonZero)
-				if !ok || tree == nil {
-					continue
+				panicMu.Lock()
+				stop := panicE != nil
+				panicMu.Unlock()
+				if stop {
+					return
 				}
-				fp := &Footprint{}
-				for _, child := range tree.Childs() {
-					collectFootprintLoops(child, fp)
-				}
-				if len(fp.Loops) > 0 {
-					out[i] = fp
+				if err := unionOne(i); err != nil {
+					panicMu.Lock()
+					if panicE == nil {
+						panicE = err
+					}
+					panicMu.Unlock()
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	return out
+	if panicE != nil {
+		return nil, panicE
+	}
+	return out, nil
 }
 
 // SurfaceDropStats reports how many in-band triangle projections
@@ -230,17 +273,21 @@ type SurfaceDropStats struct {
 // Cancellation: checked every cancelCheckFaceStride faces and per
 // union job. On cancel the result is partial; the caller must check
 // ctx and discard it.
-func SlabSurfaceFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) ([]*Footprint, SurfaceDropStats) {
+//
+// The error return is panic containment only: a panicking Clipper
+// union surfaces as an error (see unionPerSlabFootprints) instead of
+// killing the process.
+func SlabSurfaceFootprints(ctx context.Context, model *loader.LoadedModel, planes []float32) ([]*Footprint, SurfaceDropStats, error) {
 	var drop SurfaceDropStats
 	nSlabs := len(planes) - 1
 	if nSlabs < 1 {
-		return nil, drop
+		return nil, drop, nil
 	}
 	zLo, zHi := planes[0], planes[nSlabs]
 	perSlab := make([]clipper.Paths, nSlabs)
 	for fi, f := range model.Faces {
 		if fi%cancelCheckFaceStride == 0 && ctx.Err() != nil {
-			return nil, drop
+			return nil, drop, nil
 		}
 		a := model.Vertices[f[0]]
 		b := model.Vertices[f[1]]
@@ -286,7 +333,8 @@ func SlabSurfaceFootprints(ctx context.Context, model *loader.LoadedModel, plane
 			}
 		}
 	}
-	return unionPerSlabFootprints(ctx, perSlab), drop
+	fps, err := unionPerSlabFootprints(ctx, perSlab)
+	return fps, drop, err
 }
 
 // triBandXYPath clips triangle a,b,c to the Z-slab [zBot,zTop] and

@@ -920,9 +920,16 @@ func (r *pipelineRun) sliceSampleHalf(
 	// advanced opt-out for A/B timing.
 	var interiorFps []*cellslicer.Footprint
 	if !r.opts.NoInteriorFaceFootprint {
-		interiorFps = cellslicer.InteriorHorizontalFootprints(r.ctx, geom, planes)
+		var ifpErr error
+		interiorFps, ifpErr = cellslicer.InteriorHorizontalFootprints(r.ctx, geom, planes)
+		if ifpErr != nil {
+			return halfVoxels{}, ifpErr
+		}
 	}
-	surfaceFps, surfDrop := cellslicer.SlabSurfaceFootprints(r.ctx, geom, planes)
+	surfaceFps, surfDrop, sfpErr := cellslicer.SlabSurfaceFootprints(r.ctx, geom, planes)
+	if sfpErr != nil {
+		return halfVoxels{}, sfpErr
+	}
 	if err := r.checkCancel(); err != nil {
 		return halfVoxels{}, err
 	}

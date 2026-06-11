@@ -24,7 +24,11 @@ import (
 // crashing the process. A goroutine panic is otherwise unrecoverable
 // by the stage-level recover in runStageCached, so without this a
 // single bad slab would take down the whole app. The first panic wins;
-// the remaining workers stop picking up tasks.
+// the remaining workers stop picking up tasks. When a panic and a
+// cancellation coincide, the panic error is returned — it carries the
+// stack of a real bug, while ctx.Err() carries nothing; the GUI still
+// reports "cancelled" either way (processOne checks ctx, not the error
+// value), so prioritizing the panic only improves the log.
 //
 // Pass newState == nil when the task body is fully self-contained
 // (no per-goroutine buffers).
@@ -84,8 +88,8 @@ func runParallel(ctx context.Context, workers, n int, newState func(workerID int
 		}(w)
 	}
 	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return err
+	if panicE != nil {
+		return panicE
 	}
-	return panicE
+	return ctx.Err()
 }

@@ -300,11 +300,15 @@ func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts []
 		}()
 	}
 	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return ClipResult{}, err
-	}
+	// firstE before ctx.Err(): when a job error/panic and a cancellation
+	// coincide, the job error carries the diagnostic signal (a panic's
+	// stack in particular); ctx.Err() carries nothing. Callers that care
+	// about "was this a cancel?" check ctx themselves.
 	if firstE != nil {
 		return ClipResult{}, firstE
+	}
+	if err := ctx.Err(); err != nil {
+		return ClipResult{}, err
 	}
 
 	totalV, totalF := 0, 0

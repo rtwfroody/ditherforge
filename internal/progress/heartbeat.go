@@ -40,10 +40,11 @@ type Monitor struct {
 	inner Tracker
 	hb    Heartbeater // inner as Heartbeater, nil if not implemented
 
-	mu     sync.Mutex
-	active map[string]*stageActivity
-	stopCh chan struct{}
-	runner bool // watchdog goroutine live
+	mu       sync.Mutex
+	active   map[string]*stageActivity
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	runner   bool // watchdog goroutine live
 }
 
 type stageActivity struct {
@@ -64,10 +65,11 @@ func NewMonitor(tracker Tracker) *Monitor {
 	return m
 }
 
-// Stop terminates the watchdog. Idempotent is not required — call
-// exactly once (defer at the run's top level).
+// Stop terminates the watchdog. Idempotent — Monitor is exported, so
+// a future caller that both defers Stop and calls it on an early-exit
+// path must not panic on the second close.
 func (m *Monitor) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
 func (m *Monitor) StageStart(stage string, hasProgress bool, total int) {

@@ -73,7 +73,10 @@ func TestSurfaceFootprintBoxObservable(t *testing.T) {
 	model := boxWallMesh(5, 0, 10)
 	planes := SlabBoundaryPlanes(0, 10, 0.2)
 
-	fps, drop := SlabSurfaceFootprints(context.Background(), model, planes)
+	fps, drop, sfpErr := SlabSurfaceFootprints(context.Background(), model, planes)
+	if sfpErr != nil {
+		t.Fatalf("SlabSurfaceFootprints: %v", sfpErr)
+	}
 
 	loops := 0
 	for _, fp := range fps {
@@ -100,7 +103,10 @@ func TestSurfaceFootprintVerticalWallNoSlivers(t *testing.T) {
 	model := wallMesh(nseg, 0, 10, func(float32) float32 { return 10 })
 	planes := SlabBoundaryPlanes(0, 10, 0.2)
 
-	fps, drop := SlabSurfaceFootprints(context.Background(), model, planes)
+	fps, drop, sfpErr := SlabSurfaceFootprints(context.Background(), model, planes)
+	if sfpErr != nil {
+		t.Fatalf("SlabSurfaceFootprints: %v", sfpErr)
+	}
 
 	loops := 0
 	for _, fp := range fps {
@@ -138,7 +144,10 @@ func TestSurfaceFootprintConeKeepsCoverage(t *testing.T) {
 	model := wallMesh(nseg, 0, 10, cone)
 	planes := SlabBoundaryPlanes(0, 10, 0.2)
 
-	fps, drop := SlabSurfaceFootprints(context.Background(), model, planes)
+	fps, drop, sfpErr := SlabSurfaceFootprints(context.Background(), model, planes)
+	if sfpErr != nil {
+		t.Fatalf("SlabSurfaceFootprints: %v", sfpErr)
+	}
 
 	// Pick a mid slab; its surface projection must be a real annulus, not
 	// empty, and must reach out toward the top-of-band radius the lower
