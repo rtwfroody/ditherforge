@@ -7,31 +7,43 @@ import (
 )
 
 // placePegs picks N peg-center positions inside the given polygon
-// (with holes), spaced reasonably far apart. The polygon is in 2D
-// plane-basis coordinates (the same basis recoverCapPolygons emits).
+// (with holes), spread as far apart as the shape allows. The polygon
+// is in 2D plane-basis coordinates (the same basis
+// recoverCapPolygons emits).
 //
-// boundaryClearance is the minimum distance every peg center must
-// keep from the polygon boundary (outer loop and any hole). The
-// caller passes the peg diameter so a circle of 2× the peg diameter
-// can fit fully inside the polygon around each peg center, leaving
-// peg-radius worth of wall around every peg. Pixels closer than
-// boundaryClearance to the boundary are excluded from candidacy.
+// clearances is a descending list of preferred distances every peg
+// center should keep from the polygon boundary (outer loop and any
+// hole). We try the largest clearance first for the most edge margin,
+// stepping down only when the polygon is too small to fit the full
+// requested count at that margin. We return the first (largest-
+// clearance) ladder rung that achieves the full count; if no rung
+// does, we return whichever rung placed the most pegs. (Counts are
+// compared explicitly rather than assumed monotonic: a smaller
+// clearance yields a superset of eligible pixels, but with minSpacing
+// > 0 the greedy placement can still trip its spacing break earlier on
+// the larger set and place fewer pegs, so the most permissive rung is
+// not guaranteed to win.) As a last resort (every rung erodes the
+// polygon away) we fall back to "any inside pixel" so a tiny cap still
+// gets at least one peg.
 //
 // Algorithm: rasterize the polygon into a binary mask at fixed
 // resolution, run a multi-source BFS distance transform from the
 // outside-mask to find each inside pixel's distance to the boundary,
-// then place pegs greedily — first at the inside pixel closest to
-// the polygon centroid, and each subsequent peg at the inside pixel
-// maximally far from all previously placed pegs (subject to
-// boundary-clearance).
+// then place pegs greedily. The seed is deliberately *not* the
+// centroid: a lone peg (count==1) goes at the deepest interior pixel
+// (effectively the center), but for two or more we seed at the pixel
+// farthest from the centroid — an extreme — and let the greedy
+// farthest-point loop fan the rest out from there, so no peg lands in
+// the middle and the set hugs the edges (N=2 → opposite extremes,
+// N=3 → a spread triangle).
 //
-// Returns peg centers in polygon coordinates. Returns an error if no
-// inside pixels survive the clearance erosion (polygon too small for
-// the requested clearance, or polygon too thin to fit a peg).
+// Returns peg centers in polygon coordinates. Returns an error only
+// when the polygon mask is empty (polygon too small for the raster
+// resolution).
 //
 // For polygons-with-multiple-components callers should call this
 // once per polygon, dividing N proportionally to area.
-func placePegs(poly capPolygon, count int, minSpacing, boundaryClearance float64) ([][2]float64, error) {
+func placePegs(poly capPolygon, count int, minSpacing float64, clearances []float64) ([][2]float64, error) {
 	if count <= 0 {
 		return nil, fmt.Errorf("placePegs: count must be positive, got %d", count)
 	}
@@ -108,36 +120,6 @@ func placePegs(poly capPolygon, count int, minSpacing, boundaryClearance float64
 	// of the L2 distance, exact to a few percent).
 	dist := computeDistanceTransform(mask, W, H, step)
 
-	// Build the eligible-set: inside pixels whose distance-to-
-	// boundary >= boundaryClearance. If the clearance erodes
-	// everything, fall back to the unrestricted inside-set so we
-	// don't silently produce zero pegs on a small polygon.
-	insideIdx := make([]int, 0, W*H/2)
-	for idx, ok := range mask {
-		if !ok {
-			continue
-		}
-		if dist[idx] < boundaryClearance {
-			continue
-		}
-		insideIdx = append(insideIdx, idx)
-	}
-	if len(insideIdx) == 0 {
-		// Polygon too small for the requested clearance — fall back
-		// to "any inside pixel" so the user gets at least one peg
-		// placed in the most-interior location, rather than a
-		// silent no-op.
-		for idx, ok := range mask {
-			if !ok {
-				continue
-			}
-			insideIdx = append(insideIdx, idx)
-		}
-	}
-	if len(insideIdx) == 0 {
-		return nil, fmt.Errorf("placePegs: polygon mask is empty (polygon too small for resolution %d)", targetRes)
-	}
-
 	pixelToWorld := func(idx int) [2]float64 {
 		i := idx % W
 		j := idx / W
@@ -145,69 +127,137 @@ func placePegs(poly capPolygon, count int, minSpacing, boundaryClearance float64
 		return [2]float64{minX + float64(i-1)*step, minY + float64(j-1)*step}
 	}
 
-	// Centroid of the polygon (use mask centroid for robustness with holes).
-	var cx, cy float64
-	for _, idx := range insideIdx {
-		p := pixelToWorld(idx)
-		cx += p[0]
-		cy += p[1]
-	}
-	cx /= float64(len(insideIdx))
-	cy /= float64(len(insideIdx))
-
-	// First peg: inside pixel closest to centroid.
-	first := insideIdx[0]
-	bestDist2 := math.Inf(1)
-	for _, idx := range insideIdx {
-		p := pixelToWorld(idx)
-		d2 := (p[0]-cx)*(p[0]-cx) + (p[1]-cy)*(p[1]-cy)
-		if d2 < bestDist2 {
-			bestDist2 = d2
-			first = idx
+	// eligibleAt returns the inside pixels whose distance-to-boundary
+	// is >= clr. Smaller clr → superset.
+	eligibleAt := func(clr float64) []int {
+		out := make([]int, 0, W*H/2)
+		for idx, ok := range mask {
+			if !ok {
+				continue
+			}
+			if dist[idx] < clr {
+				continue
+			}
+			out = append(out, idx)
 		}
+		return out
 	}
-	placed := []int{first}
-	pegs := [][2]float64{pixelToWorld(first)}
 
-	// Subsequent pegs: greedy farthest-point.
-	for k := 1; k < count; k++ {
-		bestIdx := -1
-		bestMinD2 := -1.0
+	// placeFrom runs the seed + greedy farthest-point placement over a
+	// given non-empty eligible set.
+	placeFrom := func(insideIdx []int) [][2]float64 {
+		// Centroid of the eligible set (robust with holes).
+		var cx, cy float64
 		for _, idx := range insideIdx {
 			p := pixelToWorld(idx)
-			minD2 := math.Inf(1)
-			for _, pidx := range placed {
-				q := pixelToWorld(pidx)
-				d2 := (p[0]-q[0])*(p[0]-q[0]) + (p[1]-q[1])*(p[1]-q[1])
-				if d2 < minD2 {
-					minD2 = d2
+			cx += p[0]
+			cy += p[1]
+		}
+		cx /= float64(len(insideIdx))
+		cy /= float64(len(insideIdx))
+
+		// Seed. One peg → deepest interior pixel (the center). Two or
+		// more → the pixel farthest from the centroid (an extreme), so
+		// the greedy loop spreads the set to the edges with no central
+		// peg.
+		first := insideIdx[0]
+		if count == 1 {
+			bestDeep := -1.0
+			for _, idx := range insideIdx {
+				if dist[idx] > bestDeep {
+					bestDeep = dist[idx]
+					first = idx
 				}
 			}
-			if minD2 > bestMinD2 {
-				bestMinD2 = minD2
-				bestIdx = idx
+		} else {
+			bestFar2 := -1.0
+			for _, idx := range insideIdx {
+				p := pixelToWorld(idx)
+				d2 := (p[0]-cx)*(p[0]-cx) + (p[1]-cy)*(p[1]-cy)
+				if d2 > bestFar2 {
+					bestFar2 = d2
+					first = idx
+				}
 			}
 		}
-		// Reject if minimum spacing would be violated (only for
-		// minSpacing > 0; placement is best-effort otherwise).
-		if minSpacing > 0 && bestMinD2 < minSpacing*minSpacing {
-			break
+		placed := []int{first}
+		pegs := [][2]float64{pixelToWorld(first)}
+
+		// Subsequent pegs: greedy farthest-point.
+		for k := 1; k < count; k++ {
+			bestIdx := -1
+			bestMinD2 := -1.0
+			for _, idx := range insideIdx {
+				p := pixelToWorld(idx)
+				minD2 := math.Inf(1)
+				for _, pidx := range placed {
+					q := pixelToWorld(pidx)
+					d2 := (p[0]-q[0])*(p[0]-q[0]) + (p[1]-q[1])*(p[1]-q[1])
+					if d2 < minD2 {
+						minD2 = d2
+					}
+				}
+				if minD2 > bestMinD2 {
+					bestMinD2 = minD2
+					bestIdx = idx
+				}
+			}
+			// Reject if minimum spacing would be violated (only for
+			// minSpacing > 0; placement is best-effort otherwise).
+			if minSpacing > 0 && bestMinD2 < minSpacing*minSpacing {
+				break
+			}
+			if bestIdx < 0 {
+				break
+			}
+			placed = append(placed, bestIdx)
+			pegs = append(pegs, pixelToWorld(bestIdx))
 		}
-		if bestIdx < 0 {
-			break
-		}
-		placed = append(placed, bestIdx)
-		pegs = append(pegs, pixelToWorld(bestIdx))
+		return pegs
 	}
 
-	return pegs, nil
+	// Clearance ladder: try the largest edge margin first and step
+	// down. Return the first (largest-clearance) rung that places the
+	// full requested count — that gives the most margin while still
+	// placing every peg. If no rung reaches the full count, keep
+	// whichever rung placed the most pegs. A smaller clearance yields a
+	// superset of eligible pixels but does NOT always place more pegs
+	// (with minSpacing > 0 the greedy loop can break earlier on the
+	// larger set), so we compare counts across rungs explicitly rather
+	// than assuming the most permissive rung wins.
+	var best [][2]float64
+	for _, clr := range clearances {
+		elig := eligibleAt(clr)
+		if len(elig) == 0 {
+			continue
+		}
+		pegs := placeFrom(elig)
+		if len(pegs) == count {
+			return pegs, nil
+		}
+		if len(pegs) > len(best) {
+			best = pegs
+		}
+	}
+	if len(best) > 0 {
+		return best, nil
+	}
+
+	// Every ladder rung eroded the polygon to nothing. Fall back to
+	// "any inside pixel" so the user still gets at least one peg placed
+	// in the most-interior location, rather than a silent no-op.
+	anyInside := eligibleAt(0)
+	if len(anyInside) == 0 {
+		return nil, fmt.Errorf("placePegs: polygon mask is empty (polygon too small for resolution %d)", targetRes)
+	}
+	return placeFrom(anyInside), nil
 }
 
 // placePegsInPolygons distributes count pegs across multiple polygon
 // components, allocating count proportionally to area. Each component
 // gets at least 1 if count >= number of components; otherwise the
 // largest components get a peg first.
-func placePegsInPolygons(polys []capPolygon, count int, minSpacing, boundaryClearance float64) ([][2]float64, error) {
+func placePegsInPolygons(polys []capPolygon, count int, minSpacing float64, clearances []float64) ([][2]float64, error) {
 	if len(polys) == 0 {
 		return nil, fmt.Errorf("placePegsInPolygons: no polygons")
 	}
@@ -215,7 +265,7 @@ func placePegsInPolygons(polys []capPolygon, count int, minSpacing, boundaryClea
 		return nil, fmt.Errorf("placePegsInPolygons: count must be positive")
 	}
 	if len(polys) == 1 {
-		return placePegs(polys[0], count, minSpacing, boundaryClearance)
+		return placePegs(polys[0], count, minSpacing, clearances)
 	}
 
 	// Score each polygon by net area (outer minus holes).
@@ -266,7 +316,7 @@ func placePegsInPolygons(polys []capPolygon, count int, minSpacing, boundaryClea
 		if n == 0 {
 			continue
 		}
-		pegs, err := placePegs(polys[i], n, minSpacing, boundaryClearance)
+		pegs, err := placePegs(polys[i], n, minSpacing, clearances)
 		if err != nil {
 			// Skip this polygon; others still contribute.
 			continue

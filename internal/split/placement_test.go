@@ -12,7 +12,7 @@ func TestPlacePegs_UnitSquareSpread(t *testing.T) {
 	square := capPolygon{
 		outer: [][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}},
 	}
-	pegs, err := placePegs(square, 4, 0, 0)
+	pegs, err := placePegs(square, 4, 0, []float64{0})
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestPlacePegs_LShapeSpread(t *testing.T) {
 			{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2},
 		},
 	}
-	pegs, err := placePegs(lshape, 2, 0, 0)
+	pegs, err := placePegs(lshape, 2, 0, []float64{0})
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestPlacePegs_HoleAvoided(t *testing.T) {
 			{{1.25, 2.75}, {2.75, 2.75}, {2.75, 1.25}, {1.25, 1.25}}, // CW
 		},
 	}
-	pegs, err := placePegs(poly, 1, 0, 0)
+	pegs, err := placePegs(poly, 1, 0, []float64{0})
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestPlacePegs_BoundaryClearance(t *testing.T) {
 	square := capPolygon{
 		outer: [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}},
 	}
-	pegs, err := placePegs(square, 4, 0, 2.0)
+	pegs, err := placePegs(square, 4, 0, []float64{2.0})
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}
@@ -121,12 +121,13 @@ func TestPlacePegs_BoundaryClearance(t *testing.T) {
 	}
 }
 
-// TestPlacePegs_SinglePeg with count=1 places near centroid.
+// TestPlacePegs_SinglePeg with count=1 places at the deepest interior
+// point, which for a square is its center.
 func TestPlacePegs_SinglePeg(t *testing.T) {
 	square := capPolygon{
 		outer: [][2]float64{{0, 0}, {2, 0}, {2, 2}, {0, 2}},
 	}
-	pegs, err := placePegs(square, 1, 0, 0)
+	pegs, err := placePegs(square, 1, 0, []float64{0})
 	if err != nil {
 		t.Fatalf("placePegs: %v", err)
 	}

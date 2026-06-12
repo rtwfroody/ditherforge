@@ -29,7 +29,7 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// treated the same.
 	count := settings.Count
 	if count <= 0 {
-		count = 2
+		count = 3
 	}
 
 	// Recover cap polygons from half 0 (cap normal = +plane.Normal).
@@ -45,15 +45,16 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	// don't touch each other. Best-effort — placePegs may yield fewer
 	// pegs than requested if the polygon is small.
 	//
-	// Boundary clearance: the peg center must be at least one peg
-	// diameter from the cap polygon boundary so a circle of 2× the
-	// peg diameter fits fully inside, leaving peg-radius worth of
-	// wall around every peg. Without this guard, the greedy
-	// farthest-point placement parks pegs at corners, which then
-	// punch through the side wall.
+	// Boundary clearance ladder: prefer to sit 3× the connector
+	// diameter from the cap edge, stepping down to 2× then 1× when the
+	// cap is too small to fit the full count at the larger margin. One
+	// diameter is the floor — below that a circle of 2× the peg
+	// diameter no longer fits inside, leaving too little wall, and the
+	// greedy placement would park pegs where they punch through the
+	// side wall. placePegs picks the largest feasible rung per cap.
 	minSpacing := 2.5 * settings.DiamMM
-	boundaryClearance := settings.DiamMM
-	centers2D, err := placePegsInPolygons(polys, count, minSpacing, boundaryClearance)
+	clearances := []float64{3 * settings.DiamMM, 2 * settings.DiamMM, settings.DiamMM}
+	centers2D, err := placePegsInPolygons(polys, count, minSpacing, clearances)
 	if err != nil {
 		plog.Printf("  Split: peg placement failed (%v); using flat caps", err)
 		return halves
