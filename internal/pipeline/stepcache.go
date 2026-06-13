@@ -793,6 +793,11 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// now spans the first-layer height (SlabBoundaryPlanesFirst), so
 	// caches built by the old uniform-layerH grid must be rebuilt.
 	writeString(h, "slab-partition-v2")
+	// Sampling salt: "visible-v1" = cell color sampling now prefers
+	// the nearest exterior-visible face (SpatialIndex.FaceVisible)
+	// over nearer hidden interior geometry, so cached sampled colors
+	// from the visibility-blind sampler are stale.
+	writeString(h, "visible-v1")
 	writeFloat32(h, cells.Layer0XY)
 	writeFloat32(h, cells.UpperXY)
 	writeFloat32(h, cells.Layer0Z)

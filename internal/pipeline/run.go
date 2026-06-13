@@ -645,6 +645,21 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 	colorModel := lo.ColorModel
 	spatial := voxel.NewSpatialIndex(colorModel, cellSizeUpper)
 
+	// Per-face exterior visibility for color sampling: cells must take
+	// their color from surfaces visible from outside the model, not
+	// from interior geometry hugging the skin (flood-fill pocket caps
+	// sit 0.02–0.2mm under the painted surface and otherwise win the
+	// nearest-tri race about half the time, bleeding their base color
+	// into surface cells). The classification gets the leading window
+	// of the stage bar; the per-unit cellslicer windows below start
+	// after it.
+	visSpanHi := progress.ScaleTotal * 4 / 100
+	faceVis, visErr := computeFaceVisibility(r.ctx, colorModel, stage.Span(0, visSpanHi))
+	if visErr != nil {
+		return nil, visErr
+	}
+	spatial.FaceVisible = faceVis
+
 	// MaterialX base-color override for untextured faces, plumbed
 	// into the per-cell sampler. Without it every cell on an
 	// untextured face falls back to that face's single centroid-
@@ -716,8 +731,8 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 		// Each unit owns an equal window of the normalized bar
 		// (split halves are roughly equal work; unsplit = the
 		// whole bar).
-		progLo := ui * progress.ScaleTotal / len(units)
-		progHi := (ui + 1) * progress.ScaleTotal / len(units)
+		progLo := visSpanHi + ui*(progress.ScaleTotal-visSpanHi)/len(units)
+		progHi := visSpanHi + (ui+1)*(progress.ScaleTotal-visSpanHi)/len(units)
 		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
 		if herr != nil {
 			return nil, herr
@@ -849,6 +864,57 @@ type halfVoxels struct {
 type sampleBufs struct {
 	color   *voxel.SearchBuf
 	sticker *voxel.SearchBuf
+}
+
+// computeFaceVisibility classifies every face of model as exterior-
+// visible or hidden (see voxel.RayBVH.FaceVisible) in parallel. The
+// result feeds SpatialIndex.FaceVisible so cell color sampling prefers
+// surfaces that can be seen from outside the model. prog receives
+// per-chunk ticks, which doubles as the stage heartbeat for stall
+// detection.
+func computeFaceVisibility(ctx context.Context, model *loader.LoadedModel, prog func(done, total int)) ([]bool, error) {
+	n := len(model.Faces)
+	if n == 0 {
+		return nil, nil
+	}
+	t0 := time.Now()
+	bvh, err := voxel.BuildRayBVH(ctx, model)
+	if err != nil {
+		return nil, err
+	}
+	vis := make([]bool, n)
+	const chunk = 2048
+	nChunks := (n + chunk - 1) / chunk
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > nChunks {
+		workers = nChunks
+	}
+	var done, nVisible atomic.Int64
+	err = runParallel(ctx, workers, nChunks, nil, func(i int, _ any) {
+		lo := i * chunk
+		hi := lo + chunk
+		if hi > n {
+			hi = n
+		}
+		nv := 0
+		for fi := lo; fi < hi; fi++ {
+			if bvh.FaceVisible(fi) {
+				vis[fi] = true
+				nv++
+			}
+		}
+		nVisible.Add(int64(nv))
+		prog(int(done.Add(1)), nChunks)
+	})
+	if err != nil {
+		return nil, err
+	}
+	plog.Printf("  Visibility: %d/%d faces exterior-visible (%.1fs)",
+		nVisible.Load(), n, time.Since(t0).Seconds())
+	return vis, nil
 }
 
 // sliceSampleHalf runs slice → footprint → partition → sample →

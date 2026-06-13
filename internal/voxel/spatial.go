@@ -16,6 +16,15 @@ type SpatialIndex struct {
 	cellSize float32
 	cols     int
 	rows     int
+
+	// FaceVisible, when non-nil, is the per-face exterior-visibility
+	// classification for the indexed model (see RayBVH.FaceVisible).
+	// SampleNearestColorWithSticker uses it to prefer the nearest
+	// exterior-visible face over nearer hidden ones, so interior
+	// geometry hugging the visible skin (flood-fill pocket caps) can't
+	// bleed its color into surface cells. nil = no filtering (legacy
+	// nearest-triangle behavior).
+	FaceVisible []bool
 }
 
 // NewSpatialIndex builds a spatial index over the model's triangles.

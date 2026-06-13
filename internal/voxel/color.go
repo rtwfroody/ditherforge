@@ -492,18 +492,43 @@ func SampleNearestColorWithSticker(
 	override BaseColorOverride,
 ) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
+	// Track the nearest exterior-visible face and the nearest hidden
+	// face separately (si.FaceVisible nil = everything visible). A
+	// visible face wins over any nearer hidden one: interior geometry
+	// that hugs the skin — flood-fill pocket caps sit well under one
+	// search radius beneath the painted surface — must not bleed its
+	// color into cells on the visible surface. The hidden best is only
+	// a fallback for sample points with no visible face in range at
+	// all (e.g. a car interior behind window glass), which keeps fully
+	// enclosed regions sampling their own colors.
+	vis := si.FaceVisible
 	bestDistSq := float32(math.MaxFloat32)
 	bestTri := int32(-1)
 	var bestS, bestT float32
+	hidDistSq := float32(math.MaxFloat32)
+	hidTri := int32(-1)
+	var hidS, hidT float32
 	for _, ti := range cands {
 		f := model.Faces[ti]
 		r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+		if vis != nil && !vis[ti] {
+			if r.DistSq < hidDistSq {
+				hidDistSq = r.DistSq
+				hidTri = ti
+				hidS = r.S
+				hidT = r.T
+			}
+			continue
+		}
 		if r.DistSq < bestDistSq {
 			bestDistSq = r.DistSq
 			bestTri = ti
 			bestS = r.S
 			bestT = r.T
 		}
+	}
+	if bestTri < 0 {
+		bestTri, bestS, bestT = hidTri, hidS, hidT
 	}
 
 	if bestTri < 0 {
