@@ -652,7 +652,9 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 	// nearest-tri race about half the time, bleeding their base color
 	// into surface cells). The classification gets the leading window
 	// of the stage bar; the per-unit cellslicer windows below start
-	// after it.
+	// after it. 4% matches its measured wall-clock share (~3s for a
+	// 574k-face model vs a minutes-long stage) — like the pct()
+	// weights in sliceSampleHalf, it only shapes the bar.
 	visSpanHi := progress.ScaleTotal * 4 / 100
 	faceVis, visErr := computeFaceVisibility(r.ctx, colorModel, stage.Span(0, visSpanHi))
 	if visErr != nil {

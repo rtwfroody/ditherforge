@@ -608,6 +608,13 @@ func SampleNearestColorWithSticker(
 			if sBuf == nil {
 				sBuf = buf
 			}
+			// Note: this lookup deliberately ignores FaceVisible-style
+			// visibility filtering (stickerSI carries none). The sticker
+			// substrate is the projection clone / wrap — an outer surface
+			// with no interior geometry to bleed through — and this
+			// lookup only maps p into the substrate's UV space for decal
+			// compositing; the base color above is already
+			// visibility-filtered.
 			sCands := stickerSI.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, sBuf)
 			sBestDistSq := float32(math.MaxFloat32)
 			sBestTri := int32(-1)
