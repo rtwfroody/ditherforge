@@ -29,8 +29,12 @@ func loadModel(path string, objectIndex int) (*loader.LoadedModel, error) {
 		return loader.Load3MF(path, objectIndex)
 	case ".stl":
 		return loader.LoadSTL(path, objectIndex)
+	case ".obj":
+		return loader.LoadOBJ(path, objectIndex)
+	case ".zip":
+		return loader.LoadOBJZip(path, objectIndex)
 	default:
-		return nil, fmt.Errorf("unsupported format %q (use .glb, .3mf, or .stl)", ext)
+		return nil, fmt.Errorf("unsupported format %q (use .glb, .3mf, .stl, .obj, or .zip)", ext)
 	}
 }
 

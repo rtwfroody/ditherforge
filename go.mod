@@ -12,6 +12,7 @@ require (
 	github.com/qmuntal/draco-go v0.4.0
 	github.com/qmuntal/gltf v0.27.0
 	github.com/schollz/progressbar/v3 v3.19.0
+	github.com/udhos/gwob v1.0.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	golang.org/x/image v0.25.0
 	golang.org/x/term v0.29.0

@@ -32,7 +32,7 @@ func expandColors(colors []string) []string {
 
 // Args defines the CLI arguments.
 type Args struct {
-	Input                           string   `arg:"positional,required" help:"Input .glb, .3mf, or .stl file"`
+	Input                           string   `arg:"positional,required" help:"Input .glb, .3mf, .stl, .obj, or .obj-in-.zip file"`
 	NumColors                       int      `arg:"-n" default:"4" help:"Number of palette colors"`
 	Color                           []string `arg:"--color,separate" help:"Lock a color (CSS name or hex, repeatable, comma-separated)"`
 	Inventory                       string   `arg:"--inventory" help:"Inventory file for remaining colors"`
