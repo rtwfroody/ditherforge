@@ -2,10 +2,30 @@ package cellslicer
 
 import (
 	"math"
+	"os"
+	"strconv"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
+
+// rayBackMargin and rayReach tune the along-normal color ray (added to
+// the slab thickness for the outward start-back, and the inward search
+// distance past the sample point). Defaults clear the wrap offset while
+// staying local; env DF_RAY_BACK / DF_RAY_REACH override for tuning.
+var (
+	rayBackMargin = envFloat("DF_RAY_BACK", 0.6)
+	rayReach      = envFloat("DF_RAY_REACH", 0.6)
+)
+
+func envFloat(key string, def float32) float32 {
+	if s := os.Getenv(key); s != "" {
+		if v, err := strconv.ParseFloat(s, 32); err == nil && v >= 0 {
+			return float32(v)
+		}
+	}
+	return def
+}
 
 // CellSample is the per-cell color sample produced by SampleCells.
 // SlabIdx + CellIdx identify the source cell in slabs[SlabIdx].Cells.
@@ -50,7 +70,7 @@ func SampleCells(
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	out := []CellSample{}
 	for si_ := range slabs {
-		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil)...)
+		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil, nil, nil, nil, nil)...)
 	}
 	return out
 }
@@ -101,6 +121,10 @@ func SampleSlab(
 	colorXform func([3]float32) [3]float32,
 	buf *voxel.SearchBuf,
 	stickerBuf *voxel.SearchBuf,
+	geom *loader.LoadedModel,
+	geomSI *voxel.SpatialIndex,
+	geomBuf *voxel.SearchBuf,
+	colorBVH *voxel.RayBVH,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	// The decal lookup indexes stickerModel's faces, which can outnumber
@@ -111,11 +135,38 @@ func SampleSlab(
 	if stickerModel != nil && stickerBuf == nil {
 		stickerBuf = voxel.NewSearchBuf(len(stickerModel.Faces))
 	}
+	// geomSI + colorBVH drive along-normal color sampling: each cell reads
+	// its outward normal from the geom (printed-surface) mesh, then color
+	// is taken from the first original-mesh face a ray finds going inward
+	// along -normal (see voxel.SampleAlongNormal). Because alpha-wrap only
+	// expands outward, that inward hit is the true surface under the skin,
+	// so a thin perpendicular accent (a red module side-wall) can't bleed
+	// onto the cap it abuts. geomBuf is sized to geom; allocate when the
+	// caller didn't. When geomSI or colorBVH is nil the sampler falls back
+	// to legacy nearest-face for every cell.
+	if geomSI != nil && geomBuf == nil {
+		geomBuf = voxel.NewSearchBuf(len(geom.Faces))
+	}
+	// Along-normal ray geometry. The sample point sits at the slab's
+	// mid-Z (inside the solid), so the ray starts startBack outward to
+	// clear the skin — past half the slab thickness plus the wrap offset —
+	// then searches reach past the sample point for the surface beneath.
+	// reach is kept short so a cell over a deep bridged void falls back to
+	// nearest-face rather than painting a far interior surface.
+	slabThick := s.ZTop - s.ZBot
+	startBack := slabThick + rayBackMargin
+	reach := rayReach
 	out := make([]CellSample, 0, len(s.Cells))
 	midZ := 0.5 * (s.ZBot + s.ZTop)
 	for ci := range s.Cells {
 		c := &s.Cells[ci]
 		cx, cy, area := polyCentroid(c.Outer)
+		// Outward normal of the printed surface at this cell, read from
+		// the geom mesh and mapped into the color model's frame. Computed
+		// once per cell and reused for all its sample points. Zero (no
+		// geom face in range) disables along-normal sampling for this cell
+		// — SampleAlongNormal falls back to nearest-face.
+		cellN := cellOrient(cx, cy, midZ, colorXform, geom, geomSI, searchRadius, geomBuf)
 		// Cell-interior sample points (Step 4 of the cleanup plan):
 		// land every sample STRICTLY inside c.Outer so adjacent
 		// geometry's colour can't bleed in. For convex cells the
@@ -130,7 +181,7 @@ func SampleSlab(
 			if colorXform != nil {
 				p = colorXform(p)
 			}
-			rgba := voxel.SampleNearestColorWithSticker(p, model, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+			rgba := voxel.SampleAlongNormal(p, cellN, startBack, reach, model, colorBVH, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 			if rgba[3] < 128 {
 				continue
 			}
@@ -236,6 +287,36 @@ func cellInteriorSamplePoints(outer []Point2, cx, cy, midZ float32) [][3]float32
 		pts = append(pts, [3]float32{cx, cy, midZ})
 	}
 	return pts
+}
+
+// cellOrient reads the printed-surface outward normal at (cx,cy,midZ)
+// from the geom mesh, in the color model's coordinate frame. Returns
+// the zero vector (along-normal sampling off; falls back to nearest)
+// when geomSI is nil or no geom face is in range. When colorXform is
+// non-nil (the Split pipeline samples color in the original-coords frame
+// while geometry is in bed coords), the normal is rotated by the same
+// transform via a finite difference so it matches the frame the color
+// faces — and the ray cast against them — live in.
+func cellOrient(cx, cy, midZ float32, colorXform func([3]float32) [3]float32, geom *loader.LoadedModel, geomSI *voxel.SpatialIndex, searchRadius float32, geomBuf *voxel.SearchBuf) [3]float32 {
+	if geomSI == nil || geom == nil {
+		return [3]float32{}
+	}
+	n, ok := voxel.NearestFaceNormal([3]float32{cx, cy, midZ}, geom, geomSI, searchRadius, geomBuf)
+	if !ok {
+		return [3]float32{}
+	}
+	if colorXform != nil {
+		const e = 0.1
+		base := colorXform([3]float32{cx, cy, midZ})
+		tip := colorXform([3]float32{cx + n[0]*e, cy + n[1]*e, midZ + n[2]*e})
+		d := [3]float32{tip[0] - base[0], tip[1] - base[1], tip[2] - base[2]}
+		l := float32(math.Sqrt(float64(d[0]*d[0] + d[1]*d[1] + d[2]*d[2])))
+		if l < 1e-9 {
+			return [3]float32{}
+		}
+		n = [3]float32{d[0] / l, d[1] / l, d[2] / l}
+	}
+	return n
 }
 
 func resolveSearchRadius(searchRadius, cellSize float32) float32 {

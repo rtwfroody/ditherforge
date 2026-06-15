@@ -798,6 +798,12 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// over nearer hidden interior geometry, so cached sampled colors
 	// from the visibility-blind sampler are stale.
 	writeString(h, "visible-v1")
+	// Sampling salt: "alongnormal-v1" = cell color is now sampled by
+	// casting a ray from just outside the printed surface inward along
+	// the surface normal and taking the first original-mesh hit
+	// (voxel.SampleAlongNormal), instead of the laterally-nearest face.
+	// Caches from the nearest-face sampler hold different colors.
+	writeString(h, "alongnormal-v1")
 	writeFloat32(h, cells.Layer0XY)
 	writeFloat32(h, cells.UpperXY)
 	writeFloat32(h, cells.Layer0Z)

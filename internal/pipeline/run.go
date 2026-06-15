@@ -656,7 +656,7 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 	// 574k-face model vs a minutes-long stage) — like the pct()
 	// weights in sliceSampleHalf, it only shapes the bar.
 	visSpanHi := progress.ScaleTotal * 4 / 100
-	faceVis, visErr := computeFaceVisibility(r.ctx, colorModel, stage.Span(0, visSpanHi))
+	colorBVH, faceVis, visErr := computeFaceVisibility(r.ctx, colorModel, stage.Span(0, visSpanHi))
 	if visErr != nil {
 		return nil, visErr
 	}
@@ -735,7 +735,7 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 		// whole bar).
 		progLo := visSpanHi + ui*(progress.ScaleTotal-visSpanHi)/len(units)
 		progHi := visSpanHi + (ui+1)*(progress.ScaleTotal-visSpanHi)/len(units)
-		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
+		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, colorBVH, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
 		if herr != nil {
 			return nil, herr
 		}
@@ -866,6 +866,7 @@ type halfVoxels struct {
 type sampleBufs struct {
 	color   *voxel.SearchBuf
 	sticker *voxel.SearchBuf
+	geom    *voxel.SearchBuf
 }
 
 // computeFaceVisibility classifies every face of model as exterior-
@@ -874,15 +875,17 @@ type sampleBufs struct {
 // surfaces that can be seen from outside the model. prog receives
 // per-chunk ticks, which doubles as the stage heartbeat for stall
 // detection.
-func computeFaceVisibility(ctx context.Context, model *loader.LoadedModel, prog func(done, total int)) ([]bool, error) {
+// The returned RayBVH (over model) is reused by the cellslicer for
+// along-normal color sampling, so it is built once here.
+func computeFaceVisibility(ctx context.Context, model *loader.LoadedModel, prog func(done, total int)) (*voxel.RayBVH, []bool, error) {
 	n := len(model.Faces)
 	if n == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	t0 := time.Now()
 	bvh, err := voxel.BuildRayBVH(ctx, model)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	vis := make([]bool, n)
 	const chunk = 2048
@@ -912,11 +915,11 @@ func computeFaceVisibility(ctx context.Context, model *loader.LoadedModel, prog 
 		prog(int(done.Add(1)), nChunks)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	plog.Printf("  Visibility: %d/%d faces exterior-visible (%.1fs)",
 		nVisible.Load(), n, time.Since(t0).Seconds())
-	return vis, nil
+	return bvh, vis, nil
 }
 
 // sliceSampleHalf runs slice → footprint → partition → sample →
@@ -932,6 +935,7 @@ func computeFaceVisibility(ctx context.Context, model *loader.LoadedModel, prog 
 func (r *pipelineRun) sliceSampleHalf(
 	geom, colorModel *loader.LoadedModel,
 	spatial *voxel.SpatialIndex,
+	colorBVH *voxel.RayBVH,
 	stickerModel *loader.LoadedModel,
 	stickerSI *voxel.SpatialIndex,
 	decals []*voxel.StickerDecal,
@@ -1051,6 +1055,13 @@ func (r *pipelineRun) sliceSampleHalf(
 	}
 	fpElapsed := time.Since(tFp).Seconds()
 
+	// Spatial index over the geom (printed-surface) mesh, used by
+	// SampleSlab to read each cell's local outward normal that aims the
+	// inward color-sampling ray (see cellslicer.cellOrient /
+	// voxel.SampleAlongNormal). Immutable post-construction, shared by
+	// all workers.
+	geomSI := voxel.NewSpatialIndex(geom, cellSizeForSlab(0))
+
 	// Per-slab phase: partition + sample. Each worker writes only its
 	// own slabs[i] / perSlabSamples[i] slots, so no locks are needed.
 	tSlab := time.Now()
@@ -1066,6 +1077,7 @@ func (r *pipelineRun) sliceSampleHalf(
 			// (subdivided clone / wrap) from colorModel.
 			b.sticker = voxel.NewSearchBuf(len(stickerModel.Faces))
 		}
+		b.geom = voxel.NewSearchBuf(len(geom.Faces))
 		return b
 	}, func(i int, state any) {
 		bufs := state.(*sampleBufs)
@@ -1100,7 +1112,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
-		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker)
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker, geom, geomSI, bufs.geom, colorBVH)
 		sampleNs.Add(int64(time.Since(t1)))
 		progSlab(int(slabDone.Add(1)), nSlabs)
 	})

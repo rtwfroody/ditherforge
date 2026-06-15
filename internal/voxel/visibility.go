@@ -342,3 +342,114 @@ func rayTriHit(o, d, v0, v1, v2 [3]float32) bool {
 	t := (e2[0]*qx + e2[1]*qy + e2[2]*qz) * invDet
 	return t > 0
 }
+
+// rayTriHitT is rayTriHit but returns the ray parameter t and the
+// barycentric coords (u, v) of the hit on (v0, v1, v2), where the hit
+// point is (1-u-v)*v0 + u*v1 + v*v2. Two-sided; ok is false when the
+// ray misses or t <= 0.
+func rayTriHitT(o, d, v0, v1, v2 [3]float32) (t, u, v float32, ok bool) {
+	e1 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
+	e2 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
+	px := d[1]*e2[2] - d[2]*e2[1]
+	py := d[2]*e2[0] - d[0]*e2[2]
+	pz := d[0]*e2[1] - d[1]*e2[0]
+	det := e1[0]*px + e1[1]*py + e1[2]*pz
+	if det > -1e-12 && det < 1e-12 {
+		return 0, 0, 0, false
+	}
+	invDet := 1 / det
+	tx := o[0] - v0[0]
+	ty := o[1] - v0[1]
+	tz := o[2] - v0[2]
+	u = (tx*px + ty*py + tz*pz) * invDet
+	if u < 0 || u > 1 {
+		return 0, 0, 0, false
+	}
+	qx := ty*e1[2] - tz*e1[1]
+	qy := tz*e1[0] - tx*e1[2]
+	qz := tx*e1[1] - ty*e1[0]
+	v = (d[0]*qx + d[1]*qy + d[2]*qz) * invDet
+	if v < 0 || u+v > 1 {
+		return 0, 0, 0, false
+	}
+	t = (e2[0]*qx + e2[1]*qy + e2[2]*qz) * invDet
+	if t <= 0 {
+		return 0, 0, 0, false
+	}
+	return t, u, v, true
+}
+
+// FirstHit casts the ray from o along unit direction d and returns the
+// nearest triangle it crosses within (0, maxDist], its ray parameter t,
+// and the hit's barycentric coords (u, v) such that the hit point is
+// (1-u-v)*V0 + u*V1 + v*V2. ok is false when nothing is hit in range.
+// Two-sided (the source mesh may be open / inconsistently wound), so the
+// first surface crossed wins regardless of facing. Read-only; safe for
+// concurrent use.
+func (b *RayBVH) FirstHit(o, d [3]float32, maxDist float32) (tri int32, t, u, v float32, ok bool) {
+	if len(b.nodes) == 0 {
+		return -1, 0, 0, 0, false
+	}
+	var inv [3]float32
+	for k := 0; k < 3; k++ {
+		dk := d[k]
+		if dk > -1e-30 && dk < 1e-30 {
+			if dk < 0 {
+				dk = -1e-30
+			} else {
+				dk = 1e-30
+			}
+		}
+		inv[k] = 1 / dk
+	}
+	model := b.model
+	bestT := maxDist
+	tri = -1
+	var stack [96]int32
+	sp := 0
+	stack[sp] = 0
+	sp++
+	for sp > 0 {
+		sp--
+		nd := &b.nodes[stack[sp]]
+		// Slab test against [0, bestT]: skip nodes wholly beyond the
+		// current nearest hit.
+		tLo := float32(0)
+		tHi := bestT
+		hit := true
+		for k := 0; k < 3; k++ {
+			t1 := (nd.min[k] - o[k]) * inv[k]
+			t2 := (nd.max[k] - o[k]) * inv[k]
+			if t1 > t2 {
+				t1, t2 = t2, t1
+			}
+			tLo = Maxf(tLo, t1)
+			tHi = Minf(tHi, t2)
+			if tLo > tHi {
+				hit = false
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		if nd.count > 0 {
+			for i := nd.start; i < nd.start+nd.count; i++ {
+				ti := b.tris[i]
+				f := model.Faces[ti]
+				ht, hu, hv, hok := rayTriHitT(o, d, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+				if hok && ht < bestT {
+					bestT = ht
+					tri = ti
+					t, u, v = ht, hu, hv
+				}
+			}
+			continue
+		}
+		stack[sp] = stack[sp] + 1
+		sp++
+		stack[sp] = nd.start
+		sp++
+	}
+	return tri, t, u, v, tri >= 0
+}

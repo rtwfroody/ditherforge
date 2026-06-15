@@ -161,7 +161,7 @@ func boxSampleNRGBA(src *image.NRGBA, cx, cy, rU, rV, W, H int) [4]uint8 {
 			y = origY + H - 1
 		}
 		for dx := -rU; dx <= rU; dx++ {
-			x := ((cx + dx - origX) % W + W) % W + origX
+			x := ((cx+dx-origX)%W+W)%W + origX
 			i := (y-origY)*stride + (x-origX)*4
 			r, g, b, a := nrgbaPremul(pix, i)
 			sumR += uint32(r)
@@ -193,7 +193,7 @@ func boxSampleRGBA(src *image.RGBA, cx, cy, rU, rV, W, H int) [4]uint8 {
 			y = origY + H - 1
 		}
 		for dx := -rU; dx <= rU; dx++ {
-			x := ((cx + dx - origX) % W + W) % W + origX
+			x := ((cx+dx-origX)%W+W)%W + origX
 			i := (y-origY)*stride + (x-origX)*4
 			sumR += uint32(pix[i])
 			sumG += uint32(pix[i+1])
@@ -220,7 +220,7 @@ func boxSampleGeneric(img image.Image, cx, cy, rU, rV, W, H, minX, minY int) [4]
 			y = minY + H - 1
 		}
 		for dx := -rU; dx <= rU; dx++ {
-			x := ((cx + dx - minX) % W + W) % W + minX
+			x := ((cx+dx-minX)%W+W)%W + minX
 			r, g, b, a := img.At(x, y).RGBA()
 			sumR += r >> 8
 			sumG += g >> 8
@@ -437,6 +437,30 @@ type BaseColorOverride interface {
 	SampleBaseColor(ctx BaseColorContext) [3]uint8
 }
 
+// NearestFaceNormal returns the unit normal of the face on `model`
+// closest to p within radius (XY) and the Z window, and true when a
+// face was found. Used to read the local printed-surface orientation
+// (the geom/wrap mesh normal) that drives along-normal color sampling.
+// It ignores visibility — the geom mesh it queries is a clean outer
+// surface with no interior geometry.
+func NearestFaceNormal(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf) ([3]float32, bool) {
+	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
+	bestDistSq := float32(math.MaxFloat32)
+	bestTri := int32(-1)
+	for _, ti := range cands {
+		f := model.Faces[ti]
+		r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+		if r.DistSq < bestDistSq {
+			bestDistSq = r.DistSq
+			bestTri = ti
+		}
+	}
+	if bestTri < 0 {
+		return [3]float32{}, false
+	}
+	return FaceNormal(int(bestTri), model), true
+}
+
 // FaceNormal returns the unit-length normal of the face at faceIdx
 // computed from its three vertex positions (right-handed cross
 // product, v0→v1 × v0→v2). Returns the zero vector when the face is
@@ -545,16 +569,34 @@ func SampleNearestColorWithSticker(
 		return [4]uint8{0, 0, 0, 0}
 	}
 
-	matAlpha, bc, texIdx := faceMaterial(int(bestTri), model)
+	return resolveFaceColor(p, model, bestTri, bestS, bestT, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+}
+
+// resolveFaceColor extracts the RGBA color of triangle tri on model at
+// barycentric (1-s-t, s, t) — the texture / vertex-color / base-color
+// material path, the MaterialX override for untextured faces, and
+// sticker decal compositing. Shared by the nearest-face sampler and the
+// along-normal ray sampler so both resolve color identically once a
+// face has been chosen. p is the world-space sample point (for the
+// override and the separate sticker-substrate lookup); radius/buf feed
+// that sticker lookup.
+func resolveFaceColor(
+	p [3]float32, model *loader.LoadedModel, tri int32, s, t float32,
+	radius float32, buf *SearchBuf,
+	decals []*StickerDecal,
+	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+	override BaseColorOverride,
+) [4]uint8 {
+	matAlpha, bc, texIdx := faceMaterial(int(tri), model)
 	if override != nil && (texIdx < 0 || int(texIdx) >= len(model.Textures)) {
 		rgb := override.SampleBaseColor(BaseColorContext{
 			Pos:    p,
-			Normal: FaceNormal(int(bestTri), model),
+			Normal: FaceNormal(int(tri), model),
 		})
 		bc[0], bc[1], bc[2] = rgb[0], rgb[1], rgb[2]
 	}
-	f := model.Faces[bestTri]
-	bary := [3]float32{1 - bestS - bestT, bestS, bestT}
+	f := model.Faces[tri]
+	bary := [3]float32{1 - s - t, s, t}
 
 	var rgba [4]uint8
 	if texIdx >= 0 && int(texIdx) < len(model.Textures) {
@@ -602,7 +644,7 @@ func SampleNearestColorWithSticker(
 	// color sample mesh.
 	if len(decals) > 0 {
 		if stickerModel == nil || stickerModel == model {
-			rgba = CompositeStickerColor(rgba, bestTri, bary, decals)
+			rgba = CompositeStickerColor(rgba, tri, bary, decals)
 		} else {
 			sBuf := stickerBuf
 			if sBuf == nil {
@@ -638,6 +680,44 @@ func SampleNearestColorWithSticker(
 	}
 
 	return rgba
+}
+
+// SampleAlongNormal samples color by casting a ray from the sample
+// point p inward along -normal (toward the object) and resolving the
+// color of the first original-mesh face it crosses. Because alpha-wrap
+// only ever expands the surface outward, the original colored surface
+// always lies inward of a wrapped sample point along its normal, so the
+// first inward hit is the true surface beneath the printed skin — with
+// no lateral pickup of a neighbor's wall (the failure mode of pure
+// nearest-face sampling, which fattens thin perpendicular accents like
+// red module side-walls over the grey caps they abut).
+//
+// The cell's sample point p sits at the cell's mid-Z — inside the solid,
+// below the skin by up to half a slab — so the ray is started startBack
+// *outward* of p (along +normal) to clear the surface, then cast inward;
+// the first original face within reach past p wins. startBack should
+// exceed the slab thickness + wrap offset; reach bounds how far past p
+// the search continues (small, so a cell over a deep bridged void falls
+// back rather than painting a far interior surface). If nothing is hit
+// in range (degenerate normal, deep void) it falls back to nearest-face
+// sampling so coverage never regresses. normal must be unit length and
+// in model's coordinate frame; bvh is built over model.
+func SampleAlongNormal(
+	p, normal [3]float32, startBack, reach float32,
+	model *loader.LoadedModel, bvh *RayBVH, si *SpatialIndex, radius float32, buf *SearchBuf,
+	decals []*StickerDecal,
+	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+	override BaseColorOverride,
+) [4]uint8 {
+	if bvh != nil && normal != ([3]float32{}) {
+		o := [3]float32{p[0] + normal[0]*startBack, p[1] + normal[1]*startBack, p[2] + normal[2]*startBack}
+		d := [3]float32{-normal[0], -normal[1], -normal[2]}
+		if tri, tt, u, v, ok := bvh.FirstHit(o, d, startBack+reach); ok {
+			hit := [3]float32{o[0] + d[0]*tt, o[1] + d[1]*tt, o[2] + d[2]*tt}
+			return resolveFaceColor(hit, model, tri, u, v, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+		}
+	}
+	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 }
 
 // Neighbor holds a precomputed neighbor reference with its diffusion weight.
@@ -877,10 +957,13 @@ func BuildNeighbors(cells []ActiveCell) [][]Neighbor {
 // causes dizzy's chroma drift).
 //
 // 1-hop weights (chebyshev=1) match BuildNeighbors exactly:
-//   axes=1 → 1.0, axes=2 → 0.1, axes=3 → 0.01.
+//
+//	axes=1 → 1.0, axes=2 → 0.1, axes=3 → 0.01.
+//
 // 2-hop weights (chebyshev=2) are 100× smaller for the same axes
 // count, continuing the same 10×-per-step falloff pattern:
-//   axes=1 → 0.01, axes=2 → 0.001, axes=3 → 0.0001.
+//
+//	axes=1 → 0.01, axes=2 → 0.001, axes=3 → 0.0001.
 //
 // The 100× gap means 1-hop neighbors dominate when any are
 // unprocessed; 2-hop only matters as a fallback. Surface cells
@@ -1069,6 +1152,7 @@ func nearestPaletteLab(L, A, B float32, palLab [][3]float32) int {
 func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
 	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells), nil)
 }
+
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
 // If tracker is non-nil, emits StageProgress("Dithering", current) every 1000
 // cells. Caller owns StageStart/StageDone.
@@ -1188,7 +1272,7 @@ func regionObjective(region []int, combo []int32, targets [][3]float32, palLin [
 // recoverQualityWeight balances per-cell quality against local
 // regional residual in the local-solve objective:
 //
-//   combined = (2·L·s + |s|²) + λ · (2·r_N·s + |s|²)
+//	combined = (2·L·s + |s|²) + λ · (2·r_N·s + |s|²)
 //
 // where:
 //   - s = palette[old_p_N] - palette[p_N'] (the swap shift)
@@ -1197,11 +1281,16 @@ func regionObjective(region []int, combo []int32, targets [][3]float32, palLin [
 //   - r_N = T_N - palette[old_p_N]: N's individual quality residual
 //
 // λ = 0: pure regional balance. Any quality cost at N is accepted
-//        to reduce local residual.
+//
+//	to reduce local residual.
+//
 // λ → ∞: pure per-cell quality. Swaps never hurt N's individual
-//        fidelity even if it would help the regional balance.
+//
+//	fidelity even if it would help the regional balance.
+//
 // λ = 1: equal weight; swaps that hurt N's quality by the same
-//        amount they help regional balance are rejected.
+//
+//	amount they help regional balance are rejected.
 const recoverQualityWeight = 0.1
 
 // DitherWithRecover is DitherWithNeighbors with a local-solve
@@ -1237,7 +1326,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	order := rng.Perm(n)
 
 	assignments := make([]int32, n)
-	errBuf := make([][3]float32, n)  // accumulated residual in linear light
+	errBuf := make([][3]float32, n) // accumulated residual in linear light
 	processed := make([]bool, n)
 	targets := make([][3]float32, n) // per-cell target in linear light
 	areas := effectiveAreas(cells)
@@ -1453,7 +1542,7 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 // RiemersmaInputBiasDefault is the default value for the per-cell
 // adaptive input-bias maximum used in the Riemersma palette pick:
 //
-//   score = (1 - α) · dist²(target, palette) + α · dist²(input, palette)
+//	score = (1 - α) · dist²(target, palette) + α · dist²(input, palette)
 //
 // α is computed per-cell from the input's distance to the nearest
 // palette color (see RiemersmaInputBiasRange). The fundamental
@@ -2032,11 +2121,11 @@ func buildRiemersmaTour(cells []ActiveCell, neighbors [][]Neighbor) []int {
 // which keeps both per-step expansion shells small and bookkeeping
 // overhead bounded.
 type cellBucketGrid struct {
-	minX, minY, minZ float32
+	minX, minY, minZ    float32
 	stepX, stepY, stepZ float32
-	nx, ny, nz int
-	buckets map[int][]int
-	cellBucket []int // per-cell linear bucket index
+	nx, ny, nz          int
+	buckets             map[int][]int
+	cellBucket          []int // per-cell linear bucket index
 }
 
 func newCellBucketGrid(cells []ActiveCell) *cellBucketGrid {
