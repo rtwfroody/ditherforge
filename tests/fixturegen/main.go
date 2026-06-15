@@ -173,8 +173,10 @@ func loadAny(path string) (*loader.LoadedModel, error) {
 		return loader.LoadSTL(path, -1)
 	case ".obj":
 		return loader.LoadOBJ(path, -1)
+	case ".dae":
+		return loader.LoadDAE(path, -1)
 	case ".zip":
-		return loader.LoadOBJZip(path, -1)
+		return loader.LoadZip(path, -1)
 	default:
 		return nil, fmt.Errorf("unsupported extension %q", filepath.Ext(path))
 	}

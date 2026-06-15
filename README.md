@@ -2,7 +2,7 @@
 
 ![Colorful fish printed with Ditherforge](images/fish-collage.png)
 
-Convert textured 3D models (GLB, 3MF, STL, or OBJ) into multi-color 3D-printable files
+Convert textured 3D models (GLB, 3MF, STL, OBJ, or COLLADA) into multi-color 3D-printable files
 (3MF) for multi-filament printers.
 
 ## Download
@@ -13,8 +13,9 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 ## Quick Start
 
 1. Launch `ditherforge`
-2. Use **File > Open** to select a `.glb`, `.3mf`, `.stl`, or `.obj` file (an OBJ
-   packaged in a `.zip` alongside its `.mtl` and textures also works)
+2. Use **File > Open** to select a `.glb`, `.3mf`, `.stl`, `.obj`, or `.dae`
+   (COLLADA) file (an OBJ or COLLADA model packaged in a `.zip` alongside its
+   `.mtl`/textures also works)
 3. Set **Nozzle diameter** and **Layer height** to match your slicer
 4. Set **Size (mm)** to your target print size
 5. Optionally, open the **Stickers** panel to apply PNG or JPEG images onto the model surface
@@ -337,7 +338,7 @@ compatible with OrcaSlicer and BambuStudio.
 
 ## How It Works
 
-1. **Load** — reads a GLB, 3MF, STL, or OBJ file and scales it to millimeters. The
+1. **Load** — reads a GLB, 3MF, STL, OBJ, or COLLADA file and scales it to millimeters. The
    model bottom is normalized to Z = 0. For files with multiple objects, the
    selected object (or all objects) is processed. The geometry mesh is then
    decimated to voxel resolution with QEM mesh decimation — detail finer than
@@ -397,8 +398,9 @@ appears as a final line in the list.
 ## CLI
 
 `ditherforge-cli` provides the same pipeline from the command line, without a
-GUI window. It accepts `.glb`, `.3mf`, `.stl`, and `.obj` inputs (plus an OBJ
-packaged in a `.zip` with its `.mtl` and textures).
+GUI window. It accepts `.glb`, `.3mf`, `.stl`, `.obj`, and `.dae` (COLLADA)
+inputs (plus an OBJ or COLLADA model packaged in a `.zip` with its
+`.mtl`/textures).
 
 ```
 ditherforge-cli model.glb --size 100
