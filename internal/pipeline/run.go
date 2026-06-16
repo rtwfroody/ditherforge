@@ -442,19 +442,23 @@ func parseConnectorStyle(s string) split.ConnectorStyle {
 }
 
 // parseOrientation converts the Options string into the typed
-// split.Orientation. Empty / unknown values fall back to OrientOriginal.
+// split.Orientation. Empty / unknown values — including legacy
+// "original" and "seam-*" settings — fall back to OrientZUp (the
+// model's authored +Z up).
 func parseOrientation(s string) split.Orientation {
 	switch s {
-	case "seam-up":
-		return split.OrientSeamUp
-	case "seam-down":
-		return split.OrientSeamDown
-	case "seam-left":
-		return split.OrientSeamLeft
-	case "seam-right":
-		return split.OrientSeamRight
+	case "z-down":
+		return split.OrientZDown
+	case "x-up":
+		return split.OrientXUp
+	case "x-down":
+		return split.OrientXDown
+	case "y-up":
+		return split.OrientYUp
+	case "y-down":
+		return split.OrientYDown
 	default:
-		return split.OrientOriginal
+		return split.OrientZUp
 	}
 }
 

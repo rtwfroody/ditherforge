@@ -216,12 +216,12 @@
         <span class="text-muted-foreground flex items-center gap-1.5">
           {halfLabels.a}
           <HelpTip>
-            How this half sits on the bed. <strong>Original</strong>
-            keeps the model's authored orientation. <strong>Seam
-            up/down/left/right</strong> rotate the half so the cut
-            face points in that direction. Z-axis rotation is free
-            (the slicer picks any), so left and right are the only
-            distinct side options.
+            How this half sits on the bed: which model axis points up.
+            <strong>+Z up</strong> keeps the model's authored
+            orientation; the others rotate the half so the chosen model
+            axis (±X, ±Y, ±Z) faces up. The remaining spin about the
+            vertical is fixed automatically to stay close to the
+            authored orientation.
           </HelpTip>
         </span>
         <select

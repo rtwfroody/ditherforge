@@ -18,11 +18,12 @@
 // captured value as the fallback to the validator.
 
 export const SPLIT_ORIENTATION_OPTIONS = [
-  { value: 'original',   label: 'Original'   },
-  { value: 'seam-up',    label: 'Seam up'    },
-  { value: 'seam-down',  label: 'Seam down'  },
-  { value: 'seam-left',  label: 'Seam left'  },
-  { value: 'seam-right', label: 'Seam right' },
+  { value: 'z-up',   label: '+Z up' },
+  { value: 'z-down', label: '−Z up' },
+  { value: 'x-up',   label: '+X up' },
+  { value: 'x-down', label: '−X up' },
+  { value: 'y-up',   label: '+Y up' },
+  { value: 'y-down', label: '−Y up' },
 ] as const;
 export type SplitOrientation = typeof SPLIT_ORIENTATION_OPTIONS[number]['value'];
 

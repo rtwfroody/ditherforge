@@ -214,13 +214,13 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 	}
 }
 
-// TestLayout_SeamUpOnPegHalf — when the user chooses OrientSeamUp for
-// the male-peg half, the pegs print pointing upward.
+// TestLayout_ZUpOnPegHalf — when the user chooses OrientZUp for the
+// male-peg half, the pegs print pointing upward.
 //
 // For a cube cut at z=25 with Pegs(depth=5):
 //   - Half 0 in original coords spans z ∈ [0, 25] (body) plus
-//     z ∈ [25, 30] (peg). Outward cap normal is +Z; OrientSeamUp
-//     makes the layout rotation identity (already +Z).
+//     z ∈ [25, 30] (peg). OrientZUp keeps the model's +Z up, so the
+//     layout rotation is the identity.
 //   - bbox-min-z=0 leaves z extent [0, 30]: the body's z=0 face is
 //     on the bed, the cap is at bed z=25, and the peg tips reach
 //     bed z=30 (highest, pointing up).
@@ -228,7 +228,7 @@ func TestLayout_NonZAxisCut(t *testing.T) {
 // Verifies (a) the body face is on the bed (min.z=0), (b) the peg
 // tip is the highest point at bed z≈30, and (c) inverse round-trip
 // recovers the peg tip's original coords at z=30.
-func TestLayout_SeamUpOnPegHalf(t *testing.T) {
+func TestLayout_ZUpOnPegHalf(t *testing.T) {
 	verts := [][3]float32{
 		{0, 0, 0}, {50, 0, 0}, {50, 50, 0}, {0, 50, 0},
 		{0, 0, 50}, {50, 0, 50}, {50, 50, 50}, {0, 50, 50},
@@ -246,7 +246,7 @@ func TestLayout_SeamUpOnPegHalf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
-	res.Orientation = [2]Orientation{OrientSeamUp, OrientSeamDown}
+	res.Orientation = [2]Orientation{OrientZUp, OrientZDown}
 	xforms := Layout(res, 5)
 
 	half0 := res.Halves[0]
@@ -284,15 +284,17 @@ func TestLayout_SeamUpOnPegHalf(t *testing.T) {
 }
 
 // TestLayout_TransformOnPlanePoints — plane vertices in original
-// coords should map to z=0 in bed coords via Transform.Apply when
-// both halves are oriented seam-down (cut face on the bed).
+// coords should map to z=0 in bed coords via Transform.Apply when each
+// half is oriented so its cut face rests on the bed. For a Z cut at
+// z=0.5, half 0 (cap is its top face) needs −Z up (OrientZDown) and
+// half 1 (cap is its bottom face) needs +Z up (OrientZUp).
 func TestLayout_TransformOnPlanePoints(t *testing.T) {
 	cube := makeUnitCube()
 	res, err := Cut(cube, AxisPlane(2, 0.5), ConnectorSettings{})
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
-	res.Orientation = [2]Orientation{OrientSeamDown, OrientSeamDown}
+	res.Orientation = [2]Orientation{OrientZDown, OrientZUp}
 	origPoints := []struct {
 		half  int
 		point [3]float32
@@ -310,33 +312,36 @@ func TestLayout_TransformOnPlanePoints(t *testing.T) {
 	}
 }
 
-// TestRotateVecToTarget_AlignsCorrectly — sanity check the rotation
-// utility: applying the rotation to the input vector should produce
-// the target within float precision, across all six world axes for
-// both source and target.
-func TestRotateVecToTarget_AlignsCorrectly(t *testing.T) {
-	axes := []struct {
-		name string
-		v    [3]float64
+// TestOrientationRotation — each orientation must map its named model
+// axis onto +Z (the bed up direction), and the matrix must be a proper
+// rotation (orthonormal, det +1) so it neither mirrors nor scales.
+func TestOrientationRotation(t *testing.T) {
+	cases := []struct {
+		o      Orientation
+		upAxis [3]float64 // model-space axis that should end up at +Z
 	}{
-		{"+Z", [3]float64{0, 0, 1}},
-		{"-Z", [3]float64{0, 0, -1}},
-		{"+X", [3]float64{1, 0, 0}},
-		{"-X", [3]float64{-1, 0, 0}},
-		{"+Y", [3]float64{0, 1, 0}},
-		{"-Y", [3]float64{0, -1, 0}},
+		{OrientZUp, [3]float64{0, 0, 1}},
+		{OrientZDown, [3]float64{0, 0, -1}},
+		{OrientXUp, [3]float64{1, 0, 0}},
+		{OrientXDown, [3]float64{-1, 0, 0}},
+		{OrientYUp, [3]float64{0, 1, 0}},
+		{OrientYDown, [3]float64{0, -1, 0}},
 	}
-	for _, src := range axes {
-		for _, tgt := range axes {
-			R := rotateVecToTarget(src.v, tgt.v)
-			got := applyRotation(R, [3]float32{float32(src.v[0]), float32(src.v[1]), float32(src.v[2])})
-			want := [3]float32{float32(tgt.v[0]), float32(tgt.v[1]), float32(tgt.v[2])}
-			dx := math.Abs(float64(got[0] - want[0]))
-			dy := math.Abs(float64(got[1] - want[1]))
-			dz := math.Abs(float64(got[2] - want[2]))
-			if dx > 1e-5 || dy > 1e-5 || dz > 1e-5 {
-				t.Errorf("%s → %s: rotation maps to %v, want %v", src.name, tgt.name, got, want)
-			}
+	for _, c := range cases {
+		R := orientationRotation(c.o)
+		got := applyRotation(R, [3]float32{float32(c.upAxis[0]), float32(c.upAxis[1]), float32(c.upAxis[2])})
+		if math.Abs(float64(got[0])) > 1e-6 || math.Abs(float64(got[1])) > 1e-6 || math.Abs(float64(got[2]-1)) > 1e-6 {
+			t.Errorf("orientation %d: up axis %v maps to %v, want +Z", c.o, c.upAxis, got)
+		}
+		if d := matrixDet3(R); math.Abs(d-1) > 1e-9 {
+			t.Errorf("orientation %d: det = %g, want +1 (proper rotation)", c.o, d)
 		}
 	}
+}
+
+// matrixDet3 returns the determinant of a row-major 3×3 matrix.
+func matrixDet3(m [9]float64) float64 {
+	return m[0]*(m[4]*m[8]-m[5]*m[7]) -
+		m[1]*(m[3]*m[8]-m[5]*m[6]) +
+		m[2]*(m[3]*m[7]-m[4]*m[6])
 }

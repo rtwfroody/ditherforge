@@ -63,29 +63,30 @@ func AxisPlane(axis int, offset float64) Plane {
 	return Plane{Normal: n, D: offset}
 }
 
-// Orientation selects how Layout rotates a half before placing it on
-// the build plate. The user picks one per half independently.
+// Orientation selects which model-space axis Layout points "up" (+Z on
+// the build plate) for a half before placing it. The user picks one per
+// half independently. The choice is independent of the cut plane — it
+// is a fixed re-mapping of the half's authored axes. The remaining spin
+// about the vertical (yaw) is resolved deterministically so the other
+// two axes stay as close to their authored orientation as possible.
 type Orientation int
 
 const (
-	// OrientOriginal leaves the half in its authored model-space
-	// rotation; only the bbox-min-z=0 shift and side-by-side
-	// translation are applied.
-	OrientOriginal Orientation = iota
-	// OrientSeamUp rotates the half so its outward cap normal points to
-	// +Z (cut face on top). Useful when male pegs would otherwise
-	// print hanging in air.
-	OrientSeamUp
-	// OrientSeamDown rotates the half so its outward cap normal points
-	// to −Z (cut face flat on the build plate). Default for most
-	// glue-up workflows.
-	OrientSeamDown
-	// OrientSeamLeft rotates the half so its outward cap normal points
-	// to −X (cut face on the left side wall).
-	OrientSeamLeft
-	// OrientSeamRight rotates the half so its outward cap normal points
-	// to +X (cut face on the right side wall).
-	OrientSeamRight
+	// OrientZUp keeps the model's +Z axis pointing up (identity
+	// rotation). Default zero value; matches the legacy "original"
+	// behaviour. Only the bbox-min-z=0 shift and side-by-side
+	// translation are then applied.
+	OrientZUp Orientation = iota
+	// OrientZDown points the model's −Z axis up.
+	OrientZDown
+	// OrientXUp points the model's +X axis up.
+	OrientXUp
+	// OrientXDown points the model's −X axis up.
+	OrientXDown
+	// OrientYUp points the model's +Y axis up.
+	OrientYUp
+	// OrientYDown points the model's −Y axis up.
+	OrientYDown
 )
 
 // CutResult is the output of Cut. Halves[0] and Halves[1] are
@@ -96,9 +97,7 @@ const (
 //
 // Orientation[h] selects the per-half rotation applied by Layout. See
 // the Orientation constants for semantics. The default zero value
-// (OrientOriginal) is the simplest to reason about; the frontend
-// defaults to OrientSeamDown to match the pre-orientation-feature
-// behaviour.
+// (OrientZUp) leaves the half in its authored orientation.
 //
 // Cap faces aren't tracked separately — they're just part of each
 // half's face list. Callers that need to identify the cap should

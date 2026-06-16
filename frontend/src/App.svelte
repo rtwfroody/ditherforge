@@ -217,10 +217,11 @@
   let splitConnectorDiamMM = $state(3);
   let splitConnectorDepthMM = $state(2);
   let splitClearanceMM = $state(0.15);
-  // Per-half orientation. Defaults to "original" — the user picks per
-  // half independently. See SplitControls.svelte for option semantics.
-  let splitOrientationA = $state<SplitOrientation>('original');
-  let splitOrientationB = $state<SplitOrientation>('original');
+  // Per-half orientation: which model axis points up. Defaults to
+  // "z-up" (the model's authored orientation). The user picks per half
+  // independently. See SplitControls.svelte for option semantics.
+  let splitOrientationA = $state<SplitOrientation>('z-up');
+  let splitOrientationB = $state<SplitOrientation>('z-up');
   // The loaded model's bbox in original-mesh coords (mm, post-scale,
   // post-normalizeZ). Populated from the input-mesh event; null until
   // the first event arrives so the Split UI can distinguish "no model

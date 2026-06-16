@@ -156,9 +156,10 @@ type SplitSettings struct {
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64
 	ClearanceMM      float64
-	// Orientation per half: "original", "seam-up", "seam-down",
-	// "seam-left", "seam-right". Empty string is treated as
-	// "original".
+	// Orientation per half: which model-space axis points up (+Z on
+	// the bed). One of "z-up", "z-down", "x-up", "x-down", "y-up",
+	// "y-down". Empty / legacy ("original", "seam-*") / unknown values
+	// are treated as "z-up".
 	Orientation [2]string
 }
 
