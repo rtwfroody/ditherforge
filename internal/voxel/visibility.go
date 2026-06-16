@@ -238,15 +238,10 @@ func (b *RayBVH) FaceVisible(fi int) bool {
 	return false
 }
 
-// anyHit reports whether the ray from o along unit direction d hits
-// any face other than skip.
-func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
-	if len(b.nodes) == 0 {
-		return false
-	}
-	// Precompute inverse direction for the slab test, replacing zero
-	// components with a huge finite value so 0*inf NaNs can't poison
-	// the min/max comparisons.
+// rayInvDir returns the component-wise inverse of d for the BVH slab
+// test, replacing near-zero components with a huge finite value so
+// 0*inf NaNs can't poison the min/max comparisons.
+func rayInvDir(d [3]float32) [3]float32 {
 	var inv [3]float32
 	for k := 0; k < 3; k++ {
 		dk := d[k]
@@ -259,9 +254,22 @@ func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
 		}
 		inv[k] = 1 / dk
 	}
+	return inv
+}
+
+// traverseRay walks the BVH for the ray from o with inverse direction
+// inv, calling visitLeaf with each leaf node's triangle indices whose
+// node AABB the ray crosses within [0, *maxT]. visitLeaf returns false
+// to stop traversal early (any-hit); a nearest-hit caller lowers *maxT
+// as it finds closer hits so farther nodes prune (*maxT is re-read per
+// node). Shared by anyHit and FirstHit. Read-only; safe for concurrent
+// use.
+func (b *RayBVH) traverseRay(o, inv [3]float32, maxT *float32, visitLeaf func(tris []int32) bool) {
+	if len(b.nodes) == 0 {
+		return
+	}
 	// Stack capacity covers the build's depth bound (bvhMaxFreeDepth +
 	// log2(n) forced-even levels) with margin.
-	model := b.model
 	var stack [96]int32
 	sp := 0
 	stack[sp] = 0
@@ -269,9 +277,9 @@ func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
 	for sp > 0 {
 		sp--
 		nd := &b.nodes[stack[sp]]
-		// Slab test against [0, +inf).
+		// Slab test against [0, *maxT].
 		tLo := float32(0)
-		tHi := float32(math.Inf(1))
+		tHi := *maxT
 		hit := true
 		for k := 0; k < 3; k++ {
 			t1 := (nd.min[k] - o[k]) * inv[k]
@@ -290,15 +298,8 @@ func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
 			continue
 		}
 		if nd.count > 0 {
-			for i := nd.start; i < nd.start+nd.count; i++ {
-				ti := b.tris[i]
-				if ti == skip {
-					continue
-				}
-				f := model.Faces[ti]
-				if rayTriHit(o, d, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]]) {
-					return true
-				}
+			if !visitLeaf(b.tris[nd.start : nd.start+nd.count]) {
+				return
 			}
 			continue
 		}
@@ -308,39 +309,36 @@ func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
 		stack[sp] = nd.start
 		sp++
 	}
-	return false
 }
 
-// rayTriHit is a two-sided Möller–Trumbore any-hit test for the ray
-// from o along d against triangle (v0, v1, v2), accepting hits at any
-// t > 0.
+// anyHit reports whether the ray from o along unit direction d hits
+// any face other than skip.
+func (b *RayBVH) anyHit(o, d [3]float32, skip int32) bool {
+	inv := rayInvDir(d)
+	maxT := float32(math.Inf(1)) // any-hit: no distance pruning
+	hit := false
+	b.traverseRay(o, inv, &maxT, func(tris []int32) bool {
+		for _, ti := range tris {
+			if ti == skip {
+				continue
+			}
+			f := b.model.Faces[ti]
+			if rayTriHit(o, d, b.model.Vertices[f[0]], b.model.Vertices[f[1]], b.model.Vertices[f[2]]) {
+				hit = true
+				return false
+			}
+		}
+		return true
+	})
+	return hit
+}
+
+// rayTriHit is the boolean form of rayTriHitT: a two-sided
+// Möller–Trumbore any-hit test for the ray from o along d against
+// triangle (v0, v1, v2), accepting hits at any t > 0.
 func rayTriHit(o, d, v0, v1, v2 [3]float32) bool {
-	e1 := [3]float32{v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]}
-	e2 := [3]float32{v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]}
-	px := d[1]*e2[2] - d[2]*e2[1]
-	py := d[2]*e2[0] - d[0]*e2[2]
-	pz := d[0]*e2[1] - d[1]*e2[0]
-	det := e1[0]*px + e1[1]*py + e1[2]*pz
-	if det > -1e-12 && det < 1e-12 {
-		return false
-	}
-	invDet := 1 / det
-	tx := o[0] - v0[0]
-	ty := o[1] - v0[1]
-	tz := o[2] - v0[2]
-	u := (tx*px + ty*py + tz*pz) * invDet
-	if u < 0 || u > 1 {
-		return false
-	}
-	qx := ty*e1[2] - tz*e1[1]
-	qy := tz*e1[0] - tx*e1[2]
-	qz := tx*e1[1] - ty*e1[0]
-	v := (d[0]*qx + d[1]*qy + d[2]*qz) * invDet
-	if v < 0 || u+v > 1 {
-		return false
-	}
-	t := (e2[0]*qx + e2[1]*qy + e2[2]*qz) * invDet
-	return t > 0
+	_, _, _, ok := rayTriHitT(o, d, v0, v1, v2)
+	return ok
 }
 
 // rayTriHitT is rayTriHit but returns the ray parameter t and the
@@ -387,69 +385,22 @@ func rayTriHitT(o, d, v0, v1, v2 [3]float32) (t, u, v float32, ok bool) {
 // first surface crossed wins regardless of facing. Read-only; safe for
 // concurrent use.
 func (b *RayBVH) FirstHit(o, d [3]float32, maxDist float32) (tri int32, t, u, v float32, ok bool) {
-	if len(b.nodes) == 0 {
-		return -1, 0, 0, 0, false
-	}
-	var inv [3]float32
-	for k := 0; k < 3; k++ {
-		dk := d[k]
-		if dk > -1e-30 && dk < 1e-30 {
-			if dk < 0 {
-				dk = -1e-30
-			} else {
-				dk = 1e-30
-			}
-		}
-		inv[k] = 1 / dk
-	}
-	model := b.model
+	inv := rayInvDir(d)
+	// bestT is the nearest-hit bound: traverseRay re-reads it per node to
+	// prune farther subtrees, and the visitor lowers it on each closer hit.
 	bestT := maxDist
 	tri = -1
-	var stack [96]int32
-	sp := 0
-	stack[sp] = 0
-	sp++
-	for sp > 0 {
-		sp--
-		nd := &b.nodes[stack[sp]]
-		// Slab test against [0, bestT]: skip nodes wholly beyond the
-		// current nearest hit.
-		tLo := float32(0)
-		tHi := bestT
-		hit := true
-		for k := 0; k < 3; k++ {
-			t1 := (nd.min[k] - o[k]) * inv[k]
-			t2 := (nd.max[k] - o[k]) * inv[k]
-			if t1 > t2 {
-				t1, t2 = t2, t1
-			}
-			tLo = Maxf(tLo, t1)
-			tHi = Minf(tHi, t2)
-			if tLo > tHi {
-				hit = false
-				break
+	b.traverseRay(o, inv, &bestT, func(tris []int32) bool {
+		for _, ti := range tris {
+			f := b.model.Faces[ti]
+			ht, hu, hv, hok := rayTriHitT(o, d, b.model.Vertices[f[0]], b.model.Vertices[f[1]], b.model.Vertices[f[2]])
+			if hok && ht < bestT {
+				bestT = ht
+				tri = ti
+				t, u, v = ht, hu, hv
 			}
 		}
-		if !hit {
-			continue
-		}
-		if nd.count > 0 {
-			for i := nd.start; i < nd.start+nd.count; i++ {
-				ti := b.tris[i]
-				f := model.Faces[ti]
-				ht, hu, hv, hok := rayTriHitT(o, d, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
-				if hok && ht < bestT {
-					bestT = ht
-					tri = ti
-					t, u, v = ht, hu, hv
-				}
-			}
-			continue
-		}
-		stack[sp] = stack[sp] + 1
-		sp++
-		stack[sp] = nd.start
-		sp++
-	}
+		return true
+	})
 	return tri, t, u, v, tri >= 0
 }

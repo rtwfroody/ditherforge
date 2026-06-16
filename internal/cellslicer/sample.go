@@ -142,9 +142,9 @@ func SampleSlab(
 	// expands outward, that inward hit is the true surface under the skin,
 	// so a thin perpendicular accent (a red module side-wall) can't bleed
 	// onto the cap it abuts. geomBuf is sized to geom; allocate when the
-	// caller didn't. When geomSI or colorBVH is nil the sampler falls back
-	// to legacy nearest-face for every cell.
-	if geomSI != nil && geomBuf == nil {
+	// caller didn't. When geom/geomSI or colorBVH is nil the sampler falls
+	// back to legacy nearest-face for every cell.
+	if geom != nil && geomSI != nil && geomBuf == nil {
 		geomBuf = voxel.NewSearchBuf(len(geom.Faces))
 	}
 	// Along-normal ray geometry. The sample point sits at the slab's

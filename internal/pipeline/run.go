@@ -1059,8 +1059,14 @@ func (r *pipelineRun) sliceSampleHalf(
 	// SampleSlab to read each cell's local outward normal that aims the
 	// inward color-sampling ray (see cellslicer.cellOrient /
 	// voxel.SampleAlongNormal). Immutable post-construction, shared by
-	// all workers.
-	geomSI := voxel.NewSpatialIndex(geom, cellSizeForSlab(0))
+	// all workers. Skipped when colorBVH is nil (degenerate 0-face color
+	// model): SampleAlongNormal would fall back to nearest-face for every
+	// cell, so the index and its per-cell normal queries would be pure
+	// waste.
+	var geomSI *voxel.SpatialIndex
+	if colorBVH != nil {
+		geomSI = voxel.NewSpatialIndex(geom, cellSizeForSlab(0))
+	}
 
 	// Per-slab phase: partition + sample. Each worker writes only its
 	// own slabs[i] / perSlabSamples[i] slots, so no locks are needed.
@@ -1077,7 +1083,12 @@ func (r *pipelineRun) sliceSampleHalf(
 			// (subdivided clone / wrap) from colorModel.
 			b.sticker = voxel.NewSearchBuf(len(stickerModel.Faces))
 		}
-		b.geom = voxel.NewSearchBuf(len(geom.Faces))
+		if geomSI != nil {
+			// Per-worker scratch for the per-cell geom-normal lookup that
+			// aims the along-normal color ray. Only needed when geomSI was
+			// built (colorBVH non-nil).
+			b.geom = voxel.NewSearchBuf(len(geom.Faces))
+		}
 		return b
 	}, func(i int, state any) {
 		bufs := state.(*sampleBufs)
