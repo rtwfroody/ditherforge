@@ -169,6 +169,22 @@ func CellColorHistogram(colors [][3]uint8, weights []float32) []WeightedLabSampl
 		s.Weight = b.weight
 		samples = append(samples, s)
 	}
+	// Map iteration order is randomized, so sort into a stable order. The
+	// downstream subset scorers sum a float term per sample, and float
+	// addition is non-associative, so an unstable sample order makes the
+	// scores — and thus the selected palette — vary run to run (the
+	// cube_dither flake). Each sample is a distinct quantized colour, so
+	// its Lab triple is a total order.
+	sort.Slice(samples, func(i, j int) bool {
+		a, b := samples[i].Lab, samples[j].Lab
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		if a[1] != b[1] {
+			return a[1] < b[1]
+		}
+		return a[2] < b[2]
+	})
 	return samples
 }
 
@@ -256,7 +272,12 @@ func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
 	}
 	for _, idxs := range bins {
 		sort.Slice(idxs, func(a, b int) bool {
-			return samples[idxs[a]].Count > samples[idxs[b]].Count
+			if samples[idxs[a]].Count != samples[idxs[b]].Count {
+				return samples[idxs[a]].Count > samples[idxs[b]].Count
+			}
+			// samples is in stable Lab order, so the smaller index is the
+			// deterministic tie-break (sort.Slice is not stable).
+			return idxs[a] < idxs[b]
 		})
 	}
 
@@ -286,7 +307,20 @@ func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
 		totalWeight += w
 	}
 	sort.Slice(binList, func(i, j int) bool {
-		return binList[i].weight > binList[j].weight
+		if binList[i].weight != binList[j].weight {
+			return binList[i].weight > binList[j].weight
+		}
+		// Equal-weight bins must order deterministically (sort.Slice is
+		// not stable and binList was built from random map order); the
+		// binKey is a total order.
+		ki, kj := binList[i].key, binList[j].key
+		if ki[0] != kj[0] {
+			return ki[0] < kj[0]
+		}
+		if ki[1] != kj[1] {
+			return ki[1] < kj[1]
+		}
+		return ki[2] < kj[2]
 	})
 
 	// Allocate slots: 1 guaranteed per bin + proportional share of remainder.
@@ -308,7 +342,19 @@ func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
 	// If we ended up with more than maxN due to rounding, trim.
 	if len(result) > maxN {
 		sort.Slice(result, func(i, j int) bool {
-			return result[i].Count > result[j].Count
+			if result[i].Count != result[j].Count {
+				return result[i].Count > result[j].Count
+			}
+			// Deterministic tie-break by Lab so the trim keeps a stable
+			// subset (sort.Slice is not stable).
+			a, b := result[i].Lab, result[j].Lab
+			if a[0] != b[0] {
+				return a[0] < b[0]
+			}
+			if a[1] != b[1] {
+				return a[1] < b[1]
+			}
+			return a[2] < b[2]
 		})
 		result = result[:maxN]
 	}
@@ -598,6 +644,22 @@ func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]floa
 }
 
 // exhaustiveSearch enumerates all C(inv, n) subsets to find the one that
+// subsetLess reports whether subset a sorts before b lexicographically.
+// Used as a deterministic tie-break when two palette subsets score
+// equally, so the parallel search result doesn't depend on goroutine
+// scheduling. b == nil (no candidate yet) sorts after any real subset.
+func subsetLess(a, b []int) bool {
+	if b == nil {
+		return true
+	}
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
 // minimizes the given scoring function. Uses parallel workers.
 func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, progress *atomic.Int64) ([]int, error) {
 	if n < 1 {
@@ -627,7 +689,12 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 				}
 				progress.Add(1)
 				s := score(subset, invLab, lockedLab, samples)
-				if s < localBest {
+				// On an exact score tie, keep the lexicographically smaller
+				// subset so the result is independent of which worker
+				// happened to evaluate it (otherwise equal-scoring palettes
+				// — common for near-achromatic inputs — are picked by
+				// goroutine scheduling, varying run to run).
+				if s < localBest || (s == localBest && subsetLess(subset, localSubset)) {
 					localBest = s
 					localSubset = make([]int, len(subset))
 					copy(localSubset, subset)
@@ -672,7 +739,10 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 	bestScore := math.MaxFloat64
 	var bestSubset []int
 	for r := range results {
-		if r.score < bestScore {
+		if r.subset == nil {
+			continue
+		}
+		if r.score < bestScore || (r.score == bestScore && subsetLess(r.subset, bestSubset)) {
 			bestScore = r.score
 			bestSubset = r.subset
 		}
@@ -771,4 +841,3 @@ func combinationsCount(n, k int) int {
 	}
 	return result
 }
-
