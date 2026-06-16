@@ -151,7 +151,7 @@ type SplitSettings struct {
 	Enabled          bool
 	Axis             int     // 0=X, 1=Y, 2=Z
 	Offset           float64 // model-space, along Axis
-	ConnectorStyle   string  // "none", "pegs", "dowels"
+	ConnectorStyle   string  // "none", "pegs", "pegs-high", "dowels"
 	ConnectorCount   int     // 0 = auto, 1..3 explicit
 	ConnectorDiamMM  float64
 	ConnectorDepthMM float64

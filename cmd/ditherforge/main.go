@@ -70,7 +70,7 @@ type Args struct {
 	Split                           bool     `arg:"--split" help:"Cut the model into two halves laid out side by side on the bed (requires --alpha-wrap)"`
 	SplitAxis                       string   `arg:"--split-axis" default:"z" help:"Split cut axis: x, y, or z"`
 	SplitOffset                     float64  `arg:"--split-offset" help:"Split cut position along the axis in mm (model coords, post --size, post normalize). X/Y are centered on 0; Z rests on 0 so use ~half the height."`
-	SplitConnector                  string   `arg:"--split-connector" default:"none" help:"Split connector style: none, pegs, or dowels"`
+	SplitConnector                  string   `arg:"--split-connector" default:"none" help:"Split connector style: none, pegs (male on low-coordinate half), pegs-high (male on high-coordinate half), or dowels"`
 }
 
 // parseSplitAxis maps an x/y/z axis name to the pipeline's 0/1/2 index.
