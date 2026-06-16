@@ -16,7 +16,8 @@ import (
 // equal to +plane.Normal and half 1's cap with outward normal equal
 // to -plane.Normal. Pegs (Style==Pegs) protrude from half 0 along
 // +plane.Normal and matching pockets carve into half 1 from the
-// -plane.Normal side. Dowels punch matching pockets in both halves.
+// -plane.Normal side; PegsHigh swaps the two (peg on half 1, pocket on
+// half 0). Dowels punch matching pockets in both halves.
 func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings ConnectorSettings) [2]*loader.LoadedModel {
 	if settings.Style == NoConnectors {
 		return halves
@@ -97,10 +98,19 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	}
 	var ops []pendingOp
 	switch settings.Style {
-	case Pegs:
+	case Pegs, PegsHigh:
+		// Pegs: male on half 0 (low side). PegsHigh: male on half 1
+		// (high side). The cylinder is symmetric about the cut plane, so
+		// swapping which half is unioned vs differenced just flips which
+		// side carries the peg.
+		maleHalf := 0
+		if settings.Style == PegsHigh {
+			maleHalf = 1
+		}
+		femaleHalf := 1 - maleHalf
 		for i := range centers3D {
-			ops = append(ops, pendingOp{i, 0, maleR, opUnion})
-			ops = append(ops, pendingOp{i, 1, femaleR, opDifference})
+			ops = append(ops, pendingOp{i, maleHalf, maleR, opUnion})
+			ops = append(ops, pendingOp{i, femaleHalf, femaleR, opDifference})
 		}
 	case Dowels:
 		for i := range centers3D {
@@ -156,7 +166,7 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 
 func connectorStyleName(s ConnectorStyle) string {
 	switch s {
-	case Pegs:
+	case Pegs, PegsHigh:
 		return "peg"
 	case Dowels:
 		return "dowel"

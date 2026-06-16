@@ -80,6 +80,47 @@ func TestCut_PegsAddsAndSubtractsVolume(t *testing.T) {
 	}
 }
 
+// TestCut_PegsHighSwapsSides — PegsHigh is Pegs with the male/female
+// sides flipped: the peg lands on half 1 (volume up) and the pocket on
+// half 0 (volume down), the mirror image of TestCut_PegsAddsAndSubtractsVolume.
+func TestCut_PegsHighSwapsSides(t *testing.T) {
+	cube := makeCube()
+	flatRes, err := Cut(cube, AxisPlane(2, 25), ConnectorSettings{})
+	if err != nil {
+		t.Fatalf("flat Cut: %v", err)
+	}
+	flatV0 := volume(flatRes.Halves[0])
+	flatV1 := volume(flatRes.Halves[1])
+
+	settings := ConnectorSettings{
+		Style:       PegsHigh,
+		Count:       1,
+		DiamMM:      4,
+		DepthMM:     5,
+		ClearanceMM: 0.15,
+	}
+	res, err := Cut(cube, AxisPlane(2, 25), settings)
+	if err != nil {
+		t.Fatalf("PegsHigh Cut: %v", err)
+	}
+	v0 := volume(res.Halves[0])
+	v1 := volume(res.Halves[1])
+
+	// Mirror of the Pegs case: half 1 gains the peg cylinder, half 0
+	// loses the female pocket cylinder.
+	expectedAdded := math.Pi * 2 * 2 * 5
+	expectedRemoved := math.Pi * 2.15 * 2.15 * 5.15
+	delta1 := v1 - flatV1
+	delta0 := flatV0 - v0
+	tol := 5.0
+	if math.Abs(delta1-expectedAdded) > tol {
+		t.Errorf("half 1 volume added = %g, want ≈ %g (peg cylinder upper half)", delta1, expectedAdded)
+	}
+	if math.Abs(delta0-expectedRemoved) > tol {
+		t.Errorf("half 0 volume removed = %g, want ≈ %g (pocket cylinder lower half)", delta0, expectedRemoved)
+	}
+}
+
 // TestCut_DowelsRemovesFromBoth — Dowels punches matching pockets in
 // both halves; both halves' volumes should decrease.
 func TestCut_DowelsRemovesFromBoth(t *testing.T) {

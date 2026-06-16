@@ -30,10 +30,14 @@ type ConnectorStyle int
 const (
 	// NoConnectors leaves both caps as flat planar surfaces.
 	NoConnectors ConnectorStyle = iota
-	// Pegs places a solid cylindrical peg on half 0's cap and a
-	// matching cylindrical pocket on half 1's cap. Female radius =
-	// peg radius + clearance.
+	// Pegs places a solid cylindrical peg on half 0's cap (the
+	// low-coordinate side of the cut) and a matching cylindrical pocket
+	// on half 1's cap. Female radius = peg radius + clearance.
 	Pegs
+	// PegsHigh is Pegs with the male/female sides swapped: the peg sits
+	// on half 1's cap (the high-coordinate side) and the pocket on
+	// half 0's cap.
+	PegsHigh
 	// Dowels punches matching cylindrical holes in both caps. Both
 	// holes are oversized by clearance. The user prints separate
 	// dowels (or uses hardware-store steel pins).
@@ -114,7 +118,7 @@ type CutResult struct {
 // multi-component / nested-cavity cases — robustly via exact
 // predicates.
 //
-// When connectors.Style is Pegs or Dowels, applyConnectors recovers
+// When connectors.Style is Pegs, PegsHigh, or Dowels, applyConnectors recovers
 // the cap polygon, places connector centers, builds peg/pocket
 // cylinders, and applies CGAL boolean operations to bake them into
 // the halves. Per-connector failures isolate: any one failure logs a

@@ -70,6 +70,28 @@
         ? { a: 'Front half (−Y)', b: 'Back half (+Y)' }
         : { a: 'Bottom half (−Z)', b: 'Top half (+Z)' }
   );
+
+  // Short side names for the two peg options, keyed off the cut axis.
+  // 'pegs' puts the male peg on the low-coordinate half, 'pegs-high' on
+  // the high-coordinate half.
+  const pegSides = $derived(
+    axis === 0
+      ? { low: 'left (−X)', high: 'right (+X)' }
+      : axis === 1
+        ? { low: 'front (−Y)', high: 'back (+Y)' }
+        : { low: 'bottom (−Z)', high: 'top (+Z)' }
+  );
+
+  // Connector options with axis-aware labels for the two peg variants.
+  const connectorOptions = $derived(
+    SPLIT_CONNECTOR_OPTIONS.map((opt) =>
+      opt.value === 'pegs'
+        ? { value: opt.value, label: `Pegs on ${pegSides.low} half` }
+        : opt.value === 'pegs-high'
+          ? { value: opt.value, label: `Pegs on ${pegSides.high} half` }
+          : { value: opt.value, label: opt.label }
+    )
+  );
 </script>
 
 <div class="space-y-3">
@@ -136,17 +158,19 @@
           Connector style
           <HelpTip>
             <strong>Pegs</strong>: solid peg on one half, matching pocket
-            on the other. <strong>Dowel/magnet holes</strong>: matching
-            pockets on both halves — print or buy dowel pins, or glue
-            in magnets for a magnetic catch.
-            <strong>None</strong>: flat cut, glue-only assembly.
+            on the other. The two peg options choose which half carries
+            the male pegs (the label names the side for the current cut
+            axis). <strong>Dowel/magnet holes</strong>: matching pockets
+            on both halves — print or buy dowel pins, or glue in magnets
+            for a magnetic catch. <strong>None</strong>: flat cut,
+            glue-only assembly.
           </HelpTip>
         </span>
         <select
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={connectorStyle}
         >
-          {#each SPLIT_CONNECTOR_OPTIONS as opt}
+          {#each connectorOptions as opt}
             <option value={opt.value}>{opt.label}</option>
           {/each}
         </select>

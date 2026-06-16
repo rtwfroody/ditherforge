@@ -27,10 +27,14 @@ export const SPLIT_ORIENTATION_OPTIONS = [
 ] as const;
 export type SplitOrientation = typeof SPLIT_ORIENTATION_OPTIONS[number]['value'];
 
+// The two 'pegs*' labels here are placeholders; SplitControls.svelte
+// rewrites them per cut axis (e.g. "Pegs on left half" / "Pegs on right
+// half") since which side a peg lands on is a world-axis direction.
 export const SPLIT_CONNECTOR_OPTIONS = [
-  { value: 'none',   label: 'None'                },
-  { value: 'pegs',   label: 'Pegs'                },
-  { value: 'dowels', label: 'Dowel/magnet holes' },
+  { value: 'none',      label: 'None'                },
+  { value: 'pegs',      label: 'Pegs on low side'    },
+  { value: 'pegs-high', label: 'Pegs on high side'   },
+  { value: 'dowels',    label: 'Dowel/magnet holes'  },
 ] as const;
 export type SplitConnectorStyle = typeof SPLIT_CONNECTOR_OPTIONS[number]['value'];
 

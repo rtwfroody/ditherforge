@@ -434,6 +434,8 @@ func parseConnectorStyle(s string) split.ConnectorStyle {
 	switch s {
 	case "pegs":
 		return split.Pegs
+	case "pegs-high":
+		return split.PegsHigh
 	case "dowels":
 		return split.Dowels
 	default:
