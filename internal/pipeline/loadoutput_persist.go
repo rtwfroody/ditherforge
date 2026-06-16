@@ -21,7 +21,6 @@ import (
 type loadOutputOnDisk struct {
 	ColorModel    *loader.LoadedModel
 	ModelDistinct *loader.LoadedModel // nil = aliases ColorModel
-	InputMesh     *MeshData
 	PreviewScale  float32
 	ExtentMM      float32
 	// The applied-base-color triple (appliedBaseColor,
@@ -38,7 +37,6 @@ type loadOutputOnDisk struct {
 func (lo *loadOutput) GobEncode() ([]byte, error) {
 	od := loadOutputOnDisk{
 		ColorModel:   lo.ColorModel,
-		InputMesh:    lo.InputMesh,
 		PreviewScale: lo.PreviewScale,
 		ExtentMM:     lo.ExtentMM,
 	}
@@ -58,7 +56,6 @@ func (lo *loadOutput) GobDecode(data []byte) error {
 		return err
 	}
 	lo.ColorModel = od.ColorModel
-	lo.InputMesh = od.InputMesh
 	lo.PreviewScale = od.PreviewScale
 	lo.ExtentMM = od.ExtentMM
 	if od.ModelDistinct != nil {

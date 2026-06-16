@@ -374,6 +374,24 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		onWarning: onWarning,
 	}
 
+	// Early bare input preview: as soon as the model is loaded and
+	// scaled (StagePreload), push it to the GUI — before the slow
+	// decimate/alpha-wrap "Preparing geometry" stage. Stickers and any
+	// MaterialX base-color bake arrive in the fuller re-emit below, once
+	// Load resolves ("show bare model first, update later").
+	if onInputMesh != nil {
+		pl, err := r.Preload()
+		if err != nil {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		mesh := ScalePreviewMesh(pl.InputMesh, pl.PreviewScale)
+		bboxMin, bboxMax := modelBBox(pl.Model)
+		onInputMesh(mesh, pl.PreviewScale, pl.ExtentMM, bboxMin, bboxMax)
+	}
+
 	// Load — needed for the input preview, extent check, and the
 	// downstream output texture source. applyBaseColor runs inside.
 	lo, err := r.Load()
@@ -406,40 +424,51 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 
-	// Send input mesh (with sticker overlay) to the preview.
-	if onInputMesh != nil && lo.ColorModel != nil {
-		previewModel := lo.ColorModel
-		var bakedDecals []*voxel.StickerDecal
-		if so != nil && so.Model != nil && !so.FromAlphaWrap {
-			previewModel = so.Model
-			bakedDecals = so.Decals
-		}
-		mesh := buildInputMeshData(previewModel)
-		mesh.BaseColorAtlas = lo.BaseColorAtlas
-		if len(bakedDecals) > 0 {
-			mesh = attachStickerOverlay(mesh, bakedDecals)
-		}
-		mesh = ScalePreviewMesh(mesh, lo.PreviewScale)
-		// Compute the original-mesh-coord bbox (in mm, post-scale,
-		// post-normalizeZ). Used by the Split UI to size the offset
-		// slider per axis.
-		var bboxMin, bboxMax [3]float32
-		if len(lo.ColorModel.Vertices) > 0 {
-			bboxMin = lo.ColorModel.Vertices[0]
-			bboxMax = lo.ColorModel.Vertices[0]
-			for _, v := range lo.ColorModel.Vertices[1:] {
-				for i := 0; i < 3; i++ {
-					if v[i] < bboxMin[i] {
-						bboxMin[i] = v[i]
-					}
-					if v[i] > bboxMax[i] {
-						bboxMax[i] = v[i]
-					}
+	if lo.ColorModel != nil {
+		// Re-emit the input mesh with stickers / base-color baked in —
+		// but ONLY when that actually changes how the model looks versus
+		// the bare preview already pushed above. The bare emit ships the
+		// (potentially huge) input mesh once; re-sending an identical
+		// mesh just to "confirm it" would double the upload for nothing.
+		//
+		// The full mesh differs from the bare one exactly when in-mesh
+		// decals are baked (non-alpha-wrap stickers) or a base-color
+		// override (solid or MaterialX) recolors FaceBaseColor / adds an
+		// atlas. Alpha-wrap stickers ride a SEPARATE overlay mesh
+		// (onStickerOverlay below), so they don't change the input mesh
+		// itself. Keying on opts.* (not on a per-run "has stickers" flag)
+		// is what makes DISABLING work: when the user turns stickers or
+		// the override off, the condition goes false, we skip the
+		// re-emit, and the always-on bare emit above already shows the
+		// correct, un-stickered model.
+		if onInputMesh != nil {
+			previewModel := lo.ColorModel
+			var bakedDecals []*voxel.StickerDecal
+			if so != nil && so.Model != nil && !so.FromAlphaWrap {
+				previewModel = so.Model
+				bakedDecals = so.Decals
+			}
+			overrideActive := opts.BaseColor != "" || opts.BaseColorMaterialX != ""
+			if len(bakedDecals) > 0 || overrideActive {
+				mesh := buildInputMeshData(previewModel)
+				mesh.BaseColorAtlas = lo.BaseColorAtlas
+				if len(bakedDecals) > 0 {
+					mesh = attachStickerOverlay(mesh, bakedDecals)
 				}
+				mesh = ScalePreviewMesh(mesh, lo.PreviewScale)
+				// Original-mesh-coord bbox (mm, post-scale,
+				// post-normalizeZ) for the Split UI offset slider. The
+				// bare emit already sent this; resend so a skipped bare
+				// (e.g. nil callback at that point) can't leave it stale.
+				bboxMin, bboxMax := modelBBox(lo.ColorModel)
+				onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
 			}
 		}
-		onInputMesh(mesh, lo.PreviewScale, lo.ExtentMM, bboxMin, bboxMax)
 
+		// The overlay and wrapped-mesh callbacks always fire (even when
+		// the input re-emit is skipped): they own separate preview meshes
+		// and must run every time to CLEAR stale state when the user
+		// disables alpha-wrap stickers or the wrapped-view toggle.
 		if onAlphaWrappedMesh != nil {
 			var wrapped *MeshData
 			if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
@@ -831,9 +860,10 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 }
 
 // applyBaseColor resets lo.ColorModel.FaceBaseColor from the pristine parse
-// output and reapplies the active base-color override, then rebuilds
-// lo.InputMesh so the preview reflects the new colors. Idempotent — a no-op
-// when the applied state already matches opts.
+// output and reapplies the active base-color override (recoloring
+// FaceBaseColor and rebuilding lo.BaseColorAtlas), so the input-mesh re-emit
+// in Run reflects the new colors. Idempotent — a no-op when the applied state
+// already matches opts.
 //
 // Two override sources are supported, mutually exclusive at apply time:
 //   - opts.BaseColorMaterialX (with TileMM): per-face centroid sample of the
@@ -929,8 +959,6 @@ func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts
 	case opts.BaseColor != "":
 		applyBaseColorOverride(lo.ColorModel, opts.BaseColor)
 	}
-	lo.InputMesh = buildInputMeshData(lo.ColorModel)
-	lo.InputMesh.BaseColorAtlas = lo.BaseColorAtlas
 	lo.appliedBaseColor = opts.BaseColor
 	lo.appliedBaseColorMaterialX = opts.BaseColorMaterialX
 	lo.appliedBaseColorMaterialXTileMM = opts.BaseColorMaterialXTileMM
@@ -1028,6 +1056,27 @@ func modelExtents(model *loader.LoadedModel) [3]float32 {
 		}
 	}
 	return [3]float32{maxV[0] - minV[0], maxV[1] - minV[1], maxV[2] - minV[2]}
+}
+
+// modelBBox returns the axis-aligned bounding box of the model's
+// vertices. A vertex-less model yields zero corners. Used to size the
+// Split UI's per-axis offset slider.
+func modelBBox(model *loader.LoadedModel) (bboxMin, bboxMax [3]float32) {
+	if len(model.Vertices) == 0 {
+		return bboxMin, bboxMax
+	}
+	bboxMin, bboxMax = model.Vertices[0], model.Vertices[0]
+	for _, v := range model.Vertices[1:] {
+		for i := 0; i < 3; i++ {
+			if v[i] < bboxMin[i] {
+				bboxMin[i] = v[i]
+			}
+			if v[i] > bboxMax[i] {
+				bboxMax[i] = v[i]
+			}
+		}
+	}
+	return bboxMin, bboxMax
 }
 
 func modelMaxExtent(model *loader.LoadedModel) float32 {

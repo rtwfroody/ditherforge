@@ -149,6 +149,10 @@ func (r *pipelineRun) Parse() (*loader.LoadedModel, error) {
 	return resolveTyped[loader.LoadedModel](r, StageParse)
 }
 
+func (r *pipelineRun) Preload() (*preloadOutput, error) {
+	return resolveTyped[preloadOutput](r, StagePreload)
+}
+
 func (r *pipelineRun) Load() (*loadOutput, error) {
 	return resolveTyped[loadOutput](r, StageLoad)
 }
@@ -235,17 +239,17 @@ func afterLoad(r *pipelineRun, out any) error {
 	return nil
 }
 
-// runLoad is StageLoad's body (see stageDefs).
-func (r *pipelineRun) runLoad() (any, error) {
+// runPreload is StagePreload's body (see stageDefs): the cheap half of
+// loading. It clones, unit-scales, and Z-normalizes the parsed model and
+// builds the input preview mesh — everything the GUI needs to show the
+// input model immediately, before StageLoad's slow decimate/alpha-wrap
+// pass ("Preparing geometry").
+func (r *pipelineRun) runPreload() (any, error) {
 	raw, err := r.Parse()
 	if err != nil {
 		return nil, err
 	}
-	label := stageNames[StageLoad]
-	if r.opts.AlphaWrap {
-		label += " (including alpha-wrap)"
-	}
-	stage := progress.BeginStage(r.tracker, label, false, 0)
+	stage := progress.BeginStage(r.tracker, stageNames[StagePreload], false, 0)
 	defer stage.Done()
 
 	inputExt := strings.ToLower(filepath.Ext(r.opts.Input))
@@ -268,10 +272,37 @@ func (r *pipelineRun) runLoad() (any, error) {
 	ex := modelExtents(model)
 	plog.Printf("  Extent: %.1f x %.1f x %.1f mm", ex[0], ex[1], ex[2])
 
+	return &preloadOutput{
+		Model:        model,
+		InputMesh:    buildInputMeshData(model),
+		PreviewScale: unitScale / totalScale,
+		ExtentMM:     modelMaxExtent(model) * unitScale / totalScale,
+	}, nil
+}
+
+// runLoad is StageLoad's body (see stageDefs): the heavy half of
+// loading — decimation and optional alpha-wrap — applied on top of the
+// already-scaled, Z-normalized mesh from StagePreload.
+func (r *pipelineRun) runLoad() (any, error) {
+	pl, err := r.Preload()
+	if err != nil {
+		return nil, err
+	}
+	label := stageNames[StageLoad]
+	if r.opts.AlphaWrap {
+		label += " (including alpha-wrap)"
+	}
+	stage := progress.BeginStage(r.tracker, label, false, 0)
+	defer stage.Done()
+
+	// Own editable copy: afterLoad/applyBaseColor bakes overrides into
+	// ColorModel.FaceBaseColor in place, and StagePreload's cached model
+	// must stay pristine (it feeds the immediate bare input preview).
+	model := loader.CloneForEdit(pl.Model)
+
 	if err := r.checkCancel(); err != nil {
 		return nil, err
 	}
-	nativeExtentMM := modelMaxExtent(model) * unitScale / totalScale
 
 	// Load-time decimation: prune geometry to voxel resolution on every
 	// load, alpha-wrap or not. errorBudget bounds geometric drift to ~½ a
@@ -350,9 +381,8 @@ func (r *pipelineRun) runLoad() (any, error) {
 	return &loadOutput{
 		Model:        geomModel,
 		ColorModel:   model,
-		InputMesh:    buildInputMeshData(model),
-		PreviewScale: unitScale / totalScale,
-		ExtentMM:     nativeExtentMM,
+		PreviewScale: pl.PreviewScale,
+		ExtentMM:     pl.ExtentMM,
 		// Freshly built: FaceBaseColor is pristine and the (empty)
 		// appliedBaseColor* markers describe it accurately. A
 		// disk-decoded loadOutput leaves this false; see the field doc.

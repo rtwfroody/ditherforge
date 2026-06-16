@@ -33,11 +33,17 @@ const (
 	// only depends on (Input, ObjectIndex). Replaced what used
 	// to be a separate "raw cache" living outside the stages array.
 	StageParse StageID = iota
-	// StageLoad transforms the parsed model into a usable loadOutput:
-	// clones, scales, normalizes Z, optionally alpha-wraps, builds the
-	// preview MeshData. Alpha-wrap (the slow part) is folded into this
-	// stage's body, not a separate stage — so the on-disk cache for
-	// StageLoad subsumes what used to be a separate alpha-wrap cache.
+	// StagePreload is the cheap half of loading: it clones, unit-scales,
+	// Z-normalizes the parsed model and builds the input preview
+	// MeshData. Split out from StageLoad so the GUI can show the input
+	// model the instant it's loaded — before the slow decimate/alpha-wrap
+	// work in StageLoad ("Preparing geometry").
+	StagePreload
+	// StageLoad is the heavy half of loading: it decimates the
+	// already-scaled StagePreload mesh and, when enabled, alpha-wraps it.
+	// Alpha-wrap (the slow part) is folded into this stage's body, not a
+	// separate stage — so the on-disk cache for StageLoad subsumes what
+	// used to be a separate alpha-wrap cache.
 	StageLoad
 	// StageSplit cuts the watertight loaded mesh in two and lays the
 	// halves out side-by-side on the bed (see docs/SPLIT.md). The
@@ -74,6 +80,10 @@ func stageDescription(stage StageID, opts Options) string {
 
 func describeParse(opts Options) string {
 	return fmt.Sprintf("Parse: %s", filepath.Base(opts.Input))
+}
+
+func describePreload(opts Options) string {
+	return fmt.Sprintf("Preload: %s", filepath.Base(opts.Input))
 }
 
 func describeLoad(opts Options) string {
@@ -396,6 +406,20 @@ func sizeKeyPart(s *float32) string {
 
 // Per-stage output types.
 
+// preloadOutput is StagePreload's result: the scaled, Z-normalized,
+// pristine mesh plus the input preview MeshData. It carries everything
+// the GUI needs to render the input model immediately, before StageLoad
+// runs decimation and alpha-wrap. Plain gob round-trips it (the single
+// Model pointer has no aliasing to preserve, unlike loadOutput).
+type preloadOutput struct {
+	// Model is the scaled+normalized pristine mesh (no decimate/wrap).
+	// StageLoad clones this into its editable ColorModel.
+	Model        *loader.LoadedModel
+	InputMesh    *MeshData
+	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
+	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
+}
+
 type loadOutput struct {
 	// Model is the geometry model used for voxelization, decimation, and
 	// clip-shell construction. When alpha-wrap is enabled, Model is the
@@ -405,7 +429,6 @@ type loadOutput struct {
 	// materials. Used for color sampling and sticker placement. When
 	// alpha-wrap is disabled, Model == ColorModel.
 	ColorModel   *loader.LoadedModel
-	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
 	// BaseColorAtlas is the packed atlas of per-triangle MaterialX
@@ -587,8 +610,8 @@ type mergeOutput struct {
 // Each struct contains exactly the Options fields that affect that stage.
 // stageFnv hashes the struct using binary.Write, so the key is type-safe and
 // free of format-string ambiguities. The cumulative cascade is built by
-// stageKey, which concatenates stageFnv values from StageLoad through the
-// requested stage.
+// stageKey, which concatenates stageFnv values from StageParse (StageID 0)
+// through the requested stage.
 
 // parseSettings is what affects the parsed-from-file *LoadedModel.
 // File-content invariants live elsewhere (the stageKey cascade adds the
@@ -605,14 +628,23 @@ type parseSettings struct {
 	ObjectIndex int
 }
 
-// loadSettings is what affects the post-parse loadOutput: scale,
-// normalize, alpha-wrap. The cumulative cascade key for StageLoad
-// includes parseSettings via stageFnv(StageParse), so changing Input
-// also invalidates StageLoad.
+// preloadSettings is what affects StagePreload's scaled+normalized
+// mesh: the scale factor and the optional target size. The cumulative
+// cascade folds these into StageLoad's key too (stageKey concatenates
+// stageFnv from StageParse through the requested stage), so a scale
+// change still invalidates Load and everything downstream.
+type preloadSettings struct {
+	Scale   float32
+	HasSize bool
+	Size    float32
+}
+
+// loadSettings is what affects the heavy post-preload loadOutput:
+// decimation and alpha-wrap. Scale/Size live in preloadSettings now
+// (and cascade in via stageFnv(StagePreload)); the cumulative cascade
+// key for StageLoad includes parseSettings via stageFnv(StageParse), so
+// changing Input also invalidates StageLoad.
 type loadSettings struct {
-	Scale           float32
-	HasSize         bool
-	Size            float32
 	AlphaWrap       bool
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
@@ -679,15 +711,8 @@ func hashParseSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeInt(h, v.ObjectIndex)
 }
 
-func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
-	v := loadSettings{
-		Scale:           opts.Scale,
-		AlphaWrap:       opts.AlphaWrap,
-		AlphaWrapAlpha:  opts.AlphaWrapAlpha,
-		AlphaWrapOffset: opts.AlphaWrapOffset,
-		NozzleDiameter:  opts.NozzleDiameter,
-		NoSimplify:      opts.NoSimplify,
-	}
+func hashPreloadSettings(c *StageCache, h hash.Hash64, opts Options) {
+	v := preloadSettings{Scale: opts.Scale}
 	if opts.Size != nil {
 		v.HasSize = true
 		v.Size = *opts.Size
@@ -695,6 +720,16 @@ func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeFloat32(h, v.Scale)
 	writeBool(h, v.HasSize)
 	writeFloat32(h, v.Size)
+}
+
+func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
+	v := loadSettings{
+		AlphaWrap:       opts.AlphaWrap,
+		AlphaWrapAlpha:  opts.AlphaWrapAlpha,
+		AlphaWrapOffset: opts.AlphaWrapOffset,
+		NozzleDiameter:  opts.NozzleDiameter,
+		NoSimplify:      opts.NoSimplify,
+	}
 	writeBool(h, v.AlphaWrap)
 	writeFloat32(h, v.AlphaWrapAlpha)
 	writeFloat32(h, v.AlphaWrapOffset)

@@ -58,7 +58,6 @@ func TestApplyBaseColorClearsRemnantAfterDiskHit(t *testing.T) {
 	c.set(StageLoad, opts, &loadOutput{
 		Model:                     baked,
 		ColorModel:                baked,
-		InputMesh:                 buildInputMeshData(baked),
 		appliedBaseColorMaterialX: "/some/texture.mtlx", // dropped by gob (unexported)
 		markersValid:              true,                 // dropped by gob (unexported)
 	})
