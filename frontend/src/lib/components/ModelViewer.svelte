@@ -73,6 +73,7 @@
     loading = '',
     stages = [],
     stageTick = 0,
+    progressActive = true,
     cutPlane = null,
     pipelineError = '',
     viewMode = 'solid',
@@ -108,6 +109,10 @@
     loading?: string;
     stages?: StageInfo[];
     stageTick?: number;
+    // When false (run finished), the progress overlay is hidden so the
+    // completed output mesh shows unobstructed. Errors still surface via
+    // pipelineError regardless.
+    progressActive?: boolean;
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
     viewMode?: 'solid' | 'hidden-line';
@@ -1428,49 +1433,60 @@
       <div class="flex items-center justify-center h-full text-sm text-red-400 p-4 text-center">
         {errorMessage}
       </div>
-    {:else if stages.length > 0 || pipelineError}
-      <div class="flex flex-col justify-end gap-2 p-4 text-sm overflow-hidden h-full">
-        {#each stages as stage}
-          <div class="flex items-center gap-2">
-            {#if stage.status === 'done'}
-              <CheckIcon class="w-4 h-4 text-green-500 shrink-0" />
-            {:else if isStalled(stage, stageTick)}
-              <LoaderCircleIcon class="w-4 h-4 animate-spin text-amber-500 shrink-0" />
-            {:else}
-              <LoaderCircleIcon class="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
-            {/if}
-            <span class={stage.status === 'done' ? 'text-muted-foreground' : ''}>
-              {stage.name}{#if isStalled(stage, stageTick)}<span class="text-amber-500 text-xs ml-1">(not responding)</span>{/if}
-            </span>
-            <span class="ml-auto text-xs text-muted-foreground tabular-nums">
-              {#if stage.status === 'done' && stage.elapsed >= 0.1}
-                {stage.elapsed.toFixed(1)}s
-              {:else if stage.status === 'running'}
-                {elapsedSince(stage.startedAt, stageTick)}s
-              {/if}
-            </span>
-          </div>
-          {#if stage.status === 'running' && stage.hasProgress && stage.total > 0}
-            <div class="ml-6 h-2 bg-muted rounded-full overflow-hidden">
-              <div class="h-full bg-primary rounded-full transition-all" style="width: {Math.round(100 * stage.current / stage.total)}%"></div>
-            </div>
-          {/if}
-        {/each}
-        {#if pipelineError}
-          <div class="flex items-start gap-2 text-red-500">
-            <span class="w-4 h-4 shrink-0 text-center font-bold leading-4">!</span>
-            <span class="break-words">{pipelineError}</span>
-          </div>
-        {/if}
-      </div>
     {:else if loading}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground gap-2">
         <LoaderCircleIcon class="w-4 h-4 animate-spin" />
         Loading {loading}
       </div>
-    {:else}
+    {:else if !((progressActive && stages.length > 0) || pipelineError)}
       <div class="flex items-center justify-center h-full text-sm text-muted-foreground">
         No model loaded
+      </div>
+    {/if}
+
+    <!-- Pipeline progress overlay. Floats above the output mesh (or the
+         empty panel) so stage status stays visible while the grey preview
+         and, later, the coloured output render underneath. Bottom-left,
+         with a translucent scrim for legibility over the model;
+         pointer-events-none keeps the model orbitable through it. Hidden
+         once the run finishes (progressActive=false) so the completed
+         output shows unobstructed; errors keep it up. -->
+    {#if (progressActive && stages.length > 0) || pipelineError}
+      <div class="absolute inset-0 z-10 flex flex-col justify-end p-4 overflow-hidden pointer-events-none">
+        <div class="flex flex-col gap-2 text-sm rounded-md bg-background/80 backdrop-blur-sm p-3 w-fit max-w-full">
+          {#each stages as stage}
+            <div class="flex items-center gap-2">
+              {#if stage.status === 'done'}
+                <CheckIcon class="w-4 h-4 text-green-500 shrink-0" />
+              {:else if isStalled(stage, stageTick)}
+                <LoaderCircleIcon class="w-4 h-4 animate-spin text-amber-500 shrink-0" />
+              {:else}
+                <LoaderCircleIcon class="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
+              {/if}
+              <span class={stage.status === 'done' ? 'text-muted-foreground' : ''}>
+                {stage.name}{#if isStalled(stage, stageTick)}<span class="text-amber-500 text-xs ml-1">(not responding)</span>{/if}
+              </span>
+              <span class="ml-auto text-xs text-muted-foreground tabular-nums">
+                {#if stage.status === 'done' && stage.elapsed >= 0.1}
+                  {stage.elapsed.toFixed(1)}s
+                {:else if stage.status === 'running'}
+                  {elapsedSince(stage.startedAt, stageTick)}s
+                {/if}
+              </span>
+            </div>
+            {#if stage.status === 'running' && stage.hasProgress && stage.total > 0}
+              <div class="ml-6 h-2 bg-muted rounded-full overflow-hidden">
+                <div class="h-full bg-primary rounded-full transition-all" style="width: {Math.round(100 * stage.current / stage.total)}%"></div>
+              </div>
+            {/if}
+          {/each}
+          {#if pipelineError}
+            <div class="flex items-start gap-2 text-red-500">
+              <span class="w-4 h-4 shrink-0 text-center font-bold leading-4">!</span>
+              <span class="break-words">{pipelineError}</span>
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>

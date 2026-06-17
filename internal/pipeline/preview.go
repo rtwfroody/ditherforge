@@ -93,6 +93,44 @@ func buildWrappedMeshData(model *loader.LoadedModel) *MeshData {
 	})
 }
 
+// buildSplitPreviewMesh merges the two laid-out split halves into one
+// flat-grey MeshData for the Output Model viewer. The halves' vertices
+// are already in bed coordinates (split.Layout rewrites them in place),
+// so this just concatenates them with the second half's face indices
+// offset past the first half's vertices.
+func buildSplitPreviewMesh(halves [2]*loader.LoadedModel) *MeshData {
+	nVerts := 0
+	nFaces := 0
+	for _, h := range halves {
+		if h == nil {
+			continue
+		}
+		nVerts += len(h.Vertices)
+		nFaces += len(h.Faces)
+	}
+
+	vertices := make([]float32, 0, nVerts*3)
+	faces := make([]uint32, 0, nFaces*3)
+	faceColors := make([]uint16, 0, nFaces*3)
+
+	var vertOffset uint32
+	for _, h := range halves {
+		if h == nil {
+			continue
+		}
+		for _, v := range h.Vertices {
+			vertices = append(vertices, v[0], v[1], v[2])
+		}
+		for _, f := range h.Faces {
+			faces = append(faces, vertOffset+f[0], vertOffset+f[1], vertOffset+f[2])
+			faceColors = append(faceColors, defaultGray, defaultGray, defaultGray)
+		}
+		vertOffset += uint32(len(h.Vertices))
+	}
+
+	return &MeshData{Vertices: vertices, Faces: faces, FaceColors: faceColors}
+}
+
 // buildInputMeshData creates a MeshData from a loaded model, including texture
 // and UV data when available for proper texture-mapped rendering.
 func buildInputMeshData(model *loader.LoadedModel) *MeshData {

@@ -206,7 +206,16 @@ type Callbacks struct {
 	// alpha-wrap is off so the frontend can drop any stale wrapped
 	// mesh and force the toggle back to the input view.
 	OnAlphaWrappedMesh func(*MeshData, float32)
-	OnPalette          func([][3]uint8, []string)
+	// OnOutputPreviewMesh fires from inside the geometry stages
+	// (load-time decimation, alpha-wrap, split) with a flat-grey
+	// snapshot of the output geometry so the Output Model viewer shows
+	// the model taking shape before colours are computed. The mesh is
+	// already scaled to the GUI's preview-mm frame. It fires ONLY when a
+	// stage actually recomputes (cache miss); a warm-cache re-run (e.g.
+	// a colour-only change) skips these stages, leaving the previous
+	// output in place rather than flashing back to grey.
+	OnOutputPreviewMesh func(*MeshData, float32)
+	OnPalette           func([][3]uint8, []string)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -339,6 +348,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	var onInputMesh func(*MeshData, float32, float32, [3]float32, [3]float32)
 	var onStickerOverlay func(*MeshData, float32)
 	var onAlphaWrappedMesh func(*MeshData, float32)
+	var onOutputPreview func(*MeshData, float32)
 	var onPalette func([][3]uint8, []string)
 	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
@@ -346,6 +356,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		onInputMesh = cb.OnInputMesh
 		onStickerOverlay = cb.OnStickerOverlay
 		onAlphaWrappedMesh = cb.OnAlphaWrappedMesh
+		onOutputPreview = cb.OnOutputPreviewMesh
 		onPalette = cb.OnPalette
 		onWarning = cb.OnWarning
 		if cb.Progress != nil {
@@ -370,8 +381,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		ctx:       ctx,
 		cache:     cache,
 		opts:      opts,
-		tracker:   mon,
-		onWarning: onWarning,
+		tracker:         mon,
+		onWarning:       onWarning,
+		onOutputPreview: onOutputPreview,
 	}
 
 	// Early bare input preview: as soon as the model is loaded and

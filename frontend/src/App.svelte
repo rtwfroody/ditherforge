@@ -454,6 +454,12 @@
     }
   }
   let outputMeshUrl: string | undefined = $state(undefined);
+  // Flat-grey, colour-free snapshot of the output geometry emitted by
+  // the backend mid-pipeline (after decimation, alpha-wrap, split) so
+  // the Output Model viewer shows the model taking shape before the
+  // final coloured mesh is ready. The viewer prefers outputMeshUrl and
+  // falls back to this; cleared at run start alongside outputMeshUrl.
+  let outputPreviewMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
   // Pipeline error from a backend stage failure. Rendered as a final
   // red line below the stage list in the output viewer so the user can
@@ -569,9 +575,17 @@
       inputViewMode = 'input';
     }
   });
+  EventsOn('output-preview-mesh', (event: { gen: number; url: string }) => {
+    if (event.gen < latestGen) return;
+    // Grey in-progress geometry. Don't overwrite a final coloured mesh
+    // if one is somehow already showing for this gen.
+    outputPreviewMeshUrl = event.url;
+  });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
     if (event.gen < latestGen) return;
     outputMeshUrl = event.url;
+    // Final coloured mesh is in; drop the grey preview reference.
+    outputPreviewMeshUrl = undefined;
   });
 
   // Listen for pipeline result events from the backend worker.
@@ -908,6 +922,7 @@
     wrappedMeshUrl = undefined;
     inputViewMode = 'input';
     outputMeshUrl = undefined;
+    outputPreviewMeshUrl = undefined;
     modelBBoxMin = null;
     modelBBoxMax = null;
   }
@@ -1554,6 +1569,7 @@
     statusMessage = 'Processing...';
     statusType = 'idle';
     outputMeshUrl = undefined;
+    outputPreviewMeshUrl = undefined;
     resolvedUnlockedColors = [] as ColorInfo[];
     pipelineStages = [];
     if (stageTimerHandle) {
@@ -2337,7 +2353,7 @@
       </div>
     </div>
     <div class="flex-1 min-h-0 relative">
-      <ModelViewer meshUrl={outputMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
+      <ModelViewer meshUrl={outputMeshUrl ?? outputPreviewMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"

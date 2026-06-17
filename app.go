@@ -548,6 +548,23 @@ func (a *App) processOne(req pipelineRequest) {
 			wailsRuntime.EventsEmit(a.ctx, "wrapped-mesh",
 				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
 		},
+		OnOutputPreviewMesh: func(mesh *pipeline.MeshData, pvScale float32) {
+			// Grey, colour-free snapshot of the output geometry emitted
+			// mid-pipeline (after decimation, alpha-wrap, split) so the
+			// Output Model viewer fills in before the final coloured mesh
+			// is ready. Reuses lastOutputID so each snapshot — and the
+			// final output-mesh below — replaces the previous one in
+			// storage, bounding memory to a single output-side mesh.
+			if a.lastOutputID != "" {
+				a.meshes.Remove(a.lastOutputID)
+			}
+			a.lastOutputID = a.meshes.Store(mesh)
+			wailsRuntime.EventsEmit(a.ctx, "output-preview-mesh", meshEvent{
+				Gen:          req.gen,
+				URL:          "/mesh/" + a.lastOutputID,
+				PreviewScale: pvScale,
+			})
+		},
 		OnStickerOverlay: func(mesh *pipeline.MeshData, pvScale float32) {
 			// Alpha-wrap mode: stickers are carried by a separate mesh
 			// that renders just outside the input mesh. The pipeline

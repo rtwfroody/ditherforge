@@ -136,6 +136,11 @@ type pipelineRun struct {
 	opts      Options
 	tracker   progress.Tracker
 	onWarning func(kind, message string)
+	// onOutputPreview, when set, receives flat-grey snapshots of the
+	// output geometry from the load/split stages (already scaled to
+	// preview-mm) so the Output Model viewer fills in before colours
+	// are ready. See Callbacks.OnOutputPreviewMesh.
+	onOutputPreview func(*MeshData, float32)
 
 	// memo holds per-Run resolved stage outputs: once a stage has been
 	// resolved, subsequent consumers within the same Run skip the
@@ -280,6 +285,17 @@ func (r *pipelineRun) runPreload() (any, error) {
 	}, nil
 }
 
+// previewOutputGeometry pushes a flat-grey snapshot of in-progress
+// output geometry to the Output Model viewer. mesh is in pipeline-mm
+// and gets scaled to preview-mm here (matching the output-mesh path).
+// Cheap no-op when no preview callback is registered (CLI / tests).
+func (r *pipelineRun) previewOutputGeometry(mesh *MeshData, pvScale float32) {
+	if r.onOutputPreview == nil || mesh == nil {
+		return
+	}
+	r.onOutputPreview(ScalePreviewMesh(mesh, pvScale), pvScale)
+}
+
 // runLoad is StageLoad's body (see stageDefs): the heavy half of
 // loading — decimation and optional alpha-wrap — applied on top of the
 // already-scaled, Z-normalized mesh from StagePreload.
@@ -331,6 +347,12 @@ func (r *pipelineRun) runLoad() (any, error) {
 		}
 	}
 
+	// First grey preview of the output geometry, right after decimation —
+	// the user sees the model's silhouette before alpha-wrap/voxelize run.
+	if r.onOutputPreview != nil {
+		r.previewOutputGeometry(buildWrappedMeshData(geomModel), pl.PreviewScale)
+	}
+
 	if r.opts.AlphaWrap {
 		alpha := r.opts.AlphaWrapAlpha
 		if alpha <= 0 {
@@ -375,6 +397,12 @@ func (r *pipelineRun) runLoad() (any, error) {
 			if err := r.checkCancel(); err != nil {
 				return nil, err
 			}
+		}
+
+		// Updated grey preview once the wrapped skin is built, replacing
+		// the post-decimation silhouette with the watertight wrap shape.
+		if r.onOutputPreview != nil {
+			r.previewOutputGeometry(buildWrappedMeshData(geomModel), pl.PreviewScale)
 		}
 	}
 
@@ -443,6 +471,13 @@ func (r *pipelineRun) runSplit() (any, error) {
 	// who need a different layout rearrange in the slicer.
 	const bedGapMM = 5.0
 	xforms := split.Layout(res, bedGapMM)
+
+	// Grey preview of both halves laid out on the bed — replaces the
+	// pre-split wrap silhouette so the user sees the cut + layout before
+	// voxelize/dither produce the coloured result.
+	if r.onOutputPreview != nil {
+		r.previewOutputGeometry(buildSplitPreviewMesh(res.Halves), lo.PreviewScale)
+	}
 
 	plog.Printf("  Split: cut and laid out two halves in %.1fs (half 0: %d verts, %d faces; half 1: %d verts, %d faces)",
 		time.Since(tSplit).Seconds(),
