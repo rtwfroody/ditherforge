@@ -11,8 +11,18 @@ import (
 )
 
 // Parse reads a MaterialX document from r.
+//
+// XML comments are blanked out before decoding so that comments
+// containing "--" (illegal per the strict XML spec, but common in
+// hand- and tool-authored MaterialX, e.g. "---- section ----" dividers)
+// don't abort the parse. Go's encoding/xml is strict and would reject
+// them otherwise.
 func Parse(r io.Reader) (*Document, error) {
-	dec := xml.NewDecoder(r)
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	dec := xml.NewDecoder(bytes.NewReader(blankXMLComments(raw)))
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -30,6 +40,32 @@ func Parse(r io.Reader) (*Document, error) {
 		}
 		return parseMaterialX(dec)
 	}
+}
+
+// blankXMLComments overwrites every <!-- ... --> span with spaces,
+// leaving newlines intact so byte offsets and line numbers in any later
+// parse error still line up with the original source. An unterminated
+// comment is left untouched so the decoder reports it naturally.
+func blankXMLComments(b []byte) []byte {
+	out := append([]byte(nil), b...)
+	for i := 0; i+4 <= len(out); {
+		if !bytes.HasPrefix(out[i:], []byte("<!--")) {
+			i++
+			continue
+		}
+		end := bytes.Index(out[i+4:], []byte("-->"))
+		if end < 0 {
+			break // unterminated; let the decoder surface it
+		}
+		stop := i + 4 + end + 3
+		for j := i; j < stop; j++ {
+			if out[j] != '\n' {
+				out[j] = ' '
+			}
+		}
+		i = stop
+	}
+	return out
 }
 
 // ParseFile is a convenience wrapper around Parse that also installs a

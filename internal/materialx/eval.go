@@ -346,6 +346,7 @@ func init() {
 		"cos":         buildUnary(math.Cos),
 		"power":       buildPower,
 		"clamp":       buildClamp,
+		"smoothstep":  buildSmoothstep,
 		"floor":       buildUnary(math.Floor),
 		"mix":         buildMix,
 		"image":       buildImage,
@@ -544,6 +545,46 @@ func buildClamp(c *compiler, n *node) (evalFn, error) {
 		src := in(ctx, scratch).Vec
 		for i := range arity {
 			v.Vec[i] = clampF(src[i], low, high)
+		}
+		return v
+	}, nil
+}
+
+// buildSmoothstep implements MaterialX smoothstep: a Hermite ease
+// between low and high. out = 0 for in <= low, 1 for in >= high, and the
+// smooth 3t²-2t³ ramp in between. low/high default to 0/1 per the stdlib
+// nodedef. Mirrors buildClamp's float/per-component vector handling, with
+// low/high read as scalars (the common case — e.g. anti-aliasing a
+// stripe mask across a narrow band).
+func buildSmoothstep(c *compiler, n *node) (evalFn, error) {
+	in, err := c.compileRequired(n, "in")
+	if err != nil {
+		return nil, err
+	}
+	lowFn, err := c.compileOptional(n, "low")
+	if err != nil {
+		return nil, err
+	}
+	highFn, err := c.compileOptional(n, "high")
+	if err != nil {
+		return nil, err
+	}
+	out := n.OutputType
+	arity := vecArity(out)
+	if out == TypeFloat {
+		return func(ctx *SampleContext, scratch []Value) Value {
+			low := floatOrDefault(lowFn, ctx, scratch, 0)
+			high := floatOrDefault(highFn, ctx, scratch, 1)
+			return FloatValue(smoothstepF(in(ctx, scratch).AsFloat(), low, high))
+		}, nil
+	}
+	return func(ctx *SampleContext, scratch []Value) Value {
+		low := floatOrDefault(lowFn, ctx, scratch, 0)
+		high := floatOrDefault(highFn, ctx, scratch, 1)
+		v := Value{Type: out}
+		src := broadcast(in(ctx, scratch))
+		for i := range arity {
+			v.Vec[i] = smoothstepF(src[i], low, high)
 		}
 		return v
 	}, nil
@@ -1024,6 +1065,20 @@ func safeDiv(a, b float64) float64 {
 		return 0
 	}
 	return a / b
+}
+
+// smoothstepF is the scalar Hermite ease used by the smoothstep node. A
+// degenerate band (high <= low) collapses to a hard step at low so the
+// node never divides by zero.
+func smoothstepF(x, low, high float64) float64 {
+	if high <= low {
+		if x < low {
+			return 0
+		}
+		return 1
+	}
+	t := clampF((x-low)/(high-low), 0, 1)
+	return t * t * (3 - 2*t)
 }
 
 func clampF(v, lo, hi float64) float64 {
