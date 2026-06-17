@@ -1,6 +1,6 @@
 # DitherForge
 
-![Colorful fish printed with Ditherforge](images/fish-collage.png)
+![Models printed with Ditherforge](images/showcase.png)
 
 Convert textured 3D models (GLB, 3MF, STL, OBJ, or COLLADA) into multi-color 3D-printable files
 (3MF) for multi-filament printers.
