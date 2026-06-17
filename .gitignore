@@ -17,10 +17,13 @@ frontend/vite.config.d.ts
 *.obj
 *.mtl
 *.ply
-*.png
 
-# Test fixture renders (checked in; see tests/testdata/color/README.md)
-!tests/testdata/color/*.png
+# Generated PNG renders. We deliberately do NOT use a blanket *.png ignore,
+# so checked-in images (images/, build/appicon.png, tests/testdata/color/*.png)
+# need no force-adding. Instead ignore the directories that hold generated
+# renders by path. tests/output/ also self-ignores via its own .gitignore.
+tests/output/*.png
+internal/voxel/testdata/sticker-renders/*.png
 
 # Test cache (remesh outputs keyed by source hash)
 tests/cache/
