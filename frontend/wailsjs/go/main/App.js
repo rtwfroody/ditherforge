@@ -70,8 +70,8 @@ export function OpenStickerImage() {
   return window['go']['main']['App']['OpenStickerImage']();
 }
 
-export function ProcessPipeline(arg1) {
-  return window['go']['main']['App']['ProcessPipeline'](arg1);
+export function ProcessPipeline(arg1, arg2) {
+  return window['go']['main']['App']['ProcessPipeline'](arg1, arg2);
 }
 
 export function Quit() {

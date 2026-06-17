@@ -391,7 +391,6 @@
   }
 
   // UI state.
-  let running = $state(false);
   let statusMessage = $state('');
   let statusType: 'idle' | 'success' | 'error' | 'warning' = $state('idle');
   let version = $state('');
@@ -425,16 +424,14 @@
     triangleInfoDialogOpen = true;
   }
 
-  // Binary mesh URLs for 3D viewers.
-  let inputMeshUrl: string | undefined = $state(undefined);
-  // Optional alpha-wrap sticker overlay. Rendered just outside the input
-  // mesh in the input viewer; carries decals when alpha-wrap is on.
-  let inputOverlayMeshUrl: string | undefined = $state(undefined);
-  // Alpha-wrapped geometry preview (untextured, flat-shaded). Set when
-  // alpha-wrap is enabled; cleared on the next clear/disable event.
-  let wrappedMeshUrl: string | undefined = $state(undefined);
+  // Binary mesh URLs for the 3D viewers live inside the single `run`
+  // record declared below (run.input.*, run.output.*) and are read here
+  // through the $derived aliases (inputMeshUrl, wrappedMeshUrl, …). See
+  // the RunView block for the rationale.
+  //
   // 'input' = show the textured input mesh; 'wrapped' = show the
-  // alpha-wrapped geometry. Toggle disabled when alpha-wrap is off.
+  // alpha-wrapped geometry. Toggle disabled when alpha-wrap is off. This
+  // is view-selection UI state, not per-run data, so it stays separate.
   let inputViewMode: 'input' | 'wrapped' = $state('input');
   // Overlay "View" popup state for the Input Model viewer.
   let viewMenuOpen = $state(false);
@@ -453,19 +450,7 @@
       outputViewMenuOpen = false;
     }
   }
-  let outputMeshUrl: string | undefined = $state(undefined);
-  // Flat-grey, colour-free snapshot of the output geometry emitted by
-  // the backend mid-pipeline (after decimation, alpha-wrap, split) so
-  // the Output Model viewer shows the model taking shape before the
-  // final coloured mesh is ready. The viewer prefers outputMeshUrl and
-  // falls back to this; cleared at run start alongside outputMeshUrl.
-  let outputPreviewMeshUrl: string | undefined = $state(undefined);
   let inputError = $state('');
-  // Pipeline error from a backend stage failure. Rendered as a final
-  // red line below the stage list in the output viewer so the user can
-  // see *which* stage failed by the green checkmarks above it. Cleared
-  // at the start of each pipeline run.
-  let pipelineError = $state('');
 
   // Resolved unlocked colors from the backend (the non-locked portion of the palette).
   let resolvedUnlockedColors = $state<ColorInfo[]>([]);
@@ -486,7 +471,59 @@
     // genuinely stalled — ModelViewer renders it amber.
     lastBeatAt: number;
   };
-  let pipelineStages = $state<StageInfo[]>([]);
+  // Single source of truth for everything the two model viewers show for
+  // one pipeline run. Previously this was ~9 independent mutable $state
+  // variables (inputMeshUrl, wrappedMeshUrl, outputMeshUrl, running,
+  // pipelineStages, pipelineError, latestGen, …) written from a dozen
+  // event handlers, each of which had to remember to reset every variable
+  // and re-implement the staleness gate by hand. That made stale writes
+  // structurally possible (see docs/output-viewer-run-state-plan.md).
+  //
+  // Now one record IS the state. Each run owns a monotonic id allocated
+  // synchronously on the frontend (runId) before the backend is told about
+  // it, so the gate is an exact match (event.gen === run.id) with no
+  // lagging async copy to race against. Starting a run — or abandoning one
+  // via clearViewportMesh — replaces the record atomically, so there are
+  // no scattered per-variable resets to forget.
+  type RunPhase = 'idle' | 'running' | 'done' | 'error';
+  type RunView = {
+    id: number;                    // the owning runId; backend echoes it on every event
+    phase: RunPhase;
+    stages: StageInfo[];
+    error: string;                 // pipeline stage failure text, shown below the stage list
+    input: {
+      meshUrl?: string;            // textured input mesh
+      overlayUrl?: string;         // alpha-wrap sticker overlay (decals when alpha-wrap on)
+      wrappedUrl?: string;         // untextured alpha-wrapped geometry preview
+    };
+    output: {
+      // Flat-grey mid-pipeline snapshot (after decimation, alpha-wrap,
+      // split) so the Output viewer shows the shape before the final
+      // coloured mesh; the viewer prefers finalUrl and falls back to this.
+      previewUrl?: string;
+      finalUrl?: string;           // final coloured output mesh
+    };
+  };
+  function idleRun(id: number): RunView {
+    return { id, phase: 'idle', stages: [], error: '', input: {}, output: {} };
+  }
+  // Monotonic run-id counter. Bumped synchronously (no await) whenever a
+  // run is started or abandoned, so in-flight events for a superseded run
+  // can never satisfy the exact-match gate.
+  let runId = 0;
+  let run = $state<RunView>(idleRun(0));
+
+  // Derived aliases so the template and event handlers read the same
+  // names as before. The display is derived from `run`, never pushed.
+  const running = $derived(run.phase === 'running');
+  const inputMeshUrl = $derived(run.input.meshUrl);
+  const inputOverlayMeshUrl = $derived(run.input.overlayUrl);
+  const wrappedMeshUrl = $derived(run.input.wrappedUrl);
+  const outputMeshUrl = $derived(run.output.finalUrl);          // final mesh only (export, picking)
+  const outputMesh = $derived(run.output.finalUrl ?? run.output.previewUrl); // what the viewer shows
+  const pipelineStages = $derived(run.stages);
+  const pipelineError = $derived(run.error);
+
   let stageTick = $state(0);  // incremented to force timer re-render
   let stageTimerHandle = 0;
 
@@ -522,18 +559,18 @@
   // Auto-processing state (plain variables, not reactive -- nothing in the template reads these).
   let processTimer: number | undefined;
 
-  // Generation counter: tracks the latest pipeline request submitted.
-  // Pipeline result events with gen < latestGen are stale and ignored.
-  let latestGen = 0;
-
-  // All mesh and pipeline events use latestGen for staleness checks.
+  // Every backend event carries the gen (= runId) of the run that emitted
+  // it. An event belongs to the current viewer state iff event.gen ===
+  // run.id; anything else is from a superseded or torn-down run and is
+  // ignored. Because run.id is allocated synchronously before the backend
+  // is told about the run, this gate is never stale — there is no window.
 
   Version().then(v => version = v);
 
   // Listen for binary mesh URLs from the backend.
   EventsOn('input-mesh', (event: { gen: number; url: string; previewScale?: number; extentMM?: number; bboxMin?: [number, number, number]; bboxMax?: [number, number, number] }) => {
-    if (event.gen < latestGen) return;
-    inputMeshUrl = event.url;
+    if (event.gen !== run.id) return;
+    run.input.meshUrl = event.url;
     // The overlay is set/cleared deterministically by the
     // 'input-overlay-mesh' event the pipeline fires after this one, so
     // we don't need to clear it here.
@@ -561,37 +598,37 @@
     }
   });
   EventsOn('input-overlay-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen < latestGen) return;
+    if (event.gen !== run.id) return;
     // Empty url means the pipeline explicitly told us there's no overlay
     // (e.g. alpha-wrap turned off). Clear the previous overlay if any.
-    inputOverlayMeshUrl = event.url || undefined;
+    run.input.overlayUrl = event.url || undefined;
   });
   EventsOn('wrapped-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen < latestGen) return;
+    if (event.gen !== run.id) return;
     // Empty url = alpha-wrap is off; drop the wrapped preview and
     // force the toggle back to the input view.
-    wrappedMeshUrl = event.url || undefined;
-    if (!wrappedMeshUrl && inputViewMode === 'wrapped') {
+    run.input.wrappedUrl = event.url || undefined;
+    if (!run.input.wrappedUrl && inputViewMode === 'wrapped') {
       inputViewMode = 'input';
     }
   });
   EventsOn('output-preview-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen < latestGen) return;
-    // Grey in-progress geometry. Don't overwrite a final coloured mesh
-    // if one is somehow already showing for this gen.
-    outputPreviewMeshUrl = event.url;
+    if (event.gen !== run.id) return;
+    // Grey in-progress geometry. The viewer prefers the final mesh, so
+    // this only shows until output-mesh arrives for the same run.
+    run.output.previewUrl = event.url;
   });
   EventsOn('output-mesh', (event: { gen: number; url: string }) => {
-    if (event.gen < latestGen) return;
-    outputMeshUrl = event.url;
+    if (event.gen !== run.id) return;
+    run.output.finalUrl = event.url;
     // Final coloured mesh is in; drop the grey preview reference.
-    outputPreviewMeshUrl = undefined;
+    run.output.previewUrl = undefined;
   });
 
   // Listen for pipeline result events from the backend worker.
   EventsOn('pipeline-done', (event: { gen: number; duration: number }) => {
-    if (event.gen < latestGen) return;
-    running = false;
+    if (event.gen !== run.id) return;
+    run.phase = 'done';
     // Preserve any warning emitted during the run; don't overwrite it
     // with "Done!".
     if (statusType !== 'warning') {
@@ -600,15 +637,15 @@
     }
   });
   EventsOn('pipeline-error', (event: { gen: number; message: string }) => {
-    if (event.gen < latestGen) return;
-    running = false;
+    if (event.gen !== run.id) return;
+    run.phase = 'error';
+    run.error = event.message;
     inputError = event.message;
-    pipelineError = event.message;
     statusMessage = `Error: ${event.message}`;
     statusType = 'error';
   });
   EventsOn('pipeline-warning', (event: { gen: number; kind: string; message: string }) => {
-    if (event.gen < latestGen) return;
+    if (event.gen !== run.id) return;
     // Every warning updates the status bar (chronological event log).
     // Kind-tagged warnings ALSO pin to their inline home (persistent
     // state-of-the-input) — the two surfaces answer different
@@ -630,25 +667,28 @@
     }
   });
   EventsOn('pipeline-needs-force', (event: { gen: number; extentMM: number }) => {
-    if (event.gen < latestGen) return;
-    running = false;
+    if (event.gen !== run.id) return;
+    // Not running, not an error — the run paused awaiting confirmation.
+    // 'idle' hides the progress overlay; the force dialog drives the next
+    // step (Continue → runPipeline(true), which starts a fresh run).
+    run.phase = 'idle';
     forceExtentMM = event.extentMM;
     forceDialogOpen = true;
     statusMessage = '';
     statusType = 'idle';
   });
   EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string }[] }) => {
-    if (event.gen < latestGen) return;
+    if (event.gen !== run.id) return;
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;
     const collName = inventoryCollection;
     resolvedUnlockedColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
   });
   EventsOn('pipeline-stage', (event: { gen: number; stage: string; status: string; hasProgress: boolean; total: number }) => {
-    if (event.gen < latestGen) return;
+    if (event.gen !== run.id) return;
     const now = Date.now();
     if (event.status === 'running') {
-      const existing = pipelineStages.find(s => s.name === event.stage);
+      const existing = run.stages.find(s => s.name === event.stage);
       if (existing) {
         existing.status = 'running';
         existing.hasProgress = event.hasProgress;
@@ -657,9 +697,8 @@
         existing.startedAt = now;
         existing.elapsed = 0;
         existing.lastBeatAt = now;
-        pipelineStages = pipelineStages;
       } else {
-        pipelineStages = [...pipelineStages, {
+        run.stages.push({
           name: event.stage,
           status: 'running',
           hasProgress: event.hasProgress,
@@ -668,17 +707,16 @@
           startedAt: now,
           elapsed: 0,
           lastBeatAt: now,
-        }];
+        });
       }
       startStageTimer();
     } else if (event.status === 'done') {
-      const existing = pipelineStages.find(s => s.name === event.stage);
+      const existing = run.stages.find(s => s.name === event.stage);
       if (existing) {
         existing.status = 'done';
         existing.elapsed = (now - existing.startedAt) / 1000;
-        pipelineStages = pipelineStages;
       } else {
-        pipelineStages = [...pipelineStages, {
+        run.stages.push({
           name: event.stage,
           status: 'done',
           hasProgress: false,
@@ -687,28 +725,26 @@
           startedAt: now,
           elapsed: 0,
           lastBeatAt: now,
-        }];
+        });
       }
     }
   });
   EventsOn('pipeline-progress', (event: { gen: number; stage: string; current: number }) => {
-    if (event.gen < latestGen) return;
-    const existing = pipelineStages.find(s => s.name === event.stage);
+    if (event.gen !== run.id) return;
+    const existing = run.stages.find(s => s.name === event.stage);
     if (existing) {
       existing.current = event.current;
       existing.lastBeatAt = Date.now();
-      pipelineStages = pipelineStages;
     }
   });
   // Backend liveness ticks for running stages that emit no natural
   // progress (see progress.Monitor on the Go side). Only refreshes
   // lastBeatAt — the stalled indicator derives from its absence.
   EventsOn('pipeline-heartbeat', (event: { gen: number; stage: string; elapsedMs: number }) => {
-    if (event.gen < latestGen) return;
-    const existing = pipelineStages.find(s => s.name === event.stage);
+    if (event.gen !== run.id) return;
+    const existing = run.stages.find(s => s.name === event.stage);
     if (existing && existing.status === 'running') {
       existing.lastBeatAt = Date.now();
-      pipelineStages = pipelineStages;
     }
   });
 
@@ -910,19 +946,21 @@
     pendingInputPath = '';
   }
 
-  // Clears the cached viewport mesh URLs and bbox. Used when the
-  // current model is being replaced (File > Open a model directly,
-  // File > New, loading a settings JSON for a different model) — the
-  // prior values would otherwise render the old mesh until the
-  // pipeline regenerates everything. Kept as a helper so applySettings
-  // and proceedWithInput stay in lockstep.
+  // Abandons the current viewer state. Used when the current model is
+  // being replaced (File > Open a model directly, File > New, loading a
+  // settings JSON for a different model) — the prior mesh would otherwise
+  // render until the pipeline regenerates everything. Kept as a helper so
+  // applySettings and proceedWithInput stay in lockstep.
+  //
+  // Bumping runId here is the crux of the fix: replacing the model cancels
+  // nothing on the backend until the debounced runPipeline fires ~300ms
+  // later, so the in-flight previous run keeps emitting events. Allocating
+  // a fresh id orphans those events (their gen no longer matches run.id),
+  // which is precisely what stops a superseded run's output from being
+  // written into the viewer while the next model loads.
   function clearViewportMesh() {
-    inputMeshUrl = undefined;
-    inputOverlayMeshUrl = undefined;
-    wrappedMeshUrl = undefined;
+    run = idleRun(++runId);
     inputViewMode = 'input';
-    outputMeshUrl = undefined;
-    outputPreviewMeshUrl = undefined;
     modelBBoxMin = null;
     modelBBoxMax = null;
   }
@@ -1563,25 +1601,26 @@
       statusType = 'error';
       return;
     }
-    running = true;
+    // Allocate this run's id synchronously and replace the whole record in
+    // one shot — phase, stages, error and output are reset atomically; no
+    // scattered per-variable resets to forget. Input geometry is preserved
+    // (run.input) so the input viewer keeps showing the current model while
+    // it reprocesses; a new input-mesh event for this run overwrites it.
+    const id = ++runId;
+    run = { id, phase: 'running', stages: [], error: '', input: { ...run.input }, output: {} };
     inputError = '';
-    pipelineError = '';
     statusMessage = 'Processing...';
     statusType = 'idle';
-    outputMeshUrl = undefined;
-    outputPreviewMeshUrl = undefined;
     resolvedUnlockedColors = [] as ColorInfo[];
-    pipelineStages = [];
     if (stageTimerHandle) {
       window.clearInterval(stageTimerHandle);
       stageTimerHandle = 0;
     }
 
-    // ProcessPipeline enqueues the request and returns immediately.
-    // The backend worker processes only the latest request and delivers
-    // results via events (pipeline-done, pipeline-error, pipeline-needs-force).
-    const gen = await ProcessPipeline(buildOpts(force));
-    latestGen = gen;
+    // ProcessPipeline enqueues the request and returns immediately. The
+    // backend worker processes only the latest request and echoes this run
+    // id (id) on every event so the exact-match gate can attribute results.
+    await ProcessPipeline(buildOpts(force), id);
   }
 
   let saving = $state(false);
@@ -2353,7 +2392,7 @@
       </div>
     </div>
     <div class="flex-1 min-h-0 relative">
-      <ModelViewer meshUrl={outputMeshUrl ?? outputPreviewMeshUrl} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
+      <ModelViewer meshUrl={outputMesh} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"

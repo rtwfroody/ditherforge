@@ -38,7 +38,7 @@ export function OpenMaterialXFile():Promise<main.MaterialXOpenResult>;
 
 export function OpenStickerImage():Promise<string>;
 
-export function ProcessPipeline(arg1:pipeline.Options):Promise<number>;
+export function ProcessPipeline(arg1:pipeline.Options,arg2:number):Promise<void>;
 
 export function Quit():Promise<void>;
 

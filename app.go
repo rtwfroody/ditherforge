@@ -43,7 +43,6 @@ type App struct {
 	// methods) can snapshot it without blocking on `mu`, which the
 	// pipeline worker holds for the entire duration of a run.
 	lastOpts      atomic.Pointer[pipeline.Options]
-	pipeGen       atomic.Int64         // generation counter for pipeline requests
 	meshes        *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string               // mesh handler ID for last input mesh (protected by mu)
 	lastOverlayID string               // mesh handler ID for the alpha-wrap sticker overlay
@@ -55,6 +54,10 @@ type App struct {
 }
 
 // pipelineRequest is sent from ProcessPipeline to the worker goroutine.
+// gen is the frontend-owned run id (the correlation id allocated
+// synchronously in App.svelte's runPipeline before the IPC call). The
+// worker echoes it on every event so the frontend can gate with an
+// exact match — there is no lagging backend counter to race against.
 type pipelineRequest struct {
 	opts pipeline.Options
 	gen  int64
@@ -339,11 +342,12 @@ func (a *App) Export3MF() (string, error) {
 // The single pipelineWorker goroutine processes only the latest request.
 // Results are delivered via Wails events: pipeline-done, pipeline-error,
 // pipeline-needs-force, input-mesh, output-mesh.
-// Returns the generation number assigned to this request, which the frontend
-// uses to filter stale events.
-func (a *App) ProcessPipeline(opts pipeline.Options) int64 {
-	gen := a.pipeGen.Add(1)
-
+//
+// runID is allocated by the frontend synchronously, before this call, and
+// echoed on every event emitted for this run so the frontend gates events
+// with an exact match against the run it currently owns. There is no
+// backend generation counter to lag behind the frontend.
+func (a *App) ProcessPipeline(opts pipeline.Options, runID int64) {
 	// Cancel any in-flight pipeline immediately so it aborts early.
 	a.cancelMu.Lock()
 	if a.cancel != nil {
@@ -353,14 +357,12 @@ func (a *App) ProcessPipeline(opts pipeline.Options) int64 {
 
 	// Replace any pending request in the channel. Drain first (non-blocking),
 	// then send into the now-empty buffer-1 channel.
-	req := pipelineRequest{opts: opts, gen: gen}
+	req := pipelineRequest{opts: opts, gen: runID}
 	select {
 	case <-a.reqCh:
 	default:
 	}
 	a.reqCh <- req
-
-	return gen
 }
 
 // pipelineWorker is the single goroutine that processes pipeline requests.
