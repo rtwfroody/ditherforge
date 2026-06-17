@@ -338,6 +338,8 @@ func init() {
 		"multiply":    buildArithmetic(func(a, b float64) float64 { return a * b }),
 		"add":         buildArithmetic(func(a, b float64) float64 { return a + b }),
 		"subtract":    buildArithmetic(func(a, b float64) float64 { return a - b }),
+		"divide":      buildArithmetic(safeDiv),
+		"modulo":      buildArithmetic(floorMod),
 		"fractal3d":   buildFractal3D,
 		"noise3d":     buildNoise3D,
 		"sin":         buildUnary(math.Sin),
@@ -999,6 +1001,29 @@ func valueOrZero(fn evalFn, ctx *SampleContext, scratch []Value) Value {
 		return FloatValue(0)
 	}
 	return fn(ctx, scratch)
+}
+
+// floorMod implements MaterialX's modulo node, matching the GLSL
+// codegen's mod(): in1 - in2*floor(in1/in2). Floor-based (not fmod's
+// truncation) so the result keeps the sign of in2 and tiling patterns
+// repeat cleanly for negative in1 — e.g. a stripe phase below the
+// height origin still wraps into [0, in2). A zero divisor yields 0
+// rather than NaN.
+func floorMod(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a - b*math.Floor(a/b)
+}
+
+// safeDiv implements MaterialX's divide node, guarding against a zero
+// divisor (which would otherwise propagate Inf/NaN through the rest of
+// the graph and the sRGB quantizer).
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }
 
 func clampF(v, lo, hi float64) float64 {
