@@ -376,14 +376,26 @@ type InventoryEntry struct {
 }
 
 // parseTDAndLabel splits the part of an inventory line after the color into
-// an optional transmission distance and a label. TD is carried by an explicit
-// "td=<float>" token anywhere in the remainder (so a numeric label is never
-// mistaken for a TD); all other tokens form the label. When no td= token is
-// present, DefaultTD is returned.
+// an optional transmission distance and a label. The primary form is
+// positional — "#RRGGBB <td> <label>", e.g. "#FFE800 4.3 Yellow" — matching
+// the Panchroma/HueForge convention used by the built-in collections: a
+// leading bare number is the TD and the rest is the label. An explicit
+// "td=<float>" token is also accepted anywhere as a fallback. When neither is
+// present (e.g. "#A79E82 Tan") DefaultTD is returned and the whole remainder
+// is the label.
 func parseTDAndLabel(rest string) (float32, string) {
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return DefaultTD, ""
+	}
+	// Positional: a leading bare number is the TD.
+	if f, err := strconv.ParseFloat(fields[0], 32); err == nil {
+		return float32(f), strings.Join(fields[1:], " ")
+	}
+	// Fallback: an explicit td=<float> token anywhere; other tokens are label.
 	td := float32(DefaultTD)
 	var labelTokens []string
-	for _, tok := range strings.Fields(rest) {
+	for _, tok := range fields {
 		if v, ok := strings.CutPrefix(tok, "td="); ok {
 			if f, err := strconv.ParseFloat(v, 32); err == nil {
 				td = float32(f)

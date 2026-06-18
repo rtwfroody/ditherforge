@@ -677,7 +677,7 @@
     statusMessage = '';
     statusType = 'idle';
   });
-  EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string }[] }) => {
+  EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string; td: number }[] }) => {
     if (event.gen !== run.id) return;
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;

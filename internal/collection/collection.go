@@ -268,16 +268,18 @@ func (m *Manager) Create(name string, entries []palette.InventoryEntry) error {
 	return m.writeFile(path, entries)
 }
 
-// writeFile writes inventory entries to a file in "#RRGGBB [td=X] Label"
-// format. The td= token is emitted only when TD differs from the default, so
-// opaque/untagged collections keep their original minimal form.
+// writeFile writes inventory entries in the positional "#RRGGBB <td> Label"
+// format used by the built-in collections. TD is always emitted so the parser
+// never mistakes a numeric label (e.g. "2024 Edition") for a TD, and so the
+// value round-trips exactly.
 func (m *Manager) writeFile(path string, entries []palette.InventoryEntry) error {
 	var lines []string
 	for _, e := range entries {
-		line := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
-		if e.TD != 0 && e.TD != palette.DefaultTD {
-			line += fmt.Sprintf(" td=%g", e.TD)
+		td := e.TD
+		if td <= 0 {
+			td = palette.DefaultTD
 		}
+		line := fmt.Sprintf("#%02X%02X%02X %g", e.Color[0], e.Color[1], e.Color[2], td)
 		if e.Label != "" {
 			line += " " + e.Label
 		}

@@ -594,16 +594,21 @@ func (a *App) processOne(req pipelineRequest) {
 			wailsRuntime.EventsEmit(a.ctx, "input-overlay-mesh",
 				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
 		},
-		OnPalette: func(pal [][3]uint8, labels []string) {
-			colors := make([]map[string]string, len(pal))
+		OnPalette: func(pal [][3]uint8, tds []float32, labels []string) {
+			colors := make([]map[string]any, len(pal))
 			for i, c := range pal {
 				label := ""
 				if i < len(labels) {
 					label = labels[i]
 				}
-				colors[i] = map[string]string{
+				td := float32(palette.DefaultTD)
+				if i < len(tds) && tds[i] > 0 {
+					td = tds[i]
+				}
+				colors[i] = map[string]any{
 					"hex":   fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
 					"label": label,
+					"td":    td,
 				}
 			}
 			wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{

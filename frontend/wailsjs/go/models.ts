@@ -43,7 +43,7 @@ export namespace main {
 	    hex: string;
 	    label: string;
 	    td: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ColorEntry(source);
 	    }

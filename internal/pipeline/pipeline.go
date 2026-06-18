@@ -217,7 +217,7 @@ type Callbacks struct {
 	// a colour-only change) skips these stages, leaving the previous
 	// output in place rather than flashing back to grey.
 	OnOutputPreviewMesh func(*MeshData, float32)
-	OnPalette           func([][3]uint8, []string)
+	OnPalette           func([][3]uint8, []float32, []string)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -351,7 +351,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	var onStickerOverlay func(*MeshData, float32)
 	var onAlphaWrappedMesh func(*MeshData, float32)
 	var onOutputPreview func(*MeshData, float32)
-	var onPalette func([][3]uint8, []string)
+	var onPalette func([][3]uint8, []float32, []string)
 	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
@@ -515,7 +515,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 	if onPalette != nil {
-		onPalette(po.Palette, po.PaletteLabels)
+		onPalette(po.Palette, po.PaletteTDs, po.PaletteLabels)
 	}
 
 	// Merge — the final output mesh. On a warm cache this is the

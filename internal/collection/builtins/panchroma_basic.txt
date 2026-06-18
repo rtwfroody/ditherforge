@@ -1,28 +1,28 @@
-#080A0D Black
-#55331A Brown
-#E72F1D Red
-#D60212 Wine Red
-#F24574 Magenta
-#F1A1AF Pink
-#F67405 Orange
-#FFE800 Yellow
-#EED230 Lemon Yellow
-#EED1A8 Cream
-#C2AB72 Beige
+#080A0D 0.1 Black
+#55331A 0.1 Brown
+#E72F1D 1.9 Red
+#D60212 1 Wine Red
+#F24574 1.4 Magenta
+#F1A1AF 1.8 Pink
+#F67405 3.3 Orange
+#FFE800 4.3 Yellow
+#EED230 3.3 Lemon Yellow
+#EED1A8 1.5 Cream
+#C2AB72 0.5 Beige
 #A79E82 Tan
-#06924D Green
-#D5D701 Lime Green
-#4E742D Jungle Green
-#948902 Olive Green
+#06924D 0.4 Green
+#D5D701 2.3 Lime Green
+#4E742D 0.1 Jungle Green
+#948902 0.1 Olive Green
 #575B54 Dark Olive Drab
-#003776 Blue
-#0066D9 Azure Blue
-#487BA2 Stone Blue
-#5EBDDB Aqua Blue
-#4CC0C7 Polymaker Teal
-#6C47B2 Purple
-#485259 Dark Grey
-#616469 Steel Grey
-#8C9099 Grey
-#D9DFE5 Cold White
-#EBF7FF White
+#003776 0.3 Blue
+#0066D9 1.5 Azure Blue
+#487BA2 0.3 Stone Blue
+#5EBDDB 1.5 Aqua Blue
+#4CC0C7 0.6 Polymaker Teal
+#6C47B2 0.1 Purple
+#485259 0.2 Dark Grey
+#616469 0.4 Steel Grey
+#8C9099 0.4 Grey
+#D9DFE5 0.3 Cold White
+#EBF7FF 3.2 White
