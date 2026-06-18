@@ -64,6 +64,12 @@ type Options struct {
 	InventoryLabels []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
 	InventoryTDs    []float32  `json:"InventoryTDs,omitempty"`    // parallel to InventoryColors; transmission distance (mm), 0 = default opaque
 	LockedTDs       []float32  `json:"LockedTDs,omitempty"`       // parallel to LockedColors; transmission distance (mm), 0 = default opaque
+	// HonorTD enables the opacity-weighted dither: each filament's TD
+	// scales how much it contributes per cell (translucent colors get more
+	// area). Default true at every real entry point (GUI checkbox / CLI
+	// --honor-td). When false, palette alphas are forced nil and every
+	// dither mode reverts to the plain area-weighted mix (TD ignored).
+	HonorTD bool `json:"HonorTD"`
 	Brightness      float32
 	Contrast        float32
 	Saturation      float32

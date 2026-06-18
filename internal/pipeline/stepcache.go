@@ -910,6 +910,11 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeString(h, opts.Dither)
 	writeFloat64(h, opts.RiemersmaInputBias)
 	writeFloat64(h, opts.BlueNoiseTolerance)
+	// HonorTD gates the opacity-weighted mix; toggling it changes the
+	// dithered assignments and must invalidate the cache.
+	if opts.HonorTD {
+		writeString(h, "honor-td")
+	}
 }
 
 // hashClipSettings fingerprints the clip-stage knobs. Beyond these the

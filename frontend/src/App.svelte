@@ -186,6 +186,7 @@
   let noMerge = $state(false);
   let noCellMerge = $state(false);
   let noSimplify = $state(false);
+  let honorTD = $state(true);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
   // originating section's raw sampled RGB instead of the dithered
@@ -1047,6 +1048,7 @@
       noMerge,
       noCellMerge,
       noSimplify,
+      honorTD,
       stats,
       showSampledColors,
       alphaWrap,
@@ -1240,6 +1242,7 @@
     { key: 'noMerge',                         validate: pickBool,                                          apply: (v) => { noMerge = v; } },
     { key: 'noCellMerge',                       validate: pickBool,                                          apply: (v) => { noCellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
+    { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
@@ -1554,6 +1557,7 @@
       BlueNoiseTolerance: committedBlueNoiseTol,
       NoMerge: noMerge,
       NoCellMerge: noCellMerge,
+      HonorTD: honorTD,
       ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -2299,6 +2303,13 @@
                 No cell merge
                 <HelpTip>
                   Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
+                </HelpTip>
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={honorTD} />
+                Honor TD
+                <HelpTip>
+                  Opacity-weight the dither by each filament's transmission distance (TD). Translucent filaments (high TD) cover more area to deliver the same perceived color, so e.g. a transparent yellow no longer disappears into an opaque red. On by default; untick to use the plain area-weighted mix (treat every filament as opaque).
                 </HelpTip>
               </label>
               <label class="flex items-center gap-2 text-sm">

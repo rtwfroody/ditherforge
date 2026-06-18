@@ -1427,7 +1427,12 @@ func (r *pipelineRun) runDither() (any, error) {
 	// Per-color opacity from transmission distance drives the opacity-
 	// weighted error diffusion so translucent filaments contribute less per
 	// unit area (see voxel.AlphaFromTD). Nil/uniform alpha is identity.
-	palAlpha := voxel.PaletteAlphas(po.PaletteTDs)
+	// HonorTD (default on) gates the whole effect: when off, palAlpha stays
+	// nil and every mode reverts to the plain area-weighted mix.
+	var palAlpha []float32
+	if r.opts.HonorTD {
+		palAlpha = voxel.PaletteAlphas(po.PaletteTDs)
+	}
 	tDither := time.Now()
 	var assignments []int32
 	var derr error

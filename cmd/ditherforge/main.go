@@ -55,6 +55,7 @@ type Args struct {
 	NoSimplify                      bool     `arg:"--no-simplify" help:"Skip QEM mesh decimation before clipping"`
 	NoInteriorFaceFootprint         bool     `arg:"--no-interior-face-footprint" help:"Advanced: disable projecting thin between-plane horizontal faces into slab footprints (for A/B timing of that augmentation)"`
 	NoCellMerge                     bool     `arg:"--no-cell-merge" help:"Advanced: clip every cell individually instead of pairing adjacent same-color cells per slab (slower, more triangles, no effect on dithered output). Merging is on by default."`
+	HonorTD                         bool     `arg:"--honor-td" default:"true" help:"Opacity-weight the dither by each filament's transmission distance (TD) so translucent colors get more area. On by default; pass --honor-td=false to revert to the plain area-weighted mix."`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force                           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats                           bool     `arg:"--stats" help:"Print face counts per material"`
@@ -132,6 +133,7 @@ func main() {
 		NoSimplify:                           args.NoSimplify,
 		NoInteriorFaceFootprint:              args.NoInteriorFaceFootprint,
 		NoCellMerge:                          args.NoCellMerge,
+		HonorTD:                              args.HonorTD,
 		Size:                                 args.Size,
 		Force:                                args.Force,
 		Stats:                                args.Stats,

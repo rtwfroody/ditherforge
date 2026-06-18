@@ -159,6 +159,7 @@ export namespace main {
 	    noMerge: boolean;
 	    noCellMerge: boolean;
 	    noSimplify: boolean;
+	    honorTD: boolean;
 	    stats: boolean;
 	    showSampledColors: boolean;
 	    alphaWrap: boolean;
@@ -210,6 +211,7 @@ export namespace main {
 	        this.noMerge = source["noMerge"];
 	        this.noCellMerge = source["noCellMerge"];
 	        this.noSimplify = source["noSimplify"];
+	        this.honorTD = source["honorTD"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];
@@ -458,6 +460,7 @@ export namespace pipeline {
 	    Split?: SplitSettings;
 	    NoInteriorFaceFootprint?: boolean;
 	    NoCellMerge?: boolean;
+	    HonorTD: boolean;
 	    ShowSampledColors?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -507,6 +510,7 @@ export namespace pipeline {
 	        this.Split = this.convertValues(source["Split"], SplitSettings);
 	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
 	        this.NoCellMerge = source["NoCellMerge"];
+	        this.HonorTD = source["HonorTD"];
 	        this.ShowSampledColors = source["ShowSampledColors"];
 	    }
 	
