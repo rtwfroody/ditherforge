@@ -883,9 +883,9 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	for _, l := range opts.InventoryLabels {
 		writeString(h, l)
 	}
-	// TD affects palette selection and the opacity-weighted dither, so it
-	// must invalidate the cache. Length-prefix both TD slices for the same
-	// reason the labels are length-sensitive above.
+	// TD feeds the opacity-weighted dither (not palette selection, which is
+	// color-only), so it must invalidate the cache. Length-prefix both TD
+	// slices for the same reason the labels are length-sensitive above.
 	writeInt(h, len(opts.InventoryTDs))
 	for _, td := range opts.InventoryTDs {
 		writeFloat64(h, float64(td))

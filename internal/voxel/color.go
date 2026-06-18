@@ -1132,23 +1132,55 @@ func linearToSrgbByte(l float32) uint8 {
 // instead of collapsing toward the opaque red. See AlphaFromTD.
 const NominalOpticalThicknessMM = 1.0
 
-// AlphaFromTD returns the opacity in [0,1] of a filament with transmission
-// distance td (mm) at NominalOpticalThicknessMM, via the Beer–Lambert law
-// alpha = 1 - 10^(-t/TD). A non-positive TD is treated as fully opaque so an
-// unset value never collapses a cell to zero contribution.
+// alphaFloor is the smallest opacity AlphaFromTD will return. A filament with
+// astronomically high TD has alpha≈0, but an exact 0 would zero the
+// weighted-average denominator in the diffusion (div-by-zero → Inf/NaN), so we
+// clamp to a tiny positive value that keeps the math finite without
+// meaningfully changing a near-transparent filament's contribution.
+const alphaFloor = 1e-4
+
+// AlphaFromTD returns the opacity in [alphaFloor,1] of a filament with
+// transmission distance td (mm) at NominalOpticalThicknessMM, via the
+// Beer–Lambert law alpha = 1 - 10^(-t/TD).
+//
+// This is the single chokepoint that sanitizes TD before it reaches the
+// dither: a hand-authored --inventory file (whose entries bypass the tdAt
+// payload guard, pipeline.go) can carry garbage — TD ≤ 0, NaN, or ±Inf — and
+// any of those is treated as fully opaque (alpha 1, i.e. "no TD effect")
+// rather than poisoning the error diffusion with a 0 or NaN weight.
 func AlphaFromTD(td float32) float32 {
-	if td <= 0 {
+	t := float64(td)
+	// !(t > 0) catches both NaN and t ≤ 0; IsInf catches ±Inf.
+	if !(t > 0) || math.IsInf(t, 0) {
 		return 1
 	}
-	return float32(1 - math.Pow(10, -NominalOpticalThicknessMM/float64(td)))
+	a := 1 - math.Pow(10, -NominalOpticalThicknessMM/t)
+	if a < alphaFloor {
+		a = alphaFloor
+	}
+	return float32(a)
 }
 
 // PaletteAlphas maps a per-color transmission-distance slice to per-color
-// opacity. A nil input returns nil, which every dither kernel treats as
-// "all opaque" — making the opacity-weighted path bit-identical to the
-// historical area-weighted dither when no TD data is present.
+// opacity. It returns nil — the kernels' exact "all opaque" identity path —
+// for an empty input OR when every TD is identical, because a uniform opacity
+// cancels in the renormalized mix. Returning nil (rather than a uniform but
+// non-nil slice) keeps the common all-default-TD pipeline path BIT-identical
+// to the historical area-weighted dither, not merely algebraically equal:
+// the uniform-alpha kernel path differs by floating-point rounding
+// (a·k)/(b·k) ≠ a/b, which could flip a boundary assignment.
 func PaletteAlphas(tds []float32) []float32 {
-	if tds == nil {
+	if len(tds) == 0 {
+		return nil
+	}
+	uniform := true
+	for _, td := range tds {
+		if td != tds[0] {
+			uniform = false
+			break
+		}
+	}
+	if uniform {
 		return nil
 	}
 	a := make([]float32, len(tds))
@@ -1165,6 +1197,27 @@ func alphaAt(palAlpha []float32, i int) float32 {
 		return palAlpha[i]
 	}
 	return 1
+}
+
+// cellAlphaProxies precomputes, per cell, the opacity of the palette color
+// nearest the cell's own (pre-diffusion) color — a stable stand-in for the
+// receiver's eventual assignment opacity, which the opacity-weighted diffusion
+// needs to convert reflectance mass back into a color shift but which isn't
+// known until that cell is processed. Returns nil when palAlpha is nil (the
+// opaque identity path), which every caller treats as "all proxies = 1".
+func cellAlphaProxies(cells []ActiveCell, palAlpha []float32, palLab [][3]float32) []float32 {
+	if palAlpha == nil {
+		return nil
+	}
+	proxy := make([]float32, len(cells))
+	for i := range cells {
+		cr := srgbToLinearLUT[cells[i].Color[0]]
+		cg := srgbToLinearLUT[cells[i].Color[1]]
+		cb := srgbToLinearLUT[cells[i].Color[2]]
+		pl, pa, pb := linearToLab(cr, cg, cb)
+		proxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
+	}
+	return proxy
 }
 
 // paletteLinearLab precomputes each palette color in both linear-light
@@ -1241,22 +1294,7 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
 
-	// cellAlphaProxy[i] is the opacity of the palette color nearest cell
-	// i's own (pre-diffusion) color — a stable stand-in for the receiver's
-	// assignment opacity, which isn't known until that cell is processed.
-	// Used only to convert diffused reflectance mass back into a color
-	// shift at the receiver. nil palAlpha → all 1 (identity).
-	var cellAlphaProxy []float32
-	if palAlpha != nil {
-		cellAlphaProxy = make([]float32, n)
-		for i := range cells {
-			cr := srgbToLinearLUT[cells[i].Color[0]]
-			cg := srgbToLinearLUT[cells[i].Color[1]]
-			cb := srgbToLinearLUT[cells[i].Color[2]]
-			pl, pa, pb := linearToLab(cr, cg, cb)
-			cellAlphaProxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
-		}
-	}
+	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1420,17 +1458,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
 
-	var cellAlphaProxy []float32
-	if palAlpha != nil {
-		cellAlphaProxy = make([]float32, n)
-		for i := range cells {
-			cr := srgbToLinearLUT[cells[i].Color[0]]
-			cg := srgbToLinearLUT[cells[i].Color[1]]
-			cb := srgbToLinearLUT[cells[i].Color[2]]
-			pl, pa, pb := linearToLab(cr, cg, cb)
-			cellAlphaProxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
-		}
-	}
+	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1556,7 +1584,9 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 //
 // Like DitherWithNeighbors, the (cell + accumulated error) target is
 // fed unclamped to the nearest-palette search.
-func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+// palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion
+// identically; only the traversal order differs from dizzy. nil/uniform = identity.
+func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -1592,6 +1622,7 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
+	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1618,9 +1649,9 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 		// Forward neighbors: same predicate as dizzy. The only
 		// algorithmic difference between the two functions is the
 		// traversal order — random vs. (Grid, Layer, Row, Col).
-		// Area weighting is identical to DitherWithNeighbors — see
-		// that function for the mass-conservation rationale.
-		aSender := areas[idx]
+		// Opacity-weighted area diffusion is identical to
+		// DitherWithNeighbors — see that function for the rationale.
+		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -1631,7 +1662,11 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, nei
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale * (aSender / areas[nb.Idx])
+					aRecvEff := areas[nb.Idx]
+					if cellAlphaProxy != nil {
+						aRecvEff *= cellAlphaProxy[nb.Idx]
+					}
+					w := nb.Weight * scale * (aSender / aRecvEff)
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -1725,7 +1760,12 @@ const RiemersmaDecayRatio = 1.0 / 16.0
 //
 // Cost: O(N · L) for the dither, plus O(N · avg_degree) for the
 // tour with O(N) extra work per dead end.
-func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+// palAlpha (see DitherWithNeighbors) opacity-weights the window: each cell's
+// residual enters the sliding window with mass = area × opacity-of-chosen-color
+// instead of area alone, so a translucent pick exerts less pull and the tour
+// spends more area on it. A nil/uniform palAlpha leaves the mass at plain area,
+// i.e. byte-identical to the historical Riemersma.
+func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, biasMax float64, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -1851,7 +1891,12 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 		window[head].residual[0] = r - palLin[bestIdx][0]
 		window[head].residual[1] = g - palLin[bestIdx][1]
 		window[head].residual[2] = b - palLin[bestIdx][2]
+		// Mass = area × opacity-of-chosen (opacity-weighted mixing). nil
+		// palAlpha keeps the mass at plain area for an exact identity path.
 		window[head].area = areas[idx]
+		if palAlpha != nil {
+			window[head].area *= alphaAt(palAlpha, bestIdx)
+		}
 		head = (head + 1) % L
 	}
 	return assigns, nil
@@ -1903,8 +1948,8 @@ const RiemersmaPairCancellationDefault = 0.1
 //
 // Pass biasMax = RiemersmaInputBiasDefault to inherit the same near-
 // palette input bias Riemersma uses.
-func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
-	return riemersmaPairImpl(ctx, cells, pal, neighbors, biasMax, lambda, true, tracker)
+func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+	return riemersmaPairImpl(ctx, cells, pal, palAlpha, neighbors, biasMax, lambda, true, tracker)
 }
 
 // riemersmaPairImpl is the shared body for RiemersmaPair (production,
@@ -1918,7 +1963,10 @@ func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neig
 //   - slide=true: tour advances by 1 per step (sliding pair); only the
 //     left cell is committed each step, so each cell is scored as both
 //     the right of one pair and the left of the next.
-func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, biasMax float64, lambda float32, slide bool, tracker progress.Tracker) ([]int32, error) {
+// palAlpha (see DitherWithNeighbors / Riemersma) opacity-weights each
+// committed cell's window mass by its chosen color's opacity; nil/uniform =
+// identity.
+func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, biasMax float64, lambda float32, slide bool, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -2061,6 +2109,9 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			window[head].residual[1] = r0G - palLin[bestA][1]
 			window[head].residual[2] = r0B - palLin[bestA][2]
 			window[head].area = a0
+			if palAlpha != nil {
+				window[head].area *= alphaAt(palAlpha, bestA)
+			}
 			head = (head + 1) % L
 			break
 		}
@@ -2131,6 +2182,9 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		window[head].residual[1] = r0G - palLin[bestA][1]
 		window[head].residual[2] = r0B - palLin[bestA][2]
 		window[head].area = a0
+		if palAlpha != nil {
+			window[head].area *= alphaAt(palAlpha, bestA)
+		}
 		head = (head + 1) % L
 
 		if !slide {
@@ -2142,6 +2196,9 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			window[head].residual[1] = r1G - palLin[bestB][1]
 			window[head].residual[2] = r1B - palLin[bestB][2]
 			window[head].area = a1
+			if palAlpha != nil {
+				window[head].area *= alphaAt(palAlpha, bestB)
+			}
 			head = (head + 1) % L
 		}
 	}

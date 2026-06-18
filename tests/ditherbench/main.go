@@ -531,10 +531,10 @@ func wrapDizzyRecover(ctx context.Context, cells []voxel.ActiveCell, pal [][3]ui
 	return voxel.DitherWithRecover(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})
+	return voxel.FloydSteinberg(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapRiemersma(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.Riemersma(ctx, cells, pal, nbrs, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+	return voxel.Riemersma(ctx, cells, pal, nil, nbrs, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
 func wrapRKNearest3(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.RiemersmaKNearest(ctx, cells, pal, nbrs, 3, progress.NullTracker{})
@@ -567,7 +567,7 @@ func wrapRLeak02(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, 
 	return voxel.RiemersmaLeaky(ctx, cells, pal, nbrs, 0.2, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
 func wrapRiemersmaPair(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.RiemersmaPair(ctx, cells, pal, nbrs, voxel.RiemersmaPairCancellationDefault, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
+	return voxel.RiemersmaPair(ctx, cells, pal, nil, nbrs, voxel.RiemersmaPairCancellationDefault, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
 }
 func wrapRPairDisjointDefault(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.RiemersmaPairDisjoint(ctx, cells, pal, nbrs, voxel.RiemersmaPairCancellationDefault, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})
@@ -588,16 +588,16 @@ func wrapBNTriDiffused(ctx context.Context, cells []voxel.ActiveCell, pal [][3]u
 	return voxel.BlueNoiseTriangleDiffused(ctx, cells, pal, nbrs, progress.NullTracker{})
 }
 func wrapBNAdapt2(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 2, progress.NullTracker{})
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, 2, progress.NullTracker{})
 }
 func wrapBNAdapt5(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 5, progress.NullTracker{})
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, 5, progress.NullTracker{})
 }
 func wrapBNAdapt10(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 10, progress.NullTracker{})
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, 10, progress.NullTracker{})
 }
 func wrapBNAdapt20(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nbrs, 20, progress.NullTracker{})
+	return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, 20, progress.NullTracker{})
 }
 func wrapDBS3(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DBS(ctx, cells, pal, nbrs, 3, voxel.RiemersmaInputBiasDefault, progress.NullTracker{})

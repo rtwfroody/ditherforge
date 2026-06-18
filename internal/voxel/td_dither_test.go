@@ -2,8 +2,49 @@ package voxel
 
 import (
 	"context"
+	"math"
 	"testing"
 )
+
+// TestAlphaFromTDSanitizesGarbage guards the single chokepoint that protects
+// the dither from a hand-authored inventory file: TD ≤ 0, NaN, or ±Inf must
+// become opaque (1), and a finite-but-huge TD must floor above 0 so it never
+// zeroes a weighted-average denominator. Every returned alpha must be finite
+// and in (0,1].
+func TestAlphaFromTDSanitizesGarbage(t *testing.T) {
+	nan := float32(math.NaN())
+	inf := float32(math.Inf(1))
+	for _, tc := range []struct {
+		td   float32
+		want float32 // exact expected value where it matters
+	}{
+		{0, 1}, {-5, 1}, {nan, 1}, {inf, 1},
+	} {
+		if got := AlphaFromTD(tc.td); got != tc.want {
+			t.Errorf("AlphaFromTD(%v) = %v, want %v", tc.td, got, tc.want)
+		}
+	}
+	// Huge but finite TD: alpha tiny but strictly positive and finite.
+	huge := AlphaFromTD(1e9)
+	if huge <= 0 || huge > 1 || math.IsNaN(float64(huge)) || math.IsInf(float64(huge), 0) {
+		t.Errorf("AlphaFromTD(1e9) = %v, want a small finite value in (0,1]", huge)
+	}
+}
+
+// TestPaletteAlphasUniformIsNil locks in that a uniform TD slice collapses to
+// nil (the kernels' exact identity path), so the default all-opaque pipeline
+// is bit-identical to the pre-TD dither.
+func TestPaletteAlphasUniformIsNil(t *testing.T) {
+	if a := PaletteAlphas([]float32{1, 1, 1, 1}); a != nil {
+		t.Errorf("uniform TDs gave %v, want nil", a)
+	}
+	if a := PaletteAlphas([]float32{4.3, 4.3}); a != nil {
+		t.Errorf("uniform non-default TDs gave %v, want nil", a)
+	}
+	if a := PaletteAlphas([]float32{1, 4.3}); a == nil {
+		t.Errorf("mixed TDs gave nil, want a real slice")
+	}
+}
 
 // gridCells builds a w×h grid of cells all set to target color `col`,
 // with a 4-neighbor adjacency graph (face weight 1.0). Area = 1 each.
@@ -15,7 +56,7 @@ func gridCells(w, h int, col [3]uint8) ([]ActiveCell, [][]Neighbor) {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			i := at(x, y)
-			cells[i] = ActiveCell{Col: x, Row: y, Color: col, Area: 1}
+			cells[i] = ActiveCell{Col: x, Row: y, Cx: float32(x), Cy: float32(y), Color: col, Area: 1}
 			var nb []Neighbor
 			if x > 0 {
 				nb = append(nb, Neighbor{Idx: at(x-1, y), Weight: 1})
@@ -80,6 +121,56 @@ func TestOpacityWeightingRaisesTranslucentArea(t *testing.T) {
 	// Both colors should still be in play (sanity: we're actually dithering).
 	if baseYellow <= 0 || baseYellow >= 1 {
 		t.Errorf("baseline yellow fraction %.3f is degenerate; test fixture not dithering", baseYellow)
+	}
+}
+
+// TestAllModesRespondToTD verifies every production dither mode spends more
+// area on the translucent yellow when opacity weighting is on — i.e. TD is
+// actually wired into each mode, not just the dizzy family.
+func TestAllModesRespondToTD(t *testing.T) {
+	orange := [3]uint8{255, 140, 0}
+	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (0), yellow (1)
+	cells, neighbors := gridCells(48, 48, orange)
+	mixed := PaletteAlphas([]float32{1.0, 4.3}) // red opaque, yellow translucent
+	ctx := context.Background()
+
+	modes := []struct {
+		name string
+		run  func(palAlpha []float32) ([]int32, error)
+	}{
+		{"floyd-steinberg", func(a []float32) ([]int32, error) {
+			return FloydSteinberg(ctx, cells, pal, a, neighbors, nil)
+		}},
+		{"dizzy-corrected", func(a []float32) ([]int32, error) {
+			return DitherCorrected(ctx, cells, pal, a, neighbors, nil)
+		}},
+		{"riemersma", func(a []float32) ([]int32, error) {
+			return Riemersma(ctx, cells, pal, a, neighbors, RiemersmaInputBiasDefault, nil)
+		}},
+		{"riemersma-pair", func(a []float32) ([]int32, error) {
+			return RiemersmaPair(ctx, cells, pal, a, neighbors, RiemersmaPairCancellationDefault, RiemersmaInputBiasDefault, nil)
+		}},
+		{"blue-noise", func(a []float32) ([]int32, error) {
+			return BlueNoiseAdaptive(ctx, cells, pal, a, neighbors, BlueNoiseAdaptiveTolDefault, nil)
+		}},
+	}
+	for _, m := range modes {
+		base, err := m.run(nil)
+		if err != nil {
+			t.Fatalf("%s base: %v", m.name, err)
+		}
+		weighted, err := m.run(mixed)
+		if err != nil {
+			t.Fatalf("%s weighted: %v", m.name, err)
+		}
+		by, wy := fracAssignedTo(base, 1), fracAssignedTo(weighted, 1)
+		t.Logf("%-16s yellow area: opaque=%.3f opacity-weighted=%.3f", m.name, by, wy)
+		if wy <= by {
+			t.Errorf("%s: opacity weighting did not raise yellow area (opaque=%.3f weighted=%.3f)", m.name, by, wy)
+		}
+		if by <= 0 || by >= 1 {
+			t.Errorf("%s: baseline yellow fraction %.3f degenerate (not dithering)", m.name, by)
+		}
 	}
 }
 

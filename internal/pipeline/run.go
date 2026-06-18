@@ -1465,16 +1465,16 @@ func (r *pipelineRun) runDither() (any, error) {
 		assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "floyd-steinberg":
 		neighbors := vo.Neighbors
-		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)
+		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "riemersma":
 		neighbors := vo.Neighbors
-		assignments, derr = voxel.Riemersma(r.ctx, cells, pal, neighbors, r.opts.RiemersmaInputBias, r.tracker)
+		assignments, derr = voxel.Riemersma(r.ctx, cells, pal, palAlpha, neighbors, r.opts.RiemersmaInputBias, r.tracker)
 	case "riemersma-pair":
 		// Sliding 2-cell Riemersma with residual-cancellation
 		// coupling. Same drift as base Riemersma; lower wander on
 		// flat/textured fixtures at ≈2× the per-cell cost.
 		neighbors := vo.Neighbors
-		assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
+		assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, palAlpha, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
 	case "blue-noise":
 		// Adaptive simplex blue-noise threshold dither: per-cell
 		// best-K simplex (1..palette_size) selected by per-cell
@@ -1488,7 +1488,7 @@ func (r *pipelineRun) runDither() (any, error) {
 		if tol <= 0 {
 			tol = voxel.BlueNoiseAdaptiveTolDefault
 		}
-		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, neighbors, tol, r.tracker)
+		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, palAlpha, neighbors, tol, r.tracker)
 	default:
 		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 	}

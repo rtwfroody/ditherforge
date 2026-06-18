@@ -1062,7 +1062,7 @@ func RiemersmaDynamicK(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 //
 // budget in Lab ΔE units (consistent with the wander metric).
 func RiemersmaPostClampWander(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, budget float64, biasMax float64, tracker progress.Tracker) ([]int32, error) {
-	assigns, err := Riemersma(ctx, cells, pal, neighbors, biasMax, tracker)
+	assigns, err := Riemersma(ctx, cells, pal, nil, neighbors, biasMax, tracker)
 	if err != nil {
 		return nil, err
 	}
@@ -2159,7 +2159,7 @@ func DBS(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]
 	K := len(pal)
 
 	// Initialize from Riemersma.
-	assigns, err := Riemersma(ctx, cells, pal, neighbors, biasMax, tracker)
+	assigns, err := Riemersma(ctx, cells, pal, nil, neighbors, biasMax, tracker)
 	if err != nil {
 		return nil, err
 	}
@@ -2313,7 +2313,7 @@ func DBS2Hop(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors 
 	K := len(pal)
 
 	// Initialize from Riemersma.
-	assigns, err := Riemersma(ctx, cells, pal, neighbors, biasMax, tracker)
+	assigns, err := Riemersma(ctx, cells, pal, nil, neighbors, biasMax, tracker)
 	if err != nil {
 		return nil, err
 	}
@@ -2474,7 +2474,7 @@ func DBSFromBN(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbor
 	K := len(pal)
 
 	// Initialize from blue-noise adaptive.
-	assigns, err := BlueNoiseAdaptive(ctx, cells, pal, neighbors, tol, tracker)
+	assigns, err := BlueNoiseAdaptive(ctx, cells, pal, nil, neighbors, tol, tracker)
 	if err != nil {
 		return nil, err
 	}
@@ -2969,7 +2969,7 @@ func RiemersmaKNearestRefined(ctx context.Context, cells []ActiveCell, pal [][3]
 // (RiemersmaPair in color.go); the two share riemersmaPairImpl. With
 // λ = 0 this degenerates to single-cell Riemersma at the pair scale.
 func RiemersmaPairDisjoint(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
-	return riemersmaPairImpl(ctx, cells, pal, neighbors, biasMax, lambda, false, tracker)
+	return riemersmaPairImpl(ctx, cells, pal, nil, neighbors, biasMax, lambda, false, tracker)
 }
 
 // riemersmaPairImpl moved to color.go now that the sliding variant is

@@ -45,7 +45,15 @@ const BlueNoiseAdaptiveTolDefault = 20.0
 //
 // tol is the knob: smaller forces higher K (better drift, worse
 // wander); larger keeps K low (better wander, more drift).
-func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tol float64, tracker progress.Tracker) ([]int32, error) {
+//
+// palAlpha (see DitherWithNeighbors) makes the per-cell vertex threshold
+// opacity-aware: within the chosen simplex, each vertex's CELL share is its
+// color-barycentric weight divided by its opacity and renormalized, so a
+// translucent vertex covers more cells to deliver the same perceived color.
+// The simplex *selection* stays purely geometric (it brackets the input
+// color). A nil/uniform palAlpha leaves the thresholds at the color weights —
+// byte-identical to the historical blue-noise dither.
+func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tol float64, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -174,8 +182,17 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			}
 		}
 		if bestPairErr <= tol2 || K < 3 {
+			// bestPairAlpha is the color fraction toward j; convert to the
+			// cell (area) fraction under opacity weighting. nil/uniform
+			// alpha leaves it unchanged.
+			threshJ := bestPairAlpha
+			if palAlpha != nil {
+				w := []float64{1 - bestPairAlpha, bestPairAlpha}
+				opacityAreaWeights(w, []int{bestPair.i, bestPair.j}, palAlpha)
+				threshJ = w[1]
+			}
 			var pick int
-			if theta < bestPairAlpha {
+			if theta < threshJ {
 				pick = bestPair.j
 			} else {
 				pick = bestPair.i
@@ -240,11 +257,17 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		// K=4 step to escalate to (palette has <4 colors, so the
 		// triangle search above already covered the whole palette).
 		if bestTriErr <= tol2 || K < 4 {
+			tw := bestTriW
+			if palAlpha != nil {
+				ws := []float64{bestTriW[0], bestTriW[1], bestTriW[2]}
+				opacityAreaWeights(ws, []int{bestTri.i, bestTri.j, bestTri.k}, palAlpha)
+				tw = [3]float64{ws[0], ws[1], ws[2]}
+			}
 			var pick int
 			switch {
-			case theta < bestTriW[0]:
+			case theta < tw[0]:
 				pick = bestTri.i
-			case theta < bestTriW[0]+bestTriW[1]:
+			case theta < tw[0]+tw[1]:
 				pick = bestTri.j
 			default:
 				pick = bestTri.k
@@ -257,6 +280,16 @@ func BlueNoiseAdaptive(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		w := make([]float64, K)
 		simplexBarycentric(palL, iR, iG, iB, w)
 		clipAndRenormalize(w)
+		// Opacity weighting: turn the color-barycentric weights into cell
+		// (area) fractions over the full palette (idx q → palette q). nil/
+		// uniform alpha leaves them unchanged.
+		if palAlpha != nil {
+			fullIdx := make([]int, K)
+			for q := range fullIdx {
+				fullIdx[q] = q
+			}
+			opacityAreaWeights(w, fullIdx, palAlpha)
+		}
 		// LDS-driven cumulative pick. Weights sum to ≈1 after
 		// renormalize, but float drift can leave theta past every
 		// cum threshold; the trailing assignment to K-1 catches that.
@@ -329,6 +362,31 @@ func simplexBarycentric(pal [][3]float64, tR, tG, tB float64, w []float64) {
 	w[last] = 1
 	for i := 0; i < last; i++ {
 		w[last] -= wprime[i]
+	}
+}
+
+// opacityAreaWeights rewrites color-barycentric simplex weights (each w[q] is
+// vertex idx[q]'s color contribution) in place as CELL (area) fractions under
+// the opacity-weighted mix: to perceive Σ w_q c_q the area share of a vertex
+// must scale as w_q / alpha_q (a translucent vertex needs more cells), then
+// renormalize. A nil palAlpha is a no-op; a uniform alpha leaves the weights
+// unchanged after renormalization. Degenerate all-zero alpha-scaled sums are
+// left untouched rather than producing NaN.
+func opacityAreaWeights(w []float64, idx []int, palAlpha []float32) {
+	if palAlpha == nil {
+		return
+	}
+	var sum float64
+	for q := range w {
+		w[q] /= float64(alphaAt(palAlpha, idx[q]))
+		sum += w[q]
+	}
+	if sum <= 0 {
+		return
+	}
+	inv := 1.0 / sum
+	for q := range w {
+		w[q] *= inv
 	}
 }
 
