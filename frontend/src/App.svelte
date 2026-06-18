@@ -155,13 +155,13 @@
   // gets one — the other is suppressed.
   let baseColorMode = $state<BaseColorMode>('solid');
   // Color palette: each slot is either null (auto) or a locked color with hex + label + source collection.
-  type ColorInfo = { hex: string; label: string; collection?: string };
+  type ColorInfo = { hex: string; label: string; collection?: string; td?: number };
   type ColorSlot = ColorInfo | null;
   let colorSlots = $state<ColorSlot[]>([null, null, null, null]);
   let pickerIndex = $state<number | null>(null);
   // For collection-based inventory source:
   let inventoryCollection = $state('Inventory');
-  let inventoryCollectionColors = $state<{ hex: string; label: string }[]>([]);
+  let inventoryCollectionColors = $state<{ hex: string; label: string; td: number }[]>([]);
   let brightness = $state(0);
   let contrast = $state(0);
   let saturation = $state(0);
@@ -363,9 +363,9 @@
     pickerIndex = pickerIndex === index ? null : index;
   }
 
-  function pickColor(hex: string, label: string, collection: string) {
+  function pickColor(hex: string, label: string, collection: string, td: number) {
     if (pickerIndex === null) return;
-    colorSlots[pickerIndex] = { hex, label, collection };
+    colorSlots[pickerIndex] = { hex, label, collection, td };
     pickerIndex = null;
   }
 
@@ -1024,7 +1024,7 @@
       baseMaterialXPath,
       baseMaterialXTileMM,
       baseMaterialXTriplanarSharpness,
-      colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection } : null),
+      colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection, td: s.td } : null),
       inventoryCollection,
       brightness,
       contrast,
@@ -1159,7 +1159,7 @@
   function vColorSlots(raw: unknown, def: any): ColorSlot[] {
     if (Array.isArray(raw)) {
       return raw.map((c: any) => c && typeof c === 'object'
-        ? { hex: pickString(c.hex, ''), label: pickString(c.label, ''), collection: pickString(c.collection, '') }
+        ? { hex: pickString(c.hex, ''), label: pickString(c.label, ''), collection: pickString(c.collection, ''), td: pickNumber(c.td, 1) }
         : null);
     }
     return structuredClone(def);
@@ -1492,7 +1492,7 @@
       return;
     }
     const colors = (await GetCollectionColors(name)) ?? [];
-    inventoryCollectionColors = colors.map(c => ({ hex: c.hex, label: c.label }));
+    inventoryCollectionColors = colors.map(c => ({ hex: c.hex, label: c.label, td: c.td }));
   }
 
   // Load initial inventory collection colors. Wrapped in untrack
@@ -1526,11 +1526,14 @@
     const invEntries = inventoryCollectionColors;
     const invColors = invEntries.map(c => hexToRgb(c.hex));
     const invLabels = invEntries.map(c => c.label);
+    const invTDs = invEntries.map(c => c.td || 1);
+    const lockedSlots = colorSlots.filter((s): s is ColorInfo => s !== null);
 
     const opts: Partial<pipeline.Options> = {
       Input: inputFile,
       NumColors: colorSlots.length,
-      LockedColors: colorSlots.filter((s): s is ColorInfo => s !== null).map(s => s.hex),
+      LockedColors: lockedSlots.map(s => s.hex),
+      LockedTDs: lockedSlots.map(s => s.td || 1),
       Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
       BaseColor: baseColor?.hex ?? '',
       BaseColorMaterialX: baseColorMode === 'texture' ? baseMaterialXPath : '',
@@ -1542,6 +1545,7 @@
       InventoryFile: '',
       InventoryColors: invColors,
       InventoryLabels: invLabels,
+      InventoryTDs: invTDs,
       Brightness: committedBrightness,
       Contrast: committedContrast,
       Saturation: committedSaturation,
@@ -1924,8 +1928,8 @@
             {#if baseColorMode === 'solid' && baseColorPickerOpen}
               <div>
                 <CollectionPicker
-                  onselect={(hex, label, collection) => {
-                    baseColor = { hex, label, collection };
+                  onselect={(hex, label, collection, td) => {
+                    baseColor = { hex, label, collection, td };
                     baseColorPickerOpen = false;
                   }}
                   onclose={() => { baseColorPickerOpen = false; }}

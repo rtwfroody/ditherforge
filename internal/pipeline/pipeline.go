@@ -62,6 +62,8 @@ type Options struct {
 	InventoryFile   string
 	InventoryColors [][3]uint8 `json:"InventoryColors,omitempty"`
 	InventoryLabels []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
+	InventoryTDs    []float32  `json:"InventoryTDs,omitempty"`    // parallel to InventoryColors; transmission distance (mm), 0 = default opaque
+	LockedTDs       []float32  `json:"LockedTDs,omitempty"`       // parallel to LockedColors; transmission distance (mm), 0 = default opaque
 	Brightness      float32
 	Contrast        float32
 	Saturation      float32
@@ -1023,7 +1025,7 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 		}
 		pcfg.Locked = make([]palette.InventoryEntry, len(colors))
 		for i, c := range colors {
-			pcfg.Locked[i] = palette.InventoryEntry{Color: c}
+			pcfg.Locked[i] = palette.InventoryEntry{Color: c, TD: tdAt(opts.LockedTDs, i)}
 		}
 	}
 	if len(pcfg.Locked) > pcfg.NumColors {
@@ -1042,17 +1044,28 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 			if i < len(opts.InventoryLabels) {
 				label = opts.InventoryLabels[i]
 			}
-			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c, Label: label})
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: c, Label: label, TD: tdAt(opts.InventoryTDs, i)})
 		}
 	} else {
 		// Default: select from built-in color set.
 		defaultColors := []string{"cyan", "magenta", "yellow", "black", "white", "red", "green", "blue"}
 		for _, name := range defaultColors {
 			rgb, _ := palette.ParsePalette([]string{name})
-			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name})
+			pcfg.Inventory = append(pcfg.Inventory, palette.InventoryEntry{Color: rgb[0], Label: name, TD: palette.DefaultTD})
 		}
 	}
 	return pcfg, nil
+}
+
+// tdAt returns the transmission distance at index i from a TD slice parallel
+// to a color slice, falling back to the opaque default when the slice is
+// short or the value is unset (<= 0). This keeps TD optional in the payload:
+// an older client that omits it gets opaque filaments and unchanged output.
+func tdAt(tds []float32, i int) float32 {
+	if i < len(tds) && tds[i] > 0 {
+		return tds[i]
+	}
+	return palette.DefaultTD
 }
 
 func modelExtents(model *loader.LoadedModel) [3]float32 {

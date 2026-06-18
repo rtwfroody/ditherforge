@@ -185,7 +185,7 @@ func TestColorSelection(t *testing.T) {
 				NumColors: tc.nColors,
 				Inventory: inv,
 			}
-			paletteRGB, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
+			paletteRGB, _, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 			if err != nil {
 				t.Fatalf("ResolvePalette: %v", err)
 			}
@@ -258,7 +258,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
+		pal, _, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -284,7 +284,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    locked,
 			Inventory: inv,
 		}
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
+		pal, _, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err != nil {
 			t.Fatalf("ResolvePalette: %v", err)
 		}
@@ -306,7 +306,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 			Locked:    []palette.InventoryEntry{{Color: [3]uint8{255, 0, 0}}},
 			Inventory: smallInv,
 		}
-		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
+		_, _, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err == nil {
 			t.Fatalf("expected error when inventory is exhausted after filtering")
 		}
@@ -316,7 +316,7 @@ func TestResolvePaletteWithLockedColors(t *testing.T) {
 		pcfg := voxel.PaletteConfig{
 			NumColors: 3,
 		}
-		_, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
+		_, _, _, _, err := voxel.ResolvePalette(context.Background(), cells, pcfg, true, progress.NullTracker{})
 		if err == nil {
 			t.Fatalf("expected error when no color source is set")
 		}

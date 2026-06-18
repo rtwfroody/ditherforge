@@ -42,7 +42,8 @@ export namespace main {
 	export class ColorEntry {
 	    hex: string;
 	    label: string;
-	
+	    td: number;
+
 	    static createFrom(source: any = {}) {
 	        return new ColorEntry(source);
 	    }
@@ -51,6 +52,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.hex = source["hex"];
 	        this.label = source["label"];
+	        this.td = source["td"];
 	    }
 	}
 	export class ColorSlotSetting {
@@ -430,6 +432,8 @@ export namespace pipeline {
 	    InventoryFile: string;
 	    InventoryColors?: number[][];
 	    InventoryLabels?: string[];
+	    InventoryTDs?: number[];
+	    LockedTDs?: number[];
 	    Brightness: number;
 	    Contrast: number;
 	    Saturation: number;
@@ -477,6 +481,8 @@ export namespace pipeline {
 	        this.InventoryFile = source["InventoryFile"];
 	        this.InventoryColors = source["InventoryColors"];
 	        this.InventoryLabels = source["InventoryLabels"];
+	        this.InventoryTDs = source["InventoryTDs"];
+	        this.LockedTDs = source["LockedTDs"];
 	        this.Brightness = source["Brightness"];
 	        this.Contrast = source["Contrast"];
 	        this.Saturation = source["Saturation"];

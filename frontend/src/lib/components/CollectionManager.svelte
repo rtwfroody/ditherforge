@@ -18,7 +18,13 @@
   let editIndex = $state(-1);
   let editHex = $state('');
   let editLabel = $state('');
+  let editTD = $state(1);
   let editError = $state('');
+
+  // Default transmission distance (mm) for a newly added filament; matches
+  // the backend's opaque DefaultTD so new colors don't change dither output
+  // until the user gives them a real TD.
+  const DEFAULT_TD = 1;
 
   async function addColor() {
     if (!colorInput.trim() || !collectionStore.activeCollection) return;
@@ -34,9 +40,9 @@
     }
   }
 
-  async function addColorFromPicker(hex: string, label: string) {
+  async function addColorFromPicker(hex: string, label: string, td: number) {
     if (!collectionStore.activeCollection) return;
-    const entry: main.ColorEntry = { hex, label } as main.ColorEntry;
+    const entry: main.ColorEntry = { hex, label, td: td || DEFAULT_TD } as main.ColorEntry;
     const newColors = [...collectionStore.colors, entry];
     try {
       await SaveCollectionColors(collectionStore.activeCollection, newColors);
@@ -75,6 +81,7 @@
     editIndex = index;
     editHex = color.hex;
     editLabel = color.label;
+    editTD = color.td || DEFAULT_TD;
     editError = '';
   }
 
@@ -89,7 +96,8 @@
     try {
       const resolved = await ResolveColor(editHex.trim());
       const newColors = [...collectionStore.colors];
-      newColors[editIndex] = { hex: resolved.hex, label: editLabel.trim() || resolved.label } as main.ColorEntry;
+      const td = Number(editTD) > 0 ? Number(editTD) : DEFAULT_TD;
+      newColors[editIndex] = { hex: resolved.hex, label: editLabel.trim() || resolved.label, td } as main.ColorEntry;
       await SaveCollectionColors(collectionStore.activeCollection, newColors);
       collectionStore.setColors(newColors);
       editIndex = -1;
@@ -141,7 +149,7 @@
                     type="button"
                     class="w-full h-13 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1 cursor-pointer hover:ring-2 hover:ring-primary transition-shadow"
                     style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                    title="{color.hex}{color.label ? ' — ' + color.label : ''}"
+                    title="{color.hex}{color.label ? ' — ' + color.label : ''}{color.td ? ' · TD ' + color.td : ''}"
                     onclick={() => startEdit(i)}
                   >
                     {#if color.label}{color.label}<br>{/if}{color.hex}
@@ -150,7 +158,7 @@
                   <div
                     class="h-13 rounded border flex items-center justify-center text-[10px] leading-tight select-none text-center px-1"
                     style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                    title="{color.hex}{color.label ? ' — ' + color.label : ''}"
+                    title="{color.hex}{color.label ? ' — ' + color.label : ''}{color.td ? ' · TD ' + color.td : ''}"
                   >
                     {#if color.label}{color.label}<br>{/if}{color.hex}
                   </div>
@@ -188,6 +196,22 @@
                   class="flex-1"
                 />
               </div>
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-muted-foreground whitespace-nowrap" for="edit-td">TD (mm)</label>
+                <Input
+                  id="edit-td"
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  bind:value={editTD}
+                  onkeydown={handleEditKeydown}
+                  class="flex-1"
+                />
+              </div>
+              <p class="text-[10px] text-muted-foreground leading-snug">
+                Transmission distance: higher = more translucent (light passes through, mixes less).
+                ~1 = opaque, ~4+ = see-through. Affects how the color dithers.
+              </p>
               {#if editError}
                 <p class="text-xs text-destructive">{editError}</p>
               {/if}
@@ -237,8 +261,8 @@
                           type="button"
                           class="h-13 rounded border cursor-pointer flex items-center justify-center text-[10px] leading-tight select-none text-center px-1 hover:ring-2 hover:ring-primary transition-shadow"
                           style="background: {color.hex}; color: {contrastColor(color.hex)};"
-                          title="{color.hex}{color.label ? ' — ' + color.label : ''}"
-                          onclick={() => addColorFromPicker(color.hex, color.label)}
+                          title="{color.hex}{color.label ? ' — ' + color.label : ''}{color.td ? ' · TD ' + color.td : ''}"
+                          onclick={() => addColorFromPicker(color.hex, color.label, color.td)}
                         >
                           {#if color.label}{color.label}<br>{/if}{color.hex}
                         </button>

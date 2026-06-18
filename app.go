@@ -254,7 +254,7 @@ func (a *App) SaveCollectionColors(name string, colors []ColorEntry) error {
 		if err != nil {
 			return fmt.Errorf("invalid color %q: %w", c.Hex, err)
 		}
-		entries[i] = palette.InventoryEntry{Color: rgb[0], Label: c.Label}
+		entries[i] = palette.InventoryEntry{Color: rgb[0], Label: c.Label, TD: tdOrDefault(c.TD)}
 	}
 	return a.collections.Save(name, entries)
 }
@@ -275,7 +275,16 @@ func (a *App) ResolveColor(input string) (*ColorEntry, error) {
 	if !strings.HasPrefix(input, "#") {
 		label = input
 	}
-	return &ColorEntry{Hex: hex, Label: label}, nil
+	return &ColorEntry{Hex: hex, Label: label, TD: palette.DefaultTD}, nil
+}
+
+// tdOrDefault treats a zero/unset TD (e.g. from an older client that never
+// sent the field) as the opaque default rather than literal zero.
+func tdOrDefault(td float32) float32 {
+	if td <= 0 {
+		return palette.DefaultTD
+	}
+	return td
 }
 
 // IsBusy returns true if the pipeline mutex is held (processing in progress).
@@ -789,8 +798,9 @@ type CollectionInfo struct {
 
 // ColorEntry is a single color from a collection.
 type ColorEntry struct {
-	Hex   string `json:"hex"`
-	Label string `json:"label"`
+	Hex   string  `json:"hex"`
+	Label string  `json:"label"`
+	TD    float32 `json:"td"` // transmission distance in mm; higher = more translucent
 }
 
 // ListCollections returns all available filament collections.
@@ -818,6 +828,7 @@ func (a *App) GetCollectionColors(name string) []ColorEntry {
 		result[i] = ColorEntry{
 			Hex:   fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2]),
 			Label: e.Label,
+			TD:    e.TD,
 		}
 	}
 	return result

@@ -560,6 +560,7 @@ type splitOutput struct {
 
 type paletteOutput struct {
 	Palette       [][3]uint8
+	PaletteTDs    []float32          // parallel to Palette; transmission distance (mm) for opacity-weighted dither
 	PaletteLabels []string           // parallel to Palette; label from inventory (empty for locked/computed)
 	Cells         []voxel.ActiveCell // copy with snapped colors
 }
@@ -881,6 +882,17 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// explicit count. This is intentional — label count tracks color count.
 	for _, l := range opts.InventoryLabels {
 		writeString(h, l)
+	}
+	// TD affects palette selection and the opacity-weighted dither, so it
+	// must invalidate the cache. Length-prefix both TD slices for the same
+	// reason the labels are length-sensitive above.
+	writeInt(h, len(opts.InventoryTDs))
+	for _, td := range opts.InventoryTDs {
+		writeFloat64(h, float64(td))
+	}
+	writeInt(h, len(opts.LockedTDs))
+	for _, td := range opts.LockedTDs {
+		writeFloat64(h, float64(td))
 	}
 	writeFloat64(h, opts.ColorSnap)
 }

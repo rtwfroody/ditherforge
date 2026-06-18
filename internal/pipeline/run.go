@@ -1354,7 +1354,7 @@ func (r *pipelineRun) runPalette() (any, error) {
 	cells := make([]voxel.ActiveCell, len(cwo.Cells))
 	copy(cells, cwo.Cells)
 	ditherMode := r.opts.Dither
-	pal, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
+	pal, palTDs, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
 	if perr != nil {
 		return nil, perr
 	}
@@ -1388,10 +1388,12 @@ func (r *pipelineRun) runPalette() (any, error) {
 		if best != 0 {
 			pal[0], pal[best] = pal[best], pal[0]
 			palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
+			palTDs[0], palTDs[best] = palTDs[best], palTDs[0]
 		}
 	}
 	return &paletteOutput{
 		Palette:       pal,
+		PaletteTDs:    palTDs,
 		PaletteLabels: palLabels,
 		Cells:         cells,
 	}, nil
@@ -1422,6 +1424,10 @@ func (r *pipelineRun) runDither() (any, error) {
 	defer stage.Done()
 	cells := po.Cells
 	pal := po.Palette
+	// Per-color opacity from transmission distance drives the opacity-
+	// weighted error diffusion so translucent filaments contribute less per
+	// unit area (see voxel.AlphaFromTD). Nil/uniform alpha is identity.
+	palAlpha := voxel.PaletteAlphas(po.PaletteTDs)
 	tDither := time.Now()
 	var assignments []int32
 	var derr error
@@ -1442,21 +1448,21 @@ func (r *pipelineRun) runDither() (any, error) {
 	switch ditherMode {
 	case "dizzy-corrected":
 		neighbors := vo.Neighbors
-		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, neighbors, r.tracker)
+		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "dizzy-2hop":
 		// Single-pass dizzy with an expanded 2-hop neighbor
 		// stencil so stranded cells (no unprocessed 1-hop
 		// neighbors) can still distribute error to 2-hop
 		// neighbors instead of dropping it.
 		neighbors := voxel.BuildNeighbors2Hop(cells)
-		assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, neighbors, r.tracker)
+		assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "dizzy-recover":
 		// Single-pass dizzy with a local-solve recovery on
 		// stranded cells: instead of dropping the residual,
 		// search neighbor palette swaps for one that absorbs
 		// it in the global-drift sense.
 		neighbors := vo.Neighbors
-		assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, neighbors, r.tracker)
+		assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "floyd-steinberg":
 		neighbors := vo.Neighbors
 		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, neighbors, r.tracker)

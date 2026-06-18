@@ -171,7 +171,7 @@ func main() {
 		// with the live pipeline. dithering=true matches what real
 		// users get when any dither mode is selected.
 		pcfg := voxel.PaletteConfig{NumColors: 4, Inventory: inv}
-		pal, _, _, err := voxel.ResolvePalette(context.Background(), fx.cells, pcfg, true, progress.NullTracker{})
+		pal, _, _, _, err := voxel.ResolvePalette(context.Background(), fx.cells, pcfg, true, progress.NullTracker{})
 		if err != nil {
 			fmt.Printf("  ResolvePalette failed: %v\n\n", err)
 			continue
@@ -519,16 +519,16 @@ func wrapAssign(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, _
 	return voxel.AssignColors(ctx, cells, pal)
 }
 func wrapDizzy(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.DitherWithNeighbors(ctx, cells, pal, nbrs, progress.NullTracker{})
+	return voxel.DitherWithNeighbors(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapDizzyCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.DitherCorrected(ctx, cells, pal, nbrs, progress.NullTracker{})
+	return voxel.DitherCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapDizzy2Hop(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, _ [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.DitherWithNeighbors(ctx, cells, pal, voxel.BuildNeighbors2Hop(cells), progress.NullTracker{})
+	return voxel.DitherWithNeighbors(ctx, cells, pal, nil, voxel.BuildNeighbors2Hop(cells), progress.NullTracker{})
 }
 func wrapDizzyRecover(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
-	return voxel.DitherWithRecover(ctx, cells, pal, nbrs, progress.NullTracker{})
+	return voxel.DitherWithRecover(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nbrs, progress.NullTracker{})

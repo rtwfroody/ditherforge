@@ -21,17 +21,23 @@ import (
 // Returns the palette RGB values, parallel labels, and a display string
 // for logging. Labels come from inventory entries; locked entries carry
 // whatever label was set in PaletteConfig.Locked.
-func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig, dithering bool, tracker progress.Tracker) ([][3]uint8, []string, string, error) {
+// ResolvePalette returns the resolved palette colors, a parallel slice of
+// per-color transmission distances (mm), per-color labels, a display string,
+// and any error. The TD slice feeds the opacity-weighted dither; entries
+// default to palette.DefaultTD when the source had no TD.
+func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig, dithering bool, tracker progress.Tracker) ([][3]uint8, []float32, []string, string, error) {
 	lockedColors := make([][3]uint8, len(pcfg.Locked))
+	lockedTDs := make([]float32, len(pcfg.Locked))
 	lockedLabels := make([]string, len(pcfg.Locked))
 	for i, e := range pcfg.Locked {
 		lockedColors[i] = e.Color
+		lockedTDs[i] = e.TD
 		lockedLabels[i] = e.Label
 	}
 
 	remaining := pcfg.NumColors - len(pcfg.Locked)
 	if remaining <= 0 {
-		return lockedColors, lockedLabels, "", nil
+		return lockedColors, lockedTDs, lockedLabels, "", nil
 	}
 
 	cellColors := make([][3]uint8, len(cells))
@@ -63,19 +69,22 @@ func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig,
 	if len(pcfg.Inventory) > 0 {
 		filtered := filterInventory(pcfg.Inventory, pcfg.Locked)
 		if len(filtered) == 0 {
-			return nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
+			return nil, nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
 		selected, err := palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, remaining, lockedColors, dithering, tracker)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, nil, "", err
 		}
 		pal := make([][3]uint8, len(lockedColors), pcfg.NumColors)
 		copy(pal, lockedColors)
+		tds := make([]float32, len(lockedTDs), pcfg.NumColors)
+		copy(tds, lockedTDs)
 		labels := make([]string, len(lockedLabels), pcfg.NumColors)
 		copy(labels, lockedLabels)
 		strs := make([]string, 0, len(selected))
 		for _, e := range selected {
 			pal = append(pal, e.Color)
+			tds = append(tds, e.TD)
 			labels = append(labels, e.Label)
 			s := fmt.Sprintf("#%02X%02X%02X", e.Color[0], e.Color[1], e.Color[2])
 			if e.Label != "" {
@@ -84,10 +93,10 @@ func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig,
 			strs = append(strs, s)
 		}
 		display := " " + strings.Join(strs, ", ")
-		return pal, labels, display, nil
+		return pal, tds, labels, display, nil
 	}
 
-	return nil, nil, "", fmt.Errorf("palette config has %d remaining slots but no inventory is set", remaining)
+	return nil, nil, nil, "", fmt.Errorf("palette config has %d remaining slots but no inventory is set", remaining)
 }
 
 // filterInventory returns inventory entries that don't match any locked color.
@@ -1114,6 +1123,50 @@ func linearToSrgbByte(l float32) uint8 {
 	return uint8(v)
 }
 
+// NominalOpticalThicknessMM is the assumed optical path length (mm) a single
+// dithered cell presents to the viewer. It converts a filament's transmission
+// distance into an opacity for the reflectance-weighted mixing model. Only the
+// ratio thickness/TD matters, so this is a single global knob: at 1.0 mm an
+// opaque filament (TD≈1) reads ~fully opaque while a translucent one (TD≈4)
+// contributes far less, which is what lets red+yellow actually reach orange
+// instead of collapsing toward the opaque red. See AlphaFromTD.
+const NominalOpticalThicknessMM = 1.0
+
+// AlphaFromTD returns the opacity in [0,1] of a filament with transmission
+// distance td (mm) at NominalOpticalThicknessMM, via the Beer–Lambert law
+// alpha = 1 - 10^(-t/TD). A non-positive TD is treated as fully opaque so an
+// unset value never collapses a cell to zero contribution.
+func AlphaFromTD(td float32) float32 {
+	if td <= 0 {
+		return 1
+	}
+	return float32(1 - math.Pow(10, -NominalOpticalThicknessMM/float64(td)))
+}
+
+// PaletteAlphas maps a per-color transmission-distance slice to per-color
+// opacity. A nil input returns nil, which every dither kernel treats as
+// "all opaque" — making the opacity-weighted path bit-identical to the
+// historical area-weighted dither when no TD data is present.
+func PaletteAlphas(tds []float32) []float32 {
+	if tds == nil {
+		return nil
+	}
+	a := make([]float32, len(tds))
+	for i, td := range tds {
+		a[i] = AlphaFromTD(td)
+	}
+	return a
+}
+
+// alphaAt returns palAlpha[i], or 1 when palAlpha is nil/short. Centralizes
+// the "nil means opaque" contract so uniform/empty alpha is exactly identity.
+func alphaAt(palAlpha []float32, i int) float32 {
+	if i < len(palAlpha) {
+		return palAlpha[i]
+	}
+	return 1
+}
+
 // paletteLinearLab precomputes each palette color in both linear-light
 // RGB (for residual computation/diffusion) and CIELAB (for the
 // nearest-color decision).
@@ -1149,8 +1202,8 @@ func nearestPaletteLab(L, A, B float32, palLab [][3]float32) int {
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.
-func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) ([]int32, error) {
-	return DitherWithNeighbors(ctx, cells, pal, BuildNeighbors(cells), nil)
+func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32) ([]int32, error) {
+	return DitherWithNeighbors(ctx, cells, pal, palAlpha, BuildNeighbors(cells), nil)
 }
 
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
@@ -1166,7 +1219,14 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8) (
 // targets, so the per-cell error term carries the full unclamped
 // discrepancy out to neighbors. This matches the structure of the
 // reference dizzy implementation (Liam Appelbe, 2020).
-func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+// palAlpha, if non-nil, gives each palette color's opacity in [0,1]
+// (see AlphaFromTD). The error diffusion then conserves the
+// *opacity-weighted* area average Σ(aᵢαₖ cₖ)/Σ(aᵢαₖ) rather than the
+// plain area average, so a translucent filament contributes less per
+// unit area and the solver must spend more area on it to hit a target —
+// the fix for opaque-red swamping translucent-yellow. A nil or uniform
+// palAlpha cancels out and reproduces the historical area-weighted result.
+func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -1180,6 +1240,23 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
+
+	// cellAlphaProxy[i] is the opacity of the palette color nearest cell
+	// i's own (pre-diffusion) color — a stable stand-in for the receiver's
+	// assignment opacity, which isn't known until that cell is processed.
+	// Used only to convert diffused reflectance mass back into a color
+	// shift at the receiver. nil palAlpha → all 1 (identity).
+	var cellAlphaProxy []float32
+	if palAlpha != nil {
+		cellAlphaProxy = make([]float32, n)
+		for i := range cells {
+			cr := srgbToLinearLUT[cells[i].Color[0]]
+			cg := srgbToLinearLUT[cells[i].Color[1]]
+			cb := srgbToLinearLUT[cells[i].Color[2]]
+			pl, pa, pb := linearToLab(cr, cg, cb)
+			cellAlphaProxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
+		}
+	}
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1205,12 +1282,15 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 		eG := g - palLin[bestIdx][1]
 		eB := b - palLin[bestIdx][2]
 
-		// Area-weighted error diffusion: outgoing mass is eR*aSender;
-		// each neighbor's color-domain shift = mass * adjacency_fraction
-		// / aReceiver. Mass-preserving across the diffusion step (modulo
-		// the documented stranded-cell drop). With uniform areas the
-		// aSender/aReceiver factor reduces to 1.
-		aSender := areas[idx]
+		// Opacity-weighted error diffusion: outgoing mass is eR*aSender,
+		// where the sender's effective area folds in the chosen color's
+		// opacity (aᵢαₖ). Each neighbor's color-domain shift = mass *
+		// adjacency_fraction / aReceiverEff, with the receiver's effective
+		// area using its proxy opacity. Conserves Σ(aαₖ cₖ)/Σ(aαₖ) (modulo
+		// the documented stranded-cell drop). With nil/uniform alpha the
+		// opacity factors cancel and this is exactly the historical
+		// area-weighted diffusion.
+		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -1221,7 +1301,11 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale * (aSender / areas[nb.Idx])
+					aRecvEff := areas[nb.Idx]
+					if cellAlphaProxy != nil {
+						aRecvEff *= cellAlphaProxy[nb.Idx]
+					}
+					w := nb.Weight * scale * (aSender / aRecvEff)
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -1316,7 +1400,11 @@ const recoverQualityWeight = 0.1
 //   - Single-swap per stranded cell. A multi-cell joint optimization
 //     would do better but scales as |palette|^k for k-cell regions;
 //     single-swap is the cheap heuristic.
-func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+// palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion
+// here identically. The stranded-cell local solve still uses the unweighted
+// regionObjective; stranded cells are a small fraction, so the opacity model
+// is applied to the dominant diffusion path only. nil/uniform alpha = identity.
+func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -1331,6 +1419,18 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	targets := make([][3]float32, n) // per-cell target in linear light
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
+
+	var cellAlphaProxy []float32
+	if palAlpha != nil {
+		cellAlphaProxy = make([]float32, n)
+		for i := range cells {
+			cr := srgbToLinearLUT[cells[i].Color[0]]
+			cg := srgbToLinearLUT[cells[i].Color[1]]
+			cb := srgbToLinearLUT[cells[i].Color[2]]
+			pl, pa, pb := linearToLab(cr, cg, cb)
+			cellAlphaProxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
+		}
+	}
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1355,8 +1455,8 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		eG := g - palLin[bestIdx][1]
 		eB := b - palLin[bestIdx][2]
 
-		// Area-weighted diffusion (see DitherWithNeighbors).
-		aSender := areas[idx]
+		// Opacity-weighted diffusion (see DitherWithNeighbors).
+		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -1367,7 +1467,11 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					w := nb.Weight * scale * (aSender / areas[nb.Idx])
+					aRecvEff := areas[nb.Idx]
+					if cellAlphaProxy != nil {
+						aRecvEff *= cellAlphaProxy[nb.Idx]
+					}
+					w := nb.Weight * scale * (aSender / aRecvEff)
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -2355,7 +2459,12 @@ const DizzyCorrectionPasses = 3
 // (typical for real models) saturation loss is negligible. If
 // shifts grew large enough to push many cells through saturation,
 // the correction would degrade — none of our fixtures hit that.
-func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+// palAlpha (see DitherWithNeighbors) is threaded into every pass and into
+// the drift measurement: the perceived output average is opacity-weighted
+// Σ(αₐ cₐ)/Σ(αₐ) so the correction chases the average the eye actually
+// integrates. A nil/uniform palAlpha leaves both the inner passes and the
+// drift metric bit-identical to the historical area-weighted behavior.
+func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	// Empty input: no work, no division by zero downstream.
 	if len(cells) == 0 {
 		return nil, nil
@@ -2410,21 +2519,28 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, ne
 		// offset for a single continuous K*n unit of work.
 		passTracker := ditherPassTracker{real: tracker, offset: pass * len(cells)}
 		var err error
-		assigns, err = DitherWithNeighbors(ctx, shifted, pal, neighbors, passTracker)
+		assigns, err = DitherWithNeighbors(ctx, shifted, pal, palAlpha, neighbors, passTracker)
 		if err != nil {
 			return nil, err
 		}
 
-		// Measure drift relative to ORIGINAL input (linear light).
-		var oR, oG, oB float64
+		// Measure drift relative to ORIGINAL input (linear light). The
+		// perceived output is the opacity-weighted mean of the chosen
+		// colors: a translucent tile contributes its color with less
+		// weight, exactly as DitherWithNeighbors conserves. With nil/
+		// uniform alpha the weights are constant and this reduces to the
+		// historical per-cell mean (divide by n).
+		var oR, oG, oB, wSum float64
 		for _, a := range assigns {
-			oR += float64(palLin[a][0])
-			oG += float64(palLin[a][1])
-			oB += float64(palLin[a][2])
+			w := float64(alphaAt(palAlpha, int(a)))
+			oR += w * float64(palLin[a][0])
+			oG += w * float64(palLin[a][1])
+			oB += w * float64(palLin[a][2])
+			wSum += w
 		}
-		oR /= n
-		oG /= n
-		oB /= n
+		oR /= wSum
+		oG /= wSum
+		oB /= wSum
 		driftDE := computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB)
 
 		if driftDE < bestDriftDE {

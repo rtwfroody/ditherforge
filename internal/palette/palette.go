@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -361,10 +362,37 @@ func topSamples(samples []WeightedLabSample, maxN int) []WeightedLabSample {
 	return result
 }
 
+// DefaultTD is the transmission distance (mm) assumed for a filament whose
+// TD is not specified. It is the opaque end of the scale: at the dither's
+// nominal optical thickness this yields opacity ~1, so untagged palettes
+// behave exactly as they did before TD existed.
+const DefaultTD = 1.0
+
 // InventoryEntry holds a color from an inventory file with an optional label.
 type InventoryEntry struct {
 	Color [3]uint8
-	Label string // user comment after the color, empty if none
+	Label string  // user comment after the color, empty if none
+	TD    float32 // transmission distance in mm; higher = more translucent
+}
+
+// parseTDAndLabel splits the part of an inventory line after the color into
+// an optional transmission distance and a label. TD is carried by an explicit
+// "td=<float>" token anywhere in the remainder (so a numeric label is never
+// mistaken for a TD); all other tokens form the label. When no td= token is
+// present, DefaultTD is returned.
+func parseTDAndLabel(rest string) (float32, string) {
+	td := float32(DefaultTD)
+	var labelTokens []string
+	for _, tok := range strings.Fields(rest) {
+		if v, ok := strings.CutPrefix(tok, "td="); ok {
+			if f, err := strconv.ParseFloat(v, 32); err == nil {
+				td = float32(f)
+				continue
+			}
+		}
+		labelTokens = append(labelTokens, tok)
+	}
+	return td, strings.Join(labelTokens, " ")
 }
 
 // ParseInventoryData parses inventory entries from raw bytes.
@@ -383,18 +411,19 @@ func ParseInventoryData(data []byte) ([]InventoryEntry, error) {
 		if strings.HasPrefix(line, "#") && (len(line) < 2 || (line[1] < '0' || line[1] > '9') && (line[1] < 'a' || line[1] > 'f') && (line[1] < 'A' || line[1] > 'F')) {
 			continue
 		}
-		// Split into color token and optional label.
+		// Split into color token and optional remainder (TD + label).
 		colorStr := line
-		label := ""
+		rest := ""
 		if idx := strings.IndexAny(line, " \t"); idx >= 0 {
 			colorStr = line[:idx]
-			label = strings.TrimSpace(line[idx+1:])
+			rest = strings.TrimSpace(line[idx+1:])
 		}
 		rgb, err := parseColor(colorStr)
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, InventoryEntry{Color: rgb, Label: label})
+		td, label := parseTDAndLabel(rest)
+		entries = append(entries, InventoryEntry{Color: rgb, Label: label, TD: td})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
