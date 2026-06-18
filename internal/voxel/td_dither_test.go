@@ -174,6 +174,44 @@ func TestAllModesRespondToTD(t *testing.T) {
 	}
 }
 
+// TestDitherCorrectedNoTranslucentBleed is a regression guard for the bug
+// where DitherCorrected weighted the OUTPUT mean by alpha but the INPUT mean
+// plainly: a translucent color's alpha-discount then looked like a permanent
+// global drift, so the corrector shifted every cell toward that hue and
+// scattered it into solid regions of other colors (yellow speckles all over a
+// pure-red 3DBenchy hull). A field that is half pure-red, half pure-yellow
+// with a translucent yellow must keep the deep-red region essentially red.
+func TestDitherCorrectedNoTranslucentBleed(t *testing.T) {
+	w, h := 64, 64
+	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (0), yellow (1)
+	palAlpha := PaletteAlphas([]float32{1.0, 4.3})  // yellow translucent
+	cells, neighbors := gridCells(w, h, [3]uint8{255, 0, 0})
+	for y := 0; y < h; y++ {
+		for x := w / 2; x < w; x++ {
+			cells[y*w+x].Color = [3]uint8{255, 255, 0} // right half: yellow target
+		}
+	}
+	assigns, err := DitherCorrected(context.Background(), cells, pal, palAlpha, neighbors, nil)
+	if err != nil {
+		t.Fatalf("DitherCorrected: %v", err)
+	}
+	// Deep-red quarter (x < w/4), far from the red/yellow boundary.
+	yellow, total := 0, 0
+	for y := 0; y < h; y++ {
+		for x := 0; x < w/4; x++ {
+			total++
+			if assigns[y*w+x] == 1 {
+				yellow++
+			}
+		}
+	}
+	frac := float64(yellow) / float64(total)
+	t.Logf("yellow fraction in deep-red quarter: %.3f", frac)
+	if frac > 0.02 {
+		t.Errorf("translucent yellow bled into solid-red region: %.3f (want ~0)", frac)
+	}
+}
+
 // TestUniformAlphaIsIdentity guarantees the backwards-compatibility
 // property: a nil alpha and any uniform alpha must produce byte-identical
 // assignments, since a constant opacity cancels in the renormalized mix.

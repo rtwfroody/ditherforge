@@ -903,8 +903,10 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// every dither mode (dizzy/dizzy-corrected/dizzy-2hop/dizzy-
 	// recover, floyd-steinberg, riemersma, riemersma-pair,
 	// blue-noise) moved to a CIELAB nearest-color decision with
-	// linear-light error/residual handling.
-	writeString(h, "perceptual-v1")
+	// linear-light error/residual handling. "td-v1" = every mode now
+	// opacity-weights the mix by filament TD, and DitherCorrected's
+	// drift measurement weights input and output consistently.
+	writeString(h, "td-v1")
 	writeString(h, opts.Dither)
 	writeFloat64(h, opts.RiemersmaInputBias)
 	writeFloat64(h, opts.BlueNoiseTolerance)

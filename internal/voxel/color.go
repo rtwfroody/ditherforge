@@ -2533,20 +2533,6 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 	// linear-light color for the output mean.
 	palLin, _ := paletteLinearLab(pal)
 
-	// Compute the static input average once; it doesn't change
-	// across passes (the SHIFTED inputs do, but the drift we measure
-	// each pass is relative to the ORIGINAL input).
-	var iR, iG, iB float64
-	for i := range cells {
-		iR += float64(srgbToLinearLUT[cells[i].Color[0]])
-		iG += float64(srgbToLinearLUT[cells[i].Color[1]])
-		iB += float64(srgbToLinearLUT[cells[i].Color[2]])
-	}
-	n := float64(len(cells))
-	iR /= n
-	iG /= n
-	iB /= n
-
 	// Working copy of cells whose colors get shifted between passes.
 	// Pass 1 uses the originals (zero correction).
 	shifted := make([]ActiveCell, len(cells))
@@ -2581,23 +2567,34 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 			return nil, err
 		}
 
-		// Measure drift relative to ORIGINAL input (linear light). The
-		// perceived output is the opacity-weighted mean of the chosen
-		// colors: a translucent tile contributes its color with less
-		// weight, exactly as DitherWithNeighbors conserves. With nil/
-		// uniform alpha the weights are constant and this reduces to the
-		// historical per-cell mean (divide by n).
-		var oR, oG, oB, wSum float64
-		for _, a := range assigns {
+		// Measure drift relative to the ORIGINAL input (linear light),
+		// weighting BOTH the output (chosen colors) and the input
+		// reference by the SAME per-cell opacity α(assignment). This
+		// consistency is essential: weighting only the output makes the
+		// α-discount of every translucent pick look like a permanent
+		// global drift, so the corrector shifts ALL cells toward the
+		// translucent hue each pass — scattering e.g. yellow into a
+		// pure-red region. Matching the weights cancels that bias,
+		// leaving only the genuine stranded-tail residual to correct.
+		// With nil/uniform alpha every weight is 1, so both reduce to the
+		// historical plain per-cell means and the behavior is unchanged.
+		var oR, oG, oB, iR, iG, iB, wSum float64
+		for i, a := range assigns {
 			w := float64(alphaAt(palAlpha, int(a)))
 			oR += w * float64(palLin[a][0])
 			oG += w * float64(palLin[a][1])
 			oB += w * float64(palLin[a][2])
+			iR += w * float64(srgbToLinearLUT[cells[i].Color[0]])
+			iG += w * float64(srgbToLinearLUT[cells[i].Color[1]])
+			iB += w * float64(srgbToLinearLUT[cells[i].Color[2]])
 			wSum += w
 		}
 		oR /= wSum
 		oG /= wSum
 		oB /= wSum
+		iR /= wSum
+		iG /= wSum
+		iB /= wSum
 		driftDE := computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB)
 
 		if driftDE < bestDriftDE {
