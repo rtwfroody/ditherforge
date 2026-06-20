@@ -213,6 +213,49 @@ func SampleSlab(
 	return out
 }
 
+// SampleSurfaceColor returns the printed-surface colour at a single
+// slab-plane point (x, y, z), using the same along-normal logic as
+// SampleSlab applies per sample point. It exists so the colour-aware
+// partition (PartitionSlabAnalyticColor) can build a slab colour field
+// BEFORE cells exist; the geometry partition stays colour-free by
+// receiving this as an injected func(x,y)->colour closure.
+//
+// ok is false when no surface was found at that point (along-normal ray
+// missed and the nearest-face fallback returned alpha < 128) — the
+// caller treats that as a distinct "miss" label that merges away.
+// slabThick sets the ray's outward start-back exactly as SampleSlab does.
+func SampleSurfaceColor(
+	x, y, z, slabThick, cellSize float32,
+	model *loader.LoadedModel,
+	si *voxel.SpatialIndex,
+	searchRadius float32,
+	decals []*voxel.StickerDecal,
+	stickerModel *loader.LoadedModel,
+	stickerSI *voxel.SpatialIndex,
+	stickerBuf *voxel.SearchBuf,
+	override voxel.BaseColorOverride,
+	colorXform func([3]float32) [3]float32,
+	buf *voxel.SearchBuf,
+	geom *loader.LoadedModel,
+	geomSI *voxel.SpatialIndex,
+	geomBuf *voxel.SearchBuf,
+	colorBVH *voxel.RayBVH,
+) ([3]uint8, bool) {
+	searchRadius = resolveSearchRadius(searchRadius, cellSize)
+	startBack := slabThick + rayBackMargin
+	reach := rayReach
+	cellN := cellOrient(x, y, z, colorXform, geom, geomSI, searchRadius, geomBuf)
+	p := [3]float32{x, y, z}
+	if colorXform != nil {
+		p = colorXform(p)
+	}
+	rgba := voxel.SampleAlongNormal(p, cellN, startBack, reach, model, colorBVH, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+	if rgba[3] < 128 {
+		return [3]uint8{}, false
+	}
+	return [3]uint8{rgba[0], rgba[1], rgba[2]}, true
+}
+
 // cellInteriorSamplePoints returns up to maxSamples (x, y, midZ)
 // sample points that all lie strictly inside the polygon outer (CCW).
 // Every returned point passes pointInPolygon(outer, x, y), so

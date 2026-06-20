@@ -851,6 +851,18 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeFloat64(h, opts.BaseColorMaterialXTileMM)
 	writeFloat64(h, opts.BaseColorMaterialXTriplanarSharpness)
 	writeBool(h, opts.NoInteriorFaceFootprint)
+	// ColorAwareCells changes which cells the partition emits (colour-
+	// segmented per-region tiling vs one Voronoi over the whole shell),
+	// so toggling it must rebuild the voxelize cache.
+	writeBool(h, opts.ColorAwareCells)
+	if opts.ColorAwareCells {
+		// Salt the colour-aware tiling so its caches rebuild when the
+		// per-region seeding changes (baseline caches are unaffected).
+		// "v2" = ring seeds thinned to kill the thin-band seed overlap.
+		writeString(h, "colorcells-v2")
+		// The ΔE threshold changes which colour edges become cuts.
+		writeFloat64(h, opts.ColorRegionContrast)
+	}
 }
 
 func hashColorAdjustSettings(c *StageCache, h hash.Hash64, opts Options) {

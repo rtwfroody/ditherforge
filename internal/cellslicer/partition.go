@@ -402,19 +402,33 @@ func concentricCapSeeds(fpCur, innerCap *Footprint, cellSize float32, ringSeedPt
 // intersections are never emitted.
 //
 // Pass nil for either neighbour at the top/bottom of the model.
+// slabCoverRegions computes the surface-shell region algebra shared by
+// the plain and colour-aware partitioners. Both must derive the exposed
+// cap and the cell-tiling cover target identically, or the colour path
+// would tile a different shell than PartitionSlabAnalytic and break its
+// byte-identical no-cut fallback — so this is the single source of truth.
+//
+//   - innerCap: interior surface left exposed where the neighbours' caps
+//     don't both cover it (empty for a pure-wall slab).
+//   - coverTarget: the shell the cells tile = lateral band ∪ innerCap.
+func slabCoverRegions(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) (innerCap, coverTarget *Footprint) {
+	inner := OffsetFootprint(fpCur, -cellSize)
+	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
+	innerCap = FootprintDifference(inner, neighborBoth)
+	band := FootprintDifference(fpCur, inner)
+	coverTarget = FootprintUnion(band, innerCap)
+	return innerCap, coverTarget
+}
+
 func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, *Footprint, PartitionStats) {
 	var stats PartitionStats
 	if fpCur == nil || len(fpCur.Loops) == 0 {
 		return nil, nil, stats
 	}
-	inner := OffsetFootprint(fpCur, -cellSize)
-	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
-	innerCap := FootprintDifference(inner, neighborBoth)
-	band := FootprintDifference(fpCur, inner)
-	// The surface shell the emitted cells tile: lateral band ∪ cap region.
-	// Stored on the Slab so diagnostics can measure coverage against the
-	// region cells are actually meant to fill, not the full footprint.
-	coverTarget := FootprintUnion(band, innerCap)
+	// innerCap and coverTarget (band ∪ cap). coverTarget is stored on the
+	// Slab so diagnostics can measure coverage against the region cells
+	// actually fill, not the full footprint.
+	innerCap, coverTarget := slabCoverRegions(fpCur, fpBelow, fpAbove, cellSize)
 
 	// Pixels is a diagnostic only (run.go's partition histogram); the
 	// raster path counted real pixels at pxSize = cellSize/4, so report

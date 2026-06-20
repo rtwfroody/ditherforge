@@ -187,6 +187,9 @@
   let noCellMerge = $state(false);
   let noSimplify = $state(false);
   let honorTD = $state(true);
+  let colorAwareCells = $state(false);
+  let colorRegionContrast = $state(20);
+  let committedColorRegionContrast = $state(20);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
   // originating section's raw sampled RGB instead of the dithered
@@ -1049,6 +1052,8 @@
       noCellMerge,
       noSimplify,
       honorTD,
+      colorAwareCells,
+      colorRegionContrast,
       stats,
       showSampledColors,
       alphaWrap,
@@ -1243,6 +1248,8 @@
     { key: 'noCellMerge',                       validate: pickBool,                                          apply: (v) => { noCellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
+    { key: 'colorAwareCells',                 validate: pickBool,                                          apply: (v) => { colorAwareCells = v; } },
+    { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
@@ -1558,6 +1565,8 @@
       NoMerge: noMerge,
       NoCellMerge: noCellMerge,
       HonorTD: honorTD,
+      ColorAwareCells: colorAwareCells,
+      ColorRegionContrast: committedColorRegionContrast,
       ShowSampledColors: showSampledColors,
       NoSimplify: noSimplify,
       AlphaWrap: alphaWrap,
@@ -2305,6 +2314,27 @@
                   Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
                 </HelpTip>
               </label>
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={colorAwareCells} />
+                Color-aware cells
+                <HelpTip>
+                  Segment each layer by color and tile each monochrome region separately, so cell boundaries land on color boundaries. Sharp patterns (e.g. a checkerboard) stay pure black/white instead of averaging to gray at the edges. Color features smaller than one cell are merged away. Off by default.
+                </HelpTip>
+              </label>
+              {#if colorAwareCells}
+                <div class="space-y-1 pl-6">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Color contrast (delta E)</Label>
+                      <HelpTip>
+                        Cut a color boundary into a cell boundary only where neighboring surface colors differ by more than this CIELAB distance. Low (~5) cuts almost any edge; higher (~20-30) ignores soft shading and cuts only crisp edges.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-8 text-right">{colorRegionContrast}</span>
+                  </div>
+                  <Slider type="single" min={0} max={50} step={1} value={colorRegionContrast} onValueChange={(v: number) => colorRegionContrast = v} onValueCommit={(v: number) => committedColorRegionContrast = v} />
+                </div>
+              {/if}
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={honorTD} />
                 Honor TD

@@ -1179,7 +1179,27 @@ func (r *pipelineRun) sliceSampleHalf(
 			fpAbove = capFps[i+1]
 		}
 		cs := cellSizeForSlab(i)
-		cells, coverTarget, stats := cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
+		var cells []cellslicer.Cell
+		var coverTarget *cellslicer.Footprint
+		var stats cellslicer.PartitionStats
+		if r.opts.ColorAwareCells {
+			// Colour-aware partition: segment this slab's surface shell by
+			// colour and tile each monochrome region independently so cell
+			// boundaries land on colour boundaries. The sampler reads the
+			// printed-surface colour at a slab-plane point exactly as
+			// SampleSlab does per cell (along the surface normal), reusing
+			// this worker's scratch buffers (sequential, not concurrent).
+			midZ := 0.5 * (planes[i] + planes[i+1])
+			slabThick := planes[i+1] - planes[i]
+			sample := func(x, y float32) ([3]uint8, bool) {
+				return cellslicer.SampleSurfaceColor(x, y, midZ, slabThick, cs,
+					colorModel, spatial, 0, decals, stickerModel, stickerSI, bufs.sticker,
+					override, colorXform, buf, geom, geomSI, bufs.geom, colorBVH)
+			}
+			cells, coverTarget, stats = cellslicer.PartitionSlabAnalyticColor(footprints[i], fpBelow, fpAbove, cs, r.opts.ColorRegionContrast, sample)
+		} else {
+			cells, coverTarget, stats = cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
+		}
 		perSlabStats[i] = stats
 		slabs[i] = cellslicer.Slab{
 			Index:       i,

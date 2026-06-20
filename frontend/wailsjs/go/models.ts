@@ -159,6 +159,9 @@ export namespace main {
 	    noMerge: boolean;
 	    noCellMerge: boolean;
 	    noSimplify: boolean;
+	    honorTD: boolean;
+	    colorAwareCells: boolean;
+	    colorRegionContrast: number;
 	    stats: boolean;
 	    showSampledColors: boolean;
 	    alphaWrap: boolean;
@@ -210,6 +213,9 @@ export namespace main {
 	        this.noMerge = source["noMerge"];
 	        this.noCellMerge = source["noCellMerge"];
 	        this.noSimplify = source["noSimplify"];
+	        this.honorTD = source["honorTD"];
+	        this.colorAwareCells = source["colorAwareCells"];
+	        this.colorRegionContrast = source["colorRegionContrast"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];
@@ -435,6 +441,8 @@ export namespace pipeline {
 	    InventoryTDs?: number[];
 	    LockedTDs?: number[];
 	    HonorTD: boolean;
+	    ColorAwareCells: boolean;
+	    ColorRegionContrast: number;
 	    Brightness: number;
 	    Contrast: number;
 	    Saturation: number;
@@ -485,6 +493,8 @@ export namespace pipeline {
 	        this.InventoryTDs = source["InventoryTDs"];
 	        this.LockedTDs = source["LockedTDs"];
 	        this.HonorTD = source["HonorTD"];
+	        this.ColorAwareCells = source["ColorAwareCells"];
+	        this.ColorRegionContrast = source["ColorRegionContrast"];
 	        this.Brightness = source["Brightness"];
 	        this.Contrast = source["Contrast"];
 	        this.Saturation = source["Saturation"];

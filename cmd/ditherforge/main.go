@@ -56,6 +56,8 @@ type Args struct {
 	NoInteriorFaceFootprint         bool     `arg:"--no-interior-face-footprint" help:"Advanced: disable projecting thin between-plane horizontal faces into slab footprints (for A/B timing of that augmentation)"`
 	NoCellMerge                     bool     `arg:"--no-cell-merge" help:"Advanced: clip every cell individually instead of pairing adjacent same-color cells per slab (slower, more triangles, no effect on dithered output). Merging is on by default."`
 	HonorTD                         bool     `arg:"--honor-td" default:"true" help:"Opacity-weight the dither by each filament's transmission distance (TD) so translucent colors get more area. On by default; pass --honor-td=false to revert to the plain area-weighted mix."`
+	ColorAwareCells                 bool     `arg:"--color-aware-cells" help:"Advanced: segment each slab by color and tile each monochrome region separately so cell boundaries land on color boundaries (sharp checkerboards stay pure instead of averaging to gray). Sub-cell features merge away. Off by default."`
+	ColorRegionContrast             float64  `arg:"--color-region-contrast" default:"20" help:"With --color-aware-cells: cut a color boundary only where neighboring surface colors differ by more than this CIE76 delta-E (0..100). Low (~5) cuts most edges; ~20-30 ignores soft shading and cuts only crisp edges."`
 	Size                            *float32 `arg:"--size" help:"Scale model so largest extent equals this value in mm"`
 	Force                           bool     `arg:"--force" help:"Bypass extent size check"`
 	Stats                           bool     `arg:"--stats" help:"Print face counts per material"`
@@ -134,6 +136,8 @@ func main() {
 		NoInteriorFaceFootprint:              args.NoInteriorFaceFootprint,
 		NoCellMerge:                          args.NoCellMerge,
 		HonorTD:                              args.HonorTD,
+		ColorAwareCells:                      args.ColorAwareCells,
+		ColorRegionContrast:                  args.ColorRegionContrast,
 		Size:                                 args.Size,
 		Force:                                args.Force,
 		Stats:                                args.Stats,

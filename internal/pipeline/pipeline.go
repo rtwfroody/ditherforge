@@ -70,7 +70,21 @@ type Options struct {
 	// --honor-td). When false, palette alphas are forced nil and every
 	// dither mode reverts to the plain area-weighted mix (TD ignored).
 	HonorTD bool `json:"HonorTD"`
-	Brightness      float32
+	// ColorAwareCells segments each slab's surface shell by colour and
+	// tiles each monochrome region independently, so cell boundaries land
+	// on colour boundaries (a checkerboard tiles into pure black / white
+	// cells instead of straddling cells that average to grey). Sub-cell
+	// colour features are merged away (no region smaller than one cell).
+	// Off by default; opt-in via CLI --color-aware-cells.
+	ColorAwareCells bool `json:"ColorAwareCells"`
+	// ColorRegionContrast is the segmentation cut threshold in standard
+	// CIE76 ΔE units (only meaningful when ColorAwareCells is on): a colour
+	// boundary becomes a cell boundary only where neighbouring surface
+	// colours differ by more than this. Low (~5) cuts almost any edge;
+	// higher (~20-30) ignores soft shading and cuts only crisp edges. 0
+	// cuts on any difference.
+	ColorRegionContrast float64 `json:"ColorRegionContrast"`
+	Brightness          float32
 	Contrast        float32
 	Saturation      float32
 	Dither          string

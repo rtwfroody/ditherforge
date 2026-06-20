@@ -1122,6 +1122,9 @@ type Settings struct {
 	NoMerge             bool                `json:"noMerge"`
 	NoCellMerge         bool                `json:"noCellMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
+	HonorTD             bool                `json:"honorTD"`
+	ColorAwareCells     bool                `json:"colorAwareCells"`
+	ColorRegionContrast float64             `json:"colorRegionContrast"`
 	Stats               bool                `json:"stats"`
 	ShowSampledColors   bool                `json:"showSampledColors"`
 	AlphaWrap           bool                `json:"alphaWrap"`
@@ -1202,6 +1205,9 @@ func defaultSettings() Settings {
 		NoMerge:               false,
 		NoCellMerge:           false,
 		NoSimplify:            false,
+		HonorTD:               true,
+		ColorAwareCells:       false,
+		ColorRegionContrast:   20,
 		Stats:                 false,
 		ShowSampledColors:     false,
 		AlphaWrap:             false,
