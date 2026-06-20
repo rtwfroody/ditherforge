@@ -691,6 +691,17 @@ func resolveFaceColor(
 	return rgba
 }
 
+// surfaceColorInsetMM is how far (mm) past the surface hit, along the inward
+// ray, the along-normal color sample is taken — so a material color-boundary
+// plane coincident with the surface resolves to the inside material instead
+// of straddling the discontinuity. It must sit comfortably above the ray-hit
+// floating-point error (≈1 ULP of the coordinate magnitude, ~1.2e-5 mm at a
+// 100mm extent) and well below the material's pattern period. 1µm clears
+// float32 noise by ~80× up to ~1m models, and is far finer than any
+// printable pattern feature (≥ nozzle width); only a sub-µm-period procedural,
+// finer than a printer can render, could be perturbed by it.
+const surfaceColorInsetMM = 1e-3
+
 // SampleAlongNormal samples color by casting a ray from the sample
 // point p inward along -normal (toward the object) and resolving the
 // color of the first original-mesh face it crosses. Because alpha-wrap
@@ -700,6 +711,12 @@ func resolveFaceColor(
 // no lateral pickup of a neighbor's wall (the failure mode of pure
 // nearest-face sampling, which fattens thin perpendicular accents like
 // red module side-walls over the grey caps they abut).
+//
+// surfaceColorInset is how far (mm) inward along -normal the along-normal
+// color sample is pushed past the surface hit, so a material color-boundary
+// plane that coincides with the surface is resolved to the inside material
+// instead of straddling the discontinuity. 1µm: ~10× the ray-hit FP noise
+// at 100mm extents, ~1/1000 of a typical pattern feature.
 //
 // The cell's sample point p sits at the cell's mid-Z — inside the solid,
 // below the skin by up to half a slab — so the ray is started startBack
@@ -722,7 +739,26 @@ func SampleAlongNormal(
 		o := [3]float32{p[0] + normal[0]*startBack, p[1] + normal[1]*startBack, p[2] + normal[2]*startBack}
 		d := [3]float32{-normal[0], -normal[1], -normal[2]}
 		if tri, tt, u, v, ok := bvh.FirstHit(o, d, startBack+reach); ok {
+			// Read color from the material just BENEATH the surface, not
+			// exactly on it. The hit lands on the surface plane; when that
+			// plane coincides with a color-boundary of a position-driven
+			// material (e.g. a procedural checker whose cells align with an
+			// axis-aligned wall — common when the model extent is a whole
+			// multiple of the pattern period), evaluating color AT the
+			// plane straddles a floor()/mod() discontinuity, and FP
+			// rounding of the hit to ±0 scatters a flat wall into a gray
+			// average between sample points. Nudging inward by
+			// surfaceColorInsetMM samples the well-defined inside material
+			// so every point on the wall agrees; non-coincident surfaces
+			// are unaffected. d is normalized so the step is a fixed
+			// geometric distance even if `normal` is slightly non-unit.
 			hit := [3]float32{o[0] + d[0]*tt, o[1] + d[1]*tt, o[2] + d[2]*tt}
+			if dlen := float32(math.Sqrt(float64(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]))); dlen > 0 {
+				s := surfaceColorInsetMM / dlen
+				hit[0] += d[0] * s
+				hit[1] += d[1] * s
+				hit[2] += d[2] * s
+			}
 			return resolveFaceColor(hit, model, tri, u, v, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 		}
 	}
