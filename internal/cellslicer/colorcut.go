@@ -477,8 +477,34 @@ func (g *colorGrid) relabel(from, to int32) {
 // per-row run rectangles to keep the Clipper union cheap), intersected
 // with coverTarget so the region's outer edge is the true silhouette,
 // not the grid staircase. Region order is by label id (deterministic).
+//
+// Boundary nodes additionally extend their square outward by half a pitch
+// on any side facing OUTSIDE coverTarget. The bare node±half squares fall
+// up to ~half a pitch short of the silhouette on the max-X and max-Y edges
+// (the outermost in-region node sits below maxX/maxY and the node beyond it
+// is culled for being outside coverTarget), so the grid-square union — and
+// hence the region footprint after the cover intersect — under-reaches the
+// true wall there. A boundary cell on a vertical wall then ends ~10µm inside
+// the alpha-wrapped surface, the 5µm open-edge clip bloat can't bridge the
+// gap, and the per-cell clip prism misses the wall entirely → holes on the
+// max walls. Extending outward (then clamping with the cover intersect)
+// makes the union reach the silhouette on all four sides, matching the plain
+// partition. Convex corners (both perpendicular neighbours outside) also get
+// a diagonal-quadrant rect the axis extensions miss, so corner points are
+// covered too.
+//
+// The extension only fires where the neighbour is OUTSIDE coverTarget, never
+// across a colour cut (both sides inside). It is exactly half a pitch — the
+// most a node's square can fall short of the silhouette — so the outward
+// reach is one full pitch (node+half + half) and an extension can never reach
+// a different-label node's square, which starts 1.5 pitch away across a
+// one-cell gap. Only a sub-pitch OUTSIDE neck sitting on a colour cut (a
+// feature the cellSize/4 grid cannot resolve in the first place) could leave
+// two extensions grazing in the off-cover sliver between them; the residual
+// is sub-pitch, the same scale as Clipper's coincident-edge tie-breaks.
 func (g *colorGrid) buildRegionFootprints(coverTarget *Footprint) []*Footprint {
 	half := g.pitch * 0.5
+	ext := half
 	rectsByLabel := make(map[int32]clipper.Paths)
 	for r := 0; r < g.rows; r++ {
 		c := 0
@@ -508,6 +534,69 @@ func (g *colorGrid) buildRegionFootprints(coverTarget *Footprint) []*Footprint {
 			rect := []Point2{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}
 			rectsByLabel[lab] = append(rectsByLabel[lab], pointsToClipperPath(rect))
 			c++
+		}
+	}
+
+	// outside reports whether grid cell (nr,nc) lies outside coverTarget
+	// (or off the grid entirely) — i.e. a silhouette boundary, not a
+	// colour cut between two in-region nodes.
+	outside := func(nr, nc int) bool {
+		if nr < 0 || nr >= g.rows || nc < 0 || nc >= g.cols {
+			return true
+		}
+		return !g.inside[nr*g.cols+nc]
+	}
+	for r := 0; r < g.rows; r++ {
+		for c := 0; c < g.cols; c++ {
+			idx := r*g.cols + c
+			if !g.inside[idx] {
+				continue
+			}
+			lab := g.label[idx]
+			if lab < 0 {
+				continue
+			}
+			nx := g.minX + float32(c)*g.pitch
+			ny := g.minY + float32(r)*g.pitch
+			addRect := func(x0, y0, x1, y1 float32) {
+				rect := []Point2{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}
+				rectsByLabel[lab] = append(rectsByLabel[lab], pointsToClipperPath(rect))
+			}
+			left := outside(r, c-1)
+			right := outside(r, c+1)
+			down := outside(r-1, c)
+			up := outside(r+1, c)
+			if left { // extend left, past the silhouette
+				addRect(nx-half-ext, ny-half, nx-half, ny+half)
+			}
+			if right { // extend right
+				addRect(nx+half, ny-half, nx+half+ext, ny+half)
+			}
+			if down { // extend down
+				addRect(nx-half, ny-half-ext, nx+half, ny-half)
+			}
+			if up { // extend up
+				addRect(nx-half, ny+half, nx+half, ny+half+ext)
+			}
+			// Convex corners: the axis extensions leave the outer diagonal
+			// quadrant uncovered, so the silhouette corner falls short. Fill
+			// it only at a genuine convex corner — both perpendicular
+			// neighbours AND the diagonal neighbour face outside. At a
+			// concave corner (e.g. the bottom of a thin slot) the diagonal
+			// neighbour is the region across the slot; extending there would
+			// poke a half-pitch square into it.
+			if left && down && outside(r-1, c-1) {
+				addRect(nx-half-ext, ny-half-ext, nx-half, ny-half)
+			}
+			if left && up && outside(r+1, c-1) {
+				addRect(nx-half-ext, ny+half, nx-half, ny+half+ext)
+			}
+			if right && down && outside(r-1, c+1) {
+				addRect(nx+half, ny-half-ext, nx+half+ext, ny-half)
+			}
+			if right && up && outside(r+1, c+1) {
+				addRect(nx+half, ny+half, nx+half+ext, ny+half+ext)
+			}
 		}
 	}
 

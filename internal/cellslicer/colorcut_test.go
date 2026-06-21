@@ -162,3 +162,114 @@ func TestColorRegionsHalfSplit(t *testing.T) {
 		}
 	}
 }
+
+// TestColorRegionsReachSilhouette pins the silhouette-coverage fix.
+// Region footprints are built from a grid of pitch×pitch squares; on an
+// edge that does not land on a grid node (here cover spans [0,size] with
+// size NOT a multiple of the pitch), the outermost in-region node sits
+// below the edge and the bare node±half squares fall up to ~half a pitch
+// short of the max-X / max-Y silhouette. On a vertical wall that leaves a
+// boundary cell ~10µm inside the surface, the 5µm open-edge clip bloat
+// can't bridge it, and the per-cell clip prism misses the wall → the
+// whole max-X / max-Y wall comes out as holes. The region footprints must
+// therefore reach the cover silhouette on every side, not just the
+// grid-aligned ones.
+func TestColorRegionsReachSilhouette(t *testing.T) {
+	const cellSize = 1.0
+	// size/pitch is non-integer (pitch = cellSize/4 = 0.25; 8.2/0.25 =
+	// 32.8), so the max edge falls between nodes — the failing case.
+	const size = 8.2
+
+	cover := squareFootprint(size)
+	sample := func(x, y float32) ([3]uint8, bool) {
+		if x < size/2 {
+			return [3]uint8{0, 0, 0}, true
+		}
+		return [3]uint8{255, 255, 255}, true
+	}
+
+	regions := ColorRegions(cover, cellSize, 30, sample)
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions across one edge, got %d", len(regions))
+	}
+
+	// Union extent of all region footprints.
+	minX, minY := float32(math.Inf(1)), float32(math.Inf(1))
+	maxX, maxY := float32(math.Inf(-1)), float32(math.Inf(-1))
+	for _, r := range regions {
+		for _, lp := range r.Loops {
+			for _, p := range lp.Points {
+				minX = float32(math.Min(float64(minX), float64(p[0])))
+				minY = float32(math.Min(float64(minY), float64(p[1])))
+				maxX = float32(math.Max(float64(maxX), float64(p[0])))
+				maxY = float32(math.Max(float64(maxY), float64(p[1])))
+			}
+		}
+	}
+	// Tolerance well under the ~half-pitch (0.125mm) shortfall the bug
+	// produced, but above Clipper's integer-grid rounding.
+	const tol = 0.02
+	if minX > tol || minY > tol {
+		t.Errorf("regions do not reach the min silhouette: min=(%.4f,%.4f) want ≤(%.2f,%.2f)", minX, minY, tol, tol)
+	}
+	if maxX < size-tol || maxY < size-tol {
+		t.Errorf("regions fall short of the max silhouette: max=(%.4f,%.4f) want ≥(%.4f,%.4f)", maxX, maxY, size-tol, size-tol)
+	}
+	// The max-X/max-Y CORNER must be covered too. Axis-only extension
+	// reaches each edge with SOME point but leaves the outer diagonal
+	// quadrant — and hence the corner itself — uncovered; the convex-corner
+	// diagonal rect fixes that.
+	corner := float32(size - tol)
+	covered := false
+	for _, r := range regions {
+		if r.Contains(corner, corner) {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Errorf("max corner (%.3f,%.3f) is in no region — convex corner left a hole", corner, corner)
+	}
+}
+
+// TestColorRegionsNoNeckOverlap pins the boundary extension against the
+// disjoint-regions invariant. A printable OUTSIDE slot in coverTarget that
+// lies on a colour cut must NOT let the two regions' silhouette extensions
+// poke across the slot into each other. With the original full-pitch
+// extension the cells on each side reached past the slot into the opposite
+// region (~0.3mm² overlap → doubled cells); the half-pitch extension reaches
+// only as far as the slot, where the cover intersect clips it, so any slot
+// at least cellSize/2 wide stays cleanly disjoint. (Sub-cellSize/2 slots —
+// below the cellSize/4 grid's resolution and the nozzle's printable gap —
+// retain a bounded ~(cellSize/8)² corner sliver, in the same noise class as
+// Clipper's coincident-edge tie-breaks.)
+func TestColorRegionsNoNeckOverlap(t *testing.T) {
+	const cellSize = 1.0 // pitch = 0.25, so a ≥0.5mm slot is fully resolved
+	// Square [0,10]² with a 0.6mm-wide slot cut into the top edge down to
+	// y=5, straddling the x=5 colour cut — a printable gap the grid resolves.
+	outer := Loop{Points: []Point2{
+		{0, 0}, {10, 0}, {10, 10}, {5.3, 10}, {5.3, 5}, {4.7, 5}, {4.7, 10}, {0, 10},
+	}}
+	outer.RefreshDerived()
+	cover := ComputeFootprint([]Loop{outer}, nil)
+
+	sample := func(x, y float32) ([3]uint8, bool) {
+		if x < 5.0 {
+			return [3]uint8{0, 0, 0}, true
+		}
+		return [3]uint8{255, 255, 255}, true
+	}
+
+	regions := ColorRegions(cover, cellSize, 30, sample)
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions across the colour cut, got %d", len(regions))
+	}
+	// The two regions must stay disjoint across the slot.
+	const tol = 0.001
+	inter := FootprintIntersect(regions[0], regions[1])
+	if inter != nil {
+		if a := footprintArea(inter); a > tol {
+			t.Errorf("regions overlap across the slot by %.4f mm² (want ≤ %.3f) — extension bridged the neck", a, tol)
+		}
+	}
+}
