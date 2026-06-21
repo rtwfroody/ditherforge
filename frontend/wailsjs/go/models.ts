@@ -55,22 +55,6 @@ export namespace main {
 	        this.td = source["td"];
 	    }
 	}
-	export class ColorSlotSetting {
-	    hex: string;
-	    label?: string;
-	    collection?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ColorSlotSetting(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.hex = source["hex"];
-	        this.label = source["label"];
-	        this.collection = source["collection"];
-	    }
-	}
 	export class DebugCellsSlabResult {
 	    svg: string;
 	    slabCount: number;
@@ -85,6 +69,176 @@ export namespace main {
 	        this.svg = source["svg"];
 	        this.slabCount = source["slabCount"];
 	        this.medianCellAreaMM2 = source["medianCellAreaMM2"];
+	    }
+	}
+	export class LoadSettingsResult {
+	    path: string;
+	    settings: settings.Settings;
+	
+	    static createFrom(source: any = {}) {
+	        return new LoadSettingsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.settings = this.convertValues(source["settings"], settings.Settings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class MaterialXOpenResult {
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MaterialXOpenResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	    }
+	}
+	export class NozzleOption {
+	    diameter: string;
+	    layerHeights: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new NozzleOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.diameter = source["diameter"];
+	        this.layerHeights = source["layerHeights"];
+	    }
+	}
+	export class PrinterOption {
+	    id: string;
+	    displayName: string;
+	    nozzles: NozzleOption[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PrinterOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.displayName = source["displayName"];
+	        this.nozzles = this.convertValues(source["nozzles"], NozzleOption);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace pipeline {
+	
+	export class SplitPreviewResult {
+	    origin: number[];
+	    normal: number[];
+	    u: number[];
+	    v: number[];
+	    halfExtentU: number;
+	    halfExtentV: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SplitPreviewResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.origin = source["origin"];
+	        this.normal = source["normal"];
+	        this.u = source["u"];
+	        this.v = source["v"];
+	        this.halfExtentU = source["halfExtentU"];
+	        this.halfExtentV = source["halfExtentV"];
+	    }
+	}
+	export class SplitSettings {
+	    Enabled: boolean;
+	    Axis: number;
+	    Offset: number;
+	    ConnectorStyle: string;
+	    ConnectorCount: number;
+	    ConnectorDiamMM: number;
+	    ConnectorDepthMM: number;
+	    ClearanceMM: number;
+	    Orientation: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SplitSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Enabled = source["Enabled"];
+	        this.Axis = source["Axis"];
+	        this.Offset = source["Offset"];
+	        this.ConnectorStyle = source["ConnectorStyle"];
+	        this.ConnectorCount = source["ConnectorCount"];
+	        this.ConnectorDiamMM = source["ConnectorDiamMM"];
+	        this.ConnectorDepthMM = source["ConnectorDepthMM"];
+	        this.ClearanceMM = source["ClearanceMM"];
+	        this.Orientation = source["Orientation"];
+	    }
+	}
+
+}
+
+export namespace settings {
+	
+	export class ColorSlotSetting {
+	    hex: string;
+	    label?: string;
+	    collection?: string;
+	    td?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ColorSlotSetting(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hex = source["hex"];
+	        this.label = source["label"];
+	        this.collection = source["collection"];
+	        this.td = source["td"];
 	    }
 	}
 	export class StickerSetting {
@@ -253,316 +407,6 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class LoadSettingsResult {
-	    path: string;
-	    settings: Settings;
-	
-	    static createFrom(source: any = {}) {
-	        return new LoadSettingsResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.path = source["path"];
-	        this.settings = this.convertValues(source["settings"], Settings);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class MaterialXOpenResult {
-	    path: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new MaterialXOpenResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.path = source["path"];
-	    }
-	}
-	export class NozzleOption {
-	    diameter: string;
-	    layerHeights: number[];
-	
-	    static createFrom(source: any = {}) {
-	        return new NozzleOption(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.diameter = source["diameter"];
-	        this.layerHeights = source["layerHeights"];
-	    }
-	}
-	export class PrinterOption {
-	    id: string;
-	    displayName: string;
-	    nozzles: NozzleOption[];
-	
-	    static createFrom(source: any = {}) {
-	        return new PrinterOption(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.displayName = source["displayName"];
-	        this.nozzles = this.convertValues(source["nozzles"], NozzleOption);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	
-
-}
-
-export namespace pipeline {
-	
-	export class SplitSettings {
-	    Enabled: boolean;
-	    Axis: number;
-	    Offset: number;
-	    ConnectorStyle: string;
-	    ConnectorCount: number;
-	    ConnectorDiamMM: number;
-	    ConnectorDepthMM: number;
-	    ClearanceMM: number;
-	    Orientation: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new SplitSettings(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.Enabled = source["Enabled"];
-	        this.Axis = source["Axis"];
-	        this.Offset = source["Offset"];
-	        this.ConnectorStyle = source["ConnectorStyle"];
-	        this.ConnectorCount = source["ConnectorCount"];
-	        this.ConnectorDiamMM = source["ConnectorDiamMM"];
-	        this.ConnectorDepthMM = source["ConnectorDepthMM"];
-	        this.ClearanceMM = source["ClearanceMM"];
-	        this.Orientation = source["Orientation"];
-	    }
-	}
-	export class Sticker {
-	    ImagePath: string;
-	    Center: number[];
-	    Normal: number[];
-	    Up: number[];
-	    Scale: number;
-	    Rotation: number;
-	    MaxAngle: number;
-	    Mode: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new Sticker(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ImagePath = source["ImagePath"];
-	        this.Center = source["Center"];
-	        this.Normal = source["Normal"];
-	        this.Up = source["Up"];
-	        this.Scale = source["Scale"];
-	        this.Rotation = source["Rotation"];
-	        this.MaxAngle = source["MaxAngle"];
-	        this.Mode = source["Mode"];
-	    }
-	}
-	export class WarpPin {
-	    sourceHex: string;
-	    targetHex: string;
-	    sigma: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new WarpPin(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sourceHex = source["sourceHex"];
-	        this.targetHex = source["targetHex"];
-	        this.sigma = source["sigma"];
-	    }
-	}
-	export class Options {
-	    Input: string;
-	    NumColors: number;
-	    LockedColors: string[];
-	    Scale: number;
-	    Output: string;
-	    BaseColor: string;
-	    BaseColorMaterialX: string;
-	    BaseColorMaterialXTileMM: number;
-	    BaseColorMaterialXTriplanarSharpness: number;
-	    NozzleDiameter: number;
-	    LayerHeight: number;
-	    Printer: string;
-	    InventoryFile: string;
-	    InventoryColors?: number[][];
-	    InventoryLabels?: string[];
-	    InventoryTDs?: number[];
-	    LockedTDs?: number[];
-	    HonorTD: boolean;
-	    ColorAwareCells: boolean;
-	    ColorRegionContrast: number;
-	    Brightness: number;
-	    Contrast: number;
-	    Saturation: number;
-	    Dither: string;
-	    RiemersmaInputBias: number;
-	    BlueNoiseTolerance: number;
-	    NoMerge: boolean;
-	    NoSimplify: boolean;
-	    Size?: number;
-	    Force: boolean;
-	    ReloadSeq: number;
-	    Stats: boolean;
-	    ColorSnap: number;
-	    WarpPins?: WarpPin[];
-	    Stickers?: Sticker[];
-	    ObjectIndex: number;
-	    AlphaWrap: boolean;
-	    AlphaWrapAlpha: number;
-	    AlphaWrapOffset: number;
-	    Layer0AdhesionXYScale: number;
-	    UpperLayerXYScale: number;
-	    Split?: SplitSettings;
-	    NoInteriorFaceFootprint?: boolean;
-	    NoCellMerge?: boolean;
-	    ShowSampledColors?: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new Options(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.Input = source["Input"];
-	        this.NumColors = source["NumColors"];
-	        this.LockedColors = source["LockedColors"];
-	        this.Scale = source["Scale"];
-	        this.Output = source["Output"];
-	        this.BaseColor = source["BaseColor"];
-	        this.BaseColorMaterialX = source["BaseColorMaterialX"];
-	        this.BaseColorMaterialXTileMM = source["BaseColorMaterialXTileMM"];
-	        this.BaseColorMaterialXTriplanarSharpness = source["BaseColorMaterialXTriplanarSharpness"];
-	        this.NozzleDiameter = source["NozzleDiameter"];
-	        this.LayerHeight = source["LayerHeight"];
-	        this.Printer = source["Printer"];
-	        this.InventoryFile = source["InventoryFile"];
-	        this.InventoryColors = source["InventoryColors"];
-	        this.InventoryLabels = source["InventoryLabels"];
-	        this.InventoryTDs = source["InventoryTDs"];
-	        this.LockedTDs = source["LockedTDs"];
-	        this.HonorTD = source["HonorTD"];
-	        this.ColorAwareCells = source["ColorAwareCells"];
-	        this.ColorRegionContrast = source["ColorRegionContrast"];
-	        this.Brightness = source["Brightness"];
-	        this.Contrast = source["Contrast"];
-	        this.Saturation = source["Saturation"];
-	        this.Dither = source["Dither"];
-	        this.RiemersmaInputBias = source["RiemersmaInputBias"];
-	        this.BlueNoiseTolerance = source["BlueNoiseTolerance"];
-	        this.NoMerge = source["NoMerge"];
-	        this.NoSimplify = source["NoSimplify"];
-	        this.Size = source["Size"];
-	        this.Force = source["Force"];
-	        this.ReloadSeq = source["ReloadSeq"];
-	        this.Stats = source["Stats"];
-	        this.ColorSnap = source["ColorSnap"];
-	        this.WarpPins = this.convertValues(source["WarpPins"], WarpPin);
-	        this.Stickers = this.convertValues(source["Stickers"], Sticker);
-	        this.ObjectIndex = source["ObjectIndex"];
-	        this.AlphaWrap = source["AlphaWrap"];
-	        this.AlphaWrapAlpha = source["AlphaWrapAlpha"];
-	        this.AlphaWrapOffset = source["AlphaWrapOffset"];
-	        this.Layer0AdhesionXYScale = source["Layer0AdhesionXYScale"];
-	        this.UpperLayerXYScale = source["UpperLayerXYScale"];
-	        this.Split = this.convertValues(source["Split"], SplitSettings);
-	        this.NoInteriorFaceFootprint = source["NoInteriorFaceFootprint"];
-	        this.NoCellMerge = source["NoCellMerge"];
-	        this.ShowSampledColors = source["ShowSampledColors"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SplitPreviewResult {
-	    origin: number[];
-	    normal: number[];
-	    u: number[];
-	    v: number[];
-	    halfExtentU: number;
-	    halfExtentV: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SplitPreviewResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.origin = source["origin"];
-	        this.normal = source["normal"];
-	        this.u = source["u"];
-	        this.v = source["v"];
-	        this.halfExtentU = source["halfExtentU"];
-	        this.halfExtentV = source["halfExtentV"];
-	    }
-	}
-	
 	
 
 }

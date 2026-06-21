@@ -48,7 +48,7 @@
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
-  import type { pipeline, loader } from '../wailsjs/go/models';
+  import type { loader, settings } from '../wailsjs/go/models';
 
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
   function log(msg: string) {
@@ -763,17 +763,25 @@
   }
 
   // Auto-trigger the pipeline whenever any input that affects the
-  // backend changes. We derive the dependency set from buildOpts()
-  // itself: Svelte 5 registers $state reads inside the effect, and
-  // buildOpts reads exactly the values that flow to the backend.
-  // Adding a new pipeline-relevant setting requires wiring it into
-  // buildOpts anyway (so the backend receives it); doing so makes
-  // this effect track it automatically. JSON.stringify produces a
-  // stable deep read for arrays/objects so element mutations don't
-  // slip past granular reactivity.
+  // backend changes. We derive the dependency set from settingsForBackend()
+  // itself: Svelte 5 registers $state reads inside the effect, and that
+  // builder reads exactly the values that flow to the backend (committed
+  // slider values, so dragging doesn't reprocess until release). Adding a
+  // new pipeline-relevant setting requires wiring it into buildSettings
+  // anyway, so this effect tracks it automatically. JSON.stringify produces
+  // a stable deep read for arrays/objects so element mutations don't slip
+  // past granular reactivity.
+  //
+  // inventoryCollectionColors and reloadSeq are tracked explicitly: the
+  // backend re-resolves the inventory collection by name, so editing the
+  // active collection's colors changes settingsForBackend()'s output only
+  // through this resolved list; reloadSeq is bumped to force a re-read of
+  // the same input file and is not part of the persisted settings.
   let initialized = false;
   $effect(() => {
-    void JSON.stringify(buildOpts(false));
+    void JSON.stringify(settingsForBackend());
+    void JSON.stringify(inventoryCollectionColors);
+    void reloadSeq;
     if (!initialized) {
       initialized = true;
       return;
@@ -1013,7 +1021,17 @@
     }
   });
 
-  function serializeSettings() {
+  // Builds the plain settings object that mirrors Go's settings.Settings.
+  // sliderSource picks whether the debounced slider fields read their live
+  // ('raw') or committed values:
+  //   • 'raw'       — for SAVE and the factory-default snapshot: persist
+  //                   exactly what the user currently sees.
+  //   • 'committed' — for the backend payload and the auto-rerun $effect:
+  //                   dragging a slider must not reprocess until release.
+  // Only the chosen branch's $state is read, so the $effect that stringifies
+  // the 'committed' build never tracks (and re-fires on) the raw slider drag.
+  function buildSettings(sliderSource: 'raw' | 'committed') {
+    const useC = sliderSource === 'committed';
     return {
       inputFile,
       objectIndex,
@@ -1030,9 +1048,9 @@
       baseMaterialXTriplanarSharpness,
       colorSlots: colorSlots.map(s => s ? { hex: s.hex, label: s.label, collection: s.collection, td: s.td } : null),
       inventoryCollection,
-      brightness,
-      contrast,
-      saturation,
+      brightness: useC ? committedBrightness : brightness,
+      contrast: useC ? committedContrast : contrast,
+      saturation: useC ? committedSaturation : saturation,
       warpPins: warpPins.map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, targetLabel: p.targetLabel, sigma: p.sigma })),
       stickers: stickers.filter(s => s.center !== null).map(s => ({
         imagePath: s.imagePath,
@@ -1045,22 +1063,22 @@
         mode: s.mode,
       })),
       dither,
-      riemersmaBias,
-      blueNoiseTol,
-      colorSnap,
+      riemersmaBias: useC ? committedRiemersmaBias : riemersmaBias,
+      blueNoiseTol: useC ? committedBlueNoiseTol : blueNoiseTol,
+      colorSnap: useC ? committedColorSnap : colorSnap,
       noMerge,
       noCellMerge,
       noSimplify,
       honorTD,
       colorAwareCells,
-      colorRegionContrast,
+      colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
       stats,
       showSampledColors,
       alphaWrap,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
-      layer0AdhesionXYScale,
-      upperLayerXYScale,
+      layer0AdhesionXYScale: useC ? committedLayer0AdhesionXYScale : layer0AdhesionXYScale,
+      upperLayerXYScale: useC ? committedUpperLayerXYScale : upperLayerXYScale,
       splitEnabled,
       splitAxis,
       splitOffset,
@@ -1072,6 +1090,18 @@
       splitOrientationA,
       splitOrientationB,
     };
+  }
+
+  // Raw snapshot for SAVE / factory defaults / the key-guard below.
+  function serializeSettings() {
+    return buildSettings('raw');
+  }
+
+  // Committed snapshot sent to the backend; Go's settings.ToOptions turns
+  // it into pipeline.Options (the same path the CLI uses). Replaces the old
+  // JS buildOpts() so the GUI and CLI can never diverge.
+  function settingsForBackend(): settings.Settings {
+    return buildSettings('committed') as unknown as settings.Settings;
   }
 
   // Compile-time guard: serializeSettings() and Go's Settings struct
@@ -1093,7 +1123,7 @@
   // generator quirks around []*T (drops null) and [N]T (widens to
   // T[]). When this guard fires it resolves the type to `never`,
   // and `const _: never = true` fails compilation.
-  type _GoSettingsKeys = keyof Omit<main.Settings, 'convertValues'>;
+  type _GoSettingsKeys = keyof Omit<settings.Settings, 'convertValues'>;
   type _FrontendSettingsKeys = keyof ReturnType<typeof serializeSettings>;
   type _SettingsKeysMatchGo =
     _FrontendSettingsKeys extends _GoSettingsKeys
@@ -1526,92 +1556,6 @@
     }
   })();
 
-  // Parse hex "#RRGGBB" to [r, g, b] array.
-  function hexToRgb(hex: string): number[] {
-    const h = hex.replace('#', '');
-    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-  }
-
-  function buildOpts(force: boolean): pipeline.Options {
-    const invEntries = inventoryCollectionColors;
-    const invColors = invEntries.map(c => hexToRgb(c.hex));
-    const invLabels = invEntries.map(c => c.label);
-    const invTDs = invEntries.map(c => c.td || 1);
-    const lockedSlots = colorSlots.filter((s): s is ColorInfo => s !== null);
-
-    const opts: Partial<pipeline.Options> = {
-      Input: inputFile,
-      NumColors: colorSlots.length,
-      LockedColors: lockedSlots.map(s => s.hex),
-      LockedTDs: lockedSlots.map(s => s.td || 1),
-      Scale: sizeMode === 'scale' ? (parseFloat(scaleValue) || 1.0) : 1.0,
-      BaseColor: baseColor?.hex ?? '',
-      BaseColorMaterialX: baseColorMode === 'texture' ? baseMaterialXPath : '',
-      BaseColorMaterialXTileMM: baseMaterialXTileMM,
-      BaseColorMaterialXTriplanarSharpness: baseMaterialXTriplanarSharpness,
-      NozzleDiameter: parseFloat(nozzleDiameter) || 0.4,
-      LayerHeight: parseFloat(layerHeight) || 0.2,
-      Printer: printerId,
-      InventoryFile: '',
-      InventoryColors: invColors,
-      InventoryLabels: invLabels,
-      InventoryTDs: invTDs,
-      Brightness: committedBrightness,
-      Contrast: committedContrast,
-      Saturation: committedSaturation,
-      Dither: dither,
-      RiemersmaInputBias: committedRiemersmaBias,
-      BlueNoiseTolerance: committedBlueNoiseTol,
-      NoMerge: noMerge,
-      NoCellMerge: noCellMerge,
-      HonorTD: honorTD,
-      ColorAwareCells: colorAwareCells,
-      ColorRegionContrast: committedColorRegionContrast,
-      ShowSampledColors: showSampledColors,
-      NoSimplify: noSimplify,
-      AlphaWrap: alphaWrap,
-      AlphaWrapAlpha: parseFloat(alphaWrapAlpha) || 0,
-      AlphaWrapOffset: parseFloat(alphaWrapOffset) || 0,
-      Layer0AdhesionXYScale: committedLayer0AdhesionXYScale,
-      UpperLayerXYScale: committedUpperLayerXYScale,
-      Split: {
-        Enabled: splitEnabled,
-        Axis: splitAxis,
-        Offset: splitOffset,
-        ConnectorStyle: splitConnectorStyle,
-        ConnectorCount: splitConnectorCount,
-        ConnectorDiamMM: splitConnectorDiamMM,
-        ConnectorDepthMM: splitConnectorDepthMM,
-        ClearanceMM: splitClearanceMM,
-        Orientation: [splitOrientationA, splitOrientationB],
-      },
-      Force: force,
-      ReloadSeq: reloadSeq,
-      ObjectIndex: objectIndex,
-      Stats: stats,
-      ColorSnap: committedColorSnap,
-      WarpPins: warpPins
-        .filter(p => /^#[0-9a-fA-F]{6}$/.test(p.sourceHex) && /^#[0-9a-fA-F]{6}$/.test(p.targetHex))
-        .map(p => ({ sourceHex: p.sourceHex, targetHex: p.targetHex, sigma: p.sigma })),
-      Stickers: stickers
-        .filter(s => s.center !== null)
-        .map(s => ({
-          ImagePath: s.imagePath,
-          Center: s.center!,
-          Normal: s.normal!,
-          Up: s.up!,
-          Scale: s.scale,
-          Rotation: s.rotation,
-          MaxAngle: s.maxAngle,
-          Mode: s.mode,
-        })),
-    };
-
-    if (sizeMode === 'size' && sizeValue) opts.Size = parseFloat(sizeValue);
-
-    return opts as pipeline.Options;
-  }
-
   async function runPipeline(force = false) {
     if (!inputFile) {
       statusMessage = 'Please select an input file.';
@@ -1637,7 +1581,7 @@
     // ProcessPipeline enqueues the request and returns immediately. The
     // backend worker processes only the latest request and echoes this run
     // id (id) on every event so the exact-match gate can attribute results.
-    await ProcessPipeline(buildOpts(force), id);
+    await ProcessPipeline(settingsForBackend(), id, force, reloadSeq);
   }
 
   let saving = $state(false);

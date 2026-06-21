@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -28,8 +27,16 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
+	"github.com/rtwfroody/ditherforge/internal/settings"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// Settings and its sub-types now live in internal/settings so the CLI can
+// share the exact same JSON format and Settings→Options conversion. This
+// alias keeps app.go's existing Settings references (and the Wails method
+// signatures bound to the frontend) working; Wails generates the sub-type
+// bindings transitively from the Settings fields.
+type Settings = settings.Settings
 
 // App is the Wails application backend.
 type App struct {
@@ -356,7 +363,20 @@ func (a *App) Export3MF() (string, error) {
 // echoed on every event emitted for this run so the frontend gates events
 // with an exact match against the run it currently owns. There is no
 // backend generation counter to lag behind the frontend.
-func (a *App) ProcessPipeline(opts pipeline.Options, runID int64) {
+func (a *App) ProcessPipeline(s Settings, runID int64, force bool, reloadSeq int64) {
+	// Convert the persisted settings to pipeline options through the same
+	// shared path the CLI uses (settings.ToOptions), so the GUI and CLI
+	// can never diverge. force / reloadSeq are runtime-only and layered on
+	// after conversion. A conversion error (e.g. a missing inventory
+	// collection) surfaces as a pipeline-error event for this run.
+	opts, err := settings.ToOptions(s, a.collections)
+	if err != nil {
+		wailsRuntime.EventsEmit(a.ctx, "pipeline-error", pipelineEvent{Gen: runID, Message: err.Error()})
+		return
+	}
+	opts.Force = force
+	opts.ReloadSeq = reloadSeq
+
 	// Cancel any in-flight pipeline immediately so it aborts early.
 	a.cancelMu.Lock()
 	if a.cancel != nil {
@@ -1003,364 +1023,16 @@ func (a *App) ReadStickerThumbnail(path string) (string, error) {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// SettingsFile is the JSON structure written to/read from .json settings files.
-type SettingsFile struct {
-	DitherForge SettingsMeta `json:"_ditherforge"`
-	Settings    Settings     `json:"settings"`
-}
-
-// SettingsMeta contains metadata about the settings file.
-type SettingsMeta struct {
-	URL     string `json:"url"`
-	Version string `json:"version"`
-}
-
-// StickerSetting is the JSON representation of a sticker for settings persistence.
-type StickerSetting struct {
-	ImagePath string     `json:"imagePath"`
-	Center    [3]float64 `json:"center"`
-	Normal    [3]float64 `json:"normal"`
-	Up        [3]float64 `json:"up"`
-	Scale     float64    `json:"scale"`
-	Rotation  float64    `json:"rotation"`
-	MaxAngle  float64    `json:"maxAngle,omitempty"`
-	Mode      string     `json:"mode,omitempty"`
-}
-
-// WarpPinSetting is the JSON representation of a color warp pin.
-type WarpPinSetting struct {
-	SourceHex   string  `json:"sourceHex"`
-	TargetHex   string  `json:"targetHex"`
-	TargetLabel string  `json:"targetLabel,omitempty"`
-	Sigma       float64 `json:"sigma"`
-}
-
-// ColorSlotSetting is the JSON representation of a color slot.
-type ColorSlotSetting struct {
-	Hex        string `json:"hex"`
-	Label      string `json:"label,omitempty"`
-	Collection string `json:"collection,omitempty"`
-}
-
-// Settings contains all user-configurable settings.
-//
-// The save/load round-trip is defended in three layers, each
-// addressing a distinct failure mode that would otherwise cause
-// silent data loss:
-//
-//  1. Frontend → Go field-name drift is caught at TypeScript
-//     compile time by a guard in App.svelte that asserts
-//     `keyof serializeSettings ⊆ keyof main.Settings`. A frontend-
-//     only key never reaches save without failing svelte-check.
-//
-//  2. Go-internal field drops (unexported field, missing/typo'd
-//     json tag, ...) are caught by TestSaveLoadRoundTripPreservesAllFields,
-//     which marshals a fully-populated Settings, unmarshals into
-//     a zero SettingsFile, and asserts DeepEqual: any field whose
-//     JSON encoding doesn't round-trip surfaces as zero post-
-//     unmarshal and the DeepEqual fails. A reflection pre-flight
-//     refuses to run unless every exported top-level field of
-//     Settings is non-zero in nonDefaultSettings — covering scalars
-//     directly, and nested structs as long as they are at least
-//     non-nil/non-empty. (Fully populating leaf scalars inside a
-//     non-zero struct/slice is on the maintainer; the test catches
-//     the dangerous case — a missing tag — even when leaves are
-//     under-populated, because the leaf goes from non-zero to zero
-//     across the round-trip.)
-//
-//  3. Legacy files predating a field would otherwise unmarshal that
-//     field as the Go zero value, which the frontend can't
-//     distinguish from "user set it to zero". LoadSettingsFile pre-
-//     populates with defaultSettings() before unmarshalling, so a
-//     missing key keeps its application default. This makes the
-//     omitempty decision irrelevant to migration semantics — adding
-//     a field needs no thought about omitempty.
-//
-// Together: a maintainer cannot accidentally add a field that
-// silently round-trips as zero. They can still set a wrong default
-// in defaultSettings, but that's a visible "wrong initial value"
-// failure on legacy files, not silent data loss.
-type Settings struct {
-	InputFile string `json:"inputFile,omitempty"`
-	// ObjectIndex is a pointer so old settings files (no field) decode as nil;
-	// the frontend maps nil → -1 ("all objects"), which differs from 0 ("first object").
-	ObjectIndex    *int              `json:"objectIndex,omitempty"`
-	SizeMode       string            `json:"sizeMode"`
-	SizeValue      string            `json:"sizeValue"`
-	ScaleValue     string            `json:"scaleValue"`
-	Printer        string            `json:"printer,omitempty"`
-	NozzleDiameter string            `json:"nozzleDiameter"`
-	LayerHeight    string            `json:"layerHeight"`
-	BaseColor      *ColorSlotSetting `json:"baseColor,omitempty"`
-	// BaseMaterialXPath is the on-disk path of the user-selected .mtlx
-	// file or .zip archive. The pipeline reads the file at run time —
-	// settings only stores the path, so projects assume the asset
-	// lives at the same path on the next machine.
-	// BaseMaterialXTileMM is the procedural-to-mm scale.
-	// BaseMaterialXTriplanarSharpness controls image-backed graphs'
-	// triplanar projection blend (ignored by procedural .mtlx).
-	BaseMaterialXPath               string  `json:"baseMaterialXPath,omitempty"`
-	BaseMaterialXTileMM             float64 `json:"baseMaterialXTileMM,omitempty"`
-	BaseMaterialXTriplanarSharpness float64 `json:"baseMaterialXTriplanarSharpness,omitempty"`
-	// BaseColorMode is "solid" or "texture" — UI mode toggle that
-	// decides which of (BaseColor, BaseMaterialXPath) is sent to the
-	// pipeline. The unselected mode's fields are kept around (so the
-	// user can flip the toggle without losing their other choice) but
-	// don't reach the backend Options.
-	BaseColorMode       string              `json:"baseColorMode,omitempty"`
-	ColorSlots          []*ColorSlotSetting `json:"colorSlots"`
-	InventoryCollection string              `json:"inventoryCollection"`
-	Brightness          float64             `json:"brightness"`
-	Contrast            float64             `json:"contrast"`
-	Saturation          float64             `json:"saturation"`
-	WarpPins            []WarpPinSetting    `json:"warpPins"`
-	Stickers            []StickerSetting    `json:"stickers,omitempty"`
-	Dither              string              `json:"dither"`
-	RiemersmaBias       float64             `json:"riemersmaBias"`
-	BlueNoiseTol        float64             `json:"blueNoiseTol"`
-	ColorSnap           float64             `json:"colorSnap"`
-	NoMerge             bool                `json:"noMerge"`
-	NoCellMerge         bool                `json:"noCellMerge"`
-	NoSimplify          bool                `json:"noSimplify"`
-	HonorTD             bool                `json:"honorTD"`
-	ColorAwareCells     bool                `json:"colorAwareCells"`
-	ColorRegionContrast float64             `json:"colorRegionContrast"`
-	Stats               bool                `json:"stats"`
-	ShowSampledColors   bool                `json:"showSampledColors"`
-	AlphaWrap           bool                `json:"alphaWrap"`
-	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
-	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
-	// Voxel-grid XY multipliers. Layer0AdhesionXYScale enlarges
-	// layer-0 cells beyond the slicer line width for bed adhesion;
-	// UpperLayerXYScale tunes upper-layer cell width relative to the
-	// slicer line width. See defaultSettings for the default values
-	// missing-from-JSON keys are filled with on load.
-	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
-	UpperLayerXYScale     float64 `json:"upperLayerXYScale"`
-	// Split panel state. Plain values matching the rest of the struct.
-	// Files saved before these fields existed lack the keys, which
-	// decode as zero in Go and serialise back as the explicit zero
-	// values on next save. On load, the frontend's TS Settings class
-	// reads missing JSON keys as `undefined`, and applySettings's
-	// `!== undefined` guards preserve in-memory state in that case —
-	// so older files keep round-tripping cleanly.
-	SplitEnabled          bool    `json:"splitEnabled"`
-	SplitAxis             int     `json:"splitAxis"`
-	SplitOffset           float64 `json:"splitOffset"`
-	SplitConnectorStyle   string  `json:"splitConnectorStyle"`
-	SplitConnectorCount   int     `json:"splitConnectorCount"`
-	SplitConnectorDiamMM  float64 `json:"splitConnectorDiamMM"`
-	SplitConnectorDepthMM float64 `json:"splitConnectorDepthMM"`
-	SplitClearanceMM      float64 `json:"splitClearanceMM"`
-	SplitOrientationA     string  `json:"splitOrientationA"`
-	SplitOrientationB     string  `json:"splitOrientationB"`
-}
-
-// defaultSettings returns the application-wide default Settings.
-//
-// LoadSettingsFile pre-populates a Settings value with these defaults
-// before unmarshalling the on-disk JSON. Go's encoding/json only
-// overwrites fields the JSON explicitly contains, so any key missing
-// from the file (e.g. an older settings file that pre-dates a feature)
-// retains its default value here rather than collapsing to the Go
-// zero value. This makes the omitempty decision irrelevant for
-// migration correctness: a zero-on-disk always means "user set zero",
-// an absent-on-disk always means "use this default", and a maintainer
-// adding a new field can never accidentally introduce silent data
-// loss by forgetting omitempty.
-//
-// Drift between these values and the frontend's $state initializers
-// is bounded — the frontend's $state values are what a fresh user
-// sees with no settings file at all, while these are what fills in
-// missing keys when an older file is loaded. They should match for
-// consistency, and TestDefaultSettingsRoundTrip catches the most
-// damaging form of drift (Go-side fields that don't round-trip
-// through JSON cleanly).
-func defaultSettings() Settings {
-	allObjects := -1
-	return Settings{
-		ObjectIndex:                     &allObjects,
-		SizeMode:                        "size",
-		SizeValue:                       "100",
-		ScaleValue:                      "1.0",
-		Printer:                         "snapmaker_u1",
-		NozzleDiameter:                  "0.4",
-		LayerHeight:                     "0.20",
-		BaseMaterialXTileMM:             10,
-		BaseMaterialXTriplanarSharpness: 4,
-		BaseColorMode:                   "solid",
-		ColorSlots: []*ColorSlotSetting{
-			nil, nil, nil, nil,
-		},
-		InventoryCollection:   "Inventory",
-		Brightness:            0,
-		Contrast:              0,
-		Saturation:            0,
-		WarpPins:              []WarpPinSetting{},
-		Stickers:              []StickerSetting{},
-		Dither:                "floyd-steinberg",
-		RiemersmaBias:         0.85,
-		BlueNoiseTol:          20,
-		ColorSnap:             5,
-		NoMerge:               false,
-		NoCellMerge:           false,
-		NoSimplify:            false,
-		HonorTD:               true,
-		ColorAwareCells:       false,
-		ColorRegionContrast:   20,
-		Stats:                 false,
-		ShowSampledColors:     false,
-		AlphaWrap:             false,
-		AlphaWrapAlpha:        "",
-		AlphaWrapOffset:       "",
-		Layer0AdhesionXYScale: 2,
-		UpperLayerXYScale:     1.25,
-		SplitEnabled:          false,
-		SplitAxis:             2,
-		SplitOffset:           0,
-		SplitConnectorStyle:   "pegs",
-		SplitConnectorCount:   0,
-		SplitConnectorDiamMM:  3,
-		SplitConnectorDepthMM: 2,
-		SplitClearanceMM:      0.15,
-		SplitOrientationA:     "original",
-		SplitOrientationB:     "original",
-	}
-}
-
-// pathForSaving converts an in-memory absolute path into the form
-// stored in a settings JSON file at jsonPath. Returns a relative path
-// when the asset is in the same directory, a subdirectory, or one
-// directory up from the JSON file; otherwise returns the absolute path
-// unchanged so that distantly-stored assets keep working without
-// implying a portable project layout that doesn't actually exist.
-//
-// Empty or already-relative inputs pass through unchanged — the former
-// because there's no path to rewrite, the latter because a path that
-// was already relative came from a previous load and we'd just be
-// re-relativizing it (and we'd need to know the *previous* JSON path
-// to do that correctly, which we don't).
-func pathForSaving(jsonPath, p string) string {
-	if p == "" {
-		return p
-	}
-	if !filepath.IsAbs(p) {
-		return p
-	}
-	absJSON, err := filepath.Abs(jsonPath)
-	if err != nil {
-		return p
-	}
-	jsonDir := filepath.Dir(absJSON)
-	// filepath.Rel errors on cross-volume Windows paths (C:\ vs D:\).
-	// Falling back to absolute is the correct behaviour there — there
-	// is no relative form between volumes.
-	//
-	// Note: we deliberately do NOT EvalSymlinks here. Relativising
-	// through evaluated symlinks would produce paths that surprise
-	// users who structured their project around the symlink names.
-	rel, err := filepath.Rel(jsonDir, p)
-	if err != nil {
-		return p
-	}
-	// Cap the "up" depth at one. Anything deeper would imply a
-	// project layout (../../../foo) that we don't want to bake into
-	// settings files — fall back to absolute. Counting only the
-	// leading ".." components is sufficient because filepath.Rel
-	// returns a Clean'd path.
-	upCount := 0
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part != ".." {
-			break
-		}
-		upCount++
-	}
-	if upCount > 1 {
-		return p
-	}
-	return rel
-}
-
-// pathForLoading resolves a path from a settings JSON file at jsonPath
-// back to the absolute form the in-memory state and pipeline use.
-// Absolute or empty paths pass through unchanged.
-func pathForLoading(jsonPath, p string) string {
-	if p == "" {
-		return p
-	}
-	if filepath.IsAbs(p) {
-		return p
-	}
-	absJSON, err := filepath.Abs(jsonPath)
-	if err != nil {
-		return p
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(absJSON), p))
-}
-
-// transformSettingsPaths applies fn to every on-disk-asset path in
-// the Settings struct. Centralized so adding a new path-typed field
-// requires updating one place — both save (relativise) and load
-// (resolve) routes through here.
-//
-// In-memory contract: each path field is expected to be ABSOLUTE
-// while held in Settings. The frontend produces absolute paths from
-// file dialogs, LoadSettingsFile resolves stored relative paths back
-// to absolute on its way out, and the pipeline expects absolute
-// paths. Callers handing pre-existing relative paths to SaveSettings
-// will see them passed through unchanged (interpreted by the next
-// loader as relative to the new JSON file's directory, which is
-// usually not what they meant).
-func transformSettingsPaths(s *Settings, fn func(string) string) {
-	s.InputFile = fn(s.InputFile)
-	s.BaseMaterialXPath = fn(s.BaseMaterialXPath)
-	for i := range s.Stickers {
-		s.Stickers[i].ImagePath = fn(s.Stickers[i].ImagePath)
-	}
-}
-
-// SaveSettings writes settings to the given path.
-// If the file already exists and is not a DitherForge settings file, it refuses
-// to overwrite it.
-//
-// On-disk asset paths (input model, MaterialX file, sticker images) are
-// rewritten to be relative to the JSON file's directory when the asset
-// lives in the same directory, a subdirectory, or one directory up.
-// More distantly-stored assets are saved as absolute paths. The
-// caller's Settings is not mutated — paths are rewritten on a local
-// copy.
-func (a *App) SaveSettings(path string, settings Settings) error {
-	if data, err := os.ReadFile(path); err == nil {
-		var existing SettingsFile
-		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil || existing.DitherForge.URL == "" {
-			return fmt.Errorf("refusing to overwrite %s: not a DitherForge settings file", filepath.Base(path))
-		}
-	}
-	// Copy stickers so transformSettingsPaths doesn't mutate the
-	// caller's slice. Other path fields are scalars, naturally copied
-	// by the struct value receive.
-	settings.Stickers = append([]StickerSetting(nil), settings.Stickers...)
-	transformSettingsPaths(&settings, func(p string) string { return pathForSaving(path, p) })
-	sf := SettingsFile{
-		DitherForge: SettingsMeta{
-			URL:     "https://github.com/rtwfroody/ditherforge",
-			Version: pipeline.Version,
-		},
-		Settings: settings,
-	}
-	data, err := json.MarshalIndent(sf, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write settings: %w", err)
-	}
-	return nil
+// SaveSettings writes settings to the given path. The format, the
+// overwrite guard, and the on-disk-asset path relativisation all live in
+// internal/settings so the CLI shares them verbatim.
+func (a *App) SaveSettings(path string, s Settings) error {
+	return settings.Save(path, s)
 }
 
 // SaveSettingsDialog opens a save dialog and writes settings to the chosen path.
 // Returns the saved path, or empty if the user cancelled.
-func (a *App) SaveSettingsDialog(settings Settings) (string, error) {
+func (a *App) SaveSettingsDialog(s Settings) (string, error) {
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
 		Title:           "Save",
 		DefaultFilename: "settings.json",
@@ -1374,7 +1046,7 @@ func (a *App) SaveSettingsDialog(settings Settings) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	if err := a.SaveSettings(path, settings); err != nil {
+	if err := a.SaveSettings(path, s); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -1416,33 +1088,11 @@ func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
 // relative-path feature still load correctly.
 func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	plog.Printf("Opening settings file: %s", path)
-	data, err := os.ReadFile(path)
+	s, err := settings.Load(path)
 	if err != nil {
-		return nil, fmt.Errorf("read settings: %w", err)
+		return nil, err
 	}
-	// Pre-populate with defaults so JSON keys absent from the file
-	// (older settings predating a field) retain the application
-	// default rather than collapsing to the Go zero value. See
-	// defaultSettings for the rationale.
-	sf := SettingsFile{Settings: defaultSettings()}
-	if err := json.Unmarshal(data, &sf); err != nil {
-		return nil, fmt.Errorf("parse settings: %w", err)
-	}
-	if sf.DitherForge.URL == "" {
-		return nil, fmt.Errorf("not a DitherForge settings file (missing _ditherforge metadata)")
-	}
-	// Migrate legacy stickers that predate the Mode field (or were saved by a
-	// version where unfold was the default and Mode was omitempty).
-	for i := range sf.Settings.Stickers {
-		if sf.Settings.Stickers[i].Mode == "" {
-			sf.Settings.Stickers[i].Mode = "unfold"
-		}
-	}
-	transformSettingsPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
-	return &LoadSettingsResult{
-		Path:     path,
-		Settings: sf.Settings,
-	}, nil
+	return &LoadSettingsResult{Path: path, Settings: s}, nil
 }
 
 // LoadSettingsResult is returned by LoadSettingsDialog/LoadSettingsFile.

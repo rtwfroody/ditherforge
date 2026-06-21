@@ -25,7 +25,10 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
-// Options controls the pipeline behavior. Mirrors CLI flags.
+// Options controls the pipeline behavior. Both front ends build it from
+// the shared settings JSON via internal/settings.ToOptions (the GUI in
+// ProcessPipeline, the CLI in main); a few fields (Force, ReloadSeq) are
+// runtime-only and layered on by the caller, not part of the JSON.
 type Options struct {
 	Input        string
 	NumColors    int
@@ -85,9 +88,9 @@ type Options struct {
 	// cuts on any difference.
 	ColorRegionContrast float64 `json:"ColorRegionContrast"`
 	Brightness          float32
-	Contrast        float32
-	Saturation      float32
-	Dither          string
+	Contrast            float32
+	Saturation          float32
+	Dither              string
 	// RiemersmaInputBias is the per-cell input-bias maximum used by
 	// the Riemersma dither (only consulted when Dither == "riemersma").
 	// 0..1; higher = stronger pull toward nearest-input palette,
@@ -400,9 +403,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	defer mon.Stop()
 
 	r := &pipelineRun{
-		ctx:       ctx,
-		cache:     cache,
-		opts:      opts,
+		ctx:             ctx,
+		cache:           cache,
+		opts:            opts,
 		tracker:         mon,
 		onWarning:       onWarning,
 		onOutputPreview: onOutputPreview,

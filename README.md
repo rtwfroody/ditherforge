@@ -397,56 +397,42 @@ appears as a final line in the list.
 
 ## CLI
 
-`ditherforge-cli` provides the same pipeline from the command line, without a
-GUI window. It accepts `.glb`, `.3mf`, `.stl`, `.obj`, and `.dae` (COLLADA)
-inputs (plus an OBJ or COLLADA model packaged in a `.zip` with its
-`.mtl`/textures).
+`ditherforge-cli` runs the same pipeline from the command line, without a GUI
+window. It is driven by a **DitherForge settings `.json` file** — the same
+format the GUI saves and loads. Every processing option (input model, size,
+palette, inventory, dither mode, base color, stickers, color pins, splitting,
+…) lives in that file, so the GUI and CLI always produce identical output from
+the same settings.
 
 ```
-ditherforge-cli model.glb --size 100
+ditherforge-cli settings.json
 ```
 
-This loads `model.glb`, scales it to 100 mm, selects 4 colors from the default
-palette, and writes `model.3mf` alongside the input.
+Set up the model and options in the GUI, save the settings file, then point the
+CLI at it. The input model is taken from the settings file's `inputFile` field;
+its path is resolved relative to the `.json`. The output is written next to the
+current directory as `<model>.3mf` unless `--output` is given.
 
-Note: the CLI does not currently support stickers, color pins, splitting, or
-multi-object selection. Use the GUI to configure those and save a JSON
-settings file.
+Inputs may be `.glb`, `.3mf`, `.stl`, `.obj`, or `.dae` (COLLADA) — plus an OBJ
+or COLLADA model packaged in a `.zip` with its `.mtl`/textures.
 
 ### Options
 
+The CLI has only the handful of flags that are *not* processing options (those
+all come from the JSON):
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--size` | — | Scale model so largest extent equals this value in mm |
-| `--scale` | `1.0` | Scale multiplier (applied on top of unit conversion) |
-| `-n` | `4` | Number of palette colors |
-| `--color` | — | Lock a color (CSS name or `#RRGGBB`; repeatable, comma-separated) |
-| `--inventory` | — | Filament inventory file (`#RRGGBB Label` per line) for auto colors |
-| `--base-color` | — | Hex color for untextured faces (e.g. `#FF0000`) |
-| `--base-materialx` | — | Path to a MaterialX `.mtlx` file (or `.zip` archive containing one with adjacent textures) applied as the base color of untextured faces. Overrides `--base-color`. |
-| `--base-materialx-tile-mm` | `10` | Object-space scale (mm per shading-unit cycle) for the MaterialX graph |
-| `--base-materialx-triplanar-sharpness` | `4` | Triplanar projection sharpness for image-backed MaterialX (higher = sharper axis transitions; ignored by procedural `.mtlx`) |
-| `--brightness` | `0` | Brightness adjustment (-100 to +100) |
-| `--contrast` | `0` | Contrast adjustment (-100 to +100) |
-| `--saturation` | `0` | Saturation adjustment (-100 to +100) |
-| `--dither` | `riemersma` | Dithering mode: `riemersma`, `riemersma-pair`, `blue-noise`, `dizzy-corrected`, `floyd-steinberg`, or `none`. See [How to Choose a Dither Mode](#how-to-choose-a-dither-mode). |
-| `--riemersma-bias` | `0.85` | Alpha for `riemersma` and `riemersma-pair` (0..1). 0 = pure error-diffusion; higher pulls toward the nearest-input palette in near-palette regions. |
-| `--blue-noise-tol` | built-in (20) | Per-cell projection-error tolerance (8-bit RGB units) for the `blue-noise` mode. Smaller = lower wander but more drift. 0 = use the built-in default. |
-| `--nozzle-diameter` | `0.4` | Nozzle diameter in mm |
-| `--layer-height` | `0.2` | Layer height in mm |
-| `--printer` | `snapmaker_u1` | Target printer profile id (`snapmaker_u1`, `snapmaker_j1`, `prusa_xl`, `prusa_xl_5t`, `bambu_h2d`, `bambu_h2d_pro`) |
-| `--color-snap` | `5` | Pre-dither color snap distance in delta E (0 to disable) |
-| `--output` | `<input>.3mf` | Output file path |
-| `--no-merge` | — | Skip coplanar triangle merging |
-| `--no-simplify` | — | Skip the load-time QEM mesh decimation |
-| `--alpha-wrap` | — | Clean the input mesh with CGAL Alpha-wrap before voxelization |
-| `--alpha-wrap-alpha` | nozzle diameter | Alpha-wrap probe radius in mm |
-| `--alpha-wrap-offset` | alpha / 30 | Alpha-wrap offset distance in mm |
+| `<settings.json>` | — | Required. DitherForge settings file holding the input path and all processing options. |
+| `--output` | derived from the model name | Output `.3mf` file path |
 | `--force` | — | Bypass the 300 mm extent size check |
-| `--stats` | — | Print face counts per material |
+| `--debug-render DIR` | — | Write PNG renders (input + dithered + sampled, four views each) into `DIR` |
+| `--debug-render-res` | `800` | Square PNG resolution for `--debug-render` |
+| `--debug-cells-dir DIR` | — | After voxelization, write per-slab cell PNGs colored by sampled RGB into `DIR` |
 
-When `--inventory` is not specified, the CLI selects from a built-in set of
-basic colors (cyan, magenta, yellow, black, white, red, green, blue).
+The inventory collection named in the settings file is resolved from the same
+built-in and user collections the GUI uses (e.g. `Inventory`, `Panchroma
+Basic`). User collections live in `~/.config/ditherforge/collections/`.
 
 ---
 
