@@ -1,12 +1,15 @@
 # Investigation: white holes in flat surfaces (Nord Stage 4 model-thicker)
 
-Status: **IN PROGRESS (2026-06-21 session 3).** ROOT CAUSE CORRECTED: the holes
-are NOT inverted/flipped faces (clip preserves winding to 0.024%). They are
-DROPPED EXTERIOR surface fragments — the clip drops the front-facing exterior
-face of thin single-wall panels, exposing the correctly-wound back-facing
-interior face, which reads as a white hole. See "CORRECTED (session 3)" below.
-The fix is in clip COVERAGE, not winding. Both headless-repro blockers (A
-voxelize determinism, B export key mismatch) are FIXED.
+Status: **ROOT CAUSE CONFIRMED (2026-06-21 session 3).** The holes are NOT
+inverted/flipped faces (clip preserves winding to 0.024%). They are DROPPED
+EXTERIOR surface fragments: the merged-group clip prism's footprint
+UNDER-COVERS the in-band surface silhouette, so surface near the footprint
+boundary projects outside the prism and is dropped, exposing the back-facing
+interior face → white hole. Directly confirmed: dilating the footprint
+(`DITHERFORGE_FOOTPRINT_GROW=0.5`) removes the big wedges (1.269% → 0.497%);
+slab pre-split and prism Z-range are both ruled out. The fix is in per-slab
+footprint coverage (NOT winding, NOT OpenEdgeBloatMM). Both headless-repro
+blockers (A voxelize determinism, B export key mismatch) are FIXED.
 
 ## Symptom
 
@@ -130,26 +133,44 @@ session-2 unculled render showed "full coverage" only because the surviving inte
 fills the pixel — masking that the exterior face was dropped. So it IS missing geometry
 (the exterior fragment), exposed as a back-face. NOT a winding error.
 
-### Where in clip the exterior face is dropped (narrowed, not yet pinned)
+### CONFIRMED (session 3): per-cell/group FOOTPRINT under-coverage drops the exterior face
 
-- Ruled OUT: per-cell prism cap coplanarity. `DITHERFORGE_PRISM_ZEPS=0.003` extrudes each
-  cell prism's Z range ±3µm so a boundary-coincident horizontal face is strictly interior
-  to the prism — **zero change** (1.269% → 1.269%, identical zero-face counts). So the
-  exterior face is dropped BEFORE the per-cell intersect, not at its Z caps.
-- Two phenomena, by cell size:
-  1. **Tiny ring cells go zero-face** (clip cell→face: ring 1px=747/1629=46%,
-     2-4px=4490/6605=68% produce NO faces). Scattered rim/speckle holes.
-  2. **Big diagonal wedges in NON-zero-face cells** (large cells are ~never zero-face:
-     17-64px ring=28/68065). The cell keeps its interior face but lacks the exterior →
-     exposed back-face. The wedges are diagonal slivers, consistent with a slightly-TILTED
-     flat panel crossing slab boundaries along diagonal XY lines.
-- Remaining suspects (both in the clip coverage domain, both heavily tuned — apollo /
-  slivers / walls): (A) the per-slab pre-split (`splitSrcBySlabs`, Manifold `SplitByPlane`)
-  drops the exterior fragment where it is coincident with / straddles a slab boundary
-  plane; (B) the upper slab's cell footprint (color-aware cells segment per slab, so cell
-  boundaries differ slab-to-slab) does not cover the XY where the exterior fragment landed.
-  Next decisive (but slow / RAM-heavy) test: force the no-split-source path so every cell
-  intersects the full `src` (no `SplitByPlane`); if the wedges vanish → (A).
+The default clip path is the MERGED-cell path (`effectiveMergeCells` ON):
+`clipPerHalfMerged` → `ClipMeshToMergedCellsManifold` → `clipOneGroupManifold`, which
+extrudes ONE prism per same-color cell GROUP from the merged group contour. (NB: hooks
+placed in `clipOneCellManifold` are DEAD on the real path — they only run in the rare
+pinch fallback. Test in `clipOneGroupManifold`.)
+
+Diagnostic experiments on the user's `model-thicker.json` (each: wipe cache, full run,
+top-down `--debug-stages-dir` hole %):
+
+| experiment | top-down holes | verdict |
+|---|---|---|
+| baseline (split) | 1.269% | — |
+| `DITHERFORGE_NO_PRESPLIT=1` (every cell vs full `src`, no `SplitByPlane`) | 1.261% | **not the slab pre-split** |
+| `DITHERFORGE_PRISM_ZEPS=0.1` on the group prism (±0.1mm Z, > slab height) | 1.269% | **not Z / cross-slab** |
+| `DITHERFORGE_FOOTPRINT_GROW=0.2` (dilate group contour 0.2mm) | 0.685% | footprint coverage |
+| `DITHERFORGE_FOOTPRINT_GROW=0.5` | 0.497% | footprint coverage |
+
+At grow=0.5 the **big diagonal wedges are GONE** (top_holes.png) and zero-face cells are
+nearly eliminated (ring 2-4px 4490→65, 5-16px 7975→2). So the dominant, user-visible
+defect is **the merged-group prism footprint not covering the full source-surface
+silhouette** — surface near the footprint boundary projects OUTSIDE the prism and the
+intersection drops it, exposing the back-facing interior. Split triples it because the
+reoriented half lays the panel near-horizontal, so its in-band silhouette within a thin
+0.08mm slab is a wide diagonal band the footprint badly under-covers.
+
+This DIRECTLY refutes the `OpenEdgeBloatMM` comment (clip_manifold.go ~L51-59): "the cell
+footprint is the XY projection of the slab surface, so the surface never extends past the
+footprint boundary… no distant geometry to reach out and grab." There IS — growing the
+footprint reaches it. Cf. [[project_apollo_holes_root_cause]] (slab footprint used only
+the 2 bounding-plane contours; mid-slab bulges projected outside it → SlabSurfaceFootprints
+added). The fix belongs in how the per-slab cell footprint / `SlabSurfaceFootprints` covers
+near-horizontal in-band surface, NOT in OpenEdgeBloatMM (a blunt global dilation regrows the
+mesh and reintroduces skirt/merge asymmetry the 5µm margin was tuned to avoid).
+
+Residual after grow=0.5 is ~0.36% small slivers = the separate, already-known baseline
+sliver family ([[project_vertical_wall_slivers]]); NOT footprint-coverage.
 
 ## SUPERSEDED (session 2): "the holes are INVERTED FACES, not missing geometry"
 
@@ -201,19 +222,20 @@ large patches come from clipping the reoriented (z-down) half in its bed-space f
 
 ## Concrete next steps (session 3 — corrected)
 
-The "fix the winding / reorient pass" plan is DEAD (clip does not flip faces; reorienting
-would do nothing). The real fix is **coverage: stop clip dropping the exterior fragment.**
+The "fix the winding / reorient pass" plan is DEAD (clip does not flip faces). The cause is
+CONFIRMED: **per-cell/group footprint under-coverage** drops the exterior fragment (see the
+table above). The fix must make the per-slab cell footprint cover the full in-band surface
+silhouette for near-horizontal surfaces — without a blunt global dilation.
 
-1. Run the decisive (A)-vs-(B) test: force the full-`src` no-pre-split path and see if the
-   big wedges vanish. (A) = `splitSrcBySlabs`/`SplitByPlane` boundary drop; (B) = per-slab
-   footprint coverage gap. RAM/time-heavy — do single-threaded or on a smaller model.
-2. If (A): make the per-slab `SplitByPlane` keep boundary-coincident / straddling exterior
-   faces (perturb the cut plane off flat-surface Z, or overlap adjacent per-slab sources by
-   an eps and rely on per-cell dedup). Cf. [[project_slab_grid_first_layer]],
-   [[project_coincident_boundary_gray_walls]].
-3. If (B): extend the upper slab's cell footprints to cover the exterior fragment XY (the
-   `SlabSurfaceFootprints` / coverTarget family — [[project_apollo_holes_root_cause]],
-   [[project_vertical_wall_slivers]]).
+1. Find where the per-slab cell footprint / `SlabSurfaceFootprints` is built and why it
+   under-reaches for near-horizontal in-band surface (the in-band silhouette of a tilted
+   panel in a 0.08mm slab is a wide diagonal band). Likely the same root as
+   [[project_apollo_holes_root_cause]] (footprint from bounding-plane contours misses
+   mid-slab surface) but for near-horizontal rather than bulging walls.
+2. Validate any fix with `DITHERFORGE_FOOTPRINT_GROW` as the oracle (grow=0.5 ≈ the target:
+   wedges gone, ~0.36% baseline residual) and the `--debug-stages-dir` top-down hole %.
+   Do NOT just raise OpenEdgeBloatMM (regrows mesh, reintroduces skirt/merge asymmetry).
+3. The ~0.36% baseline sliver residual is separate ([[project_vertical_wall_slivers]]).
 4. Blocker A (voxelize determinism) and Blocker B (export key mismatch) are FIXED; separate.
 
 Diagnostics added this session (kept, env-gated, zero cost when off):
