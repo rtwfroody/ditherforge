@@ -262,6 +262,14 @@ func pointInLoops(loops [][][2]float32, x, y float32) bool {
 // drops: if seam-bloat closes the interior diagonal-line holes and open-bloat
 // does not, the drops are hairline CSG cracks at the seams BETWEEN adjacent
 // group prisms (neighbors don't overlap), not the outer footprint boundary.
+// EXPERIMENTAL FIX BACKED OUT (session 6): defaulting seamBloatMM to overlap
+// adjacent merged-group prisms closed ~19% of the holes (1.269%→1.023% at
+// 0.1mm) but exploded non-manifold edges 14× (1358→18807) and boundary edges
+// +65% — it trades a cosmetic hole for an unprintable non-manifold mesh,
+// because overlapping prisms duplicate the shared surface. Kept env-only for
+// diagnosis. A clean fix must close seams WITHOUT overlap (e.g. one clip op
+// per slab over the whole footprint, then assign face colors), since the gap
+// has real geometric width and no overlap-free bloat can cover it.
 var seamBloatMM = envF32("DITHERFORGE_SEAM_BLOAT")
 var openBloatMM = envF32("DITHERFORGE_OPEN_BLOAT")
 
