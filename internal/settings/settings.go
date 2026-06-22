@@ -25,6 +25,17 @@ type File struct {
 type Meta struct {
 	URL     string `json:"url"`
 	Version string `json:"version"`
+	// SizeRelativeUnits marks the fraction-of-extent format: every file Save
+	// writes sets it true, meaning the size-relative fields (Split.Offset,
+	// Stickers[].Center, Stickers[].Scale, BaseMaterialXTileMM) are stored as
+	// a fraction of the scaled model's max extent. Its ABSENCE marks a legacy
+	// file whose those fields are absolute mm, so Load reports it as legacy.
+	//
+	// Presence-based detection rather than a version comparison on purpose:
+	// the on-disk version string has proven unreliable (committed fixtures
+	// carry versions like "0.9.27" that the app never shipped), so semver
+	// ordering can't safely decide the format.
+	SizeRelativeUnits bool `json:"sizeRelativeUnits"`
 }
 
 // StickerSetting is the JSON representation of a sticker for settings persistence.
@@ -158,7 +169,7 @@ func Default() Settings {
 		Printer:                         "snapmaker_u1",
 		NozzleDiameter:                  "0.4",
 		LayerHeight:                     "0.20",
-		BaseMaterialXTileMM:             10,
+		BaseMaterialXTileMM:             0.1, // fraction of model max extent (was 10 mm)
 		BaseMaterialXTriplanarSharpness: 4,
 		BaseColorMode:                   "solid",
 		ColorSlots: []*ColorSlotSetting{
@@ -275,17 +286,23 @@ func pathForLoading(jsonPath, p string) string {
 // Keys absent from the file retain their Default() value (so older files
 // predating a field never observe Go zeros), and the file must carry the
 // _ditherforge metadata or it is rejected.
-func Load(path string) (Settings, error) {
+//
+// legacyAbsoluteUnits is true when the file predates the fraction-of-extent
+// format (see fractionalUnitsVersion) and so stores the size-relative fields
+// as absolute mm. The caller passes this to pipeline.Options.LegacyAbsoluteUnits
+// (CLI) or surfaces it to the frontend (GUI) so the values are interpreted
+// correctly rather than rescaled by the model extent.
+func Load(path string) (s Settings, legacyAbsoluteUnits bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Settings{}, fmt.Errorf("read settings: %w", err)
+		return Settings{}, false, fmt.Errorf("read settings: %w", err)
 	}
 	sf := File{Settings: Default()}
 	if err := json.Unmarshal(data, &sf); err != nil {
-		return Settings{}, fmt.Errorf("parse settings: %w", err)
+		return Settings{}, false, fmt.Errorf("parse settings: %w", err)
 	}
 	if sf.DitherForge.URL == "" {
-		return Settings{}, fmt.Errorf("not a DitherForge settings file (missing _ditherforge metadata)")
+		return Settings{}, false, fmt.Errorf("not a DitherForge settings file (missing _ditherforge metadata)")
 	}
 	// Migrate legacy stickers that predate the Mode field.
 	for i := range sf.Settings.Stickers {
@@ -294,7 +311,7 @@ func Load(path string) (Settings, error) {
 		}
 	}
 	transformPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
-	return sf.Settings, nil
+	return sf.Settings, !sf.DitherForge.SizeRelativeUnits, nil
 }
 
 // Save writes settings to path, relativising on-disk asset paths against
@@ -314,8 +331,9 @@ func Save(path string, s Settings) error {
 	transformPaths(&s, func(p string) string { return pathForSaving(path, p) })
 	sf := File{
 		DitherForge: Meta{
-			URL:     "https://github.com/rtwfroody/ditherforge",
-			Version: pipeline.Version,
+			URL:               "https://github.com/rtwfroody/ditherforge",
+			Version:           pipeline.Version,
+			SizeRelativeUnits: true,
 		},
 		Settings: s,
 	}

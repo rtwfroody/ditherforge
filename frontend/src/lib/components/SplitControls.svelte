@@ -22,10 +22,13 @@
     // (high-axis side). See settingsOptions.ts for the value set.
     orientationA: SplitOrientation;
     orientationB: SplitOrientation;
-    // Range hint for the offset slider; populated by App.svelte from
+    // Range hint for the offset slider, in mm; populated by App.svelte from
     // the current model's bbox along the selected axis.
     minOffset: number;
     maxOffset: number;
+    // Model max extent at print size, in mm. offset is stored as a fraction
+    // of this; the UI multiplies by it to show/edit mm. 0 when unknown.
+    extentMM: number;
     onAlphaWrapForced?: () => void; // called when toggling Split on
   };
 
@@ -40,10 +43,17 @@
     clearanceMM = $bindable(),
     orientationA = $bindable(),
     orientationB = $bindable(),
+    extentMM,
     minOffset,
     maxOffset,
     onAlphaWrapForced,
   }: Props = $props();
+
+  // offset is a fraction of the print extent; the inputs below work in mm.
+  const offsetMM = $derived(extentMM > 0 ? offset * extentMM : 0);
+  function setOffsetMM(mm: number) {
+    if (extentMM > 0 && isFinite(mm)) offset = mm / extentMM;
+  }
 
   // Toggling Split on cascades to enabling AlphaWrap (the cut needs a
   // watertight input). The parent listens via onAlphaWrapForced and
@@ -138,7 +148,8 @@
           min={minOffset}
           max={maxOffset}
           class="h-9 rounded border bg-background text-foreground px-2"
-          bind:value={offset}
+          value={offsetMM}
+          oninput={(e) => setOffsetMM(parseFloat(e.currentTarget.value))}
         />
       </label>
 
@@ -149,7 +160,8 @@
           step="0.5"
           min={minOffset}
           max={maxOffset}
-          bind:value={offset}
+          value={offsetMM}
+          oninput={(e) => setOffsetMM(parseFloat(e.currentTarget.value))}
         />
       </label>
 

@@ -112,14 +112,22 @@ type Options struct {
 	Size               *float32
 	Force              bool
 	ReloadSeq          int64 // bumped to force re-read of the same input file
-	Stats              bool
-	ColorSnap          float64
-	WarpPins           []WarpPin `json:"WarpPins,omitempty"`
-	Stickers           []Sticker `json:"Stickers,omitempty"`
-	ObjectIndex        int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
-	AlphaWrap          bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
-	AlphaWrapAlpha     float32   // mm; 0 = auto (5 × NozzleDiameter)
-	AlphaWrapOffset    float32   // mm; 0 = auto (alpha / 30)
+	// LegacyAbsoluteUnits marks options that came from a pre-0.9.6 settings
+	// file, where the size-relative fields (Split.Offset, Stickers[].Center,
+	// Stickers[].Scale, BaseColorMaterialXTileMM) hold absolute mm rather
+	// than a fraction of the scaled model's max extent. When set, RunCached's
+	// resolveFractionalOptions skips the fraction→mm conversion and uses the
+	// values as-is. Set by the caller (CLI) after settings.Load reports a
+	// legacy file; the GUI always sends fractions, so it leaves this false.
+	LegacyAbsoluteUnits bool `json:"-"`
+	Stats               bool
+	ColorSnap           float64
+	WarpPins            []WarpPin `json:"WarpPins,omitempty"`
+	Stickers            []Sticker `json:"Stickers,omitempty"`
+	ObjectIndex         int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
+	AlphaWrap           bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
+	AlphaWrapAlpha      float32   // mm; 0 = auto (5 × NozzleDiameter)
+	AlphaWrapOffset     float32   // mm; 0 = auto (alpha / 30)
 	// Layer0AdhesionXYScale multiplies the layer-0 minimum feature
 	// size — the printer-profile InitialLayerLineWidth when a profile
 	// is resolved, else the bare nozzle diameter. >1 enlarges first-
@@ -409,6 +417,13 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		tracker:         mon,
 		onWarning:       onWarning,
 		onOutputPreview: onOutputPreview,
+	}
+
+	// Convert the size-relative option fields (stored as a fraction of the
+	// scaled model's max extent) into absolute pipeline-mm, before any stage
+	// that consumes them resolves. Needs the scaled extent from StagePreload.
+	if err := r.resolveFractionalOptions(); err != nil {
+		return nil, err
 	}
 
 	// Early bare input preview: as soon as the model is loaded and

@@ -58,7 +58,7 @@ func main() {
 	var args Args
 	arg.MustParse(&args)
 
-	s, err := settings.Load(args.Settings)
+	s, legacyAbsoluteUnits, err := settings.Load(args.Settings)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -99,6 +99,7 @@ func main() {
 		os.Exit(1)
 	}
 	opts.Force = args.Force
+	opts.LegacyAbsoluteUnits = legacyAbsoluteUnits
 
 	opts.Output = args.Output
 	if opts.Output == "" {

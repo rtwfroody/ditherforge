@@ -74,6 +74,7 @@ export namespace main {
 	export class LoadSettingsResult {
 	    path: string;
 	    settings: settings.Settings;
+	    legacyAbsoluteUnits: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new LoadSettingsResult(source);
@@ -83,6 +84,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
 	        this.settings = this.convertValues(source["settings"], settings.Settings);
+	        this.legacyAbsoluteUnits = source["legacyAbsoluteUnits"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

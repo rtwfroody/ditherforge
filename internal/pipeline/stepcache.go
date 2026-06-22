@@ -418,6 +418,13 @@ type preloadOutput struct {
 	InputMesh    *MeshData
 	PreviewScale float32 // scale factor to convert pipeline coords back to preview coords
 	ExtentMM     float32 // native max bounding-box extent in mm (scale=1.0, size=unset)
+	// ScaledMaxExtentMM is the max bounding-box dimension of the
+	// scaled+normalized model in pipeline-mm (i.e. ExtentMM / PreviewScale).
+	// It is the canonical denominator used by resolveFractionalOptions to
+	// convert the size-relative option fields (a fraction of this) back into
+	// absolute pipeline-mm. Captured here, pre-decimate/wrap, so the
+	// denominator is stable even though later stages perturb the bbox.
+	ScaledMaxExtentMM float32
 }
 
 type loadOutput struct {
@@ -718,6 +725,13 @@ func hashPreloadSettings(c *StageCache, h hash.Hash64, opts Options) {
 		v.HasSize = true
 		v.Size = *opts.Size
 	}
+	// Cache salt: "scaledmaxextent-v1" = preloadOutput now carries
+	// ScaledMaxExtentMM, which resolveFractionalOptions divides the
+	// size-relative option fields by. A blob cached before this field
+	// existed decodes it as the gob zero (0), which would make the
+	// conversion no-op and treat fractions as raw mm. Bumping the salt
+	// forces those stale preload blobs to be rebuilt.
+	writeString(h, "scaledmaxextent-v1")
 	writeFloat32(h, v.Scale)
 	writeBool(h, v.HasSize)
 	writeFloat32(h, v.Size)

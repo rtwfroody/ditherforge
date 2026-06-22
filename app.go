@@ -1088,17 +1088,23 @@ func (a *App) EnumerateObjects(path string) ([]loader.ObjectInfo, error) {
 // relative-path feature still load correctly.
 func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	plog.Printf("Opening settings file: %s", path)
-	s, err := settings.Load(path)
+	s, legacyAbsoluteUnits, err := settings.Load(path)
 	if err != nil {
 		return nil, err
 	}
-	return &LoadSettingsResult{Path: path, Settings: s}, nil
+	return &LoadSettingsResult{Path: path, Settings: s, LegacyAbsoluteUnits: legacyAbsoluteUnits}, nil
 }
 
 // LoadSettingsResult is returned by LoadSettingsDialog/LoadSettingsFile.
 type LoadSettingsResult struct {
 	Path     string   `json:"path"`
 	Settings Settings `json:"settings"`
+	// LegacyAbsoluteUnits is true when the loaded file predates the
+	// fraction-of-extent format and stores the size-relative fields
+	// (split offset, sticker center/scale, MaterialX tile size) as absolute
+	// mm. The frontend uses it to convert those values to fractions once the
+	// model extent is known, rather than treating them as fractions directly.
+	LegacyAbsoluteUnits bool `json:"legacyAbsoluteUnits"`
 }
 
 // DefaultSettingsPath returns a .json path derived from the input file path.

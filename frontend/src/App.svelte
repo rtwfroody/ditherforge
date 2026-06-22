@@ -140,7 +140,9 @@
   // time; settings round-trips the path. Accepts .mtlx (with adjacent
   // textures) or a .zip containing both.
   let baseMaterialXPath = $state<string>('');
-  let baseMaterialXTileMM = $state<number>(10);
+  // Stored as a fraction of the model's max extent (was 10 mm; 0.1 ≈ a 10 mm
+  // tile on a 100 mm model). The "Tile size" UI shows it back in mm.
+  let baseMaterialXTileMM = $state<number>(0.1);
   let baseMaterialXTriplanarSharpness = $state<number>(4);
   // Persistent inline error for the currently-selected MaterialX file.
   // Set by validateMaterialXFile (file-pick / settings-load) and by the
@@ -243,14 +245,23 @@
   // When the user changes the cut axis, recentre the offset on the
   // new axis's bbox midpoint. Without this, an offset that was sane
   // for axis Z would commonly fall outside the X or Y range.
+  // splitOffset is a fraction of the print extent, while the bbox is in
+  // mm, so compare/convert via scaledMaxExtentMM. splitOffset is read and
+  // written inside untrack so this fires only on axis/bbox changes, not on
+  // its own write.
   $effect(() => {
     const axis = splitAxis;
     if (!modelBBoxMin || !modelBBoxMax) return;
     const lo = modelBBoxMin[axis];
     const hi = modelBBoxMax[axis];
-    if (splitOffset < lo || splitOffset > hi) {
-      splitOffset = (lo + hi) / 2;
-    }
+    untrack(() => {
+      const ext = scaledMaxExtentMM;
+      if (!ext || ext <= 0) return;
+      const offMM = splitOffset * ext;
+      if (offMM < lo || offMM > hi) {
+        splitOffset = ((lo + hi) / 2) / ext;
+      }
+    });
   });
 
   // Cut-plane preview overlay for the input viewer. Mirrors the
@@ -288,13 +299,15 @@
     const originU = (minU + maxU) / 2;
     const originV = (minV + maxV) / 2;
     const origin: [number, number, number] = [0, 0, 0];
-    origin[axis] = splitOffset;
+    // splitOffset is a fraction of the print extent; convert to pipeline-mm
+    // (the bbox frame) before placing the plane along the cut axis.
+    origin[axis] = splitOffset * (scaledMaxExtentMM ?? 0);
     for (let i = 0; i < 3; i++) origin[i] += originU * u[i] + originV * v[i];
     // The bbox is in original-mesh mm but the input viewer renders the
     // mesh at previewScale (vertices multiplied by previewScale in
     // scalePreviewMesh). Scale origin and half-extents to match the
     // rendered frame; (u, v, normal) directions are scale-invariant.
-    const ps = calibratedPreviewScale ?? 1;
+    const ps = previewScale;
     return {
       origin: [origin[0] * ps, origin[1] * ps, origin[2] * ps],
       normal,
@@ -582,7 +595,7 @@
       nativeExtentMM = event.extentMM;
     }
     if (event.previewScale !== undefined) {
-      applyPreviewScale(event.previewScale);
+      previewScale = event.previewScale;
     }
     // Update the model bbox for the Split offset slider. The bbox
     // is in original-mesh coords (mm, post-scale, post-normalizeZ).
@@ -592,12 +605,17 @@
       modelBBoxMin = newMin;
       modelBBoxMax = newMax;
       // If Split was enabled with the previous model's bbox in mind
-      // (offset clamped to a range that's now invalid), recentre the
-      // offset on the new model's bbox along the chosen axis.
-      const lo = newMin[splitAxis];
-      const hi = newMax[splitAxis];
-      if (splitOffset < lo || splitOffset > hi) {
-        splitOffset = (lo + hi) / 2;
+      // (offset now outside the new model's range), recentre the offset
+      // on the new model's bbox along the chosen axis. splitOffset is a
+      // fraction of the print extent, so compare in mm via that extent.
+      const ext = scaledMaxExtentMM;
+      if (ext && ext > 0) {
+        const lo = newMin[splitAxis];
+        const hi = newMax[splitAxis];
+        const offMM = splitOffset * ext;
+        if (offMM < lo || offMM > hi) {
+          splitOffset = ((lo + hi) / 2) / ext;
+        }
       }
     }
   });
@@ -810,7 +828,9 @@
       center: null,
       normal: null,
       up: null,
-      scale: 20,
+      // Fraction of the model's max extent (was 20 mm; 0.2 ≈ 20 mm on a
+      // 100 mm model). Shown back in mm by the Scale slider.
+      scale: 0.2,
       rotation: 0,
       maxAngle: 0,
       mode: 'projection',
@@ -827,19 +847,21 @@
 
   function handleStickerPlace(point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) {
     if (placingStickerIndex < 0 || placingStickerIndex >= stickers.length) return;
-    // Convert from preview-scaled coordinates to pipeline coordinates. Use
-    // calibratedPreviewScale so the new sticker lands in the same frame as
-    // existing stickers, even if knobs were just changed and the backend
-    // hasn't yet re-run the pipeline.
-    const ps = calibratedPreviewScale ?? 1;
-    const unscaled: [number, number, number] = [
-      point[0] / ps,
-      point[1] / ps,
-      point[2] / ps,
+    // Store the placement as a fraction of the model's max extent — a
+    // scale-invariant coordinate that tracks the print size automatically.
+    // The input viewer renders at native mm (= the model at scale 1), so a
+    // clicked point divided by the native extent IS that fraction, with no
+    // dependence on the current Size/Scale knobs.
+    const ext = nativeExtentMM;
+    if (ext === null || ext <= 0) return; // no known extent yet — can't place
+    const frac: [number, number, number] = [
+      point[0] / ext,
+      point[1] / ext,
+      point[2] / ext,
     ];
     stickers[placingStickerIndex] = {
       ...stickers[placingStickerIndex],
-      center: unscaled,
+      center: frac,
       normal,
       up: cameraUp,
     };
@@ -847,85 +869,83 @@
     placingStickerIndex = -1;
   }
 
-  // Sticker coords live in pipeline-scaled units. The pipeline's previewScale
-  // (= unitScale/totalScale, emitted by the backend on each input-mesh) is
-  // the single scale sticker coords are calibrated against. When it changes,
-  // we rescale stickers by the inverse ratio. null means "sticker coords
-  // carry no known calibration — adopt whatever we next observe/predict,
-  // without rescaling" (set on fresh load and applySettings, since saved
-  // coords are consistent with the accompanying knobs).
-  let calibratedPreviewScale: number | null = $state(null);
-  // Native max extent of the loaded model in mm (scale=1.0, size=unset).
-  // Reported by the backend; enables predicting previewScale synchronously
-  // so sticker rescales happen on knob change rather than after pipeline re-run.
+  // previewScale converts pipeline-mm (the final, scaled print size) to the
+  // input viewer's render frame, which the backend keeps at a constant native
+  // size regardless of the Size/Scale knobs (= unitScale/totalScale, emitted
+  // on each input-mesh). Used by the split-plane overlay (pipeline-mm bbox →
+  // render frame) and the sticker placement cursor.
+  let previewScale = $state(1);
+  // Native max extent of the loaded model in mm (scale=1.0, size=unset),
+  // reported by the backend on each input-mesh. Feeds scaledMaxExtentMM in
+  // scale mode, the fraction conversion at sticker placement, and the
+  // placement cursor's preview-frame size.
   let nativeExtentMM: number | null = $state(null);
 
-  // predictPreviewScale algebraically mirrors backend's `unitScale/totalScale`.
-  // Values match within float32 precision; see SCALE_EPS for the numerical slack.
-  //   size mode:  totalScale = Size/nativeExtentFile
-  //               previewScale = unitScale*nativeExtentFile/Size = extentMM/Size
-  //   scale mode: totalScale = unitScale*Scale → previewScale = 1/Scale
-  // Returns null when inputs are incomplete (in size mode, when extentMM is
-  // not yet known — typical just after load).
-  function predictPreviewScale(mode: 'size' | 'scale', sizeStr: string, scaleStr: string): number | null {
-    if (mode === 'size') {
-      if (nativeExtentMM === null || nativeExtentMM <= 0) return null;
-      const s = parseFloat(sizeStr);
-      if (!isFinite(s) || s <= 0) return null;
-      return nativeExtentMM / s;
+  // scaledMaxExtentMM is the model's max bounding-box dimension at its final
+  // PRINT size, in mm — the denominator the size-relative settings (split
+  // offset, sticker center/scale, MaterialX tile size) are stored as a
+  // fraction of. In size mode that's exactly the target Size; in scale mode
+  // it's the backend-reported native extent times the scale factor. null
+  // until enough is known (scale mode needs the native extent from the first
+  // input-mesh). Mirrors the Go pipeline's modelMaxExtent of the scaled model.
+  const scaledMaxExtentMM = $derived.by((): number | null => {
+    if (sizeMode === 'size') {
+      const s = parseFloat(sizeValue);
+      return isFinite(s) && s > 0 ? s : null;
     }
-    const k = parseFloat(scaleStr);
-    if (!isFinite(k) || k <= 0) return null;
-    return 1 / k;
+    const k = parseFloat(scaleValue);
+    if (nativeExtentMM === null || nativeExtentMM <= 0) return null;
+    return isFinite(k) && k > 0 ? nativeExtentMM * k : null;
+  });
+
+  // MaterialX tile size is stored as a fraction of the print extent; the
+  // "Tile size" input shows/edits it in mm.
+  const baseMaterialXTileDisplayMM = $derived(
+    scaledMaxExtentMM && scaledMaxExtentMM > 0
+      ? baseMaterialXTileMM * scaledMaxExtentMM
+      : baseMaterialXTileMM
+  );
+  function setBaseMaterialXTileMM(mm: number) {
+    const ext = scaledMaxExtentMM;
+    if (ext && ext > 0 && isFinite(mm)) baseMaterialXTileMM = mm / ext;
   }
 
-  // Tolerance for treating two previewScales (or extents) as equal. Backend
-  // reports float32 values; frontend predictions go through a different
-  // arithmetic path, so exact equality is unreliable. Without a tolerance,
-  // float-roundoff micro-rescales would retrigger the pipeline in a loop.
+  // Legacy-file migration: a settings file written before 0.9.6 stores the
+  // size-relative fields as absolute mm. applySettings loads those values
+  // as-is and sets this flag; once the print extent is known we divide them
+  // into fractions (the canonical in-memory form) exactly once. Newer files
+  // already hold fractions, so the flag stays false and nothing runs.
+  let pendingLegacyUnitConversion = $state(false);
+  $effect(() => {
+    if (!pendingLegacyUnitConversion) return;
+    const ext = scaledMaxExtentMM;
+    if (ext === null || ext <= 0) return;
+    // untrack the writes so re-reading the same state we set here can't
+    // retrigger this effect (the only tracked deps stay scaledMaxExtentMM
+    // and the flag, which flips false below to end the conversion).
+    untrack(() => {
+      splitOffset = splitOffset / ext;
+      baseMaterialXTileMM = baseMaterialXTileMM / ext;
+      stickers = stickers.map(s => ({
+        ...s,
+        center: s.center
+          ? [s.center[0] / ext, s.center[1] / ext, s.center[2] / ext] as [number, number, number]
+          : s.center,
+        scale: s.scale / ext,
+      }));
+      pendingLegacyUnitConversion = false;
+    });
+  });
+
+  // Tolerance for treating two extents as equal. The backend reports float32
+  // values, so re-deriving them on the JS side can differ by a few ulps;
+  // without a tolerance those micro-differences would churn reactive state.
   const SCALE_EPS = 1e-5;
   function approxEqual(a: number, b: number) {
     const d = Math.abs(a - b);
     const m = Math.max(Math.abs(a), Math.abs(b));
     return d <= SCALE_EPS * (m > 0 ? m : 1);
   }
-
-  // Move sticker calibration to newPS. If uncalibrated (null) adopt. If
-  // already at newPS within tolerance, do nothing (don't overwrite, to avoid
-  // waking up reactive readers for a no-op). Otherwise rescale stickers by
-  // the totalScale ratio (= oldPS/newPS) and update the calibration.
-  function applyPreviewScale(newPS: number) {
-    const cur = calibratedPreviewScale;
-    if (cur === null) {
-      calibratedPreviewScale = newPS;
-      return;
-    }
-    if (approxEqual(cur, newPS)) return;
-    const ratio = cur / newPS;
-    if (stickers.some(s => s.center !== null)) {
-      stickers = stickers.map(s => s.center ? {
-        ...s,
-        center: [s.center[0] * ratio, s.center[1] * ratio, s.center[2] * ratio] as [number, number, number],
-        scale: s.scale * ratio,
-      } : s);
-    }
-    calibratedPreviewScale = newPS;
-  }
-
-  // Synchronous rescale on any knob change: if we can predict the new
-  // previewScale, apply it immediately so stickers track the knobs without
-  // waiting for the backend pipeline. Otherwise the input-mesh handler will
-  // catch up with the authoritative value.
-  //
-  // Termination: applyPreviewScale writes calibratedPreviewScale, which is
-  // read inside this effect (transitively, via applyPreviewScale → cur read).
-  // That re-triggers the effect once; on re-entry predictPreviewScale returns
-  // the same p, applyPreviewScale's approxEqual guard fires, no write occurs,
-  // and the effect stops.
-  $effect(() => {
-    const p = predictPreviewScale(sizeMode, sizeValue, scaleValue);
-    if (p !== null) applyPreviewScale(p);
-  });
 
   let reloadSeq = $state(0);
   let objectIndex = $state(-1); // -1 = all objects, >=0 = specific object
@@ -984,7 +1004,6 @@
     // Warp pins reference colors sampled from the previous model; clear too.
     stickers = [];
     placingStickerIndex = -1;
-    calibratedPreviewScale = null;
     nativeExtentMM = null;
     warpPins = [];
     pickingPinIndex = -1;
@@ -1299,16 +1318,13 @@
     { key: 'splitOrientationB',               validate: (v, d) => pickEnum(v, SPLIT_ORIENTATION_VALUES, d), apply: (v) => { splitOrientationB = v; } },
   ];
 
-  function applySettings(rawIn: any) {
+  function applySettings(rawIn: any, legacyAbsoluteUnits = false) {
     const D: any = FACTORY_DEFAULTS;
     const s: any = rawIn ?? {};
 
-    // Saved sticker coords match the saved size/scale settings. Clear
-    // calibration so the next prediction/event is adopted without rescaling.
-    // Also clear the cached extent: if this settings file points at a
-    // different input model, the old extent would produce a bogus prediction
-    // before the backend replies with the true extent.
-    calibratedPreviewScale = null;
+    // Clear the cached extent: if this settings file points at a different
+    // input model, the old extent would mis-scale the displayed mm values
+    // until the backend replies with the true extent.
     nativeExtentMM = null;
 
     // Snapshot inputFile before the schema overwrites it, so we can
@@ -1324,6 +1340,13 @@
     for (const spec of SETTINGS_SCHEMA) {
       spec.apply(spec.validate(s[spec.key], D[spec.key]));
     }
+
+    // Pre-0.9.6 files store the size-relative fields (split offset, sticker
+    // center/scale, MaterialX tile size) as absolute mm; newer files store
+    // fractions of the print extent. When legacy, defer a one-shot mm→fraction
+    // conversion until the extent is known (see the effect above). Always
+    // assigned so a fraction file clears any flag left by a prior legacy load.
+    pendingLegacyUnitConversion = legacyAbsoluteUnits;
 
     // If the inputFile changed (different model, or reset to empty via
     // File > New), the previous model's cached mesh URLs and bbox no
@@ -1367,7 +1390,20 @@
     });
   }
 
+  // A just-loaded legacy file still holds raw-mm values until the deferred
+  // mm→fraction conversion runs (once the model extent is known). Saving in
+  // that window would persist mm as fractions, corrupting the file. Refuse.
+  function blockedByLegacyConversion(): boolean {
+    if (pendingLegacyUnitConversion) {
+      statusMessage = 'Still finalizing loaded settings — try saving again in a moment.';
+      statusType = 'error';
+      return true;
+    }
+    return false;
+  }
+
   async function handleSave() {
+    if (blockedByLegacyConversion()) return;
     if (!settingsPath) {
       return handleSaveAs();
     }
@@ -1383,6 +1419,7 @@
   }
 
   async function handleSaveAs() {
+    if (blockedByLegacyConversion()) return;
     try {
       const path = await SaveSettingsDialog(serializeSettings() as any);
       if (path) {
@@ -1404,7 +1441,7 @@
         const result = await LoadSettingsFile(path);
         if (result && result.path) {
           settingsPath = result.path;
-          applySettings(result.settings);
+          applySettings(result.settings, result.legacyAbsoluteUnits);
           addRecentFile(path);
           statusMessage = `Loaded from ${result.path}`;
           statusType = 'success';
@@ -1903,7 +1940,7 @@
                   </HelpTip>
                 </div>
                 <div class="flex items-center gap-2">
-                  <Input bind:value={baseMaterialXTileMM} type="number" min={0.1} step={0.5} class="flex-1" />
+                  <Input value={baseMaterialXTileDisplayMM} oninput={(e) => setBaseMaterialXTileMM(parseFloat(e.currentTarget.value))} type="number" min={0.1} step={0.5} class="flex-1" />
                   <span class="text-xs text-muted-foreground">mm</span>
                 </div>
                 <div class="flex items-center gap-1.5">
@@ -1966,6 +2003,7 @@
           <StickerPanel
             bind:stickers={stickers}
             bind:placingIndex={placingStickerIndex}
+            extentMM={scaledMaxExtentMM ?? 0}
             onAdd={addSticker}
             onRemove={removeSticker}
           />
@@ -1991,6 +2029,7 @@
             bind:clearanceMM={splitClearanceMM}
             bind:orientationA={splitOrientationA}
             bind:orientationB={splitOrientationB}
+            extentMM={scaledMaxExtentMM ?? 0}
             minOffset={splitOffsetMin}
             maxOffset={splitOffsetMax}
             onAlphaWrapForced={() => { alphaWrap = true; }}
@@ -2329,7 +2368,7 @@
         pickTriangleMode={triangleSelectMode}
         stickerPlaceMode={inputViewMode === 'input' && placingStickerIndex >= 0}
         stickerImage={placingSticker?.thumbnail ?? ''}
-        stickerSize={(placingSticker?.scale ?? 0) * (calibratedPreviewScale ?? 1)}
+        stickerSize={(placingSticker?.scale ?? 0) * (nativeExtentMM ?? 0)}
         stickerRotation={placingSticker?.rotation ?? 0}
         onColorPick={handleColorPick}
         onTrianglePick={handleTrianglePick}

@@ -22,11 +22,16 @@
   let {
     stickers = $bindable([]),
     placingIndex = $bindable(-1),
+    extentMM = 0,
     onAdd,
     onRemove,
   }: {
     stickers: StickerUI[];
     placingIndex: number;
+    // Model max extent at print size, in mm. sticker.center and sticker.scale
+    // are stored as fractions of this; the panel multiplies by it to show mm
+    // and divides on edit. 0 when no model/size is known yet.
+    extentMM: number;
     onAdd: () => void;
     onRemove: (index: number) => void;
   } = $props();
@@ -79,7 +84,7 @@
           </div>
           {#if sticker.center}
             <div class="text-[10px] text-muted-foreground">
-              Placed at ({sticker.center[0].toFixed(1)}, {sticker.center[1].toFixed(1)}, {sticker.center[2].toFixed(1)})
+              Placed at ({(sticker.center[0] * extentMM).toFixed(1)}, {(sticker.center[1] * extentMM).toFixed(1)}, {(sticker.center[2] * extentMM).toFixed(1)})
             </div>
           {:else}
             <div class="text-[10px] text-muted-foreground italic">Click the model to place</div>
@@ -95,10 +100,10 @@
               Size of the sticker on the model, in millimeters along its longest dimension.
             </HelpTip>
           </span>
-          <span class="text-[10px] text-muted-foreground w-12 text-right">{sticker.scale.toFixed(1)} mm</span>
+          <span class="text-[10px] text-muted-foreground w-12 text-right">{(sticker.scale * extentMM).toFixed(1)} mm</span>
         </div>
-        <Slider type="single" min={1} max={200} step={1} value={sticker.scale}
-          onValueChange={(v: number) => { stickers[i] = { ...sticker, scale: v }; stickers = stickers; }} />
+        <Slider type="single" min={1} max={200} step={1} value={sticker.scale * extentMM}
+          onValueChange={(v: number) => { const f = extentMM > 0 ? v / extentMM : sticker.scale; stickers[i] = { ...sticker, scale: f }; stickers = stickers; }} />
       </div>
 
       <div class="space-y-1">

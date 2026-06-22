@@ -205,6 +205,49 @@ func (r *pipelineRun) checkCancel() error {
 	return nil
 }
 
+// resolveFractionalOptions converts the size-relative option fields —
+// Split.Offset, Stickers[].Center, Stickers[].Scale, and
+// BaseColorMaterialXTileMM — from a fraction of the scaled model's max
+// extent into the absolute pipeline-mm the stages consume. It runs once,
+// at the top of RunCached, before any stage that reads those fields
+// resolves (so every stage hashes the resolved mm values consistently).
+//
+// The denominator is preloadOutput.ScaledMaxExtentMM, captured before
+// decimation/alpha-wrap so it is stable. Legacy (pre-0.9.6) settings
+// files already store absolute mm and set LegacyAbsoluteUnits, which
+// short-circuits the conversion. Direct-stage unit tests bypass RunCached
+// entirely, so they continue to supply raw mm.
+func (r *pipelineRun) resolveFractionalOptions() error {
+	if r.opts.LegacyAbsoluteUnits {
+		return nil
+	}
+	pre, err := r.Preload()
+	if err != nil {
+		return err
+	}
+	ext := float64(pre.ScaledMaxExtentMM)
+	if ext <= 0 {
+		return nil
+	}
+	r.opts.Split.Offset *= ext
+	r.opts.BaseColorMaterialXTileMM *= ext
+	if len(r.opts.Stickers) > 0 {
+		// Clone before mutating: r.opts is a shallow copy of the caller's
+		// Options, so the Stickers slice still aliases the caller's backing
+		// array. Scaling in place would corrupt the caller's settings.
+		sts := make([]Sticker, len(r.opts.Stickers))
+		copy(sts, r.opts.Stickers)
+		for i := range sts {
+			sts[i].Center[0] *= ext
+			sts[i].Center[1] *= ext
+			sts[i].Center[2] *= ext
+			sts[i].Scale *= ext
+		}
+		r.opts.Stickers = sts
+	}
+	return nil
+}
+
 // ----- Stage methods -----
 
 // decimateErrorBudget translates a voxel cell size into the QEM cost
@@ -277,11 +320,13 @@ func (r *pipelineRun) runPreload() (any, error) {
 	ex := modelExtents(model)
 	plog.Printf("  Extent: %.1f x %.1f x %.1f mm", ex[0], ex[1], ex[2])
 
+	scaledMaxExtent := modelMaxExtent(model)
 	return &preloadOutput{
-		Model:        model,
-		InputMesh:    buildInputMeshData(model),
-		PreviewScale: unitScale / totalScale,
-		ExtentMM:     modelMaxExtent(model) * unitScale / totalScale,
+		Model:             model,
+		InputMesh:         buildInputMeshData(model),
+		PreviewScale:      unitScale / totalScale,
+		ExtentMM:          scaledMaxExtent * unitScale / totalScale,
+		ScaledMaxExtentMM: scaledMaxExtent,
 	}, nil
 }
 

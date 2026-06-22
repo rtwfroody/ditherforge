@@ -91,7 +91,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err := Save(jsonPath, original); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	loaded, err := Load(jsonPath)
+	loaded, _, err := Load(jsonPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestSaveLoadRoundTripPreservesAllFields(t *testing.T) {
 	if err := Save(path, original); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -234,13 +234,48 @@ func TestLoadFillsMissingKeysWithDefaults(t *testing.T) {
 	if err := os.WriteFile(path, minimal, 0644); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := Load(path)
+	loaded, _, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	want := Default()
 	if !reflect.DeepEqual(loaded, want) {
 		t.Errorf("missing-keys file should load as defaults:\n  got:  %+v\n  want: %+v", loaded, want)
+	}
+}
+
+// TestLegacyUnitsDetection verifies the presence-based marker that
+// distinguishes legacy (absolute-mm) files from the fraction-of-extent
+// format: files Save writes carry _ditherforge.sizeRelativeUnits=true and
+// load as non-legacy; files lacking the marker (any version, including the
+// unreliable high version strings some old fixtures carry) load as legacy.
+func TestLegacyUnitsDetection(t *testing.T) {
+	tmp := t.TempDir()
+
+	// A file Save wrote is the current fraction format → not legacy.
+	current := filepath.Join(tmp, "current.json")
+	if err := Save(current, Default()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, legacy, err := Load(current); err != nil {
+		t.Fatalf("Load current: %v", err)
+	} else if legacy {
+		t.Error("file written by Save should not be detected as legacy")
+	}
+
+	// Hand-authored files without the marker are legacy regardless of the
+	// version string — even an implausibly high one.
+	for _, ver := range []string{"ditherforge 0.9.5", "ditherforge 0.9.27", "ditherforge 9.9.9", ""} {
+		p := filepath.Join(tmp, "legacy.json")
+		body := `{"_ditherforge":{"url":"https://github.com/rtwfroody/ditherforge","version":"` + ver + `"},"settings":{}}`
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, legacy, err := Load(p); err != nil {
+			t.Fatalf("Load legacy (%q): %v", ver, err)
+		} else if !legacy {
+			t.Errorf("file without sizeRelativeUnits marker (version %q) should be legacy", ver)
+		}
 	}
 }
 
