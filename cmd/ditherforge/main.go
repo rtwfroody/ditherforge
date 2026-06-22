@@ -33,6 +33,7 @@ type Args struct {
 	DebugCellsDir  string `arg:"--debug-cells-dir" help:"After Voxelize, write per-slab cell PNGs colored by the sampled RGB into this directory."`
 	DebugStagesDir string `arg:"--debug-stages-dir" help:"Write output-mesh stage renders (unculled / FrontSide-culled / culled-away-holes overlay, several views) into this directory. For chasing surface holes; needs no export."`
 	DebugStagesRes int    `arg:"--debug-stages-res" default:"2400" help:"PNG resolution (square) for --debug-stages-dir output"`
+	DebugSlabSVG   string `arg:"--debug-slab-svg" help:"Comma-separated slab indices: dump each slab's partition SVG (footprint + cover + cells + contours) to /tmp for inspecting coverage gaps."`
 }
 
 func (Args) Description() string {
@@ -131,6 +132,30 @@ func main() {
 			fmt.Fprintf(os.Stderr, "debug-cells-dir: %v\n", err)
 		} else {
 			fmt.Printf("Wrote per-slab cell PNGs to %s\n", args.DebugCellsDir)
+		}
+	}
+
+	if args.DebugSlabSVG != "" {
+		for _, tok := range strings.Split(args.DebugSlabSVG, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			var idx int
+			if _, err := fmt.Sscanf(tok, "%d", &idx); err != nil {
+				continue
+			}
+			svg, n, _, err := pipeline.CellsSlabSVG(cache, opts, idx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "debug-slab-svg %d: %v\n", idx, err)
+				continue
+			}
+			p := fmt.Sprintf("/tmp/slab_%04d.svg", idx)
+			if werr := os.WriteFile(p, []byte(svg), 0o644); werr != nil {
+				fmt.Fprintf(os.Stderr, "debug-slab-svg write %d: %v\n", idx, werr)
+				continue
+			}
+			fmt.Printf("Wrote %s (of %d slabs)\n", p, n)
 		}
 	}
 

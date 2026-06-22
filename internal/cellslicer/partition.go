@@ -2,6 +2,7 @@ package cellslicer
 
 import (
 	"math"
+	"os"
 )
 
 // boundaryMark marks an arc-length position on a FootprintLoop.
@@ -414,11 +415,21 @@ func concentricCapSeeds(fpCur, innerCap *Footprint, cellSize float32, ringSeedPt
 func slabCoverRegions(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) (innerCap, coverTarget *Footprint) {
 	inner := OffsetFootprint(fpCur, -cellSize)
 	neighborBoth := FootprintIntersect(fpBelow, fpAbove)
+	if noBuriedExclusion {
+		// White-holes diagnostic: keep the whole interior as cap (don't
+		// drop buried regions). If this removes the holes, the buried
+		// exclusion is eating visible surface.
+		neighborBoth = nil
+	}
 	innerCap = FootprintDifference(inner, neighborBoth)
 	band := FootprintDifference(fpCur, inner)
 	coverTarget = FootprintUnion(band, innerCap)
 	return innerCap, coverTarget
 }
+
+// noBuriedExclusion (DITHERFORGE_NO_BURIED) makes slabCoverRegions skip the
+// buried-interior subtraction. White-holes diagnostic; no-op when unset.
+var noBuriedExclusion = os.Getenv("DITHERFORGE_NO_BURIED") != ""
 
 func PartitionSlabAnalytic(fpCur, fpBelow, fpAbove *Footprint, cellSize float32) ([]Cell, *Footprint, PartitionStats) {
 	var stats PartitionStats

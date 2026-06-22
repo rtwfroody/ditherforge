@@ -22,6 +22,9 @@ import (
 // --debug-cells-dir flag share one code path.
 func WriteCellsDebugPNGs(cache *StageCache, opts Options, dir string) error {
 	cache.WaitForDiskWrites()
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
 	vo := cache.getVoxelize(opts)
 	if vo == nil {
 		return fmt.Errorf("voxelize stage has not run yet")
@@ -75,6 +78,11 @@ func CellsSlabPNG(cache *StageCache, opts Options, slabIdx int) (data []byte, sl
 // indices have geometry.
 func CellsSlabSVG(cache *StageCache, opts Options, slabIdx int) (svg string, slabCount int, medianAreaMM2 float32, err error) {
 	cache.WaitForDiskWrites()
+	// Resolve size-relative opts to the absolute mm the run keyed its blobs
+	// under (see ExportFile); without this the Voxelize lookup misses.
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
 	vo := cache.getVoxelize(opts)
 	if vo == nil {
 		return "", 0, 0, fmt.Errorf("voxelize stage has not run yet — run the pipeline first")

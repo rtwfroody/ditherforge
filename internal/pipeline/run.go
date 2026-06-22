@@ -41,6 +41,52 @@ var debugOverlap = os.Getenv("DITHERFORGE_OVERLAP_REPORT") != ""
 // white-holes diagnostic. No-op when unset.
 var debugFlips = os.Getenv("DITHERFORGE_FLIP_REPORT") != ""
 
+// debugCover (DITHERFORGE_COVER_REPORT) logs, per slab, the coverTarget
+// area vs the summed cell-footprint area, surfacing slabs where the cells
+// under-tile the cover target (the white-holes coverage probe). No-op off.
+var debugCover = os.Getenv("DITHERFORGE_COVER_REPORT") != ""
+
+func maxf64(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// polyArea2D returns the absolute shoelace area of an XY polygon.
+func polyArea2D(pts []cellslicer.Point2) float64 {
+	n := len(pts)
+	if n < 3 {
+		return 0
+	}
+	var s float64
+	for i := 0; i < n; i++ {
+		j := (i + 1) % n
+		s += float64(pts[i][0])*float64(pts[j][1]) - float64(pts[j][0])*float64(pts[i][1])
+	}
+	if s < 0 {
+		s = -s
+	}
+	return s * 0.5
+}
+
+// footprintArea returns the net area of a Footprint (outer loops minus holes).
+func footprintArea(fp *cellslicer.Footprint) float64 {
+	if fp == nil {
+		return 0
+	}
+	var a float64
+	for i := range fp.Loops {
+		la := polyArea2D(fp.Loops[i].Points)
+		if fp.Loops[i].IsHole {
+			a -= la
+		} else {
+			a += la
+		}
+	}
+	return a
+}
+
 // reportOverlapsIfEnabled, gated on DITHERFORGE_OVERLAP_REPORT, scans
 // every slab for cells whose Outer polygons overlap (cells are supposed
 // to tile the footprint sharing only edges). It logs a per-slab summary
@@ -1413,6 +1459,12 @@ func (r *pipelineRun) sliceSampleHalf(
 	slabs := make([]cellslicer.Slab, nSlabs)
 	perSlabSamples := make([][]cellslicer.CellSample, nSlabs)
 	perSlabStats := make([]cellslicer.PartitionStats, nSlabs)
+	var coverAreas, cellAreas, fpAreas []float64
+	if debugCover {
+		coverAreas = make([]float64, nSlabs)
+		cellAreas = make([]float64, nSlabs)
+		fpAreas = make([]float64, nSlabs)
+	}
 	slabErr := runParallel(r.ctx, nWorkers, nSlabs, func(workerID int) any {
 		b := &sampleBufs{color: voxel.NewSearchBuf(len(colorModel.Faces))}
 		if stickerModel != nil {
@@ -1468,6 +1520,15 @@ func (r *pipelineRun) sliceSampleHalf(
 			cells, coverTarget, stats = cellslicer.PartitionSlabAnalytic(footprints[i], fpBelow, fpAbove, cs)
 		}
 		perSlabStats[i] = stats
+		if debugCover {
+			var cellA float64
+			for ci := range cells {
+				cellA += polyArea2D(cells[ci].Outer)
+			}
+			coverAreas[i] = footprintArea(coverTarget)
+			cellAreas[i] = cellA
+			fpAreas[i] = footprintArea(footprints[i])
+		}
 		slabs[i] = cellslicer.Slab{
 			Index:       i,
 			HalfIdx:     halfIdx,
@@ -1489,6 +1550,31 @@ func (r *pipelineRun) sliceSampleHalf(
 		return halfVoxels{}, slabErr
 	}
 	slabElapsed := time.Since(tSlab).Seconds()
+
+	if debugCover {
+		type cov struct {
+			i                         int
+			fpA, coverA, cellA, defic float64
+		}
+		var rows []cov
+		var totCover, totCell float64
+		for i := 0; i < nSlabs; i++ {
+			d := coverAreas[i] - cellAreas[i]
+			totCover += coverAreas[i]
+			totCell += cellAreas[i]
+			if d > 1e-4 {
+				rows = append(rows, cov{i, fpAreas[i], coverAreas[i], cellAreas[i], d})
+			}
+		}
+		sort.Slice(rows, func(a, b int) bool { return rows[a].defic > rows[b].defic })
+		plog.Printf("  [cover-report] Σcover=%.2f mm² Σcell=%.2f mm² total deficit=%.2f mm² (%.2f%%), %d slabs under-tiled",
+			totCover, totCell, totCover-totCell, 100*(totCover-totCell)/maxf64(totCover, 1e-9), len(rows))
+		for k := 0; k < len(rows) && k < 12; k++ {
+			r := rows[k]
+			plog.Printf("    slab %d Z=[%.2f..%.2f]: fp=%.3f cover=%.3f cell=%.3f deficit=%.3f mm² (%.1f%% of cover)",
+				r.i, planes[r.i], planes[r.i+1], r.fpA, r.coverA, r.cellA, r.defic, 100*r.defic/maxf64(r.coverA, 1e-9))
+		}
+	}
 
 	reportOverlapsIfEnabled(slabs, cellSizeForSlab)
 
