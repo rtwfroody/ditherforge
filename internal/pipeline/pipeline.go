@@ -345,7 +345,13 @@ type ProcessResult struct {
 	// (e.g. sealing open windows with surfaces at unexpected depths)
 	// would otherwise pollute cellslicer-correctness metrics.
 	WrappedMesh *MeshData `json:"-"`
-	Duration    time.Duration
+	// DebugSourceMesh is the geometry fed INTO the clip stage (the split
+	// halves assembled in bed space, or lo.Model unsplit), in the same
+	// frame as OutputMesh. Populated only when DITHERFORGE_FLIP_REPORT is
+	// set, so the CLI can render it culled/unculled and compare its
+	// top-down back-faces against the output's (the white-holes probe).
+	DebugSourceMesh *MeshData `json:"-"`
+	Duration        time.Duration
 }
 
 // PrepareResult summarizes the Prepare phase (kept for CLI backward compat).
@@ -609,9 +615,10 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	return &ProcessResult{
-		OutputMesh:  outputMesh,
-		WrappedMesh: wrappedMesh,
-		Duration:    time.Since(start),
+		OutputMesh:      outputMesh,
+		WrappedMesh:     wrappedMesh,
+		DebugSourceMesh: r.debugSourceMesh,
+		Duration:        time.Since(start),
 	}, nil
 }
 

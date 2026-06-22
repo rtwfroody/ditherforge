@@ -1,9 +1,12 @@
 # Investigation: white holes in flat surfaces (Nord Stage 4 model-thicker)
 
-Status: **IN PROGRESS (2026-06-21 session 2).** CLI repro is now possible. The
-two things that blocked headless repro before turned out to be TWO separate,
-newly-understood bugs (see "Blockers, now diagnosed"). Neither is the hole
-itself, but both had to be understood to run the pipeline headlessly.
+Status: **IN PROGRESS (2026-06-21 session 3).** ROOT CAUSE CORRECTED: the holes
+are NOT inverted/flipped faces (clip preserves winding to 0.024%). They are
+DROPPED EXTERIOR surface fragments — the clip drops the front-facing exterior
+face of thin single-wall panels, exposing the correctly-wound back-facing
+interior face, which reads as a white hole. See "CORRECTED (session 3)" below.
+The fix is in clip COVERAGE, not winding. Both headless-repro blockers (A
+voxelize determinism, B export key mismatch) are FIXED.
 
 ## Symptom
 
@@ -101,7 +104,54 @@ inverted faces but **near-tangent or genuinely missing geometry** (dot≈0, neve
 (2) my CLI reproductions only had inverted faces over *backed* regions (not single-layer
 white), so the metric never moved. **Settle missing-vs-inverted on the REAL mesh first.**
 
-## SETTLED (session 2): the holes are INVERTED FACES, not missing geometry
+## CORRECTED (session 3): the holes are DROPPED EXTERIOR faces, not winding flips
+
+The session-2 "inverted faces" conclusion was a **measurement artifact** and is now
+overturned. New instrumentation (`DITHERFORGE_FLIP_REPORT=1`, in `internal/pipeline/run.go`)
+compares every clip-output face normal against the nearest source-surface normal in the
+SAME bed-space frame (per split half), matched by perpendicular distance to the source
+triangle's plane (so thin walls don't mis-match to the opposite face). Result on the
+user's exact `model-thicker.json` (split, full clean cache):
+
+- **Only 0.024% of clip-output faces are actually inverted** relative to their source
+  (146 / 611,672), evenly spread across orientation and both halves. So **clip preserves
+  winding faithfully — it does NOT flip faces.**
+- The flag also dumps the clip INPUT (the split halves assembled in bed space) as
+  `pr.DebugSourceMesh`; `--debug-stages-dir` renders it under `<dir>/source/`. **The clip
+  INPUT has 0.000% top-down holes** (both the exterior top face and the interior wall face
+  are present, exterior in front). **The clip OUTPUT has 1.269%.**
+
+Reconciliation (this is the real mechanism): the keyboard bottom is a thin single-wall
+panel with an exterior (front-facing, toward the top camera in the reoriented half) face
+AND an interior (back-facing, into the cavity) face. **Clip drops the EXTERIOR fragment in
+the wedge regions; the correctly-wound INTERIOR fragment survives** and becomes the
+front-most surface top-down → it is back-facing → culled → reads as a white hole. The
+session-2 unculled render showed "full coverage" only because the surviving interior face
+fills the pixel — masking that the exterior face was dropped. So it IS missing geometry
+(the exterior fragment), exposed as a back-face. NOT a winding error.
+
+### Where in clip the exterior face is dropped (narrowed, not yet pinned)
+
+- Ruled OUT: per-cell prism cap coplanarity. `DITHERFORGE_PRISM_ZEPS=0.003` extrudes each
+  cell prism's Z range ±3µm so a boundary-coincident horizontal face is strictly interior
+  to the prism — **zero change** (1.269% → 1.269%, identical zero-face counts). So the
+  exterior face is dropped BEFORE the per-cell intersect, not at its Z caps.
+- Two phenomena, by cell size:
+  1. **Tiny ring cells go zero-face** (clip cell→face: ring 1px=747/1629=46%,
+     2-4px=4490/6605=68% produce NO faces). Scattered rim/speckle holes.
+  2. **Big diagonal wedges in NON-zero-face cells** (large cells are ~never zero-face:
+     17-64px ring=28/68065). The cell keeps its interior face but lacks the exterior →
+     exposed back-face. The wedges are diagonal slivers, consistent with a slightly-TILTED
+     flat panel crossing slab boundaries along diagonal XY lines.
+- Remaining suspects (both in the clip coverage domain, both heavily tuned — apollo /
+  slivers / walls): (A) the per-slab pre-split (`splitSrcBySlabs`, Manifold `SplitByPlane`)
+  drops the exterior fragment where it is coincident with / straddles a slab boundary
+  plane; (B) the upper slab's cell footprint (color-aware cells segment per slab, so cell
+  boundaries differ slab-to-slab) does not cover the XY where the exterior fragment landed.
+  Next decisive (but slow / RAM-heavy) test: force the no-split-source path so every cell
+  intersects the full `src` (no `SplitByPlane`); if the wedges vanish → (A).
+
+## SUPERSEDED (session 2): "the holes are INVERTED FACES, not missing geometry"
 
 Built `--debug-stages-dir` into the CLI (renders `pr.OutputMesh` top-down/bottom/persp:
 `<view>_unculled.png`, `<view>_culled.png` = GUI FrontSide cull, `<view>_holes.png` =
@@ -149,12 +199,26 @@ removes the inverted faces** — they are already present in the Clip output (th
 feeding it — NOT in the coplanar merge. Combined with the split result, the split's
 large patches come from clipping the reoriented (z-down) half in its bed-space frame.
 
-## Concrete next steps
-2. For the split patches: re-derive the source-normal comparison frame correctly (apply
-   the per-half colorXform / ApplyInverse) before any reorient pass, OR fix the cell
-   winding at emission so no post-hoc reorient is needed.
-3. Blocker A (voxelize determinism) and Blocker B (export key mismatch, FIXED this
-   session) are separate; see above.
+## Concrete next steps (session 3 — corrected)
+
+The "fix the winding / reorient pass" plan is DEAD (clip does not flip faces; reorienting
+would do nothing). The real fix is **coverage: stop clip dropping the exterior fragment.**
+
+1. Run the decisive (A)-vs-(B) test: force the full-`src` no-pre-split path and see if the
+   big wedges vanish. (A) = `splitSrcBySlabs`/`SplitByPlane` boundary drop; (B) = per-slab
+   footprint coverage gap. RAM/time-heavy — do single-threaded or on a smaller model.
+2. If (A): make the per-slab `SplitByPlane` keep boundary-coincident / straddling exterior
+   faces (perturb the cut plane off flat-surface Z, or overlap adjacent per-slab sources by
+   an eps and rely on per-cell dedup). Cf. [[project_slab_grid_first_layer]],
+   [[project_coincident_boundary_gray_walls]].
+3. If (B): extend the upper slab's cell footprints to cover the exterior fragment XY (the
+   `SlabSurfaceFootprints` / coverTarget family — [[project_apollo_holes_root_cause]],
+   [[project_vertical_wall_slivers]]).
+4. Blocker A (voxelize determinism) and Blocker B (export key mismatch) are FIXED; separate.
+
+Diagnostics added this session (kept, env-gated, zero cost when off):
+- `DITHERFORGE_FLIP_REPORT=1` → `[flip-report]` lines (output-vs-source winding) + populates
+  `pr.DebugSourceMesh` (clip input) so `--debug-stages-dir` also renders `<dir>/source/`.
 
 ## Useful tooling notes
 

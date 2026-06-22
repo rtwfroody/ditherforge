@@ -149,6 +149,14 @@ func main() {
 		if err := writeDebugStages(args.DebugStagesDir, pr.OutputMesh, args.DebugStagesRes); err != nil {
 			fmt.Fprintf(os.Stderr, "debug-stages-dir: %v\n", err)
 		}
+		// When DITHERFORGE_FLIP_REPORT populated the clip-source mesh,
+		// render it the same way so its top-down back-faces can be
+		// compared against the output's (white-holes probe).
+		if pr.DebugSourceMesh != nil {
+			if err := writeDebugStages(filepath.Join(args.DebugStagesDir, "source"), pr.DebugSourceMesh, args.DebugStagesRes); err != nil {
+				fmt.Fprintf(os.Stderr, "debug-stages-dir source: %v\n", err)
+			}
+		}
 	}
 
 	if _, err := pipeline.ExportFile(cache, opts, opts.Output, export3mf.Options{

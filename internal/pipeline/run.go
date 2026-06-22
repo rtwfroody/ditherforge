@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,13 @@ var debugHoles = os.Getenv("DITHERFORGE_HOLE_REPORT") != ""
 // When set, the per-slab phase checks each slab's cells for overlapping
 // polygons (a partition bug) and logs any it finds. No-op when unset.
 var debugOverlap = os.Getenv("DITHERFORGE_OVERLAP_REPORT") != ""
+
+// debugFlips is read once at init from DITHERFORGE_FLIP_REPORT. When set,
+// runClip compares every clip-output face normal against the nearest
+// source-surface normal (in the same bed-space frame, per half) and logs
+// how many output faces are inverted, bucketed by orientation — the
+// white-holes diagnostic. No-op when unset.
+var debugFlips = os.Getenv("DITHERFORGE_FLIP_REPORT") != ""
 
 // reportOverlapsIfEnabled, gated on DITHERFORGE_OVERLAP_REPORT, scans
 // every slab for cells whose Outer polygons overlap (cells are supposed
@@ -113,6 +121,205 @@ func reportHolesIfEnabled(stage string, faces [][3]uint32) {
 	plog.Printf("  [hole-report] %s: %d faces, %s", stage, len(faces), wr)
 }
 
+// assembleSourceMeshData concatenates one or more LoadedModels into a
+// single geometry-only MeshData (flat verts/faces, no colors) for the
+// white-holes probe. Vertex indices of later models are offset past the
+// earlier ones, mirroring how clipPerHalf concatenates the halves, so the
+// result lives in the same bed-space frame as OutputMesh.
+func assembleSourceMeshData(models []*loader.LoadedModel) *MeshData {
+	md := &MeshData{}
+	var vbase uint32
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		for _, v := range m.Vertices {
+			md.Vertices = append(md.Vertices, v[0], v[1], v[2])
+		}
+		for _, f := range m.Faces {
+			md.Faces = append(md.Faces, vbase+f[0], vbase+f[1], vbase+f[2])
+		}
+		vbase += uint32(len(m.Vertices))
+	}
+	return md
+}
+
+// flipTriNormal returns the (unnormalized) right-hand normal of triangle abc.
+func flipTriNormal(a, b, c [3]float32) [3]float32 {
+	e1 := [3]float32{b[0] - a[0], b[1] - a[1], b[2] - a[2]}
+	e2 := [3]float32{c[0] - a[0], c[1] - a[1], c[2] - a[2]}
+	return [3]float32{
+		e1[1]*e2[2] - e1[2]*e2[1],
+		e1[2]*e2[0] - e1[0]*e2[2],
+		e1[0]*e2[1] - e1[1]*e2[0],
+	}
+}
+
+func flipDot3(a, b [3]float32) float32 { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+
+// reportFlipsIfEnabled, gated on DITHERFORGE_FLIP_REPORT, classifies every
+// clip-output face as aligned or inverted relative to the nearest
+// source-surface triangle (compared in the same frame: per split half, the
+// half's bed-space source; otherwise lo.Model). It reports the inverted
+// fraction and buckets the inverted faces by orientation (horizontal /
+// slanted / vertical) to test whether the white holes concentrate on
+// surfaces lying parallel to the slab planes (the degenerate-clip theory).
+// Source lookup is a flat XY SpatialIndex query picking the candidate
+// triangle whose PLANE is nearest the output-face centroid (perpendicular
+// distance). Perpendicular distance reliably picks the originating source
+// face (≈0) over the opposite face of a thin wall (≈wall thickness), so
+// thin walls don't produce spurious antiparallel matches.
+func reportFlipsIfEnabled(clipped cellslicer.ClipResult, shellHalfIdx []byte, lo *loadOutput, so *splitOutput) {
+	if !debugFlips {
+		return
+	}
+	// One source index per frame the output may live in.
+	type srcIdx struct {
+		model *loader.LoadedModel
+		idx   *voxel.SpatialIndex
+	}
+	srcFor := map[byte]srcIdx{}
+	mkIdx := func(m *loader.LoadedModel) srcIdx {
+		return srcIdx{model: m, idx: voxel.NewSpatialIndex(m, 2.0)}
+	}
+	if so != nil && so.Enabled {
+		for h := byte(0); int(h) < len(so.Halves); h++ {
+			srcFor[h] = mkIdx(so.Halves[h])
+		}
+	} else {
+		srcFor[0] = mkIdx(lo.Model)
+	}
+
+	V := clipped.Verts
+	// Buckets: [0]=horizontal(|nz|>0.7) [1]=slanted [2]=vertical(|nz|<0.3).
+	var invByOri, totByOri [3]int
+	// Per split half: inverted / classified.
+	var invByHalf, totByHalf [2]int
+	var nInverted, nClassified, nNoSrc, nLowConf int
+	bmin := [3]float32{1e30, 1e30, 1e30}
+	bmax := [3]float32{-1e30, -1e30, -1e30}
+	oriBucket := func(nz float32) int {
+		az := nz
+		if az < 0 {
+			az = -az
+		}
+		switch {
+		case az > 0.7:
+			return 0
+		case az < 0.3:
+			return 2
+		default:
+			return 1
+		}
+	}
+	for fi, f := range clipped.Faces {
+		a, b, c := V[f[0]], V[f[1]], V[f[2]]
+		n := flipTriNormal(a, b, c)
+		nl := float32(math.Sqrt(float64(flipDot3(n, n))))
+		if nl < 1e-12 {
+			continue
+		}
+		nu := [3]float32{n[0] / nl, n[1] / nl, n[2] / nl}
+		cx := (a[0] + b[0] + c[0]) / 3
+		cy := (a[1] + b[1] + c[1]) / 3
+		cz := (a[2] + b[2] + c[2]) / 3
+		ctr := [3]float32{cx, cy, cz}
+		h := byte(0)
+		if shellHalfIdx != nil && fi < len(shellHalfIdx) {
+			h = shellHalfIdx[fi]
+		}
+		s, ok := srcFor[h]
+		if !ok {
+			continue
+		}
+		cand := s.idx.Candidates(cx, cy)
+		bestD := float32(1e30)
+		var bestNU [3]float32
+		found := false
+		for _, ti := range cand {
+			sf := s.model.Faces[ti]
+			sa, sb, sc := s.model.Vertices[sf[0]], s.model.Vertices[sf[1]], s.model.Vertices[sf[2]]
+			sn := flipTriNormal(sa, sb, sc)
+			snl := float32(math.Sqrt(float64(flipDot3(sn, sn))))
+			if snl < 1e-12 {
+				continue
+			}
+			snu := [3]float32{sn[0] / snl, sn[1] / snl, sn[2] / snl}
+			// Perpendicular distance from output centroid to this
+			// source triangle's plane.
+			rel := [3]float32{ctr[0] - sa[0], ctr[1] - sa[1], ctr[2] - sa[2]}
+			d := flipDot3(rel, snu)
+			if d < 0 {
+				d = -d
+			}
+			if d < bestD {
+				bestD = d
+				bestNU = snu
+				found = true
+			}
+		}
+		if !found {
+			nNoSrc++
+			continue
+		}
+		al := flipDot3(nu, bestNU)
+		// Confidence gate: the originating source face is co-planar with
+		// the output face, so |alignment| must be near 1. A low |al| means
+		// the nearest plane is a different surface (a corner/edge match) —
+		// don't score it either way.
+		aal := al
+		if aal < 0 {
+			aal = -aal
+		}
+		if aal < 0.5 {
+			nLowConf++
+			continue
+		}
+		ori := oriBucket(nu[2])
+		nClassified++
+		totByOri[ori]++
+		if h < 2 {
+			totByHalf[h]++
+		}
+		if al < 0 {
+			nInverted++
+			invByOri[ori]++
+			if h < 2 {
+				invByHalf[h]++
+			}
+			for k := 0; k < 3; k++ {
+				if ctr[k] < bmin[k] {
+					bmin[k] = ctr[k]
+				}
+				if ctr[k] > bmax[k] {
+					bmax[k] = ctr[k]
+				}
+			}
+		}
+	}
+	pct := func(a, b int) float64 {
+		if b == 0 {
+			return 0
+		}
+		return 100 * float64(a) / float64(b)
+	}
+	plog.Printf("  [flip-report] %d/%d confident faces inverted (%.3f%%); %d no-source, %d low-confidence (skipped)",
+		nInverted, nClassified, pct(nInverted, nClassified), nNoSrc, nLowConf)
+	plog.Printf("  [flip-report] by orientation  horizontal: %d/%d (%.2f%%)  slanted: %d/%d (%.2f%%)  vertical: %d/%d (%.2f%%)",
+		invByOri[0], totByOri[0], pct(invByOri[0], totByOri[0]),
+		invByOri[1], totByOri[1], pct(invByOri[1], totByOri[1]),
+		invByOri[2], totByOri[2], pct(invByOri[2], totByOri[2]))
+	if so != nil && so.Enabled {
+		plog.Printf("  [flip-report] by half  half0: %d/%d (%.2f%%)  half1: %d/%d (%.2f%%)",
+			invByHalf[0], totByHalf[0], pct(invByHalf[0], totByHalf[0]),
+			invByHalf[1], totByHalf[1], pct(invByHalf[1], totByHalf[1]))
+	}
+	if nInverted > 0 {
+		plog.Printf("  [flip-report] inverted bbox X=[%.1f..%.1f] Y=[%.1f..%.1f] Z=[%.1f..%.1f]",
+			bmin[0], bmax[0], bmin[1], bmax[1], bmin[2], bmax[2])
+	}
+}
+
 // pipelineRun is a demand-driven driver for one pipeline invocation.
 // The stage graph itself — names, dependencies, cache policy, bodies —
 // is declared as data in the stageDefs table (stagedef.go); resolve
@@ -146,6 +353,10 @@ type pipelineRun struct {
 	// resolved, subsequent consumers within the same Run skip the
 	// cache lookup. Lazily allocated by resolve.
 	memo map[StageID]any
+
+	// debugSourceMesh is the clip-stage input geometry captured for the
+	// white-holes probe (DITHERFORGE_FLIP_REPORT). nil in normal runs.
+	debugSourceMesh *MeshData
 }
 
 // Typed stage accessors — the public face of the stageDefs table.
@@ -1744,6 +1955,16 @@ func (r *pipelineRun) runClip() (any, error) {
 	plog.Printf("  Clip: %d verts, %d faces in %.1fs",
 		len(clipped.Verts), len(clipped.Faces), time.Since(tClip).Seconds())
 	reportHolesIfEnabled("clip output", clipped.Faces)
+	reportFlipsIfEnabled(clipped, shellHalfIdx, lo, so)
+	if debugFlips {
+		var srcModels []*loader.LoadedModel
+		if so.Enabled {
+			srcModels = so.Halves[:]
+		} else {
+			srcModels = []*loader.LoadedModel{lo.Model}
+		}
+		r.debugSourceMesh = assembleSourceMeshData(srcModels)
+	}
 
 	// Per-cell face-count cross-tab against partition pixel
 	// bucket. Identifies the "missing geometry" suspects:
