@@ -1,5 +1,13 @@
 # Investigation: white holes in flat surfaces (Nord Stage 4 model-thicker)
 
+Status: **FIX NOT YET LANDED (2026-06-22 session 4).** The session-3 localization to the
+slabCoverRegions buried exclusion was only PARTIALLY right: the proposed surfaceFps-union
+fix was implemented and REVERTED — it changed nothing (holes 1.269%, buried area
+byte-identical). The dropped panel surface is not in any surface-projection footprint at the
+hole XY, so un-burying can't target it; NO_BURIED only "works" by tiling all interior. See
+"TRIED AND FAILED (session 4)" below. Next: back-project a hole pixel to its slab/XY and
+inspect the footprints there directly (no more guessing). Earlier session status:
+
 Status: **ROOT CAUSE CONFIRMED (2026-06-21 session 3).** The holes are NOT
 inverted/flipped faces (clip preserves winding to 0.024%). They are DROPPED
 EXTERIOR surface fragments: the merged-group clip prism's footprint
@@ -199,16 +207,35 @@ Evidence:
   `KEEP_HORIZ_SLICES` — no change), slab pre-split (`NO_PRESPLIT`), prism Z
   (`PRISM_ZEPS`), color-aware tiling (`colorAwareCells:false` — no change), winding.
 
-PROPOSED FIX: stop slabCoverRegions excluding EXPOSED in-band surface. The in-band
-silhouette `surfaceFps[i]` (already computed in run.go, unioned into fpCur) marks exactly
-where surface is exposed mid-slab. Thread it into slabCoverRegions and union it back so
-`coverTarget` never drops actual surface: `coverTarget = (band ∪ innerCap) ∪ surfaceFps`
-(equivalently, only subtract buried where there is no in-band surface). This re-adds ONLY
-real visible surface (never hidden interior), so it can't regress the surface-only-quality
-invariant. Validate with `DITHERFORGE_COVER_REPORT` + `--debug-stages-dir` top-down hole %
-(target: ≤ the ~0.36% baseline). slabCoverRegions is the shared source of truth for both
-PartitionSlabAnalytic and …Color, so keep the no-cut byte-identical fallback intact and run
-the full suite.
+TRIED AND FAILED (session 4): "union surfaceFps back into coverTarget." Threaded
+`surfaceFps[i]` (and then `∪ interiorFps[i]`) into slabCoverRegions, subtracting it from
+`neighborBoth` so the buried test can't drop exposed surface. Result: **holes unchanged
+(1.269%)**, and `DITHERFORGE_COVER_REPORT` showed the panel slab's buried area UNCHANGED
+(475.375 mm², byte-identical) — i.e. the in-band/interior surface footprints do NOT overlap
+the buried-excluded wedge. Reverted.
+
+WHY it failed / corrected mechanism: the buried exclusion is a PARTIAL RED HERRING.
+- `DITHERFORGE_NO_BURIED` reduces holes (→0.701%) only by brute-force tiling the ENTIRE
+  solid interior (body slabs have buried≈2250 mm² of genuinely-hidden interior); a
+  body-interior cell's tall prism then incidentally re-captures the panel face. It is NOT
+  covering the specific surface, so it is not a viable fix.
+- The dropped panel surface is NOT present in `surfaceFps` or `interiorFps` at the hole
+  XY. `fpCur` includes that area only via capFp's BOUNDING-PLANE cross-section (solid), so
+  there is no surface marker to protect — the surface PROJECTION misses the panel there.
+- Only `DITHERFORGE_FOOTPRINT_GROW` (grow cells past their footprint into a neighbour's
+  coverage) reliably mitigates — consistent with "surface present, but no footprint marks
+  its XY in that slab."
+
+REVISED next step (do NOT guess again — instrument at a known hole): pick a magenta hole
+pixel from `--debug-stages-dir top_holes.png`, back-project to a world XY + Z (the output
+mesh is in bed space), find its slab, and directly inspect — at that exact XY — which of
+fpCur / coverTarget / surfaceFps / interiorFps / capFp contain it, and whether the source
+mesh has a face there. That pins whether the surface is (a) missing from fpCur entirely
+(surface-projection bug — fix in SlabSurfaceFootprints/InteriorHorizontalFootprints) or
+(b) in fpCur but buried AND not in any surface footprint (needs a different exposure test).
+The session-4 attempt skipped this back-projection and guessed (b)+surfaceFps, which was
+wrong. `--debug-slab-svg <idx>` already renders any slab; the missing piece is the
+hole-pixel → slab/XY mapping.
 
 ## SUPERSEDED (session 2): "the holes are INVERTED FACES, not missing geometry"
 
