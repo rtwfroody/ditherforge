@@ -129,13 +129,17 @@ Re-ran with `splitEnabled:false` (model-thicker-nosplit.json):
   unsplit "bottom" view has very few holes (0.026%), so it is NOT simply "all downward
   faces are inverted".
 
-## Concrete next steps
+### Bisected: the inversions are emitted by CLIP, not Merge
 
-1. **Bisect WHERE the inversion enters**: extend `--debug-stages-dir` to also render the
-   **Clip** stage shell (`co.ShellVerts/ShellFaces`) vs the **Merge** shell with the same
-   holes overlay. Merge only coalesces coplanar faces, so inversions almost certainly
-   predate it → the Clip/cellslicer per-cell winding is the suspect. (Plumbing: resolve
-   StageClip from the cache with the RESOLVED opts; build a flat-colored MeshData.)
+Re-ran with `noMerge:true` (model-thicker-nomerge.json): top-down holes =
+**12640 px / 1.269%**, byte-identical to the merge run. So **Merge neither adds nor
+removes the inverted faces** — they are already present in the Clip output (the
+`noMerge` output geometry IS the clip shell). The bug lives in the **Clip stage**
+("Manifold merged-cell intersect, same-color cells per slab") or the cellslicer cells
+feeding it — NOT in the coplanar merge. Combined with the split result, the split's
+large patches come from clipping the reoriented (z-down) half in its bed-space frame.
+
+## Concrete next steps
 2. For the split patches: re-derive the source-normal comparison frame correctly (apply
    the per-half colorXform / ApplyInverse) before any reorient pass, OR fix the cell
    winding at emission so no post-hoc reorient is needed.
