@@ -367,3 +367,52 @@ Diagnostic committed this session: `DITHERFORGE_HOLE_PROBE` (run.go).
 - `debugrender.LoadInputMesh(path,&size)` loads glb/3mf w/ face colors; `LoadAnyModel` raw.
 - debugrender views: az/el `{0,90}` is true top-down (depth=-Z); `{0,0}` ("front") looks along X.
 - Cull check: `debugrender.RenderInputCulledWithBounds` vs unculled `render.RenderColor`.
+
+## Session 6 (2026-06-22) — HOLES PINNED TO INTER-GROUP PRISM SEAMS (geometric gap)
+
+Three probes + a controlled discriminator. All committed (clip_cover_probe.go,
+probeSurfaceBeyondFootprint in run.go, env-gated seam/open bloat in clip_merge.go).
+
+1. **Inside-contour coverage** (`DITHERFORGE_CLIP_COVER_PROBE`): per merged group, rasterize
+   the slab's up-facing top-cap SOURCE surface, the clip OUTPUT (up-facing only — a white hole
+   is the up exterior dropped while the down interior survives at the same XY, so plain XY
+   coverage falsely reads "covered"), and the prism contour. Inside a group's OWN contour the
+   up-facing cap is **99.999% covered** (222 dropped px / 29.16M). → NOT a CSG crack WITHIN a
+   contour. Refutes the within-contour-(b) hypothesis.
+2. **Beyond the outer footprint** (`probeSurfaceBeyondFootprint`, run.go, HOLE_PROBE-gated):
+   only ~1.3 mm² of exposed up-facing cap projects OUTSIDE footprints[i], clustered at a low
+   ledge (Z≈3.5–4 mm), NOT the visible flat top. → NOT a simple outer-footprint under-reach.
+3. **The hole image** (`top_holes.png`, this build): holes are **long thin straight diagonal
+   slivers tracing interior lines across the panel** + a few wedges = cell/group SEAM lines,
+   not the outer edge. (`geom` is confirmed in BED coords — "Each half's geometry is in bed
+   coords" — so partition +Z = bed-top; the up-facing probes are valid, no flip caveat.)
+
+By elimination the drops are at the **seams BETWEEN adjacent group prisms** (neither probe
+targeted that region: one looked strictly inside a contour, the other strictly outside the
+footprint). Confirmed by the discriminator below.
+
+**Discriminator** (`DITHERFORGE_SEAM_BLOAT` grows non-open/seam edges; `DITHERFORGE_OPEN_BLOAT`
+grows open/footprint-boundary edges; clip_cover_probe.go). Baseline 1.269%:
+
+| bloat | open (outer boundary) | seam (between groups) |
+|-------|-----------------------|-----------------------|
+| 0.2mm | 1.095% | 0.971% |
+| 0.5mm | 0.943% | 0.711% |
+| both 0.2mm (uniform) | 0.718% (≈ old FOOTPRINT_GROW=0.2 0.685% → discriminator is faithful) |
+
+- **Seam is the dominant lever (~1.7× the boundary effect).**
+- Seam sweep is a **smooth proportional ramp** (0.02→1.174, 0.05→1.079, 0.1→1.023, 0.2→0.971,
+  0.5→0.711), NOT a step. A sub-µm numerical coincidence crack would close with a ~10µm offset
+  then flatten; this scales with distance to 0.5mm → the seam gap has **real geometric width
+  (tenths of a mm)**, not an FP crack.
+
+**Conclusion:** white holes = geometric coverage gap at the seams between adjacent merged-group
+clip prisms (dominant) + a smaller share at the outer footprint boundary. Adjacent
+different-color group prisms are each Intersection()'d with the source independently and don't
+reliably meet at their shared wall, leaving a thin uncovered band → dropped exterior face →
+back-facing interior shows → white hole. Growing prisms so neighbors OVERLAP at seams closes it
+(why FOOTPRINT_GROW was the only lever). Refines, not contradicts, "footprint under-coverage":
+the under-coverage is specifically at INTER-GROUP SEAMS, not the outer silhouette.
+
+**Next:** experimental fix = default seam bloat on non-open contour edges (overlap adjacent
+prisms). Watch for duplicate coincident faces / non-manifold growth from the overlap.

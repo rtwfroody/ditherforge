@@ -114,6 +114,122 @@ func zAtXYTri(a, b, c [3]float32, x, y float32) (float32, bool) {
 	return l1*a[2] + l2*b[2] + l3*c[2], true
 }
 
+// probeSurfaceBeyondFootprint tests the (a2) white-hole hypothesis: that the
+// up-facing top-cap SOURCE surface projects, in places, OUTSIDE the slab
+// footprint — so no cell/contour/clip covers it and it reads as a hole. For
+// each slab it samples the up-facing in-band source surface and counts how
+// much falls outside footprints[i] (= capFps[i] ∪ surfaceFps[i]), and of
+// that, how much is the TOPMOST (exposed) surface — the part that actually
+// becomes a visible hole. Gated by DITHERFORGE_HOLE_PROBE.
+func probeSurfaceBeyondFootprint(geom *loader.LoadedModel, planes []float32, capFps, surfaceFps []*cellslicer.Footprint, halfIdx int) {
+	if !debugHoleProbe || geom == nil || len(geom.Faces) == 0 {
+		return
+	}
+	nSlabs := len(planes) - 1
+	si := voxel.NewSpatialIndex(geom, 2.0)
+	// Combined per-slab footprint (what the partition actually tiles), built
+	// lazily and cached.
+	fp := make([]*cellslicer.Footprint, nSlabs)
+	fpBuilt := make([]bool, nSlabs)
+	getFp := func(i int) *cellslicer.Footprint {
+		if !fpBuilt[i] {
+			var cf, sf *cellslicer.Footprint
+			if capFps != nil && i < len(capFps) {
+				cf = capFps[i]
+			}
+			if surfaceFps != nil && i < len(surfaceFps) {
+				sf = surfaceFps[i]
+			}
+			fp[i] = cellslicer.FootprintUnion(cf, sf)
+			fpBuilt[i] = true
+		}
+		return fp[i]
+	}
+
+	type row struct {
+		i                          int
+		nUp, nOutFp, nOutFpTop     int
+		areaUp, areaOut, areaOutTp float64
+	}
+	rows := make([]row, nSlabs)
+	for i := range rows {
+		rows[i].i = i
+	}
+	const step = float32(0.04) // mm sampling pitch over each up-facing triangle
+	px2 := float64(step) * float64(step)
+	for ti := range geom.Faces {
+		f := geom.Faces[ti]
+		a, b, c := geom.Vertices[f[0]], geom.Vertices[f[1]], geom.Vertices[f[2]]
+		n := flipTriNormal(a, b, c)
+		nl := float32(math.Sqrt(float64(flipDot3(n, n))))
+		if nl <= 1e-12 || n[2]/nl <= 0 { // not up-facing
+			continue
+		}
+		minX := minf32t(a[0], b[0], c[0])
+		maxX := maxf32t(a[0], b[0], c[0])
+		minY := minf32t(a[1], b[1], c[1])
+		maxY := maxf32t(a[1], b[1], c[1])
+		for y := minY; y <= maxY; y += step {
+			for x := minX; x <= maxX; x += step {
+				z, in := zAtXYTri(a, b, c, x, y)
+				if !in {
+					continue
+				}
+				i := slabIndexForZf(planes, z)
+				if i < 0 || i >= nSlabs {
+					continue
+				}
+				rows[i].nUp++
+				rows[i].areaUp += px2
+				inFp := false
+				if g := getFp(i); g != nil {
+					inFp = g.Contains(x, y)
+				}
+				if inFp {
+					continue
+				}
+				rows[i].nOutFp++
+				rows[i].areaOut += px2
+				// Is this sample the TOPMOST source surface here (exposed)?
+				topZ := float32(-1e30)
+				for _, tj := range si.Candidates(x, y) {
+					ff := geom.Faces[tj]
+					za, zb, zc := geom.Vertices[ff[0]], geom.Vertices[ff[1]], geom.Vertices[ff[2]]
+					zz, okz := zAtXYTri(za, zb, zc, x, y)
+					if okz && zz > topZ {
+						topZ = zz
+					}
+				}
+				if z >= topZ-1e-3 {
+					rows[i].nOutFpTop++
+					rows[i].areaOutTp += px2
+				}
+			}
+		}
+	}
+	sort.Slice(rows, func(a, b int) bool { return rows[a].nOutFpTop > rows[b].nOutFpTop })
+	var totUp, totOut, totTop int
+	var aUp, aOut, aTop float64
+	for _, r := range rows {
+		totUp += r.nUp
+		totOut += r.nOutFp
+		totTop += r.nOutFpTop
+		aUp += r.areaUp
+		aOut += r.areaOut
+		aTop += r.areaOutTp
+	}
+	plog.Printf("  [surf-beyond-fp half %d] up-facing in-band surface: %d samp (%.1f mm²); OUTSIDE footprint=%d (%.2f mm²); of those TOPMOST/exposed=%d (%.3f mm²) → hole-causing cap beyond footprint",
+		halfIdx, totUp, aUp, totOut, aOut, totTop, aTop)
+	for k := 0; k < len(rows) && k < 10; k++ {
+		r := rows[k]
+		if r.nOutFpTop == 0 {
+			break
+		}
+		plog.Printf("    slab %d Z=[%.2f..%.2f]: up=%d outFp=%d topmost-outFp=%d (%.4f mm²)",
+			r.i, planes[r.i], planes[r.i+1], r.nUp, r.nOutFp, r.nOutFpTop, r.areaOutTp)
+	}
+}
+
 // probeHolesIfEnabled implements the DITHERFORGE_HOLE_PROBE diagnostic. See
 // debugHoleProbe. capFps/surfaceFps/interiorFps are this half's per-slab
 // footprints (any may be nil or carry nil entries).
@@ -1812,6 +1928,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	}
 
 	probeHolesIfEnabled(slabs, geom, planes, capFps, surfaceFps, interiorFps, int(halfIdx))
+	probeSurfaceBeyondFootprint(geom, planes, capFps, surfaceFps, int(halfIdx))
 
 	reportOverlapsIfEnabled(slabs, cellSizeForSlab)
 

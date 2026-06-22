@@ -213,6 +213,7 @@ func ClipMeshToMergedCellsManifoldProgress(ctx context.Context, model *loader.Lo
 	for i := range cr.CellRep {
 		cr.CellRep[i] = int32(i)
 	}
+	reportClipCoverProbe()
 	globalOffsets := SlabGlobalOffsets(slabs)
 	for gi := range groups {
 		g := &groups[gi]
@@ -275,6 +276,9 @@ func clipOneGroupManifold(src *manifoldbool.Manifold, srcID int32, cells []Cell,
 		return nil, nil, nil
 	}
 	v, f := out.ToMeshFiltered(srcID)
+	if clipCoverProbe {
+		probeGroupCoverage(contours, clipCoverCapTris(src, srcID), v, f, zBot)
+	}
 	return v, f, nil
 }
 
@@ -382,7 +386,10 @@ func mergedGroupContours(cells []Cell, cellIdxs []int) ([][][2]float32, bool) {
 		if len(pts) < 3 {
 			continue
 		}
-		bloated := bloatOpenEdges(pts, flags, OpenEdgeBloatMM)
+		bloated, used := bloatEdgesExperimental(pts, flags)
+		if !used {
+			bloated = bloatOpenEdges(pts, flags, OpenEdgeBloatMM)
+		}
 		if len(bloated) >= 3 {
 			contours = append(contours, bloated)
 		}
