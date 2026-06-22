@@ -22,10 +22,20 @@ The user has confirmed:
 
 ## Blockers, now diagnosed (session 2)
 
-### Blocker A — dither panic `index out of range` (the "color-aware CLI crash")
+### Blocker A — dither panic `index out of range` (the "color-aware CLI crash") — FIXED 2026-06-21
 
-NOT actually color-aware-specific, and NOT a neighbor-graph off-by-one. It is a
-**cache-desync caused by non-deterministic voxelize**:
+NOT a neighbor-graph off-by-one. It was a **cache-desync caused by non-deterministic
+voxelize**, and the non-determinism lived in `colorGrid.pickMergeVictim`
+(internal/cellslicer/colorcut.go, the color-aware partition): it tie-broke the merge
+victim AND target by Go's randomized map iteration order, so the merge sequence and
+final cell count varied run to run. FIXED (commit 5dcae57) with deterministic
+tie-breaks: victim = smallest area then smallest label; target = most adjacency then
+SMALLER-area neighbour then smallest label (the smaller-area rule is load-bearing —
+plain smallest-label sweeps a gradient into one region, breaking
+TestColorRegionsGradientNotCut). Repeated fresh runs now give identical cell counts;
+the partial-bust crash repro completes; whole-dir cache wipes no longer needed.
+
+Original mechanism (for reference):
 
 - `dizzy-corrected` dither does `DitherCorrected(cells = po.Cells, neighbors = vo.Neighbors)`
   in `run.go` runDither. `po.Cells` flows Voxelize→ColorAdjust→ColorWarp→**Palette**;
