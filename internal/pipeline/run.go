@@ -87,6 +87,241 @@ func footprintArea(fp *cellslicer.Footprint) float64 {
 	return a
 }
 
+// debugHoleProbe (DITHERFORGE_HOLE_PROBE) is the white-holes ground-truth
+// probe. For the slabs that drop the most footprint (Footprint −
+// CoverTarget), it samples the dropped region and, for each sample, casts a
+// vertical ray against the source geom to decide whether the TOPMOST surface
+// over that XY lies inside this slab (an exposed cap we wrongly dropped — a
+// real bug) or above it (genuinely buried — a correct drop). It also reports
+// footprint membership (cap/surface/interior/neighborBoth) so the mechanism
+// is pinned, not guessed. No-op when unset.
+var debugHoleProbe = os.Getenv("DITHERFORGE_HOLE_PROBE") != ""
+
+// zAtXYTri returns the triangle's Z at (x,y) and whether (x,y) lies inside the
+// triangle's XY projection (small negative bary tolerance for edge hits).
+func zAtXYTri(a, b, c [3]float32, x, y float32) (float32, bool) {
+	d := (b[1]-c[1])*(a[0]-c[0]) + (c[0]-b[0])*(a[1]-c[1])
+	if d > -1e-12 && d < 1e-12 {
+		return 0, false
+	}
+	l1 := ((b[1]-c[1])*(x-c[0]) + (c[0]-b[0])*(y-c[1])) / d
+	l2 := ((c[1]-a[1])*(x-c[0]) + (a[0]-c[0])*(y-c[1])) / d
+	l3 := 1 - l1 - l2
+	const eps = -1e-4
+	if l1 < eps || l2 < eps || l3 < eps {
+		return 0, false
+	}
+	return l1*a[2] + l2*b[2] + l3*c[2], true
+}
+
+// probeHolesIfEnabled implements the DITHERFORGE_HOLE_PROBE diagnostic. See
+// debugHoleProbe. capFps/surfaceFps/interiorFps are this half's per-slab
+// footprints (any may be nil or carry nil entries).
+func probeHolesIfEnabled(slabs []cellslicer.Slab, geom *loader.LoadedModel, planes []float32, capFps, surfaceFps, interiorFps []*cellslicer.Footprint, halfIdx int) {
+	if !debugHoleProbe || geom == nil || len(geom.Faces) == 0 {
+		return
+	}
+	nSlabs := len(slabs)
+	si := voxel.NewSpatialIndex(geom, 2.0)
+
+	// Per-slab probe of the dropped region (Footprint − CoverTarget). The
+	// dropped area is dominated by genuinely-buried body interior (correct,
+	// surface-only tiling), so we DON'T rank by area; we ray-cast each
+	// sample and rank by EXPOSED count — samples whose topmost source
+	// surface lies within this slab (a cap we wrongly dropped = the holes).
+	type srow struct {
+		i                                      int
+		dropArea                               float64
+		nSamp, nExposed, nUp, nBuried, nNoGeom int
+		nInCap, nInSurf, nInInt, nInBoth       int
+		// Of the exposed (wrongly-dropped) samples, classify the topmost
+		// source triangle that produced them: is it near-horizontal
+		// (|nz|>0.9, the interiorFps gate) and does it span a slab plane
+		// (its zMin/zMax in different slabs, the interiorFps ks!=ke reject)?
+		nExpHoriz, nExpSpan int
+		sumExpAbsNz         float64
+	}
+	var rows []srow
+	for i := 0; i < nSlabs; i++ {
+		drop := cellslicer.FootprintDifference(slabs[i].Footprint, slabs[i].CoverTarget)
+		dropA := footprintArea(drop)
+		if dropA <= 1e-3 {
+			continue
+		}
+		minX, minY, maxX, maxY, ok := drop.Bounds()
+		if !ok {
+			continue
+		}
+		zb, zt := planes[i], planes[i+1]
+		thick := zt - zb
+		// Cap the grid so giant body-interior regions stay cheap (~≤50²);
+		// small hole regions still get dense coverage.
+		dx, dy := float64(maxX-minX), float64(maxY-minY)
+		maxDim := math.Max(dx, dy)
+		step := float32(math.Max(float64(thick*2), maxDim/50))
+		if step <= 0 {
+			step = 0.1
+		}
+		var fpBelow, fpAbove *cellslicer.Footprint
+		if i > 0 && capFps != nil {
+			fpBelow = capFps[i-1]
+		}
+		if i+1 < nSlabs && capFps != nil {
+			fpAbove = capFps[i+1]
+		}
+		neighborBoth := cellslicer.FootprintIntersect(fpBelow, fpAbove)
+		var sfp, ifp, capFp *cellslicer.Footprint
+		if surfaceFps != nil && i < len(surfaceFps) {
+			sfp = surfaceFps[i]
+		}
+		if interiorFps != nil && i < len(interiorFps) {
+			ifp = interiorFps[i]
+		}
+		if capFps != nil && i < len(capFps) {
+			capFp = capFps[i]
+		}
+		row := srow{i: i, dropArea: dropA}
+		for y := minY; y <= maxY; y += step {
+			for x := minX; x <= maxX; x += step {
+				if !drop.Contains(x, y) {
+					continue
+				}
+				row.nSamp++
+				if capFp != nil && capFp.Contains(x, y) {
+					row.nInCap++
+				}
+				if sfp != nil && sfp.Contains(x, y) {
+					row.nInSurf++
+				}
+				if ifp != nil && ifp.Contains(x, y) {
+					row.nInInt++
+				}
+				if neighborBoth != nil && neighborBoth.Contains(x, y) {
+					row.nInBoth++
+				}
+				// Topmost source surface over (x,y), with the producing
+				// triangle's normal-z and its own Z extent (for the gate test).
+				topZ := float32(-1e30)
+				var topNz, topTriZMin, topTriZMax float32
+				hit := false
+				for _, ti := range si.Candidates(x, y) {
+					f := geom.Faces[ti]
+					a, b, c := geom.Vertices[f[0]], geom.Vertices[f[1]], geom.Vertices[f[2]]
+					z, in := zAtXYTri(a, b, c, x, y)
+					if !in {
+						continue
+					}
+					if z > topZ {
+						topZ = z
+						n := flipTriNormal(a, b, c)
+						nl := float32(math.Sqrt(float64(flipDot3(n, n))))
+						if nl > 1e-12 {
+							topNz = n[2] / nl
+						}
+						topTriZMin = minf32t(a[2], b[2], c[2])
+						topTriZMax = maxf32t(a[2], b[2], c[2])
+						hit = true
+					}
+				}
+				if !hit {
+					row.nNoGeom++
+					continue
+				}
+				// Strict attribution: the topmost source surface over (x,y) is
+				// EXPOSED in THIS slab iff its own slab index equals i. No tol —
+				// a cap at Z just above zt belongs to the next slab, not here.
+				if slabIndexForZf(planes, topZ) == i {
+					row.nExposed++ // a cap that lives in this slab, yet dropped
+					if topNz > 0 {
+						row.nUp++
+					}
+					absNz := topNz
+					if absNz < 0 {
+						absNz = -absNz
+					}
+					row.sumExpAbsNz += float64(absNz)
+					if absNz > 0.9 {
+						row.nExpHoriz++ // would pass nearHorizontal (interiorFps gate)
+					}
+					// Does the producing triangle straddle a slab plane? (the
+					// interiorFps ks!=ke reject; spanning ⇒ goes to surfaceFps).
+					if slabIndexForZf(planes, topTriZMin) != slabIndexForZf(planes, topTriZMax) {
+						row.nExpSpan++
+					}
+				} else if topZ > zt {
+					row.nBuried++ // real solid above this slab → correctly dropped
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+	// Rank by EXPOSED (wrongly-dropped cap) count — that's where the holes are.
+	sort.Slice(rows, func(a, b int) bool { return rows[a].nExposed > rows[b].nExposed })
+	var totExposed int
+	for _, r := range rows {
+		totExposed += r.nExposed
+	}
+	plog.Printf("  [hole-probe half %d] %d slabs drop footprint; Σexposed(wrongly-dropped cap) samples=%d; top by exposed:",
+		halfIdx, len(rows), totExposed)
+	for k := 0; k < len(rows) && k < 14; k++ {
+		r := rows[k]
+		if r.nExposed == 0 && k >= 4 {
+			break
+		}
+		meanNz := 0.0
+		if r.nExposed > 0 {
+			meanNz = r.sumExpAbsNz / float64(r.nExposed)
+		}
+		plog.Printf("    slab %d Z=[%.2f..%.2f] drop=%.2f mm²: samp=%d EXPOSED=%d (up %d) buried=%d noGeom=%d | inCap=%d inSurf=%d inInt=%d inBoth=%d | exp-tri: mean|nz|=%.3f horiz(|nz|>.9)=%d spansPlane=%d",
+			r.i, planes[r.i], planes[r.i+1], r.dropArea, r.nSamp, r.nExposed, r.nUp, r.nBuried, r.nNoGeom,
+			r.nInCap, r.nInSurf, r.nInInt, r.nInBoth, meanNz, r.nExpHoriz, r.nExpSpan)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func minf32t(a, b, c float32) float32 {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	return m
+}
+
+func maxf32t(a, b, c float32) float32 {
+	m := a
+	if b > m {
+		m = b
+	}
+	if c > m {
+		m = c
+	}
+	return m
+}
+
+// slabIndexForZf returns the slab index whose [planes[i],planes[i+1]) band
+// contains z, or -1 if z is outside [planes[0],planes[last]]. Mirrors
+// cellslicer.slabIndexForZ (unexported) for the hole probe.
+func slabIndexForZf(planes []float32, z float32) int {
+	if len(planes) < 2 || z < planes[0] || z > planes[len(planes)-1] {
+		return -1
+	}
+	for i := 0; i+1 < len(planes); i++ {
+		if z < planes[i+1] {
+			return i
+		}
+	}
+	return len(planes) - 2
+}
+
 // reportOverlapsIfEnabled, gated on DITHERFORGE_OVERLAP_REPORT, scans
 // every slab for cells whose Outer polygons overlap (cells are supposed
 // to tile the footprint sharing only edges). It logs a per-slab summary
@@ -1575,6 +1810,8 @@ func (r *pipelineRun) sliceSampleHalf(
 				r.i, planes[r.i], planes[r.i+1], r.fpA, r.coverA, r.cellA, r.defic, 100*r.defic/maxf64(r.coverA, 1e-9))
 		}
 	}
+
+	probeHolesIfEnabled(slabs, geom, planes, capFps, surfaceFps, interiorFps, int(halfIdx))
 
 	reportOverlapsIfEnabled(slabs, cellSizeForSlab)
 
