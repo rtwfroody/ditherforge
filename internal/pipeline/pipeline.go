@@ -670,6 +670,16 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 	// blobs instead of reporting "pipeline has not been run yet".
 	cache.WaitForDiskWrites()
 
+	// Resolve the size-relative option fields to absolute mm exactly as
+	// RunCached did, so the stage cache keys below match the blobs the run
+	// wrote. RunCached mutates a copy of opts via resolveFractionalOptions;
+	// our caller still holds the unresolved (fractional) opts. Without this,
+	// Split.Offset (and the other fractional fields) differ, every downstream
+	// key misses, and export reports "pipeline has not been run yet".
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+
 	lo := cache.getLoad(opts)
 	po := cache.getPalette(opts)
 	mo := cache.getMerge(opts)

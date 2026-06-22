@@ -1135,6 +1135,14 @@ func (c *StageCache) getParse(opts Options) *loader.LoadedModel {
 	return v.(*loader.LoadedModel)
 }
 
+func (c *StageCache) getPreload(opts Options) *preloadOutput {
+	v := c.get(StagePreload, opts)
+	if v == nil {
+		return nil
+	}
+	return v.(*preloadOutput)
+}
+
 func (c *StageCache) getLoad(opts Options) *loadOutput {
 	v := c.get(StageLoad, opts)
 	if v == nil {

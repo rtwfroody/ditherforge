@@ -31,6 +31,8 @@ type Args struct {
 	DebugRender    string `arg:"--debug-render" help:"After running, write PNG renders (input + dithered + sampled, four views each) into this directory. Useful for headless debugging."`
 	DebugRenderRes int    `arg:"--debug-render-res" default:"800" help:"PNG resolution (square) for --debug-render output"`
 	DebugCellsDir  string `arg:"--debug-cells-dir" help:"After Voxelize, write per-slab cell PNGs colored by the sampled RGB into this directory."`
+	DebugStagesDir string `arg:"--debug-stages-dir" help:"Write output-mesh stage renders (unculled / FrontSide-culled / culled-away-holes overlay, several views) into this directory. For chasing surface holes; needs no export."`
+	DebugStagesRes int    `arg:"--debug-stages-res" default:"2400" help:"PNG resolution (square) for --debug-stages-dir output"`
 }
 
 func (Args) Description() string {
@@ -139,6 +141,14 @@ func main() {
 	if pr.NeedsForce {
 		fmt.Fprintf(os.Stderr, "Error: model extent %.0f mm exceeds 300 mm; reduce the size in the settings file (or pass --force to bypass)\n", pr.ModelExtentMM)
 		os.Exit(1)
+	}
+
+	// Output-mesh stage renders for surface-defect hunting. Independent of
+	// export (renders pr.OutputMesh directly), so it runs before ExportFile.
+	if args.DebugStagesDir != "" {
+		if err := writeDebugStages(args.DebugStagesDir, pr.OutputMesh, args.DebugStagesRes); err != nil {
+			fmt.Fprintf(os.Stderr, "debug-stages-dir: %v\n", err)
+		}
 	}
 
 	if _, err := pipeline.ExportFile(cache, opts, opts.Output, export3mf.Options{

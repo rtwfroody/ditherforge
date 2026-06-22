@@ -225,27 +225,38 @@ func (r *pipelineRun) resolveFractionalOptions() error {
 	if err != nil {
 		return err
 	}
-	ext := float64(pre.ScaledMaxExtentMM)
-	if ext <= 0 {
-		return nil
+	r.opts = applyFractionalOptions(r.opts, float64(pre.ScaledMaxExtentMM))
+	return nil
+}
+
+// applyFractionalOptions converts the size-relative option fields (stored as a
+// fraction of the scaled model's max extent) into absolute pipeline-mm, given
+// that extent. Returns opts unchanged for legacy (absolute-unit) settings or a
+// non-positive extent. The Stickers slice is cloned before mutation so the
+// caller's backing array is never corrupted.
+//
+// MUST stay in lockstep with what RunCached resolves: stage cache keys are
+// computed from the RESOLVED opts, so ExportFile (and any other post-run cache
+// reader) has to apply the identical conversion or its keys won't match the
+// blobs RunCached wrote. See the "pipeline has not been run yet" regression.
+func applyFractionalOptions(opts Options, ext float64) Options {
+	if opts.LegacyAbsoluteUnits || ext <= 0 {
+		return opts
 	}
-	r.opts.Split.Offset *= ext
-	r.opts.BaseColorMaterialXTileMM *= ext
-	if len(r.opts.Stickers) > 0 {
-		// Clone before mutating: r.opts is a shallow copy of the caller's
-		// Options, so the Stickers slice still aliases the caller's backing
-		// array. Scaling in place would corrupt the caller's settings.
-		sts := make([]Sticker, len(r.opts.Stickers))
-		copy(sts, r.opts.Stickers)
+	opts.Split.Offset *= ext
+	opts.BaseColorMaterialXTileMM *= ext
+	if len(opts.Stickers) > 0 {
+		sts := make([]Sticker, len(opts.Stickers))
+		copy(sts, opts.Stickers)
 		for i := range sts {
 			sts[i].Center[0] *= ext
 			sts[i].Center[1] *= ext
 			sts[i].Center[2] *= ext
 			sts[i].Scale *= ext
 		}
-		r.opts.Stickers = sts
+		opts.Stickers = sts
 	}
-	return nil
+	return opts
 }
 
 // ----- Stage methods -----
