@@ -1,12 +1,14 @@
 # Investigation: white holes in flat surfaces (Nord Stage 4 model-thicker)
 
-Status: **FIX NOT YET LANDED (2026-06-22 session 4).** The session-3 localization to the
-slabCoverRegions buried exclusion was only PARTIALLY right: the proposed surfaceFps-union
-fix was implemented and REVERTED — it changed nothing (holes 1.269%, buried area
-byte-identical). The dropped panel surface is not in any surface-projection footprint at the
-hole XY, so un-burying can't target it; NO_BURIED only "works" by tiling all interior. See
-"TRIED AND FAILED (session 4)" below. Next: back-project a hole pixel to its slab/XY and
-inspect the footprints there directly (no more guessing). Earlier session status:
+Status: **FIX NOT YET LANDED (2026-06-22 session 5).** Session 5 OVERTURNED the
+slabCoverRegions buried-exclusion theory entirely: the `DITHERFORGE_HOLE_PROBE` ground-truth
+(strict slab attribution) shows the partition-dropped region is buried at EVERY slab —
+EXPOSED=0 — so the buried exclusion drops no exposed surface. Also EXONERATED: the
+surface-projection sliver-reject (`KEEP_HORIZ_SLIVERS` → byte-identical 1.269%). The holes
+are thin diagonal slivers on the flat top; the only oracle that moves the number is
+`FOOTPRINT_GROW` (grows the CLIP prism outward), so the gap is at the merged-group clip
+prism boundary, NOT partition coverage. See "Session 5" below. Next: back-project a specific
+sliver to its slab/XY and inspect the clip prism there. Earlier session status:
 
 Status: **ROOT CAUSE CONFIRMED (2026-06-21 session 3).** The holes are NOT
 inverted/flipped faces (clip preserves winding to 0.024%). They are DROPPED
@@ -306,6 +308,54 @@ silhouette for near-horizontal surfaces — without a blunt global dilation.
 Diagnostics added this session (kept, env-gated, zero cost when off):
 - `DITHERFORGE_FLIP_REPORT=1` → `[flip-report]` lines (output-vs-source winding) + populates
   `pr.DebugSourceMesh` (clip input) so `--debug-stages-dir` also renders `<dir>/source/`.
+
+## Session 5 (2026-06-22) — TWO theories overturned; holes are thin diagonal slivers
+
+Built `DITHERFORGE_HOLE_PROBE` (run.go, committed): for every slab it samples the dropped
+footprint (`Footprint − CoverTarget`) and **ray-casts the source `geom`** (same partition
+frame — no cross-frame mapping) to decide, per sample, whether the TOPMOST source surface
+over that XY lies **in this slab** (an exposed cap wrongly dropped) or **above it**
+(correctly buried), plus footprint membership (cap/surface/interior/neighborBoth) and the
+producing triangle's `|nz|` / plane-span.
+
+**Result with STRICT slab attribution (`slabIndexForZ(topZ) == i`): EXPOSED = 0 across
+EVERY slab in BOTH halves.** Every partition-dropped region is genuinely buried (always real
+surface above it). An earlier `tol=thick` version mis-attributed the slab-*above*'s cap to
+the slab below and produced false "EXPOSED=442" counts — corrected to strict.
+
+Consequences:
+1. **The `slabCoverRegions` buried exclusion (`neighborBoth = capFps[i-1] ∩ capFps[i+1]`)
+   is EXONERATED** — it drops no exposed surface. OVERTURNS the session-4 pin and the
+   `surfaceFps`-union direction. (`NO_BURIED` only "helped" by brute-force tiling ~2250
+   mm²/slab of genuinely-hidden body interior whose tall prisms incidentally re-cover the
+   cap — not a real fix.)
+2. **Visual ground truth** (`--debug-stages-dir top_holes.png`, clean cache = 1.269%): holes
+   are **long thin DIAGONAL SLIVERS** across the flat top panel + a couple larger wedges;
+   they look like coarse triangle edges / radiating lines.
+3. **Surface-projection sliver-reject EXONERATED.** `DITHERFORGE_KEEP_HORIZ_SLIVERS` (keep
+   the thin in-band strip of near-horizontal cap triangles past the `triBandXYPath` aspect
+   reject) → top holes **byte-identical 1.269% / 12637 px**. So the sliver *shape* is not
+   surfaceFps dropping near-horizontal strips. (Reverted; confirms prior `NO_SLIVER_REJECT`.)
+4. Built-in **zero-face clip cells are all RING (wall) cells** at slabs 1,2,3,959,802,1235…
+   — NOT the flat-top cap slabs (47/48 half0, 1189 half1). So the flat-top holes are
+   **neither a partition drop NOR a zero-face clip cell**.
+
+**Where it leaves it:** the only oracle that ever moved the number is `FOOTPRINT_GROW`
+(grows each CLIP prism footprint OUTWARD, in `clipOneGroupManifold`). With partition-drop all
+buried and clip-prism-grow the thing that helps, the missing surface lies **just OUTSIDE the
+merged-group prism footprint** — a CLIP-stage coverage gap at cell/group footprint
+boundaries (cf. residual "ill-defined Clipper tie-break at coverTarget coincident edges",
+[[project_footprint_bucket_clip]]), NOT a partition coverTarget gap. keepHorizSlivers not
+helping says the gap is NOT near-horizontal surface added to fpCur.
+
+**Corrected next step (ground-truth, don't theorize):** back-project a specific magenta
+sliver from `top_holes.png` (bed space top-down: `pixelX=-worldY·s+cx`, `pixelY=-worldX·s+cy`
+from `render.ProjectedBounds(az=0,el=90)`; Z by ray-casting the OUTPUT mesh at that XY), map
+bed→partition frame for its half (split reorient inverse), find its slab, and check directly
+whether that XY is in `footprints`/`coverTarget`/a cell and why the merged-group clip prism
+fails to cover it. Pins partition-gap vs clip-prism-gap vs Clipper-tie-break.
+
+Diagnostic committed this session: `DITHERFORGE_HOLE_PROBE` (run.go).
 
 ## Useful tooling notes
 
