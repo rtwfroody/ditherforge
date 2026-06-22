@@ -425,7 +425,12 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 		if skip[lab] {
 			continue
 		}
-		if a < bestArea {
+		// Smallest area wins; ties broken by smallest label id so the
+		// choice is independent of Go's randomized map iteration order.
+		// Without the tie-break the merge sequence (and thus the final
+		// cell count) varies run to run, which desyncs the voxelize /
+		// palette caches and panics the dither stage on a partial bust.
+		if a < bestArea || (a == bestArea && lab < victim) {
 			bestArea = a
 			victim = lab
 		}
@@ -456,12 +461,30 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 	target = -1
 	best := 0
 	for nl, n := range adj {
-		if n > best {
+		// Most shared adjacency wins. Ties are broken deterministically
+		// (map iteration order is randomized in Go) but NOT by a plain
+		// label compare: smallest-label would always merge toward the
+		// same side, sweeping a whole gradient into one runaway region.
+		// Prefer the SMALLER neighbour instead, so victims attach to
+		// nascent regions rather than feeding an already-large (and soon
+		// deep-protected) blob — this nucleates multiple bands the way the
+		// old random order did, while staying reproducible. Final tie:
+		// smallest label.
+		if n > best || (n == best && target >= 0 && betterMergeTarget(area, nl, target)) {
 			best = n
 			target = nl
 		}
 	}
 	return victim, target
+}
+
+// betterMergeTarget reports whether neighbour label a is a better merge
+// target than the current best b: smaller area first, then smaller label.
+func betterMergeTarget(area map[int32]int, a, b int32) bool {
+	if area[a] != area[b] {
+		return area[a] < area[b]
+	}
+	return a < b
 }
 
 func (g *colorGrid) relabel(from, to int32) {
