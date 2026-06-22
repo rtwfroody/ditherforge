@@ -172,6 +172,44 @@ mesh and reintroduces skirt/merge asymmetry the 5µm margin was tuned to avoid).
 Residual after grow=0.5 is ~0.36% small slivers = the separate, already-known baseline
 sliver family ([[project_vertical_wall_slivers]]); NOT footprint-coverage.
 
+### PINNED (session 4): the buried-interior exclusion in slabCoverRegions drops the surface
+
+Narrowed the "footprint under-coverage" to its exact line. `coverTarget = band ∪ innerCap`
+where `innerCap = inner − (fpBelow ∩ fpAbove)` (slabCoverRegions, partition.go). The
+neighbour intersection `neighborBoth` marks a region "buried" (no exposed cap) when the
+two neighbour slabs' BOUNDING-PLANE cross-sections are both solid there — but that test is
+blind to surface exposed mid-slab, so for a near-horizontal panel it wrongly drops real
+cap surface.
+
+Evidence:
+- `DITHERFORGE_COVER_REPORT` (run.go): per-slab `coverTarget` area vs Σ cell.Outer area.
+  Cells FULLY tile coverTarget (deficit ≤0.014 mm², total ≈0) — so it is NOT a tiling
+  failure. But `coverTarget` ≪ `fpCur` (slab 1171: fp=57.8 → cover=28.5; slab 38:
+  fp=2370 → cover=125). The shrinkage is the buried subtraction.
+- `DITHERFORGE_NO_BURIED` (partition.go): skip the `neighborBoth` subtraction →
+  holes 1.269% → 0.701%. Half the holes are buried-excluded real surface. (Too blunt as
+  a fix — it would also tile genuinely-hidden interior; cf. [[project_cellslicer_surface_only]].)
+- `--debug-slab-svg 1171` → SVG: red=cells, orange=footprint, magenta=footprint-with-no-cells.
+  A magenta WEDGE tapering to a point, matching the output holes. The footprint (= fpCur,
+  the real in-band silhouette) includes the wedge; coverTarget excludes it; no cells tile
+  it; clip drops the exterior face → hole. (CoverTarget is nil after the voxelize gob
+  round-trip, so the SVG's HighlightUncovered falls back to Footprint and thus shows
+  fpCur−cells = the buried region — which is exactly what we want to see.)
+- Exonerated by A/B env gates: triBandXYPath sliver reject (`NO_SLIVER_REJECT`/
+  `KEEP_HORIZ_SLICES` — no change), slab pre-split (`NO_PRESPLIT`), prism Z
+  (`PRISM_ZEPS`), color-aware tiling (`colorAwareCells:false` — no change), winding.
+
+PROPOSED FIX: stop slabCoverRegions excluding EXPOSED in-band surface. The in-band
+silhouette `surfaceFps[i]` (already computed in run.go, unioned into fpCur) marks exactly
+where surface is exposed mid-slab. Thread it into slabCoverRegions and union it back so
+`coverTarget` never drops actual surface: `coverTarget = (band ∪ innerCap) ∪ surfaceFps`
+(equivalently, only subtract buried where there is no in-band surface). This re-adds ONLY
+real visible surface (never hidden interior), so it can't regress the surface-only-quality
+invariant. Validate with `DITHERFORGE_COVER_REPORT` + `--debug-stages-dir` top-down hole %
+(target: ≤ the ~0.36% baseline). slabCoverRegions is the shared source of truth for both
+PartitionSlabAnalytic and …Color, so keep the no-cut byte-identical fallback intact and run
+the full suite.
+
 ## SUPERSEDED (session 2): "the holes are INVERTED FACES, not missing geometry"
 
 Built `--debug-stages-dir` into the CLI (renders `pr.OutputMesh` top-down/bottom/persp:
