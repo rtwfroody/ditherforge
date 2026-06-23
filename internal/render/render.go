@@ -157,6 +157,33 @@ func ProjectedBounds(vertices [][3]float32, azimuth, elevation float64) Bounds {
 	return b
 }
 
+// ProjectToPixels maps 3D points to pixel coordinates using the exact
+// same orthographic mapping as Render/RenderColor (margin 0.05, shared
+// bounds). Returns one [x,y] per input point so debug overlays (e.g.
+// cell footprints) can be drawn aligned pixel-for-pixel with a mesh
+// render that used the same view/res/bounds.
+func ProjectToPixels(points [][3]float32, azimuth, elevation float64, resolution int, bounds Bounds) [][2]float64 {
+	rot := rotationMatrix(azimuth, elevation)
+	margin := 0.05
+	xRange := bounds.XMax - bounds.XMin
+	yRange := bounds.YMax - bounds.YMin
+	maxRange := math.Max(xRange, yRange)
+	if maxRange < 1e-12 {
+		maxRange = 1
+	}
+	res := float64(resolution)
+	scale := res * (1 - 2*margin) / maxRange
+	cx := res/2 - (bounds.XMin+bounds.XMax)/2*scale
+	cy := res/2 + (bounds.YMin+bounds.YMax)/2*scale
+	out := make([][2]float64, len(points))
+	for i, v := range points {
+		t := transform(rot, v)
+		px, py := t[0], t[2] // X=horizontal, Z=vertical (matches ProjectedBounds)
+		out[i] = [2]float64{px*scale + cx, -py*scale + cy}
+	}
+	return out
+}
+
 // Render produces a depth buffer from an orthographic view of a triangle mesh.
 func Render(vertices [][3]float32, faces [][3]uint32, azimuth, elevation float64, resolution int, bounds Bounds) *DepthImage {
 	rot := rotationMatrix(azimuth, elevation)

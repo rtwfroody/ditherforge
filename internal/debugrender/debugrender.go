@@ -369,6 +369,27 @@ func RenderPipelineMesh(mesh *pipeline.MeshData, v View, res int) *image.RGBA {
 	return ci.ToRGBA()
 }
 
+// RenderPipelineMeshUnculledWithBounds is RenderPipelineMesh with a
+// caller-supplied framing rectangle, so several meshes can be rendered
+// into the same screen space (e.g. overlaying clip-input, clip-output
+// and cell footprints in one frame).
+func RenderPipelineMeshUnculledWithBounds(mesh *pipeline.MeshData, v View, res int, bounds render.Bounds) *image.RGBA {
+	verts := meshDataVerts(mesh)
+	faces := meshDataFaces(mesh)
+	ci := render.RenderColor(verts, faces, v.Azimuth, v.Elev, res, bounds,
+		func(fi int, u, vv float64) [3]uint8 {
+			if fi < 0 || fi*3+2 >= len(mesh.FaceColors) {
+				return [3]uint8{128, 128, 128}
+			}
+			return [3]uint8{
+				uint8(mesh.FaceColors[3*fi+0]),
+				uint8(mesh.FaceColors[3*fi+1]),
+				uint8(mesh.FaceColors[3*fi+2]),
+			}
+		})
+	return ci.ToRGBA()
+}
+
 // RenderPipelineMeshCulled is RenderPipelineMesh with THREE.FrontSide
 // back-face culling. This is the version test assertions should use:
 // the GUI culls back faces, so any winding/missing-front-face bug

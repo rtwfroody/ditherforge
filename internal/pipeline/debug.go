@@ -36,6 +36,73 @@ func WriteCellsDebugPNGs(cache *StageCache, opts Options, dir string) error {
 	})
 }
 
+// CellOutline is one cell's footprint boundary as a closed 3D polyline
+// (bed coords, placed at the slab's mid-Z) so callers can project it
+// with render.ProjectToPixels and overlay it on a mesh render.
+type CellOutline struct {
+	Pts  [][3]float32
+	Slab int
+}
+
+// CellOutlinesForOverlay returns every clip cell's footprint boundary
+// (vo.CellSlabs[*].Cells[*].Outer) as 3D polylines in bed coords. Used
+// by the --debug-stages-dir cell overlay to show, in the same top-down
+// frame as the hole render, exactly which surface the cells cover.
+// Requires a completed Voxelize stage for opts.
+func CellOutlinesForOverlay(cache *StageCache, opts Options) ([]CellOutline, error) {
+	cache.WaitForDiskWrites()
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+	vo := cache.getVoxelize(opts)
+	if vo == nil {
+		return nil, fmt.Errorf("voxelize stage has not run yet")
+	}
+	var out []CellOutline
+	for si := range vo.CellSlabs {
+		s := &vo.CellSlabs[si]
+		midZ := (s.ZBot + s.ZTop) / 2
+		for ci := range s.Cells {
+			outer := s.Cells[ci].Outer
+			if len(outer) < 3 {
+				continue
+			}
+			pts := make([][3]float32, len(outer))
+			for i, p := range outer {
+				pts[i] = [3]float32{p[0], p[1], midZ}
+			}
+			out = append(out, CellOutline{Pts: pts, Slab: s.Index})
+		}
+	}
+	return out, nil
+}
+
+// SlabZRange is one slab's vertical band in bed coords.
+type SlabZRange struct {
+	Index      int
+	ZBot, ZTop float32
+}
+
+// SlabZRanges returns the [ZBot,ZTop] band of every cell slab, so a
+// per-slab debug view can test which source surface actually falls in a
+// given slab's band. Requires a completed Voxelize stage for opts.
+func SlabZRanges(cache *StageCache, opts Options) ([]SlabZRange, error) {
+	cache.WaitForDiskWrites()
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+	vo := cache.getVoxelize(opts)
+	if vo == nil {
+		return nil, fmt.Errorf("voxelize stage has not run yet")
+	}
+	out := make([]SlabZRange, 0, len(vo.CellSlabs))
+	for i := range vo.CellSlabs {
+		s := &vo.CellSlabs[i]
+		out = append(out, SlabZRange{Index: s.Index, ZBot: s.ZBot, ZTop: s.ZTop})
+	}
+	return out, nil
+}
+
 // CellsSlabPNG renders a single slab's cell partition (colored by
 // each cell's sampled RGB) to a PNG-encoded byte slice. Returns the
 // total slab count alongside the image so the GUI can drive a Z
