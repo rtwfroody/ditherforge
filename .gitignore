@@ -42,3 +42,6 @@ devscripts/*
 .claude/scheduled_tasks.lock
 .claude/agent-memory/
 .claude/projects/
+
+# Local working investigation notes — not a durable repo artifact
+docs/INVESTIGATION-flat-surface-holes.md
