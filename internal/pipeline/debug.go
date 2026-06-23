@@ -103,6 +103,40 @@ func SlabZRanges(cache *StageCache, opts Options) ([]SlabZRange, error) {
 	return out, nil
 }
 
+// CoverTargetOutlines returns each slab's CoverTarget footprint (the
+// region the cells are meant to tile) as 3D polylines in bed coords at
+// the slab's mid-Z, one CellOutline per loop (Slab = slab index). Used to
+// overlay the intended coverage against the actual cells and the holes.
+func CoverTargetOutlines(cache *StageCache, opts Options) ([]CellOutline, error) {
+	cache.WaitForDiskWrites()
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+	vo := cache.getVoxelize(opts)
+	if vo == nil {
+		return nil, fmt.Errorf("voxelize stage has not run yet")
+	}
+	var out []CellOutline
+	for si := range vo.CellSlabs {
+		s := &vo.CellSlabs[si]
+		if s.CoverTarget == nil {
+			continue
+		}
+		midZ := (s.ZBot + s.ZTop) / 2
+		for _, lp := range s.CoverTarget.Loops {
+			if len(lp.Points) < 3 {
+				continue
+			}
+			pts := make([][3]float32, len(lp.Points))
+			for i, p := range lp.Points {
+				pts[i] = [3]float32{p[0], p[1], midZ}
+			}
+			out = append(out, CellOutline{Pts: pts, Slab: s.Index})
+		}
+	}
+	return out, nil
+}
+
 // CellsSlabPNG renders a single slab's cell partition (colored by
 // each cell's sampled RGB) to a PNG-encoded byte slice. Returns the
 // total slab count alongside the image so the GUI can drive a Z

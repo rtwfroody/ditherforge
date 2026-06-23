@@ -189,11 +189,13 @@ func main() {
 			} else if err := writeCellOverlay(args.DebugStagesDir, pr.DebugSourceMesh, pr.OutputMesh, cells, args.DebugStagesRes); err != nil {
 				fmt.Fprintf(os.Stderr, "debug-stages-dir cell overlay: %v\n", err)
 			}
-			// Per-slab views over the flat-top band (slabs 46..60).
+			// Per-slab views over the slabs at the source top-surface Z
+			// (auto-selected inside writePerSlabViews).
 			if slabRanges, srerr := pipeline.SlabZRanges(cache, opts); srerr == nil {
 				slabDir := filepath.Join(args.DebugStagesDir, "perslab")
 				_ = os.MkdirAll(slabDir, 0o755)
-				if err := writePerSlabViews(slabDir, pr.DebugSourceMesh, pr.OutputMesh, cells, slabRanges, args.DebugStagesRes); err != nil {
+				coverTargets, _ := pipeline.CoverTargetOutlines(cache, opts)
+				if err := writePerSlabViews(slabDir, pr.DebugSourceMesh, pr.OutputMesh, cells, coverTargets, slabRanges, args.DebugStagesRes); err != nil {
 					fmt.Fprintf(os.Stderr, "debug-stages-dir per-slab: %v\n", err)
 				}
 			}

@@ -416,3 +416,50 @@ the under-coverage is specifically at INTER-GROUP SEAMS, not the outer silhouett
 
 **Next:** experimental fix = default seam bloat on non-open contour edges (overlap adjacent
 prisms). Watch for duplicate coincident faces / non-manifold growth from the overlap.
+
+---
+
+## Session 7 (2026-06-22) — ROOT CAUSE: flat top straddles a slab boundary; per-slab clip handoff
+
+Visualized the clip INPUT mesh and the CELLS together, per slab (committed tooling:
+`--debug-stages-dir` with `DITHERFORGE_FLIP_REPORT=1` writes `cells_overlay`,
+`cells_over_holes`, `cells_toplayer[_byslab]`, and `perslab/slab_NNNN`).
+
+Findings:
+- **Clip input is solid** where the holes are (gray, 0.000% top-down holes); cells **do** tile
+  the hole region (blue grid runs through the magenta in `cells_over_holes`). So neither a bad
+  mesh nor a missing cell.
+- `cells_toplayer_byslab` (topmost cell per pixel, filled by slab index): the nominally-flat top
+  is a **patchwork of ADJACENT slab indices** in coarse-triangle regions; **every hole sits on a
+  slab/slab boundary**.
+- Per-slab cell counts: the top surface median Z = **4.042**, sitting **right on the slab 48/49
+  boundary (4.043)**. Half0 concentrates **6424 cells in slab 48**; coarse-triangle patches drift
+  into slab 49 (1550) and 50–53 (~30–50). Half1's top is gently tilted → ~100 cells each across
+  slabs 683–693. (Two split halves, each contributing part of the top at Z≈4.)
+- `perslab/slab_0048`: green = source surface in slab 48's Z-band (prism captures it), gray =
+  surface drifted into slab 49 (no slab-48 cells there), **magenta holes on the green↔gray
+  seam**.
+
+**Mechanism (confirmed):** because the flat top lies essentially ON a slab plane, neighbouring
+surface patches split between slab N and N+1. Each slab's cells are extruded into a prism over
+ONLY that slab's 0.08mm band and Intersection()'d with the source independently. Along the
+boundary line between an N-patch and an (N+1)-patch the two prisms' XY footprints abut on the
+exact surface/plane crossing; the independent CSG at that coincident line drops a thin sliver →
+exterior face gone → back-facing interior shows → white hole.
+
+**Comparison-semantics check (does `<` vs `<=` cause it?):** No, not directly. `triBandXYPath`
+clips the per-slab footprint with `clipPolyZHalf(zBot, keep z>=zBot)` AND `(zTop, keep z<=zTop)`
+— a **CLOSED [zBot,zTop]** band on both ends, so adjacent slabs' footprints **already OVERLAP**
+on the shared plane (not a strict-inequality gap). `slabIndexForZ` is half-open `[lo,hi)` — a
+mild inconsistency, but the footprints overlapping means a simple `<`→`<=` change won't close the
+holes. Consistent with: `FOOTPRINT_GROW`/seam-bloat (XY outward) is the only lever; `PRISM_ZEPS`
+(Z growth) does nothing → the dropped surface is at the correct Z but its XY lands on the exact
+coincident seam where the independent per-slab CSG is ill-conditioned.
+
+**Open design question (for the fix):** the surface straddling a slab plane is a DEGENERATE
+coincidence, not random rounding. Cleanest fixes to weigh: (a) snap surface vertices within ε of
+a slab plane onto it + assign each triangle wholly to one slab (no straddle, no coincident-CSG),
+(b) make adjacent slabs' clip coverage provably overlap at shared-slab-boundary seams (targeted
+bloat only where neighbouring cells differ in slab index; watch non-manifold growth), or (c) cut
+the source once by the slab planes into watertight caps and assign faces to slabs, instead of
+independent per-slab prism intersections that can disagree at the boundary.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -193,7 +194,7 @@ func writeCellOverlay(dir string, source, output *pipeline.MeshData, cells []pip
 // (magenta). A blue cell sitting over gray (not green) is the user's
 // hypothesis made visible: a cell in slab N whose surface has rounded into
 // a neighbouring slab, so prism∩source is empty there.
-func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pipeline.CellOutline, slabRanges []pipeline.SlabZRange, res int) error {
+func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells, coverTargets []pipeline.CellOutline, slabRanges []pipeline.SlabZRange, res int) error {
 	v := debugrender.View{Name: "top", Azimuth: 0, Elev: 90}
 	bounds := debugrender.UnionBounds(
 		debugrender.MeshDataProjectedBounds(source, v),
@@ -216,12 +217,20 @@ func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pi
 		cellOff[i] = off
 		off += n
 	}
+	// Pre-project coverTarget loops (one CellOutline per loop, tagged by slab).
+	ctPts, ctLens := flattenCells(coverTargets)
+	ctPx := render.ProjectToPixels(ctPts, v.Azimuth, v.Elev, res, bounds)
+	ctOff := make([]int, len(coverTargets))
+	o2 := 0
+	for i, n := range ctLens {
+		ctOff[i] = o2
+		o2 += n
+	}
 
 	green := color.RGBA{60, 175, 70, 255}
 	lightgray := color.RGBA{210, 210, 210, 255}
 	white := color.RGBA{255, 255, 255, 255}
 	magenta := color.RGBA{255, 0, 255, 255}
-	blue := color.RGBA{20, 80, 230, 255}
 
 	// One-time mapping diagnostic.
 	{
@@ -294,6 +303,28 @@ func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pi
 		cellsPerSlab[c.Slab]++
 	}
 	fmt.Printf("  [perslab] source top median Z=%.3f → %d slabs around it: %v\n", medTopZ, len(slabSel), slabSel)
+	// Top slabs by cell count — locates each half's flat-top bulk slab.
+	zLook := map[int]float32{}
+	for _, s := range slabRanges {
+		zLook[s.Index] = s.ZBot
+	}
+	allCounts := map[int]int{}
+	for _, c := range cells {
+		allCounts[c.Slab]++
+	}
+	type sc struct {
+		slab, n int
+	}
+	var scs []sc
+	for s, c := range allCounts {
+		scs = append(scs, sc{s, c})
+	}
+	sort.Slice(scs, func(i, j int) bool { return scs[i].n > scs[j].n })
+	fmt.Printf("  [perslab] top slabs by cell count (slab=count@z):")
+	for i := 0; i < 12 && i < len(scs); i++ {
+		fmt.Printf(" %d=%d@%.2f", scs[i].slab, scs[i].n, zLook[scs[i].slab])
+	}
+	fmt.Println()
 	for _, n := range slabSel {
 		fmt.Printf("  [perslab]   slab %d: %d cells, z=[%.3f,%.3f]\n", n, cellsPerSlab[n], zOf[n][0], zOf[n][1])
 	}
@@ -303,24 +334,87 @@ func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pi
 		if !ok {
 			continue
 		}
+		// Coverage mask: pixels inside the UNION of this slab's cell footprints.
+		covered := make([]bool, res*res)
+		for ci := range cells {
+			if cells[ci].Slab != n {
+				continue
+			}
+			o := cellOff[ci]
+			m := polyLens[ci]
+			poly := px[o : o+m]
+			minX, minY, maxX, maxY := poly[0][0], poly[0][1], poly[0][0], poly[0][1]
+			for _, p := range poly {
+				minX, maxX = minf(minX, p[0]), maxf(maxX, p[0])
+				minY, maxY = minf(minY, p[1]), maxf(maxY, p[1])
+			}
+			x0, x1 := clampI(int(minX), 0, res), clampI(int(maxX)+1, 0, res)
+			y0, y1 := clampI(int(minY), 0, res), clampI(int(maxY)+1, 0, res)
+			for y := y0; y < y1; y++ {
+				for x := x0; x < x1; x++ {
+					if pointInPoly(poly, float64(x)+0.5, float64(y)+0.5) {
+						covered[y*res+x] = true
+					}
+				}
+			}
+		}
+
 		img := image.NewRGBA(image.Rect(0, 0, res, res))
 		for y := 0; y < res; y++ {
 			for x := 0; x < res; x++ {
 				i := y*res + x
 				if !srcCulled.HasPixel[i] {
-					img.SetRGBA(x, y, white)
+					img.SetRGBA(x, y, white) // no source surface here at all
 					continue
 				}
-				// depth axis = -worldZ for the top-down view.
+				// GREEN = the source surface (top-down) whose Z falls in THIS
+				// slab's band — i.e. the mesh this slab's manifold contains.
+				// GRAY = source surface that belongs to a different slab.
+				// Half-open [zBot,zTop) so each surface belongs to one slab,
+				// matching the cut (slabIndexForZ / SplitByPlane).
 				worldZ := float32(-srcCulled.Depth[i])
-				if worldZ >= zr[0] && worldZ <= zr[1] {
-					img.SetRGBA(x, y, green)
+				if worldZ >= zr[0] && worldZ < zr[1] {
+					img.SetRGBA(x, y, green) // this slab's mesh
 				} else {
-					img.SetRGBA(x, y, lightgray)
+					img.SetRGBA(x, y, lightgray) // another slab's mesh
 				}
 			}
 		}
-		// Cells assigned to this slab.
+		_ = covered
+		// coverTarget (the region this slab's cells are meant to tile),
+		// drawn as a translucent YELLOW fill so we can see whether it
+		// reaches the holes. Even-odd over all of this slab's loops (outer
+		// minus holes).
+		var ctLoops [][][2]float64
+		ctMinX, ctMinY := math.Inf(1), math.Inf(1)
+		ctMaxX, ctMaxY := math.Inf(-1), math.Inf(-1)
+		for ci := range coverTargets {
+			if coverTargets[ci].Slab != n {
+				continue
+			}
+			o := ctOff[ci]
+			m := ctLens[ci]
+			loop := ctPx[o : o+m]
+			ctLoops = append(ctLoops, loop)
+			for _, p := range loop {
+				ctMinX, ctMaxX = math.Min(ctMinX, p[0]), math.Max(ctMaxX, p[0])
+				ctMinY, ctMaxY = math.Min(ctMinY, p[1]), math.Max(ctMaxY, p[1])
+			}
+		}
+		if len(ctLoops) > 0 {
+			x0, x1 := clampI(int(ctMinX), 0, res), clampI(int(ctMaxX)+1, 0, res)
+			y0, y1 := clampI(int(ctMinY), 0, res), clampI(int(ctMaxY)+1, 0, res)
+			for y := y0; y < y1; y++ {
+				for x := x0; x < x1; x++ {
+					if pointInLoopsEvenOdd(ctLoops, float64(x)+0.5, float64(y)+0.5) {
+						blend(img, x, y, color.RGBA{255, 215, 0, 255}, 0.30)
+					}
+				}
+			}
+		}
+		// Cell outlines for cells in THIS slab (so you can see the actual
+		// cells present in this layer over the slab's surface).
+		blue := color.RGBA{20, 60, 220, 255}
 		for ci := range cells {
 			if cells[ci].Slab != n {
 				continue
@@ -333,13 +427,13 @@ func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pi
 				drawLine(img, int(a[0]), int(a[1]), int(b[0]), int(b[1]), blue)
 			}
 		}
-		// Holes for reference.
+		// Holes: TRANSLUCENT magenta so cells / coverTarget underneath show.
 		for y := 0; y < res; y++ {
 			for x := 0; x < res; x++ {
 				i := y*res + x
 				_, _, _, ua := outUnculled.At(x, y).RGBA()
 				if ua > 0 && !outCulled.HasPixel[i] {
-					img.SetRGBA(x, y, magenta)
+					blend(img, x, y, magenta, 0.45)
 				}
 			}
 		}
@@ -348,7 +442,171 @@ func writePerSlabViews(dir string, source, output *pipeline.MeshData, cells []pi
 			return err
 		}
 	}
-	fmt.Printf("Wrote %d per-slab views (green=source in this slab's band, gray=out of band, blue=this slab's cells, magenta=holes) to %s\n", len(slabSel), dir)
+	fmt.Printf("Wrote %d per-slab views (GREEN=this slab's mesh, gray=other slab's mesh, YELLOW=coverTarget, blue=this slab's cells, magenta=holes; coverTarget+holes translucent) to %s\n", len(slabSel), dir)
+
+	// Per-cell Z table: for every slab-49 cell that overlaps a hole pixel,
+	// report the source-surface Z range over the cell footprint, the surface
+	// Z at the cell center, and slab 49's band. Reveals whether the surface a
+	// cell owns actually sits inside that cell's prism Z range [zBot,zTop).
+	isHole := func(x, y int) bool {
+		i := y*res + x
+		_, _, _, ua := outUnculled.At(x, y).RGBA()
+		return ua > 0 && !outCulled.HasPixel[i]
+	}
+	const targetSlab = 49
+	zr := zOf[targetSlab]
+	fmt.Printf("\n  [ztable] slab %d band Z=[%.3f, %.3f) — cells overlapping a hole:\n", targetSlab, zr[0], zr[1])
+	fmt.Printf("  %-6s %-9s %-9s %-9s %-7s %-9s\n", "cell", "ctrZ", "minZ", "maxZ", "holePx", "inBand?")
+	printed := 0
+	for ci := range cells {
+		if cells[ci].Slab != targetSlab {
+			continue
+		}
+		o := cellOff[ci]
+		m := polyLens[ci]
+		poly := px[o : o+m]
+		minXf, minYf, maxXf, maxYf := poly[0][0], poly[0][1], poly[0][0], poly[0][1]
+		var pcx, pcy float64
+		for _, p := range poly {
+			minXf, maxXf = minf(minXf, p[0]), maxf(maxXf, p[0])
+			minYf, maxYf = minf(minYf, p[1]), maxf(maxYf, p[1])
+			pcx += p[0]
+			pcy += p[1]
+		}
+		pcx /= float64(m)
+		pcy /= float64(m)
+		x0, x1 := clampI(int(minXf), 0, res), clampI(int(maxXf)+1, 0, res)
+		y0, y1 := clampI(int(minYf), 0, res), clampI(int(maxYf)+1, 0, res)
+		var zmin, zmax float32 = 1e30, -1e30
+		holePx := 0
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if !pointInPoly(poly, float64(x)+0.5, float64(y)+0.5) {
+					continue
+				}
+				i := y*res + x
+				if srcCulled.HasPixel[i] {
+					wz := float32(-srcCulled.Depth[i])
+					if wz < zmin {
+						zmin = wz
+					}
+					if wz > zmax {
+						zmax = wz
+					}
+				}
+				if isHole(x, y) {
+					holePx++
+				}
+			}
+		}
+		if holePx == 0 {
+			continue
+		}
+		// surface Z at the cell center pixel.
+		ctrZ := float32(math.NaN())
+		cxp, cyp := int(pcx), int(pcy)
+		if cxp >= 0 && cxp < res && cyp >= 0 && cyp < res && srcCulled.HasPixel[cyp*res+cxp] {
+			ctrZ = float32(-srcCulled.Depth[cyp*res+cxp])
+		}
+		inBand := ctrZ >= zr[0] && ctrZ < zr[1]
+		fmt.Printf("  %-6d %-9.4f %-9.4f %-9.4f %-7d %-9v\n", ci, ctrZ, zmin, zmax, holePx, inBand)
+		printed++
+		if printed >= 30 {
+			fmt.Printf("  ... (truncated at 30)\n")
+			break
+		}
+	}
+	if printed == 0 {
+		fmt.Printf("  (no slab-%d cells overlap a hole pixel)\n", targetSlab)
+	}
+
+	// Decisive count: of the hole pixels, how many are covered by SOME cell
+	// (any slab) vs by NO cell at all. Covered-but-holed ⇒ clip CSG drops
+	// surface a cell footprint owns; not-covered ⇒ cell-generation gap.
+	coveredAny := make([]bool, res*res)
+	for ci := range cells {
+		o := cellOff[ci]
+		m := polyLens[ci]
+		poly := px[o : o+m]
+		minX, minY, maxX, maxY := poly[0][0], poly[0][1], poly[0][0], poly[0][1]
+		for _, p := range poly {
+			minX, maxX = minf(minX, p[0]), maxf(maxX, p[0])
+			minY, maxY = minf(minY, p[1]), maxf(maxY, p[1])
+		}
+		x0, x1 := clampI(int(minX), 0, res), clampI(int(maxX)+1, 0, res)
+		y0, y1 := clampI(int(minY), 0, res), clampI(int(maxY)+1, 0, res)
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if !coveredAny[y*res+x] && pointInPoly(poly, float64(x)+0.5, float64(y)+0.5) {
+					coveredAny[y*res+x] = true
+				}
+			}
+		}
+	}
+	var holeTot, holeCovered int
+	for y := 0; y < res; y++ {
+		for x := 0; x < res; x++ {
+			i := y*res + x
+			_, _, _, ua := outUnculled.At(x, y).RGBA()
+			if ua > 0 && !outCulled.HasPixel[i] {
+				holeTot++
+				if coveredAny[i] {
+					holeCovered++
+				}
+			}
+		}
+	}
+	fmt.Printf("  [perslab] holes: %d total; %d (%.1f%%) covered by SOME cell footprint, %d (%.1f%%) covered by NO cell\n",
+		holeTot, holeCovered, 100*float64(holeCovered)/float64(holeTot),
+		holeTot-holeCovered, 100*float64(holeTot-holeCovered)/float64(holeTot))
+
+	// Decisive Z-mismatch test: for each pixel, mark whether a cell covers it
+	// whose OWN slab Z-band actually contains the source surface's Z there.
+	// If hole pixels are covered by a cell but NOT by a correct-slab cell,
+	// the cell was generated in the wrong slab (footprint Z-view disagrees
+	// with the cut).
+	zAll := map[int][2]float32{}
+	for _, s := range slabRanges {
+		zAll[s.Index] = [2]float32{s.ZBot, s.ZTop}
+	}
+	correctSlab := make([]bool, res*res)
+	for ci := range cells {
+		zr := zAll[cells[ci].Slab]
+		o := cellOff[ci]
+		m := polyLens[ci]
+		poly := px[o : o+m]
+		minX, minY, maxX, maxY := poly[0][0], poly[0][1], poly[0][0], poly[0][1]
+		for _, p := range poly {
+			minX, maxX = minf(minX, p[0]), maxf(maxX, p[0])
+			minY, maxY = minf(minY, p[1]), maxf(maxY, p[1])
+		}
+		x0, x1 := clampI(int(minX), 0, res), clampI(int(maxX)+1, 0, res)
+		y0, y1 := clampI(int(minY), 0, res), clampI(int(maxY)+1, 0, res)
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				i := y*res + x
+				if correctSlab[i] || !srcCulled.HasPixel[i] {
+					continue
+				}
+				wz := float32(-srcCulled.Depth[i])
+				if wz >= zr[0] && wz <= zr[1] && pointInPoly(poly, float64(x)+0.5, float64(y)+0.5) {
+					correctSlab[i] = true
+				}
+			}
+		}
+	}
+	var holeWrongSlab int
+	for y := 0; y < res; y++ {
+		for x := 0; x < res; x++ {
+			i := y*res + x
+			_, _, _, ua := outUnculled.At(x, y).RGBA()
+			if ua > 0 && !outCulled.HasPixel[i] && coveredAny[i] && !correctSlab[i] {
+				holeWrongSlab++
+			}
+		}
+	}
+	fmt.Printf("  [perslab] holes covered by a cell but NONE whose slab Z-band contains the surface Z (WRONG-SLAB cell): %d (%.1f%% of holes)\n",
+		holeWrongSlab, 100*float64(holeWrongSlab)/float64(holeTot))
 	return nil
 }
 
@@ -529,6 +787,35 @@ func topLayerCellIDs(cells []pipeline.CellOutline, px [][2]float64, polyLens []i
 	return winner
 }
 
+// pointInLoopsEvenOdd returns true when (x,y) is inside the even-odd fill
+// of all loops combined (outer loops add, hole loops subtract).
+func pointInLoopsEvenOdd(loops [][][2]float64, x, y float64) bool {
+	inside := false
+	for _, poly := range loops {
+		n := len(poly)
+		for i, j := 0, n-1; i < n; j, i = i, i+1 {
+			if (poly[i][1] > y) != (poly[j][1] > y) {
+				xi := (poly[j][0]-poly[i][0])*(y-poly[i][1])/(poly[j][1]-poly[i][1]) + poly[i][0]
+				if x < xi {
+					inside = !inside
+				}
+			}
+		}
+	}
+	return inside
+}
+
+// blend alpha-composites color c over the existing pixel at (x,y).
+func blend(img *image.RGBA, x, y int, c color.RGBA, a float64) {
+	o := img.RGBAAt(x, y)
+	img.SetRGBA(x, y, color.RGBA{
+		uint8(float64(o.R)*(1-a) + float64(c.R)*a),
+		uint8(float64(o.G)*(1-a) + float64(c.G)*a),
+		uint8(float64(o.B)*(1-a) + float64(c.B)*a),
+		255,
+	})
+}
+
 func pointInPoly(poly [][2]float64, x, y float64) bool {
 	inside := false
 	n := len(poly)
@@ -558,6 +845,16 @@ func medianF32(v []float32) float32 {
 	copy(s, v)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 	return s[len(s)/2]
+}
+
+func clampI(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func minf(a, b float64) float64 {
