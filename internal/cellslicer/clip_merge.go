@@ -222,6 +222,7 @@ func ClipMeshToMergedCellsManifoldProgress(ctx context.Context, model *loader.Lo
 			cr.CellRep[base+ci] = int32(g.repGlobal)
 		}
 	}
+	reportSlabCoverProbe(ss, slabs, groups)
 	return cr, nil
 }
 

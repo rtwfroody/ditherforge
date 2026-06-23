@@ -843,6 +843,12 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// now spans the first-layer height (SlabBoundaryPlanesFirst), so
 	// caches built by the old uniform-layerH grid must be rebuilt.
 	writeString(h, "slab-partition-v2")
+	// Cache salt: "snap-preslice-v1" = cell-gen geometry is now snapped to
+	// the clip's 1µm quantization grid before slicing (sliceSampleHalf), so
+	// cell-to-slab assignment agrees with the clip's quantized SplitByPlane.
+	// This shifts cells near off-grid slab planes (closes flat-top white
+	// holes); caches from the un-snapped cell-gen are stale.
+	writeString(h, "snap-preslice-v1")
 	// Sampling salt: "visible-v1" = cell color sampling now prefers
 	// the nearest exterior-visible face (SpatialIndex.FaceVisible)
 	// over nearer hidden interior geometry, so cached sampled colors

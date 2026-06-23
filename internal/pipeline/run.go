@@ -1691,6 +1691,32 @@ func (r *pipelineRun) sliceSampleHalf(
 	progSlab := stage.Span(pct(35), pct(90))
 	progAdj := stage.Span(pct(90), pct(100))
 
+	// Snap cell-gen's geometry to the same 1µm grid the clip's
+	// DedupVertsByPosition (quant.go) uses. Cell-to-slab assignment bins
+	// surface triangles by their TRUE Z (SlabSurfaceFootprints →
+	// slabIndexForZ on geom.Vertices), while the clip's per-slab SplitByPlane
+	// bins the QUANTIZED geometry. Near an off-grid slab plane (planes carry a
+	// sub-µm offset, see SlabBoundaryPlanesFirst) the two disagree in a
+	// ~|f-0.5|µm band, so a slab ends up owning surface — after the split —
+	// whose cells were assigned to the neighbour slab. That surface is clipped
+	// by neither and shows as a white hole on nominally-flat tops. Snapping
+	// here makes both stages bin identical Z, so the assignment agrees.
+	//
+	// Cloned so the shared (cached) so.Halves / lo.Model stays pristine for
+	// the clip, which snaps its own copy to the same grid via
+	// DedupVertsByPosition — both independently reach bit-identical positions.
+	// Snap-only (no vertex merge / degenerate-face drop): per-vertex Z is what
+	// the slab assignment turns on, and that already matches the clip.
+	if len(geom.Vertices) > 0 {
+		snapped := make([][3]float32, len(geom.Vertices))
+		for i, v := range geom.Vertices {
+			snapped[i] = cellslicer.Snap(v)
+		}
+		clone := *geom
+		clone.Vertices = snapped
+		geom = &clone
+	}
+
 	tSlice := time.Now()
 	zMin, zMax := modelZRange(geom)
 	if zMax <= zMin {
