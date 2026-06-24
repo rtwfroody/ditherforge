@@ -501,7 +501,7 @@ func FaceNormal(faceIdx int, model *loader.LoadedModel) [3]float32 {
 // model (alpha-wrap mode: original mesh carries texture/UV, wrap mesh
 // carries decals), call SampleNearestColorWithSticker instead.
 func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf, decals []*StickerDecal, override BaseColorOverride) [4]uint8 {
-	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, nil, nil, nil, override)
+	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, nil, nil, nil, override, [3]float32{})
 }
 
 // SampleNearestColorWithSticker is the two-mesh form of SampleNearestColor.
@@ -517,12 +517,27 @@ func SampleNearestColor(p [3]float32, model *loader.LoadedModel, si *SpatialInde
 // procedurally sampled RGB at p, but only for untextured faces — when
 // the nearest face has a usable texture, the texture wins as usual.
 // Pass nil for the legacy behavior (per-face FaceBaseColor only).
+//
+// cullNormal, when non-zero, is the outward normal of the surface being
+// coloured; a candidate face whose own geometric normal agrees with it
+// (n·cullNormal > 0, i.e. front-facing) is preferred over one that
+// opposes it. This is the backface cull a viewer (or MeshLab) applies:
+// at a coincident, oppositely-wound double shell — common in imported
+// models whose printed exterior and an inner skin sit microns apart —
+// the front-facing triangle is the one actually seen, so colouring must
+// pick it rather than letting the nearest-tri race (or a mislabelled
+// FaceVisible) hand the cell the inner shell's colour. Front-facing
+// outranks the visible/hidden split for exactly this reason: at such a
+// shell FaceVisible can tag the inner (back) face "visible" and the
+// outer (front) face "hidden". Pass the zero vector to disable the cull
+// (legacy nearest-only behaviour).
 func SampleNearestColorWithSticker(
 	p [3]float32,
 	model *loader.LoadedModel, si *SpatialIndex, radius float32, buf *SearchBuf,
 	decals []*StickerDecal,
 	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
 	override BaseColorOverride,
+	cullNormal [3]float32,
 ) [4]uint8 {
 	cands := si.CandidatesRadiusZ(p[0], p[1], radius, p[2], radius, buf)
 	// Track the nearest exterior-visible face and the nearest hidden
@@ -534,6 +549,13 @@ func SampleNearestColorWithSticker(
 	// a fallback for sample points with no visible face in range at
 	// all (e.g. a car interior behind window glass), which keeps fully
 	// enclosed regions sampling their own colors.
+	//
+	// When culling, the same visible/hidden trackers are also kept for
+	// the front-facing subset; the final pick prefers front over back so
+	// a coincident inner shell never wins regardless of how FaceVisible
+	// labelled the pair. With cullNormal == 0 the front trackers stay
+	// empty and the result collapses to the legacy visible??hidden pick.
+	cull := cullNormal != [3]float32{}
 	vis := si.FaceVisible
 	bestDistSq := float32(math.MaxFloat32)
 	bestTri := int32(-1)
@@ -541,26 +563,51 @@ func SampleNearestColorWithSticker(
 	hidDistSq := float32(math.MaxFloat32)
 	hidTri := int32(-1)
 	var hidS, hidT float32
+	fBestDistSq := float32(math.MaxFloat32)
+	fBestTri := int32(-1)
+	var fBestS, fBestT float32
+	fHidDistSq := float32(math.MaxFloat32)
+	fHidTri := int32(-1)
+	var fHidS, fHidT float32
 	for _, ti := range cands {
 		f := model.Faces[ti]
 		r := ClosestPointOnTriangle(p, model.Vertices[f[0]], model.Vertices[f[1]], model.Vertices[f[2]])
+		front := false
+		if cull {
+			n := FaceNormal(int(ti), model)
+			front = n[0]*cullNormal[0]+n[1]*cullNormal[1]+n[2]*cullNormal[2] > 0
+		}
 		if vis != nil && !vis[ti] {
 			if r.DistSq < hidDistSq {
 				hidDistSq = r.DistSq
-				hidTri = ti
-				hidS = r.S
-				hidT = r.T
+				hidTri, hidS, hidT = ti, r.S, r.T
+			}
+			if front && r.DistSq < fHidDistSq {
+				fHidDistSq = r.DistSq
+				fHidTri, fHidS, fHidT = ti, r.S, r.T
 			}
 			continue
 		}
 		if r.DistSq < bestDistSq {
 			bestDistSq = r.DistSq
-			bestTri = ti
-			bestS = r.S
-			bestT = r.T
+			bestTri, bestS, bestT = ti, r.S, r.T
+		}
+		if front && r.DistSq < fBestDistSq {
+			fBestDistSq = r.DistSq
+			fBestTri, fBestS, fBestT = ti, r.S, r.T
 		}
 	}
-	if bestTri < 0 {
+	// Front-facing (visible, then hidden) outranks back-facing (visible,
+	// then hidden). The front trackers are empty when culling is off, so
+	// this collapses to the legacy nearest-visible??nearest-hidden pick.
+	switch {
+	case fBestTri >= 0:
+		bestTri, bestS, bestT = fBestTri, fBestS, fBestT
+	case fHidTri >= 0:
+		bestTri, bestS, bestT = fHidTri, fHidS, fHidT
+	case bestTri >= 0:
+		// keep nearest visible
+	default:
 		bestTri, bestS, bestT = hidTri, hidS, hidT
 	}
 
@@ -738,7 +785,14 @@ func SampleAlongNormal(
 	if bvh != nil && normal != ([3]float32{}) {
 		o := [3]float32{p[0] + normal[0]*startBack, p[1] + normal[1]*startBack, p[2] + normal[2]*startBack}
 		d := [3]float32{-normal[0], -normal[1], -normal[2]}
-		if tri, tt, u, v, ok := bvh.FirstHit(o, d, startBack+reach); ok {
+		// Backface cull, exactly as a viewer does: `normal` is the cell's
+		// outward direction, so its own exterior surface faces the same way
+		// (n·normal > 0). A first hit that faces the opposite way is the
+		// inner side of a coincident shell, or the far wall of a solid the
+		// ray punched through — never this cell's own surface. Reject it and
+		// fall through to the cull-aware nearest search, which resolves to
+		// the front-facing (outward) surface instead.
+		if tri, tt, u, v, ok := bvh.FirstHit(o, d, startBack+reach); ok && faceFrontOf(model, tri, normal) {
 			// Read color from the material just BENEATH the surface, not
 			// exactly on it. The hit lands on the surface plane; when that
 			// plane coincides with a color-boundary of a position-driven
@@ -762,7 +816,17 @@ func SampleAlongNormal(
 			return resolveFaceColor(hit, model, tri, u, v, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 		}
 	}
-	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, normal)
+}
+
+// faceFrontOf reports whether triangle tri faces the same way as
+// `outward` (its geometric normal n satisfies n·outward > 0). Used to
+// backface-cull along-normal ray hits: the cell's outward normal is
+// `outward`, so its own exterior surface faces that way; an
+// opposite-facing first hit is an inner/far surface to reject.
+func faceFrontOf(model *loader.LoadedModel, tri int32, outward [3]float32) bool {
+	n := FaceNormal(int(tri), model)
+	return n[0]*outward[0]+n[1]*outward[1]+n[2]*outward[2] > 0
 }
 
 // Neighbor holds a precomputed neighbor reference with its diffusion weight.
