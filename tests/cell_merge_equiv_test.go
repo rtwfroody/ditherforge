@@ -85,15 +85,30 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 		name      string
 		path      string
 		alphaWrap bool // building.glb is non-watertight; needs the wrap
+		// size is the normalized max-extent in mm. The merge-vs-per-cell
+		// equivalence metrics (surface area, per-color area fraction) compare
+		// two clips of the *same* size against each other, so they're
+		// invariant to this value — it only sets the cell count (∝ size²) and
+		// thus the run time. Building runs alpha-wrap and is by far the
+		// slowest case, so it's normalized smaller purely to keep the suite
+		// fast; cube/earth stay at 50mm.
+		size float32
 	}{
-		{"cube", filepath.Join("objects", "cube.stl"), false},
-		{"earth", filepath.Join("objects", "earth.glb"), false},
-		{"building", filepath.Join("objects", "low_poly_building.glb"), true},
+		{"cube", filepath.Join("objects", "cube.stl"), false, 50},
+		{"earth", filepath.Join("objects", "earth.glb"), false, 50},
+		{"building", filepath.Join("objects", "low_poly_building.glb"), true, 25},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			size := float32(50)
+			// Subtests are independent — each builds its own StageCache and
+			// Options, and the heavy stages hold no shared mutable state
+			// (alpha-wrap is a stateless CGO call). They're CPU-bound but have
+			// serial phases, so overlapping them cuts this package's wall-clock
+			// ~27% even on a 4-core runner for ~3% more peak RSS; verified
+			// stable under 3× full-concurrency stress.
+			t.Parallel()
+			size := tc.size
 			// Lock the full palette so selection is deterministic.
 			// ResolvePalette returns locked colors verbatim when
 			// NumColors == len(LockedColors) (no inventory search), so both

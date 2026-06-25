@@ -33,7 +33,10 @@ func TestSplitCellslicer_TwoHalves(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	cubePath := filepath.Join(repoRoot, "tests", "objects", "cube.stl")
 
-	size := float32(50)
+	// 20mm keeps both halves well above the 100-face floor asserted below
+	// while cutting the cell count (∝ size²) — and thus the per-half
+	// voxelize+manifold-clip time — to roughly a sixth of the 50mm cost.
+	size := float32(20)
 	base := Options{
 		Input:          cubePath,
 		ObjectIndex:    -1,

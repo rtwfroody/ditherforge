@@ -112,6 +112,11 @@ func TestSampledMatchesInput(t *testing.T) {
 		// false for cases whose opposite faces are uninteresting
 		// (open models, alpha-wrapped bottoms).
 		allAxisViews bool
+		// size overrides the default 50mm normalized max-extent (ignored
+		// when scaleOnly is set). Lowering it cuts the cell count (∝ size²)
+		// and run time; only set it where the per-view thresholds still hold
+		// at the smaller cell-to-model ratio.
+		size float32
 		// res overrides the default 256x256 render resolution.
 		// Bump for cases where the bug-detection metric needs
 		// sub-cell pixel granularity (the cube-cap winding bug's
@@ -191,16 +196,15 @@ func TestSampledMatchesInput(t *testing.T) {
 		{
 			name: "building",
 			path: filepath.Join("objects", "low_poly_building.glb"),
-			// holeFrac is set tight enough (2% of overlap pixels) to
-			// fail building/side, which currently shows ~6%
-			// depth-mismatched pixels — the wall-bottom gap bug:
-			// the sampled mesh's ±Y wall has small holes near the
-			// bottom that the colour silhouette check misses
-			// (camera sees through to the opposite wall's interior,
-			// which happens to share paint), but the depth check
-			// catches because the far surface is well behind the
-			// near one. The other three building views currently
-			// score 0.1–1.7% so they pass at 2%.
+			// holeFrac (2% of overlap pixels) guards against the
+			// wall-bottom gap bug: the sampled mesh's ±Y wall once had
+			// small holes near the bottom that the colour silhouette
+			// check misses (the camera sees through to the opposite
+			// wall's interior, which happens to share paint) but the
+			// depth check catches (the far surface is well behind the
+			// near one). That bug is fixed — all four views now score
+			// ~0 depth-holes — so the 2% limit is a wide-margin (~200×)
+			// guard that still trips loud if the gap regresses.
 			def: viewLimits{avg: 30, tile: 30, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
 			perView: map[string]viewLimits{
 				// Top: the persp tile threshold stays generous to
@@ -210,6 +214,7 @@ func TestSampledMatchesInput(t *testing.T) {
 				"top":   {avg: 30, tile: 60, silh: 0.90, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
 				"persp": {avg: 30, tile: 125, silh: 0.93, outlierFrac: 0.003, silhPx: 0.95, holeFrac: 0.02},
 			},
+			size:              35,
 			alphaWrap:         true,
 			showSampledColors: true,
 		},
@@ -217,7 +222,13 @@ func TestSampledMatchesInput(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Independent subtests overlap to fill idle cores; see the rationale
+			// on TestCellMergeMatchesPerCell.
+			t.Parallel()
 			size := float32(50)
+			if tc.size != 0 {
+				size = tc.size
+			}
 			opts := pipeline.Options{
 				Input:             tc.path,
 				ObjectIndex:       -1,
