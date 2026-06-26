@@ -170,17 +170,3 @@ func TestSplitPreview_ConcurrentSafety(t *testing.T) {
 	}
 	wg.Wait()
 }
-
-// TestProjectAxis_DotProduct — sanity check the helper.
-func TestProjectAxis_DotProduct(t *testing.T) {
-	p := [3]float32{3, 4, 5}
-	if got := projectAxis(p, [3]float32{1, 0, 0}); got != 3 {
-		t.Errorf("projectAxis on +X: got %g, want 3", got)
-	}
-	if got := projectAxis(p, [3]float32{0, 1, 0}); got != 4 {
-		t.Errorf("projectAxis on +Y: got %g, want 4", got)
-	}
-	if got := projectAxis(p, [3]float32{0, 0, 1}); got != 5 {
-		t.Errorf("projectAxis on +Z: got %g, want 5", got)
-	}
-}

@@ -139,6 +139,8 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		Enabled:          s.SplitEnabled,
 		Axis:             s.SplitAxis,
 		Offset:           s.SplitOffset,
+		TiltADeg:         s.SplitTiltA,
+		TiltBDeg:         s.SplitTiltB,
 		ConnectorStyle:   s.SplitConnectorStyle,
 		ConnectorCount:   s.SplitConnectorCount,
 		ConnectorDiamMM:  s.SplitConnectorDiamMM,

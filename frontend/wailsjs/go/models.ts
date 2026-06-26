@@ -196,6 +196,8 @@ export namespace pipeline {
 	    Enabled: boolean;
 	    Axis: number;
 	    Offset: number;
+	    TiltADeg: number;
+	    TiltBDeg: number;
 	    ConnectorStyle: string;
 	    ConnectorCount: number;
 	    ConnectorDiamMM: number;
@@ -212,6 +214,8 @@ export namespace pipeline {
 	        this.Enabled = source["Enabled"];
 	        this.Axis = source["Axis"];
 	        this.Offset = source["Offset"];
+	        this.TiltADeg = source["TiltADeg"];
+	        this.TiltBDeg = source["TiltBDeg"];
 	        this.ConnectorStyle = source["ConnectorStyle"];
 	        this.ConnectorCount = source["ConnectorCount"];
 	        this.ConnectorDiamMM = source["ConnectorDiamMM"];
@@ -328,6 +332,8 @@ export namespace settings {
 	    splitEnabled: boolean;
 	    splitAxis: number;
 	    splitOffset: number;
+	    splitTiltA: number;
+	    splitTiltB: number;
 	    splitConnectorStyle: string;
 	    splitConnectorCount: number;
 	    splitConnectorDiamMM: number;
@@ -382,6 +388,8 @@ export namespace settings {
 	        this.splitEnabled = source["splitEnabled"];
 	        this.splitAxis = source["splitAxis"];
 	        this.splitOffset = source["splitOffset"];
+	        this.splitTiltA = source["splitTiltA"];
+	        this.splitTiltB = source["splitTiltB"];
 	        this.splitConnectorStyle = source["splitConnectorStyle"];
 	        this.splitConnectorCount = source["splitConnectorCount"];
 	        this.splitConnectorDiamMM = source["splitConnectorDiamMM"];

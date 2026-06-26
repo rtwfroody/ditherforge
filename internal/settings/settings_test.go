@@ -174,6 +174,8 @@ func nonDefaultSettings() Settings {
 		SplitEnabled:          true,
 		SplitAxis:             1,
 		SplitOffset:           1.5,
+		SplitTiltA:            12.5,
+		SplitTiltB:            -7.5,
 		SplitConnectorStyle:   "dovetail",
 		SplitConnectorCount:   4,
 		SplitConnectorDiamMM:  5,

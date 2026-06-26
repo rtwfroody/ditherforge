@@ -1110,7 +1110,24 @@ func (r *pipelineRun) runSplit() (any, error) {
 	tSplit := time.Now()
 
 	// Translate Options.Split into split.Cut + split.Layout calls.
-	plane := split.AxisPlane(r.opts.Split.Axis, r.opts.Split.Offset)
+	// The cut plane is the chosen principal axis tilted by the two
+	// angles, passing through the silhouette pivot. splitPlanePivot is
+	// shared with the preview so the rendered quad matches the real
+	// cut, and TiltADeg=TiltBDeg=0 reproduces split.AxisPlane exactly.
+	//
+	// Clamp the axis to {0,1,2} once here. The geometry helpers
+	// (TiltedFrame, splitPlanePivot, FrameAlignRotation) all clamp an
+	// out-of-range axis to Z internally, so res.Axis must be the same
+	// clamped value — otherwise Layout's orientationAxis()==res.Axis gate
+	// (orientationAxis only ever returns 0/1/2) would never match and
+	// CapAlign would be silently skipped, leaving a tilted cap unseated.
+	splitAxis := r.opts.Split.Axis
+	if splitAxis < 0 || splitAxis > 2 {
+		splitAxis = 2
+	}
+	normal, _, _ := split.TiltedFrame(splitAxis, r.opts.Split.TiltADeg, r.opts.Split.TiltBDeg)
+	pivot := splitPlanePivot(lo.Model.Vertices, splitAxis, r.opts.Split.Offset)
+	plane := split.PlaneThrough(normal, pivot)
 	conn := split.ConnectorSettings{
 		Style:       parseConnectorStyle(r.opts.Split.ConnectorStyle),
 		Count:       r.opts.Split.ConnectorCount,
@@ -1131,6 +1148,11 @@ func (r *pipelineRun) runSplit() (any, error) {
 		parseOrientation(r.opts.Split.Orientation[0]),
 		parseOrientation(r.opts.Split.Orientation[1]),
 	}
+	// Tell Layout which axis the plane was tilted off and how to undo
+	// the tilt, so a "cut face up/down" orientation seats the tilted cap
+	// flat on the bed. No-op when the cut is axis-aligned.
+	res.Axis = splitAxis
+	res.CapAlign = split.FrameAlignRotation(splitAxis, r.opts.Split.TiltADeg, r.opts.Split.TiltBDeg)
 	// Bed gap between the two laid-out halves. Hardcoded — users
 	// who need a different layout rearrange in the slicer.
 	const bedGapMM = 5.0

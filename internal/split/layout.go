@@ -63,8 +63,22 @@ func Layout(result *CutResult, gapMM float64) [2]Transform {
 	var xforms [2]Transform
 
 	// Step 1: per-half rotation chosen by Orientation.
+	//
+	// A "cut face up/down" orientation (one whose up-axis equals the cut
+	// axis) seats the half on its cut face. If the cut was tilted, the
+	// cap is off-axis, so we first apply CapAlign — which rotates the
+	// tilted cut frame back to the axis frame — and then the orientation
+	// lands the now-axis-aligned cap flat on the bed. The model body
+	// picks up the tilt instead. Orientations pointing a non-cut axis up
+	// (e.g. +X up on an XY cut) rest on a model face and must NOT be
+	// re-tilted, so they skip CapAlign. CapAlign is the identity for an
+	// un-tilted cut, and result.Axis is -1 when the cut frame is unknown,
+	// so both leave the legacy layout untouched.
 	for h := 0; h < 2; h++ {
 		R := orientationRotation(result.Orientation[h])
+		if result.Axis >= 0 && orientationAxis(result.Orientation[h]) == result.Axis {
+			R = matMul3(R, result.CapAlign)
+		}
 		for i, v := range result.Halves[h].Vertices {
 			result.Halves[h].Vertices[i] = applyRotation(R, v)
 		}

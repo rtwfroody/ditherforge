@@ -13,6 +13,10 @@
     enabled: boolean;
     axis: SplitAxis;
     offset: number;
+    // Cut-plane tilt in degrees about its two in-plane axes. 0/0 keeps
+    // the plane perpendicular to the chosen axis (legacy behaviour).
+    tiltA: number;
+    tiltB: number;
     connectorStyle: SplitConnectorStyle;
     connectorCount: number; // 0=auto, 1..3 explicit
     connectorDiamMM: number;
@@ -36,6 +40,8 @@
     enabled = $bindable(),
     axis = $bindable(),
     offset = $bindable(),
+    tiltA = $bindable(),
+    tiltB = $bindable(),
     connectorStyle = $bindable(),
     connectorCount = $bindable(),
     connectorDiamMM = $bindable(),
@@ -69,6 +75,18 @@
 
   const axisLabel = $derived(['X', 'Y', 'Z'][axis] ?? 'Z');
 
+  // The two in-plane axes the tilt angles rotate the cut plane about,
+  // keyed off the cut axis. Mirrors the AxisBasis convention: for cut
+  // axis Z the in-plane basis is (U=+X, V=+Y), so tiltA rotates about X
+  // and tiltB about Y, and likewise for the other axes.
+  const tiltAxes = $derived(
+    axis === 0
+      ? { a: 'Y', b: 'Z' }
+      : axis === 1
+        ? { a: 'Z', b: 'X' }
+        : { a: 'X', b: 'Y' }
+  );
+
   // Half labels mirror the side-by-side layout: half 0 is the lower-X
   // half on the bed, half 1 is the higher-X half. The pair of labels
   // depends on the cut axis so the user can map the panel back to
@@ -91,6 +109,32 @@
         ? { low: 'front (−Y)', high: 'back (+Y)' }
         : { low: 'bottom (−Z)', high: 'top (+Z)' }
   );
+
+  // Orientation options, relabeled per cut axis. The two options whose
+  // axis equals the cut axis seat the half on its cut/seam face, so they
+  // are shown as "Cut face up/down" (and the backend's CapAlign rotation
+  // seats that face flat even when the plane is tilted). The other four
+  // align to a model side and keep their +/−axis labels.
+  //
+  // The two halves carry opposite cut-face normals, so the same enum
+  // value seats half 0's cap up but half 1's cap down. We therefore
+  // mirror the up/down label between halves so "Cut face down" always
+  // means "this half's seam on the bed". Values are unchanged.
+  const ORIENT_AXIS_LETTER = ['x', 'y', 'z'];
+  function orientationOptionsFor(half: number) {
+    const a = ORIENT_AXIS_LETTER[axis] ?? 'z';
+    return SPLIT_ORIENTATION_OPTIONS.map((opt) => {
+      if (opt.value === `${a}-up`) {
+        return { value: opt.value, label: half === 0 ? 'Cut face up' : 'Cut face down' };
+      }
+      if (opt.value === `${a}-down`) {
+        return { value: opt.value, label: half === 0 ? 'Cut face down' : 'Cut face up' };
+      }
+      return { value: opt.value, label: opt.label };
+    });
+  }
+  const orientationOptionsA = $derived(orientationOptionsFor(0));
+  const orientationOptionsB = $derived(orientationOptionsFor(1));
 
   // Connector options with axis-aware labels for the two peg variants.
   const connectorOptions = $derived(
@@ -162,6 +206,45 @@
           max={maxOffset}
           value={offsetMM}
           oninput={(e) => setOffsetMM(parseFloat(e.currentTarget.value))}
+        />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-muted-foreground flex items-center gap-1.5">
+          Tilt about {tiltAxes.a} (°)
+          <HelpTip>
+            Rotate the cut plane off the {axisLabel} axis. 0° keeps the
+            cut perpendicular to {axisLabel}. This angle tilts the plane
+            about the in-plane {tiltAxes.a} direction; combine with the
+            other tilt for a fully oblique cut.
+          </HelpTip>
+        </span>
+        <input
+          type="number"
+          step="1"
+          min="-85"
+          max="85"
+          class="h-9 rounded border bg-background text-foreground px-2"
+          bind:value={tiltA}
+        />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span class="text-muted-foreground flex items-center gap-1.5">
+          Tilt about {tiltAxes.b} (°)
+          <HelpTip>
+            Rotate the cut plane off the {axisLabel} axis about the
+            in-plane {tiltAxes.b} direction. 0° plus the other tilt at 0°
+            gives a flat axis-aligned cut.
+          </HelpTip>
+        </span>
+        <input
+          type="number"
+          step="1"
+          min="-85"
+          max="85"
+          class="h-9 rounded border bg-background text-foreground px-2"
+          bind:value={tiltB}
         />
       </label>
 
@@ -252,19 +335,20 @@
         <span class="text-muted-foreground flex items-center gap-1.5">
           {halfLabels.a}
           <HelpTip>
-            How this half sits on the bed: which model axis points up.
-            <strong>+Z up</strong> keeps the model's authored
-            orientation; the others rotate the half so the chosen model
-            axis (±X, ±Y, ±Z) faces up. The remaining spin about the
-            vertical is fixed automatically to stay close to the
-            authored orientation.
+            How this half sits on the bed. <strong>Cut face down/up</strong>
+            rests the half on its seam (the cut surface) — the usual
+            choice for gluing, and it stays flat even when the cut plane
+            is tilted. The <strong>±axis up</strong> options instead rest
+            the half on a model side, unaffected by any cut tilt. The
+            remaining spin about the vertical is fixed automatically to
+            stay close to the authored orientation.
           </HelpTip>
         </span>
         <select
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={orientationA}
         >
-          {#each SPLIT_ORIENTATION_OPTIONS as opt}
+          {#each orientationOptionsA as opt}
             <option value={opt.value}>{opt.label}</option>
           {/each}
         </select>
@@ -276,7 +360,7 @@
           class="h-9 rounded border bg-background text-foreground px-2"
           bind:value={orientationB}
         >
-          {#each SPLIT_ORIENTATION_OPTIONS as opt}
+          {#each orientationOptionsB as opt}
             <option value={opt.value}>{opt.label}</option>
           {/each}
         </select>

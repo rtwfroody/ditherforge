@@ -67,6 +67,125 @@ func AxisPlane(axis int, offset float64) Plane {
 	return Plane{Normal: n, D: offset}
 }
 
+// AxisBasis returns the right-handed in-plane basis (u, v) for the
+// principal axis (0=X, 1=Y, 2=Z), with u × v equal to the axis unit
+// normal. The convention is fixed per axis so the basis is stable as
+// the user toggles axes, and is mirrored in
+// pipeline.computeSplitPreviewFromVertices and App.svelte's
+// cutPlanePreview. Invalid axis values fall back to Z.
+func AxisBasis(axis int) (u, v [3]float64) {
+	switch axis {
+	case 0: // normal = +X → u=+Y, v=+Z
+		return [3]float64{0, 1, 0}, [3]float64{0, 0, 1}
+	case 1: // normal = +Y → u=+Z, v=+X
+		return [3]float64{0, 0, 1}, [3]float64{1, 0, 0}
+	default: // axis == 2, normal = +Z → u=+X, v=+Y
+		return [3]float64{1, 0, 0}, [3]float64{0, 1, 0}
+	}
+}
+
+// TiltedFrame returns the unit normal and right-handed in-plane basis
+// (u, v) of a plane whose normal is the principal `axis` rotated by
+// tiltADeg about the base U axis and then tiltBDeg about the resulting
+// V axis. tiltADeg = tiltBDeg = 0 reproduces the axis-aligned frame
+// exactly (normal = axis unit vector, basis = AxisBasis(axis)), so the
+// split is bit-identical to the un-tilted path when both angles are 0.
+//
+// The whole orthonormal frame is rotated together, so (u, v) continue
+// to span the tilted plane with u × v = normal. Mirrored in the
+// frontend preview — keep the rotation order in sync.
+func TiltedFrame(axis int, tiltADeg, tiltBDeg float64) (normal, u, v [3]float64) {
+	var n [3]float64
+	a := axis
+	if a < 0 || a > 2 {
+		a = 2
+	}
+	n[a] = 1
+	u, v = AxisBasis(a)
+	if tiltADeg == 0 && tiltBDeg == 0 {
+		return n, u, v
+	}
+	// Rotate about the base U axis, then about the resulting V axis.
+	ar := tiltADeg * math.Pi / 180
+	br := tiltBDeg * math.Pi / 180
+	n = rotateAboutAxis(n, u, ar)
+	v = rotateAboutAxis(v, u, ar)
+	n = rotateAboutAxis(n, v, br)
+	u = rotateAboutAxis(u, v, br)
+	return normalize3(n), normalize3(u), normalize3(v)
+}
+
+// PlaneThrough builds the Plane with the given unit normal passing
+// through pivot: a point p lies on it iff Normal·p == Normal·pivot.
+func PlaneThrough(normal, pivot [3]float64) Plane {
+	return Plane{Normal: normal, D: dot3(normal, pivot)}
+}
+
+// FrameAlignRotation returns the row-major 3×3 rotation that maps the
+// tilted cut frame produced by TiltedFrame(axis, tiltADeg, tiltBDeg)
+// back to the axis-aligned base frame: it sends the tilted normal to
+// the +axis unit vector and the tilted (u, v) to AxisBasis(axis). Layout
+// applies it before a "cut face up/down" orientation so the tilted cut
+// face seats flat on the bed. It is the identity for a zero tilt, so
+// the un-tilted layout is unchanged.
+func FrameAlignRotation(axis int, tiltADeg, tiltBDeg float64) [9]float64 {
+	a := axis
+	if a < 0 || a > 2 {
+		a = 2
+	}
+	var n0 [3]float64
+	n0[a] = 1
+	u0, v0 := AxisBasis(a)
+	n, u, v := TiltedFrame(a, tiltADeg, tiltBDeg)
+	// R = n0·nᵀ + u0·uᵀ + v0·vᵀ. Then R·n = n0, R·u = u0, R·v = v0
+	// (the frames are orthonormal). Row-major.
+	var R [9]float64
+	for r := 0; r < 3; r++ {
+		for c := 0; c < 3; c++ {
+			R[3*r+c] = n0[r]*n[c] + u0[r]*u[c] + v0[r]*v[c]
+		}
+	}
+	return R
+}
+
+// orientationAxis returns the principal axis (0=X, 1=Y, 2=Z) that the
+// orientation points up, so Layout can tell whether an orientation is a
+// "cut face up/down" choice (its axis equals the cut axis).
+func orientationAxis(o Orientation) int {
+	switch o {
+	case OrientXUp, OrientXDown:
+		return 0
+	case OrientYUp, OrientYDown:
+		return 1
+	default: // OrientZUp, OrientZDown
+		return 2
+	}
+}
+
+// matMul3 returns the row-major product A·B of two 3×3 matrices.
+func matMul3(a, b [9]float64) [9]float64 {
+	var m [9]float64
+	for r := 0; r < 3; r++ {
+		for c := 0; c < 3; c++ {
+			m[3*r+c] = a[3*r]*b[c] + a[3*r+1]*b[3+c] + a[3*r+2]*b[6+c]
+		}
+	}
+	return m
+}
+
+// rotateAboutAxis rotates vec around the unit-length axis by theta
+// radians (Rodrigues' rotation formula).
+func rotateAboutAxis(vec, axis [3]float64, theta float64) [3]float64 {
+	c, s := math.Cos(theta), math.Sin(theta)
+	cross := cross3(axis, vec)
+	d := dot3(axis, vec) * (1 - c)
+	return [3]float64{
+		vec[0]*c + cross[0]*s + axis[0]*d,
+		vec[1]*c + cross[1]*s + axis[1]*d,
+		vec[2]*c + cross[2]*s + axis[2]*d,
+	}
+}
+
 // Orientation selects which model-space axis Layout points "up" (+Z on
 // the build plate) for a half before placing it. The user picks one per
 // half independently. The choice is independent of the cut plane — it
@@ -110,6 +229,18 @@ type CutResult struct {
 	Halves      [2]*loader.LoadedModel
 	Plane       Plane
 	Orientation [2]Orientation
+	// Axis is the principal cut axis (0=X, 1=Y, 2=Z) the plane was
+	// tilted off, or -1 when unknown (a caller that built the plane
+	// directly rather than via the tilt path). Layout uses it to decide
+	// which orientations are "cut face up/down" — those whose up-axis
+	// equals Axis seat the half on the cut face, so they are corrected
+	// by CapAlign. -1 disables that correction.
+	Axis int
+	// CapAlign is the row-major 3×3 rotation that maps the tilted cut
+	// frame back to the axis-aligned frame (cut normal → +Axis). Layout
+	// applies it before a cut-face orientation so the tilted cap seats
+	// flat on the bed. The identity for an un-tilted cut.
+	CapAlign [9]float64
 }
 
 // Cut splits a watertight model by a plane, producing two closed
@@ -164,8 +295,10 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 	halves = applyConnectors(halves, plane, connectors)
 
 	return &CutResult{
-		Halves: halves,
-		Plane:  plane,
+		Halves:   halves,
+		Plane:    plane,
+		Axis:     -1, // unknown unless the caller sets it (see runSplit)
+		CapAlign: IdentityTransform.Rotation,
 	}, nil
 }
 

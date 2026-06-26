@@ -104,8 +104,12 @@ func describeSplit(opts Options) string {
 	if opts.Split.ConnectorCount == 0 {
 		countStr = "×auto"
 	}
-	return fmt.Sprintf("Split: %s (%s@%.1fmm, %s %s)",
-		base, axisName, opts.Split.Offset, opts.Split.ConnectorStyle, countStr)
+	tiltStr := ""
+	if opts.Split.TiltADeg != 0 || opts.Split.TiltBDeg != 0 {
+		tiltStr = fmt.Sprintf(", tilt %.0f°/%.0f°", opts.Split.TiltADeg, opts.Split.TiltBDeg)
+	}
+	return fmt.Sprintf("Split: %s (%s@%.1fmm%s, %s %s)",
+		base, axisName, opts.Split.Offset, tiltStr, opts.Split.ConnectorStyle, countStr)
 }
 
 func describeSticker(opts Options) string {
@@ -764,6 +768,8 @@ func hashSplitSettings(c *StageCache, h hash.Hash64, opts Options) {
 	if opts.Split.Enabled {
 		writeInt(h, opts.Split.Axis)
 		writeFloat64(h, opts.Split.Offset)
+		writeFloat64(h, opts.Split.TiltADeg)
+		writeFloat64(h, opts.Split.TiltBDeg)
 		writeString(h, opts.Split.ConnectorStyle)
 		writeInt(h, opts.Split.ConnectorCount)
 		writeFloat64(h, opts.Split.ConnectorDiamMM)

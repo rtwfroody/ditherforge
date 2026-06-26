@@ -143,6 +143,8 @@ type Settings struct {
 	SplitEnabled          bool    `json:"splitEnabled"`
 	SplitAxis             int     `json:"splitAxis"`
 	SplitOffset           float64 `json:"splitOffset"`
+	SplitTiltA            float64 `json:"splitTiltA"` // tilt about in-plane U axis, degrees
+	SplitTiltB            float64 `json:"splitTiltB"` // tilt about in-plane V axis, degrees
 	SplitConnectorStyle   string  `json:"splitConnectorStyle"`
 	SplitConnectorCount   int     `json:"splitConnectorCount"`
 	SplitConnectorDiamMM  float64 `json:"splitConnectorDiamMM"`
@@ -201,6 +203,8 @@ func Default() Settings {
 		SplitEnabled:          false,
 		SplitAxis:             2,
 		SplitOffset:           0,
+		SplitTiltA:            0,
+		SplitTiltB:            0,
 		SplitConnectorStyle:   "pegs",
 		SplitConnectorCount:   0,
 		SplitConnectorDiamMM:  3,

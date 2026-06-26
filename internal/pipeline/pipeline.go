@@ -184,6 +184,8 @@ type SplitSettings struct {
 	Enabled          bool
 	Axis             int     // 0=X, 1=Y, 2=Z
 	Offset           float64 // model-space, along Axis
+	TiltADeg         float64 // tilt the cut plane about its in-plane U axis, degrees (0 = axis-aligned)
+	TiltBDeg         float64 // tilt the cut plane about its in-plane V axis, degrees (0 = axis-aligned)
 	ConnectorStyle   string  // "none", "pegs", "pegs-high", "dowels"
 	ConnectorCount   int     // 0 = auto, 1..3 explicit
 	ConnectorDiamMM  float64

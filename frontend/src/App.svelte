@@ -218,6 +218,10 @@
   let splitEnabled = $state(false);
   let splitAxis = $state<SplitAxis>(2);
   let splitOffset = $state(0);
+  // Tilt of the cut plane, in degrees, about its two in-plane axes.
+  // 0/0 = axis-aligned (the legacy behaviour). See SplitControls.svelte.
+  let splitTiltA = $state(0);
+  let splitTiltB = $state(0);
   let splitConnectorStyle = $state<SplitConnectorStyle>('pegs');
   let splitConnectorCount = $state(0); // 0 = auto
   let splitConnectorDiamMM = $state(3);
@@ -264,6 +268,47 @@
     });
   });
 
+  // Tilt-plane geometry, mirroring internal/split/split.go's AxisBasis
+  // and TiltedFrame. Kept in sync with the Go so the preview quad and
+  // the real cut agree. Pure helpers — no reactive reads.
+  type Vec3 = [number, number, number];
+  function axisBasis(axis: number): { u: Vec3; v: Vec3 } {
+    switch (axis) {
+      case 0: return { u: [0, 1, 0], v: [0, 0, 1] };
+      case 1: return { u: [0, 0, 1], v: [1, 0, 0] };
+      default: return { u: [1, 0, 0], v: [0, 1, 0] };
+    }
+  }
+  function rotAboutAxis(vec: Vec3, ax: Vec3, theta: number): Vec3 {
+    const c = Math.cos(theta), s = Math.sin(theta);
+    const cross: Vec3 = [
+      ax[1] * vec[2] - ax[2] * vec[1],
+      ax[2] * vec[0] - ax[0] * vec[2],
+      ax[0] * vec[1] - ax[1] * vec[0],
+    ];
+    const d = (ax[0] * vec[0] + ax[1] * vec[1] + ax[2] * vec[2]) * (1 - c);
+    return [
+      vec[0] * c + cross[0] * s + ax[0] * d,
+      vec[1] * c + cross[1] * s + ax[1] * d,
+      vec[2] * c + cross[2] * s + ax[2] * d,
+    ];
+  }
+  // Normal + right-handed in-plane basis for `axis` tilted by aDeg about
+  // the base U axis, then bDeg about the resulting V axis. 0/0 = aligned.
+  function tiltedFrame(axis: number, aDeg: number, bDeg: number): { normal: Vec3; u: Vec3; v: Vec3 } {
+    const a = axis < 0 || axis > 2 ? 2 : axis;
+    let normal: Vec3 = [0, 0, 0];
+    normal[a] = 1;
+    let { u, v } = axisBasis(a);
+    if (aDeg === 0 && bDeg === 0) return { normal, u, v };
+    const ar = (aDeg * Math.PI) / 180, br = (bDeg * Math.PI) / 180;
+    normal = rotAboutAxis(normal, u, ar);
+    v = rotAboutAxis(v, u, ar);
+    normal = rotAboutAxis(normal, v, br);
+    u = rotAboutAxis(u, v, br);
+    return { normal, u, v };
+  }
+
   // Cut-plane preview overlay for the input viewer. Mirrors the
   // backend's pipeline.computeSplitPreviewFromVertices in
   // internal/pipeline/splitpreview.go — keep the two in sync. The
@@ -272,49 +317,65 @@
   // mesh. Computed client-side from the bbox so it tracks the slider
   // without RPC churn.
   //
-  // Assumes (U, V) are axis-aligned (one of {±X, ±Y, ±Z}). That lets
-  // us compute min/max of the projected silhouette from the two
-  // bbox-corner endpoints alone instead of every vertex — equivalent
-  // because the projection of a bbox onto an axis-aligned vector is
-  // determined entirely by its corners. If splitpreview.go ever
-  // generalizes to arbitrary plane normals, this mirror must too.
+  // The plane may be tilted off the principal axis by splitTiltA/B, so
+  // (U, V) are not axis-aligned in general. We therefore project all
+  // eight bbox corners onto the tilted basis instead of two opposite
+  // corners. The pivot (cut position) is still computed on the
+  // axis-aligned base basis, exactly mirroring splitPlanePivot in
+  // splitpreview.go so the rendered quad registers with the real cut.
   const cutPlanePreview = $derived.by((): CutPlanePreview | null => {
     if (!splitEnabled || !modelBBoxMin || !modelBBoxMax) return null;
     const axis = splitAxis;
-    const normal: [number, number, number] = [0, 0, 0];
-    normal[axis] = 1;
-    let u: [number, number, number];
-    let v: [number, number, number];
-    switch (axis) {
-      case 0: u = [0, 1, 0]; v = [0, 0, 1]; break;
-      case 1: u = [0, 0, 1]; v = [1, 0, 0]; break;
-      default: u = [1, 0, 0]; v = [0, 1, 0]; break;
+    const { normal, u, v } = tiltedFrame(axis, splitTiltA, splitTiltB);
+    const { u: u0, v: v0 } = axisBasis(axis);
+    const proj = (p: Vec3, a: Vec3) => p[0] * a[0] + p[1] * a[1] + p[2] * a[2];
+
+    // Eight bbox corners.
+    const lo = modelBBoxMin, hi = modelBBoxMax;
+    const corners: Vec3[] = [];
+    for (const x of [lo[0], hi[0]])
+      for (const y of [lo[1], hi[1]])
+        for (const z of [lo[2], hi[2]]) corners.push([x, y, z]);
+
+    // Pivot: silhouette centre on the base (axis-aligned) basis, placed
+    // at the cut offset along the axis. splitOffset is a fraction of the
+    // print extent; convert to pipeline-mm (the bbox frame) first.
+    let minU0 = Infinity, maxU0 = -Infinity, minV0 = Infinity, maxV0 = -Infinity;
+    for (const c of corners) {
+      const du = proj(c, u0), dv = proj(c, v0);
+      minU0 = Math.min(minU0, du); maxU0 = Math.max(maxU0, du);
+      minV0 = Math.min(minV0, dv); maxV0 = Math.max(maxV0, dv);
     }
-    const proj = (p: [number, number, number], a: [number, number, number]) =>
-      p[0] * a[0] + p[1] * a[1] + p[2] * a[2];
-    const minU = Math.min(proj(modelBBoxMin, u), proj(modelBBoxMax, u));
-    const maxU = Math.max(proj(modelBBoxMin, u), proj(modelBBoxMax, u));
-    const minV = Math.min(proj(modelBBoxMin, v), proj(modelBBoxMax, v));
-    const maxV = Math.max(proj(modelBBoxMin, v), proj(modelBBoxMax, v));
-    const originU = (minU + maxU) / 2;
-    const originV = (minV + maxV) / 2;
-    const origin: [number, number, number] = [0, 0, 0];
-    // splitOffset is a fraction of the print extent; convert to pipeline-mm
-    // (the bbox frame) before placing the plane along the cut axis.
-    origin[axis] = splitOffset * (scaledMaxExtentMM ?? 0);
-    for (let i = 0; i < 3; i++) origin[i] += originU * u[i] + originV * v[i];
+    const cu = (minU0 + maxU0) / 2, cv = (minV0 + maxV0) / 2;
+    const offAxis = splitOffset * (scaledMaxExtentMM ?? 0);
+    const n0: Vec3 = [0, 0, 0];
+    n0[axis] = 1;
+    const pivot: Vec3 = [
+      offAxis * n0[0] + cu * u0[0] + cv * v0[0],
+      offAxis * n0[1] + cu * u0[1] + cv * v0[1],
+      offAxis * n0[2] + cu * u0[2] + cv * v0[2],
+    ];
+
+    // Half-extents symmetric about the pivot along the tilted (U, V).
+    let halfU = 0, halfV = 0;
+    for (const c of corners) {
+      const d: Vec3 = [c[0] - pivot[0], c[1] - pivot[1], c[2] - pivot[2]];
+      halfU = Math.max(halfU, Math.abs(proj(d, u)));
+      halfV = Math.max(halfV, Math.abs(proj(d, v)));
+    }
+
     // The bbox is in original-mesh mm but the input viewer renders the
     // mesh at previewScale (vertices multiplied by previewScale in
     // scalePreviewMesh). Scale origin and half-extents to match the
     // rendered frame; (u, v, normal) directions are scale-invariant.
     const ps = previewScale;
     return {
-      origin: [origin[0] * ps, origin[1] * ps, origin[2] * ps],
+      origin: [pivot[0] * ps, pivot[1] * ps, pivot[2] * ps],
       normal,
       u,
       v,
-      halfExtentU: ((maxU - minU) / 2) * ps,
-      halfExtentV: ((maxV - minV) / 2) * ps,
+      halfExtentU: halfU * ps,
+      halfExtentV: halfV * ps,
     };
   });
 
@@ -1101,6 +1162,8 @@
       splitEnabled,
       splitAxis,
       splitOffset,
+      splitTiltA,
+      splitTiltB,
       splitConnectorStyle,
       splitConnectorCount,
       splitConnectorDiamMM,
@@ -1309,6 +1372,8 @@
     { key: 'splitEnabled',                    validate: pickBool,                                          apply: (v) => { splitEnabled = v; } },
     { key: 'splitAxis',                       validate: (v, d) => pickIntEnum(v, SPLIT_AXIS_VALUES, d),    apply: (v) => { splitAxis = v; } },
     { key: 'splitOffset',                     validate: pickNumber,                                        apply: (v) => { splitOffset = v; } },
+    { key: 'splitTiltA',                      validate: pickNumber,                                        apply: (v) => { splitTiltA = v; } },
+    { key: 'splitTiltB',                      validate: pickNumber,                                        apply: (v) => { splitTiltB = v; } },
     { key: 'splitConnectorStyle',             validate: (v, d) => pickEnum(v, SPLIT_CONNECTOR_VALUES, d),  apply: (v) => { splitConnectorStyle = v; } },
     { key: 'splitConnectorCount',             validate: pickNumber,                                        apply: (v) => { splitConnectorCount = v; } },
     { key: 'splitConnectorDiamMM',            validate: pickNumber,                                        apply: (v) => { splitConnectorDiamMM = v; } },
@@ -2022,6 +2087,8 @@
             bind:enabled={splitEnabled}
             bind:axis={splitAxis}
             bind:offset={splitOffset}
+            bind:tiltA={splitTiltA}
+            bind:tiltB={splitTiltB}
             bind:connectorStyle={splitConnectorStyle}
             bind:connectorCount={splitConnectorCount}
             bind:connectorDiamMM={splitConnectorDiamMM}
