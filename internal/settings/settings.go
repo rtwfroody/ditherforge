@@ -191,7 +191,7 @@ func Default() Settings {
 		NoCellMerge:           false,
 		NoSimplify:            false,
 		HonorTD:               true,
-		ColorAwareCells:       false,
+		ColorAwareCells:       true,
 		ColorRegionContrast:   20,
 		Stats:                 false,
 		ShowSampledColors:     false,

@@ -189,7 +189,7 @@
   let noCellMerge = $state(false);
   let noSimplify = $state(false);
   let honorTD = $state(true);
-  let colorAwareCells = $state(false);
+  let colorAwareCells = $state(true);
   let colorRegionContrast = $state(20);
   let committedColorRegionContrast = $state(20);
   let stats = $state(false);
