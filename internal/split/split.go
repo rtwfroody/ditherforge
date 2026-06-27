@@ -241,6 +241,24 @@ type CutResult struct {
 	// applies it before a cut-face orientation so the tilted cap seats
 	// flat on the bed. The identity for an un-tilted cut.
 	CapAlign [9]float64
+	// Connectors records the peg/pocket cylinders baked into the caps,
+	// in original-mesh coordinates. Downstream cut-face handling uses
+	// these to treat the recessed pocket (and protruding peg) walls as
+	// part of the cut face rather than as model surface — otherwise the
+	// pocket reads as a dithered ring of colour. Empty when no
+	// connectors were placed.
+	Connectors []CutConnector
+}
+
+// CutConnector is one connector site's bounding cylinder on the cut
+// plane, in original-mesh coordinates. Center lies on the cut plane;
+// Radius is the larger (female) cylinder radius and Axial the larger
+// (female) half-height, so the cylinder generously encloses both the
+// peg and the pocket on either half.
+type CutConnector struct {
+	Center [3]float64
+	Radius float64
+	Axial  float64
 }
 
 // Cut splits a watertight model by a plane, producing two closed
@@ -292,13 +310,14 @@ func Cut(model *loader.LoadedModel, plane Plane, connectors ConnectorSettings) (
 		}
 	}
 
-	halves = applyConnectors(halves, plane, connectors)
+	halves, cutConnectors := applyConnectors(halves, plane, connectors)
 
 	return &CutResult{
-		Halves:   halves,
-		Plane:    plane,
-		Axis:     -1, // unknown unless the caller sets it (see runSplit)
-		CapAlign: IdentityTransform.Rotation,
+		Halves:     halves,
+		Plane:      plane,
+		Axis:       -1, // unknown unless the caller sets it (see runSplit)
+		CapAlign:   IdentityTransform.Rotation,
+		Connectors: cutConnectors,
 	}, nil
 }
 

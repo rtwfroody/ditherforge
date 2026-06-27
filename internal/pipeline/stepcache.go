@@ -498,6 +498,15 @@ type voxelizeOutput struct {
 	// look up the dithered palette index per cell.
 	VisibleToCell []int
 
+	// CutFace, when Split is enabled, is one bool per cell parallel to
+	// CellSamples (GLOBAL index, visible AND hidden): true if the cell
+	// lies on a split cut face (surface normal aligned with the cut
+	// plane, centroid on the plane). Empty in the unsplit pipeline. Most
+	// cut-face cells are hidden (the cut exposes an interior surface), so
+	// they're absent from Cells; the Clip stage flat-fills those hidden
+	// cells with one filament while the thin visible rim dithers normally.
+	CutFace []bool
+
 	LayerH   float32
 	CellSize float32
 }
@@ -567,6 +576,11 @@ type splitOutput struct {
 	Xform     [2]split.Transform
 	CutNormal [3]float64 // outward normal from half 0 toward half 1
 	CutPlaneD float64
+	// Connectors are the peg/pocket cylinders baked into the caps, in
+	// original-mesh coords. Voxelize marks cells inside these cylinders
+	// as cut-face so the recessed pocket / protruding peg walls get the
+	// flat fill rather than a dithered ring. Empty when no connectors.
+	Connectors []split.CutConnector
 }
 
 type paletteOutput struct {
@@ -777,6 +791,14 @@ func hashSplitSettings(c *StageCache, h hash.Hash64, opts Options) {
 		writeFloat64(h, opts.Split.ClearanceMM)
 		writeString(h, opts.Split.Orientation[0])
 		writeString(h, opts.Split.Orientation[1])
+		// splitOutput now carries Connectors (the peg/pocket cylinders),
+		// which voxelize reads to flat-fill the mortise walls. A pre-fix
+		// cached split output decodes with Connectors==nil (gob ignores the
+		// new field), so without this salt a warm split cache would silently
+		// skip the connector flat-fill. Salt only the split path — Load
+		// (alpha-wrap) is upstream of this stage in the cumulative key
+		// cascade, so its cache survives. "connectors-v1" = Connectors added.
+		writeString(h, "connectors-v1")
 	}
 }
 
@@ -889,6 +911,15 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 		// The ΔE threshold changes which colour edges become cuts.
 		writeFloat64(h, opts.ColorRegionContrast)
 	}
+	if opts.Split.Enabled {
+		// Voxelize emits a per-cell CutFace flag (and CellSample.Normal) for
+		// the flat cut-face fill. Salt only the split path so non-split caches
+		// are untouched. "v2" = CutFace is now indexed parallel to CellSamples
+		// (global, incl. hidden cells) instead of to the visible Cells, so v1
+		// caches hold a wrong-length slice and must rebuild. "v3" = CutFace
+		// also includes connector pocket/peg cylinder cells.
+		writeString(h, "cutface-v3")
+	}
 }
 
 func hashColorAdjustSettings(c *StageCache, h hash.Hash64, opts Options) {
@@ -962,6 +993,16 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 // clip path produced the output.
 func hashClipSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeBool(h, effectiveMergeCells(opts))
+	// Cut-face flat fill (always on for splits) recolours hidden and
+	// deep-visible cut-face cells at clip time, changing the output face
+	// colours. Salt only the split path so non-split keys are unchanged;
+	// the salt invalidates pre-feature split clip caches.
+	if opts.Split.Enabled {
+		// "v2" = seam rim band narrowed from 3 cell hops to 2
+		// (cutFaceSeamBandCells), so the flat fill reaches one cell closer
+		// to the visible perimeter.
+		writeString(h, "cutface-fill-v2")
+	}
 }
 
 func hashMergeSettings(c *StageCache, h hash.Hash64, opts Options) {

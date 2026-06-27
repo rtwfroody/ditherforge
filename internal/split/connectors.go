@@ -18,13 +18,13 @@ import (
 // +plane.Normal and matching pockets carve into half 1 from the
 // -plane.Normal side; PegsHigh swaps the two (peg on half 1, pocket on
 // half 0). Dowels punch matching pockets in both halves.
-func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings ConnectorSettings) [2]*loader.LoadedModel {
+func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings ConnectorSettings) ([2]*loader.LoadedModel, []CutConnector) {
 	if settings.Style == NoConnectors {
-		return halves
+		return halves, nil
 	}
 	if settings.DiamMM <= 0 || settings.DepthMM <= 0 {
 		plog.Printf("  Split: connectors requested but dimensions are zero (diam=%.3f, depth=%.3f); using flat caps", settings.DiamMM, settings.DepthMM)
-		return halves
+		return halves, nil
 	}
 	// Count == 0 means "auto"; pick a sensible default. count < 0 is
 	// treated the same.
@@ -39,7 +39,7 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	polys, err := recoverCapPolygons(halves[0], plane.Normal, plane.D)
 	if err != nil {
 		plog.Printf("  Split: cap polygon recovery failed (%v); using flat caps", err)
-		return halves
+		return halves, nil
 	}
 
 	// Spacing heuristic: at least 2.5× the connector diameter so pegs
@@ -58,7 +58,7 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 	centers2D, err := placePegsInPolygons(polys, count, minSpacing, clearances)
 	if err != nil {
 		plog.Printf("  Split: peg placement failed (%v); using flat caps", err)
-		return halves
+		return halves, nil
 	}
 
 	// Lift placement points back to 3D on the cut plane.
@@ -161,7 +161,17 @@ func applyConnectors(halves [2]*loader.LoadedModel, plane Plane, settings Connec
 		out[op.halfIdx] = result
 	}
 
-	return out
+	// Report the connector cylinders (in original-mesh coords) so the
+	// cut-face handling downstream can treat the pocket/peg walls as part
+	// of the cut face. Use the larger (female) radius and half-height so
+	// the bound encloses both the recessed pocket and the protruding peg
+	// regardless of which half carries which.
+	connectors := make([]CutConnector, len(centers3D))
+	for i, c := range centers3D {
+		connectors[i] = CutConnector{Center: c, Radius: femaleR, Axial: femaleHalfHeight}
+	}
+
+	return out, connectors
 }
 
 func connectorStyleName(s ConnectorStyle) string {

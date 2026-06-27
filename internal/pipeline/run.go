@@ -1170,11 +1170,12 @@ func (r *pipelineRun) runSplit() (any, error) {
 		len(res.Halves[0].Vertices), len(res.Halves[0].Faces),
 		len(res.Halves[1].Vertices), len(res.Halves[1].Faces))
 	return &splitOutput{
-		Enabled:   true,
-		Halves:    res.Halves,
-		Xform:     xforms,
-		CutNormal: plane.Normal,
-		CutPlaneD: plane.D,
+		Enabled:    true,
+		Halves:     res.Halves,
+		Xform:      xforms,
+		CutNormal:  plane.Normal,
+		CutPlaneD:  plane.D,
+		Connectors: res.Connectors,
 	}, nil
 }
 
@@ -1561,6 +1562,93 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 			Area:  s.Area,
 		})
 	}
+
+	// Cut-face detection (Split only), over ALL cells — visible AND
+	// hidden. A cut face is the new interior surface the split exposes;
+	// because it's interior to the original model, the visibility test
+	// marks most of it hidden (Alpha == false), so those cells are
+	// dropped from `cells` above and never dithered. The Clip stage
+	// flat-fills the hidden cut-face cells with one filament (the seam
+	// you see on reassembly is the thin VISIBLE rim of the cut face,
+	// which dithers normally). A cell is on the cut face when its
+	// printed-surface normal aligns with the cut-plane normal AND its
+	// centroid lies on the plane, both in the original-mesh frame the
+	// plane lives in: s.Normal is already in that frame; the centroid is
+	// bed-space, so map it back with the half's inverse layout
+	// transform. CutFace is indexed parallel to CellSamples (global),
+	// not to the visible `cells`.
+	var cutFace []bool
+	if so.Enabled {
+		cutN := [3]float32{float32(so.CutNormal[0]), float32(so.CutNormal[1]), float32(so.CutNormal[2])}
+		cutD := float32(so.CutPlaneD)
+		// The centroid sits at the slab's mid-Z, up to ~half a slab off
+		// the plane; 1.5×layerH absorbs that (and the tilted case, where
+		// the off-plane error is bounded by the slab thickness) while
+		// staying tight enough not to catch surfaces a layer or two away.
+		cutEps := 1.5 * layerH
+		// Connector pocket/peg cylinders are part of the cut face too,
+		// but their walls are perpendicular to the cut normal (so they
+		// fail the normal-alignment test) and their floors sit DepthMM
+		// behind the plane (so they fail the on-plane distance test). Mark
+		// any cell whose centroid lands inside a connector cylinder as
+		// cut-face directly, so the recessed pocket / protruding peg gets
+		// the flat fill instead of a dithered ring. Margins of one cell
+		// pitch (radial) and cutEps (axial) absorb the cell discretisation.
+		radMargin := cellSizeUpper
+		cutFace = make([]bool, len(samples))
+		nConn := 0
+		for gi, s := range samples {
+			pc := so.Xform[s.HalfIdx].ApplyInverse(s.Centroid)
+			// On-plane cut face: surface normal aligned with the cut
+			// normal AND centroid on the plane (original-mesh frame). A
+			// cap cell whose Normal is zero (along-normal sampling found no
+			// geom face in range) fails this test and is only recovered by
+			// the connector check below — an inherited sampling limit, not
+			// introduced here.
+			nd := s.Normal[0]*cutN[0] + s.Normal[1]*cutN[1] + s.Normal[2]*cutN[2]
+			if nd < 0 {
+				nd = -nd
+			}
+			d := pc[0]*cutN[0] + pc[1]*cutN[1] + pc[2]*cutN[2] - cutD
+			if d < 0 {
+				d = -d
+			}
+			if nd >= 0.9 && d <= cutEps {
+				cutFace[gi] = true
+				continue
+			}
+			// Connector-cylinder membership: within Radius of the cylinder
+			// axis AND within Axial of the plane along the normal. `along`
+			// is the signed distance from the plane along cutN (unit), so
+			// the squared distance to the axis is |Δ|² − along².
+			for _, c := range so.Connectors {
+				dx := pc[0] - float32(c.Center[0])
+				dy := pc[1] - float32(c.Center[1])
+				dz := pc[2] - float32(c.Center[2])
+				along := dx*cutN[0] + dy*cutN[1] + dz*cutN[2]
+				axial := along
+				if axial < 0 {
+					axial = -axial
+				}
+				if axial > float32(c.Axial)+cutEps {
+					continue
+				}
+				radial2 := dx*dx + dy*dy + dz*dz - along*along
+				rLim := float32(c.Radius) + radMargin
+				if radial2 <= rLim*rLim {
+					cutFace[gi] = true
+					nConn++
+					break
+				}
+			}
+		}
+		if len(so.Connectors) > 0 {
+			// nConn counts cells the connector test recovered (cells already
+			// caught by the on-plane test above `continue` before reaching
+			// here, so they're not double-counted).
+			plog.Printf("  Cut-face: %d cells recovered via connector cylinders (across %d connector site(s))", nConn, len(so.Connectors))
+		}
+	}
 	visibleNeighbors := make([][]voxel.Neighbor, len(cells))
 	nEdges := 0
 	for gi, nbrs := range globalNeighbors {
@@ -1599,6 +1687,7 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 		CellSamples:   samples,
 		Neighbors:     visibleNeighbors,
 		VisibleToCell: visibleToCell,
+		CutFace:       cutFace,
 		LayerH:        layerH,
 		CellSize:      cellSizeUpper,
 	}, nil
@@ -2308,6 +2397,14 @@ func (r *pipelineRun) runDither() (any, error) {
 // palette index. The geometry mesh must be closed and orientable —
 // the alpha-wrap path produces this directly; for raw meshes the
 // pipeline relies on opts.AlphaWrap.
+// cutFaceSeamBandCells is the width, in cell hops, of the dithered rim
+// kept around a VISIBLE cut face's perimeter (the part of the join you
+// see when the halves are reassembled). Cells deeper than this — and all
+// hidden cut-face cells — are flat-filled with one filament. Fixed: the
+// flat cut-face fill is always on for splits; this is a robustness margin,
+// not a user preference. See runClip's cut-face flat fill.
+const cutFaceSeamBandCells = 2
+
 // runClip is StageClip's body (see stageDefs).
 func (r *pipelineRun) runClip() (any, error) {
 	do, err := r.Dither()
@@ -2355,6 +2452,79 @@ func (r *pipelineRun) runClip() (any, error) {
 	}
 	for vi, gi := range vo.VisibleToCell {
 		cellAssign[gi] = do.Assignments[vi]
+	}
+
+	// Cut-face flat fill (Split, always on). The cut exposes an interior
+	// surface whose cells are mostly hidden (Alpha == false) — they were
+	// dropped before dither and would be coloured by the most-common
+	// fallback, or by interior-sampled colour, producing a noisy
+	// multi-colour join. Paint those hidden cut-face cells (plus any deep
+	// VISIBLE ones, beyond the seam band) with one exact filament so the
+	// hidden join prints fast; the thin visible rim at the reassembled
+	// seam keeps its dithered colour. See voxelizeOutput.CutFace.
+	if so.Enabled && len(vo.CutFace) == nGlobal {
+		po, perr := r.Palette()
+		if perr != nil {
+			return nil, perr
+		}
+		pal := po.Palette
+		// One flat filament = nearest palette entry to the area-weighted
+		// average sampled colour over all cut-face cells.
+		var rs, gs, bs, ws float64
+		for gi := 0; gi < nGlobal; gi++ {
+			if !vo.CutFace[gi] {
+				continue
+			}
+			s := vo.CellSamples[gi]
+			w := float64(s.Area)
+			if w <= 0 {
+				w = 1
+			}
+			rs += float64(s.Color[0]) * w
+			gs += float64(s.Color[1]) * w
+			bs += float64(s.Color[2]) * w
+			ws += w
+		}
+		if ws > 0 && len(pal) > 0 {
+			avg := [3]uint8{uint8(rs/ws + 0.5), uint8(gs/ws + 0.5), uint8(bs/ws + 0.5)}
+			flatIdx := palette.AssignPalette([][3]uint8{avg}, pal)[0]
+			// Rim erosion on the VISIBLE cut-face cells: keep cells within
+			// CutFaceRimCells hops of the silhouette dithered, flatten the
+			// deeper visible interior. For a typical cut the visible part
+			// is a one-cell perimeter ring, so nothing is eroded and the
+			// whole rim stays dithered.
+			globalToVisible := make([]int, nGlobal)
+			for i := range globalToVisible {
+				globalToVisible[i] = -1
+			}
+			for vi, gi := range vo.VisibleToCell {
+				globalToVisible[gi] = vi
+			}
+			var visInterior []bool
+			if len(vo.Cells) > 0 {
+				visCut := make([]bool, len(vo.Cells))
+				for vi, gi := range vo.VisibleToCell {
+					visCut[vi] = vo.CutFace[gi]
+				}
+				visInterior = voxel.ClassifyCutFaceInterior(vo.Neighbors, visCut, cutFaceSeamBandCells)
+			}
+			nHidden, nDeepVis := 0, 0
+			for gi := 0; gi < nGlobal; gi++ {
+				if !vo.CutFace[gi] {
+					continue
+				}
+				vi := globalToVisible[gi]
+				if vi < 0 {
+					cellAssign[gi] = flatIdx // hidden cut-face cell → flat
+					nHidden++
+				} else if vi < len(visInterior) && visInterior[vi] {
+					cellAssign[gi] = flatIdx // deep visible cut-face cell → flat
+					nDeepVis++
+				}
+			}
+			plog.Printf("  Cut-face flat fill: filament #%02X%02X%02X on %d hidden + %d deep-visible cut cells (visible rim dithered, band %d cells)",
+				pal[flatIdx][0], pal[flatIdx][1], pal[flatIdx][2], nHidden, nDeepVis, cutFaceSeamBandCells)
+		}
 	}
 
 	// Cell merging groups same-kind, same-color cells within each

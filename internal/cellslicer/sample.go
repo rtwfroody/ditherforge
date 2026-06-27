@@ -44,6 +44,12 @@ type CellSample struct {
 	// HalfIdx tags which split half produced this cell (0 or 1).
 	// Copied from the source Slab; 0 in the unsplit pipeline.
 	HalfIdx byte
+	// Normal is the printed-surface outward normal at this cell, in the
+	// color model's coordinate frame (same frame cellOrient returns;
+	// see SampleSlab). Zero when along-normal sampling was disabled for
+	// the cell (no geom face in range). Used downstream to identify
+	// split cut-face cells by comparing against the cut-plane normal.
+	Normal [3]float32
 }
 
 // SampleCells colors every cell in slabs by averaging
@@ -208,6 +214,7 @@ func SampleSlab(
 			Alpha:    anyAlpha,
 			Area:     area,
 			HalfIdx:  s.HalfIdx,
+			Normal:   cellN,
 		})
 	}
 	return out
