@@ -130,6 +130,11 @@ type Settings struct {
 	HonorTD             bool                `json:"honorTD"`
 	ColorAwareCells     bool                `json:"colorAwareCells"`
 	ColorRegionContrast float64             `json:"colorRegionContrast"`
+	// RegionDither (advanced) confines the dither to colour regions so a
+	// grey region's diffused error can't bleed into an adjacent solid
+	// black/white region. Independent of colorAwareCells; off by default.
+	RegionDither        bool                `json:"regionDither"`
+	RegionDitherDeltaE  float64             `json:"regionDitherDeltaE"`
 	Stats               bool                `json:"stats"`
 	ShowSampledColors   bool                `json:"showSampledColors"`
 	AlphaWrap           bool                `json:"alphaWrap"`
@@ -193,6 +198,8 @@ func Default() Settings {
 		HonorTD:               true,
 		ColorAwareCells:       true,
 		ColorRegionContrast:   20,
+		RegionDither:          false,
+		RegionDitherDeltaE:    20,
 		Stats:                 false,
 		ShowSampledColors:     false,
 		AlphaWrap:             false,

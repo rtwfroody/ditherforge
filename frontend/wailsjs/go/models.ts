@@ -322,6 +322,8 @@ export namespace settings {
 	    honorTD: boolean;
 	    colorAwareCells: boolean;
 	    colorRegionContrast: number;
+	    regionDither: boolean;
+	    regionDitherDeltaE: number;
 	    stats: boolean;
 	    showSampledColors: boolean;
 	    alphaWrap: boolean;
@@ -378,6 +380,8 @@ export namespace settings {
 	        this.honorTD = source["honorTD"];
 	        this.colorAwareCells = source["colorAwareCells"];
 	        this.colorRegionContrast = source["colorRegionContrast"];
+	        this.regionDither = source["regionDither"];
+	        this.regionDitherDeltaE = source["regionDitherDeltaE"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];

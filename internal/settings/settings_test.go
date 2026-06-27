@@ -164,6 +164,8 @@ func nonDefaultSettings() Settings {
 		HonorTD:               true,
 		ColorAwareCells:       true,
 		ColorRegionContrast:   33,
+		RegionDither:          true,
+		RegionDitherDeltaE:    27,
 		Stats:                 true,
 		ShowSampledColors:     true,
 		AlphaWrap:             true,

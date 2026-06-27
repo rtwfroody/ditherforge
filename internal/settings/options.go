@@ -38,6 +38,8 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		HonorTD:                              s.HonorTD,
 		ColorAwareCells:                      s.ColorAwareCells,
 		ColorRegionContrast:                  s.ColorRegionContrast,
+		RegionDither:                         s.RegionDither,
+		RegionDitherDeltaE:                   s.RegionDitherDeltaE,
 		ShowSampledColors:                    s.ShowSampledColors,
 		Stats:                                s.Stats,
 		ColorSnap:                            s.ColorSnap,

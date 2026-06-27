@@ -192,6 +192,11 @@
   let colorAwareCells = $state(true);
   let colorRegionContrast = $state(20);
   let committedColorRegionContrast = $state(20);
+  // Advanced: confine the dither to colour regions so a grey area's
+  // diffused error can't bleed into an adjacent solid black/white area.
+  let regionDither = $state(false);
+  let regionDitherDeltaE = $state(20);
+  let committedRegionDitherDeltaE = $state(20);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
   // originating section's raw sampled RGB instead of the dithered
@@ -1152,6 +1157,8 @@
       honorTD,
       colorAwareCells,
       colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
+      regionDither,
+      regionDitherDeltaE: useC ? committedRegionDitherDeltaE : regionDitherDeltaE,
       stats,
       showSampledColors,
       alphaWrap,
@@ -1362,6 +1369,8 @@
     { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
     { key: 'colorAwareCells',                 validate: pickBool,                                          apply: (v) => { colorAwareCells = v; } },
     { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
+    { key: 'regionDither',                    validate: pickBool,                                          apply: (v) => { regionDither = v; } },
+    { key: 'regionDitherDeltaE',              validate: pickNumber,                                        apply: (v) => { regionDitherDeltaE = v; committedRegionDitherDeltaE = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
@@ -2383,6 +2392,27 @@
                     <span class="text-xs text-muted-foreground w-8 text-right">{colorRegionContrast}</span>
                   </div>
                   <Slider type="single" min={0} max={50} step={1} value={colorRegionContrast} onValueChange={(v: number) => colorRegionContrast = v} onValueCommit={(v: number) => committedColorRegionContrast = v} />
+                </div>
+              {/if}
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={regionDither} />
+                Confine dither to color regions
+                <HelpTip>
+                  Advanced. Stop dither error from bleeding across color boundaries: the cell graph is split into color regions and each is dithered in isolation, so a gray area's error can't speckle an adjacent solid black or white area. Smooth gradients still diffuse normally; only sharp color jumps act as barriers. Independent of color-aware cells; works with every dither mode. Off by default.
+                </HelpTip>
+              </label>
+              {#if regionDither}
+                <div class="space-y-1 pl-6">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Region barrier (delta E)</Label>
+                      <HelpTip>
+                        Treat neighboring cells as different color regions (a barrier to error) only where their colors differ by more than this CIELAB distance. Low (~5) confines almost everywhere; higher (~20-30) only blocks crisp edges while letting soft shading diffuse.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-8 text-right">{regionDitherDeltaE}</span>
+                  </div>
+                  <Slider type="single" min={0} max={50} step={1} value={regionDitherDeltaE} onValueChange={(v: number) => regionDitherDeltaE = v} onValueCommit={(v: number) => committedRegionDitherDeltaE = v} />
                 </div>
               {/if}
               <label class="flex items-center gap-2 text-sm">

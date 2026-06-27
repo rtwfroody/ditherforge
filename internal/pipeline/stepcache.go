@@ -979,6 +979,14 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeString(h, opts.Dither)
 	writeFloat64(h, opts.RiemersmaInputBias)
 	writeFloat64(h, opts.BlueNoiseTolerance)
+	// RegionDither cuts the adjacency graph by colour before dithering, so
+	// it changes the assignments for every mode and must invalidate the
+	// cache. Write the flag unconditionally; only fold in the threshold
+	// when it's actually consulted.
+	writeBool(h, opts.RegionDither)
+	if opts.RegionDither {
+		writeFloat64(h, opts.RegionDitherDeltaE)
+	}
 	// HonorTD gates the opacity-weighted mix; toggling it changes the
 	// dithered assignments and must invalidate the cache. Write it
 	// unconditionally (not only when true) so the false key can't alias a

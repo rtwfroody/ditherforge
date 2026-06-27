@@ -2314,36 +2314,67 @@ func (r *pipelineRun) runDither() (any, error) {
 			len(cells), time.Since(tDither).Seconds())
 		return &ditherOutput{Assignments: assignments}, nil
 	}
+	// RegionDither confines dithering so quantization error can't bleed
+	// across a colour boundary. cut() drops adjacency edges between cells
+	// whose colours differ by more than the ΔE threshold; for the
+	// error-diffusion modes that alone isolates each colour region (error
+	// only travels along edges). The space-filling Riemersma modes carry a
+	// sliding window along a tour that jumps between cells, so they must
+	// additionally run per connected component (one fresh tour/window per
+	// region) — see DitherPerComponent.
+	regionDither := r.opts.RegionDither
+	cut := func(nb [][]voxel.Neighbor) [][]voxel.Neighbor {
+		if regionDither {
+			return voxel.CutNeighborsByColor(cells, nb, r.opts.RegionDitherDeltaE)
+		}
+		return nb
+	}
 	switch ditherMode {
 	case "dizzy-corrected":
-		neighbors := vo.Neighbors
+		neighbors := cut(vo.Neighbors)
 		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "dizzy-2hop":
 		// Single-pass dizzy with an expanded 2-hop neighbor
 		// stencil so stranded cells (no unprocessed 1-hop
 		// neighbors) can still distribute error to 2-hop
 		// neighbors instead of dropping it.
-		neighbors := voxel.BuildNeighbors2Hop(cells)
+		neighbors := cut(voxel.BuildNeighbors2Hop(cells))
 		assignments, derr = voxel.DitherWithNeighbors(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "dizzy-recover":
 		// Single-pass dizzy with a local-solve recovery on
 		// stranded cells: instead of dropping the residual,
 		// search neighbor palette swaps for one that absorbs
 		// it in the global-drift sense.
-		neighbors := vo.Neighbors
+		neighbors := cut(vo.Neighbors)
 		assignments, derr = voxel.DitherWithRecover(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "floyd-steinberg":
-		neighbors := vo.Neighbors
+		neighbors := cut(vo.Neighbors)
 		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "riemersma":
-		neighbors := vo.Neighbors
-		assignments, derr = voxel.Riemersma(r.ctx, cells, pal, palAlpha, neighbors, r.opts.RiemersmaInputBias, r.tracker)
+		neighbors := cut(vo.Neighbors)
+		bias := r.opts.RiemersmaInputBias
+		if regionDither {
+			assignments, derr = voxel.DitherPerComponent(r.ctx, cells, pal, palAlpha, neighbors, r.tracker,
+				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, pa []float32, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
+					return voxel.Riemersma(ctx, c, p, pa, nb, bias, tr)
+				})
+		} else {
+			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, palAlpha, neighbors, bias, r.tracker)
+		}
 	case "riemersma-pair":
 		// Sliding 2-cell Riemersma with residual-cancellation
 		// coupling. Same drift as base Riemersma; lower wander on
 		// flat/textured fixtures at ≈2× the per-cell cost.
-		neighbors := vo.Neighbors
-		assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, palAlpha, neighbors, voxel.RiemersmaPairCancellationDefault, r.opts.RiemersmaInputBias, r.tracker)
+		neighbors := cut(vo.Neighbors)
+		bias := r.opts.RiemersmaInputBias
+		if regionDither {
+			assignments, derr = voxel.DitherPerComponent(r.ctx, cells, pal, palAlpha, neighbors, r.tracker,
+				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, pa []float32, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
+					return voxel.RiemersmaPair(ctx, c, p, pa, nb, voxel.RiemersmaPairCancellationDefault, bias, tr)
+				})
+		} else {
+			assignments, derr = voxel.RiemersmaPair(r.ctx, cells, pal, palAlpha, neighbors, voxel.RiemersmaPairCancellationDefault, bias, r.tracker)
+		}
 	case "blue-noise":
 		// Adaptive simplex blue-noise threshold dither: per-cell
 		// best-K simplex (1..palette_size) selected by per-cell
@@ -2352,7 +2383,7 @@ func (r *pipelineRun) runDither() (any, error) {
 		// reductions in wander on uniform/near-flat regions
 		// (where Riemersma's window accumulator forces visible
 		// far-palette picks).
-		neighbors := vo.Neighbors
+		neighbors := cut(vo.Neighbors)
 		tol := r.opts.BlueNoiseTolerance
 		if tol <= 0 {
 			tol = voxel.BlueNoiseAdaptiveTolDefault

@@ -87,6 +87,19 @@ type Options struct {
 	// higher (~20-30) ignores soft shading and cuts only crisp edges. 0
 	// cuts on any difference.
 	ColorRegionContrast float64 `json:"ColorRegionContrast"`
+	// RegionDither confines the dither so quantization error never bleeds
+	// across a colour boundary: the cell adjacency graph is cut wherever
+	// neighbouring cell colours differ by more than RegionDitherDeltaE
+	// (CIE76), and each resulting colour region is dithered in isolation.
+	// This stops a grey region's diffused error from speckling an adjacent
+	// solid black or white region. Independent of ColorAwareCells (works
+	// with it on or off); off by default. Applies to every dither mode.
+	RegionDither bool `json:"RegionDither"`
+	// RegionDitherDeltaE is the colour-boundary threshold for RegionDither
+	// in standard CIE76 ΔE units. Smooth gradients (small per-cell steps)
+	// stay connected and keep diffusing; sharp jumps above this are cut.
+	// Only consulted when RegionDither is on.
+	RegionDitherDeltaE  float64 `json:"RegionDitherDeltaE"`
 	Brightness          float32
 	Contrast            float32
 	Saturation          float32
