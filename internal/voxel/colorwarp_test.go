@@ -1,7 +1,6 @@
 package voxel
 
 import (
-	"context"
 	"math"
 	"testing"
 )
@@ -27,48 +26,38 @@ func TestRgbLabRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWarpNoPins(t *testing.T) {
-	cells := []ActiveCell{
-		{Color: [3]uint8{100, 150, 200}},
-		{Color: [3]uint8{50, 50, 50}},
-	}
-	out, err := WarpCellColors(context.Background(), cells, nil)
+// warpTo applies a warp-only ColorTransform (no brightness/contrast/
+// saturation) to a single color via the live ColorTransform path used by
+// the pipeline's sampler.
+func warpTo(t *testing.T, pins []ColorWarpPin, in [3]uint8) [3]uint8 {
+	t.Helper()
+	ct, err := NewColorTransform(ColorAdjustment{}, pins)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != len(cells) {
-		t.Fatalf("expected %d cells, got %d", len(cells), len(out))
+	return ct.Apply(in)
+}
+
+func TestColorTransformIdentity(t *testing.T) {
+	ct, err := NewColorTransform(ColorAdjustment{}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := range cells {
-		if out[i].Color != cells[i].Color {
-			t.Errorf("cell %d: expected %v, got %v", i, cells[i].Color, out[i].Color)
-		}
+	if !ct.IsIdentity() {
+		t.Error("no adjustment and no pins should be identity")
 	}
-	// Verify it's a copy, not aliased.
-	out[0].Color = [3]uint8{0, 0, 0}
-	if cells[0].Color == out[0].Color {
-		t.Error("output aliases input")
+	in := [3]uint8{100, 150, 200}
+	if got := ct.Apply(in); got != in {
+		t.Errorf("identity transform changed color: %v -> %v", in, got)
 	}
 }
 
 func TestWarpSinglePin(t *testing.T) {
-	// A single pin: red → blue. A red cell should become blue.
+	// A single pin: red → blue. A red color should become blue.
 	red := [3]uint8{255, 0, 0}
 	blue := [3]uint8{0, 0, 255}
-	pins := []ColorWarpPin{{Source: red, Target: blue}}
-
-	cells := []ActiveCell{
-		{Color: red},
-	}
-	out, err := WarpCellColors(context.Background(), cells, pins)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The source color should map very close to the target.
-	got := out[0].Color
-	dist := colorDist(got, blue)
-	if dist > 5 {
+	got := warpTo(t, []ColorWarpPin{{Source: red, Target: blue}}, red)
+	if dist := colorDist(got, blue); dist > 5 {
 		t.Errorf("red→blue warp: expected close to %v, got %v (dist %.1f)", blue, got, dist)
 	}
 }
@@ -79,19 +68,8 @@ func TestWarpDistantColorUnchanged(t *testing.T) {
 	blue := [3]uint8{0, 0, 255}
 	green := [3]uint8{0, 255, 0}
 	// Use a tight sigma so the effect is very local.
-	pins := []ColorWarpPin{{Source: red, Target: blue, Sigma: 10}}
-
-	cells := []ActiveCell{
-		{Color: green},
-	}
-	out, err := WarpCellColors(context.Background(), cells, pins)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got := out[0].Color
-	dist := colorDist(got, green)
-	if dist > 10 {
+	got := warpTo(t, []ColorWarpPin{{Source: red, Target: blue, Sigma: 10}}, green)
+	if dist := colorDist(got, green); dist > 10 {
 		t.Errorf("distant color should be mostly unchanged: expected ~%v, got %v (dist %.1f)", green, got, dist)
 	}
 }
@@ -108,22 +86,11 @@ func TestWarpTwoPins(t *testing.T) {
 		{Source: green, Target: yellow},
 	}
 
-	cells := []ActiveCell{
-		{Color: red},
-		{Color: green},
+	if dist := colorDist(warpTo(t, pins, red), blue); dist > 5 {
+		t.Errorf("red→blue: dist %.1f from target", dist)
 	}
-	out, err := WarpCellColors(context.Background(), cells, pins)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	distRedBlue := colorDist(out[0].Color, blue)
-	if distRedBlue > 5 {
-		t.Errorf("red→blue: got %v, dist %.1f from target", out[0].Color, distRedBlue)
-	}
-	distGreenYellow := colorDist(out[1].Color, yellow)
-	if distGreenYellow > 5 {
-		t.Errorf("green→yellow: got %v, dist %.1f from target", out[1].Color, distGreenYellow)
+	if dist := colorDist(warpTo(t, pins, green), yellow); dist > 5 {
+		t.Errorf("green→yellow: dist %.1f from target", dist)
 	}
 }
 
@@ -142,49 +109,37 @@ func TestWarpHeterogeneousSigmas(t *testing.T) {
 		{Source: green, Target: yellow, Sigma: 80}, // very wide
 	}
 
-	cells := []ActiveCell{
-		{Color: red},
-		{Color: green},
-		{Color: olive},
-	}
-	out, err := WarpCellColors(context.Background(), cells, pins)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Both pin sources should still land on their targets.
-	distRedBlue := colorDist(out[0].Color, blue)
-	if distRedBlue > 5 {
-		t.Errorf("red→blue: got %v, dist %.1f from target", out[0].Color, distRedBlue)
+	if dist := colorDist(warpTo(t, pins, red), blue); dist > 5 {
+		t.Errorf("red→blue: dist %.1f from target", dist)
 	}
-	distGreenYellow := colorDist(out[1].Color, yellow)
-	if distGreenYellow > 5 {
-		t.Errorf("green→yellow: got %v, dist %.1f from target", out[1].Color, distGreenYellow)
+	if dist := colorDist(warpTo(t, pins, green), yellow); dist > 5 {
+		t.Errorf("green→yellow: dist %.1f from target", dist)
 	}
 
 	// Olive is between red and green. The wide green pin (sigma=80) should
 	// affect it more than the tight red pin (sigma=5). So olive should shift
 	// at least slightly toward yellow. With Wendland C2, the effect is small
 	// (olive is at r≈0.79 of green's radius) but nonzero.
-	oliveDistToOriginal := colorDist(out[2].Color, olive)
-	if oliveDistToOriginal < 1 {
-		t.Errorf("olive should be shifted by wide green pin, but dist from original is only %.1f", oliveDistToOriginal)
+	if dist := colorDist(warpTo(t, pins, olive), olive); dist < 1 {
+		t.Errorf("olive should be shifted by wide green pin, but dist from original is only %.1f", dist)
 	}
 }
 
-func TestWarpContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
-	cells := make([]ActiveCell, 100000)
-	for i := range cells {
-		cells[i].Color = [3]uint8{128, 128, 128}
+func TestColorTransformAdjustBeforeWarp(t *testing.T) {
+	// The adjustment must run before the warp lookup. Brightness +100 turns
+	// black into white; a white→red pin then fires. If the warp ran first
+	// (on black, far from the white source) the result would be a brightened
+	// black ≈ white, not red — so landing on red proves the ordering.
+	black := [3]uint8{0, 0, 0}
+	white := [3]uint8{255, 255, 255}
+	red := [3]uint8{255, 0, 0}
+	ct, err := NewColorTransform(ColorAdjustment{Brightness: 100}, []ColorWarpPin{{Source: white, Target: red}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	pins := []ColorWarpPin{{Source: [3]uint8{128, 128, 128}, Target: [3]uint8{0, 0, 0}}}
-
-	_, err := WarpCellColors(ctx, cells, pins)
-	if err == nil {
-		t.Error("expected error from cancelled context")
+	if got := ct.Apply(black); colorDist(got, red) > 8 {
+		t.Errorf("adjust-before-warp: black+bright→white→red expected ~%v, got %v (dist %.1f)", red, got, colorDist(got, red))
 	}
 }
 

@@ -74,7 +74,7 @@ func TestSampleSlabCompositesStickerFromSeparateMesh(t *testing.T) {
 			sbuf = voxel.NewSearchBuf(len(sm.Faces))
 		}
 		out := SampleSlab(&slab, 0, colorModel, colorSI, cellSize, 0,
-			decals, sm, sSI, nil, nil, buf, sbuf, nil, nil, nil, nil)
+			decals, sm, sSI, nil, nil, buf, sbuf, nil, nil, nil, nil, nil)
 		if len(out) != 1 {
 			t.Fatalf("want 1 cell sample, got %d", len(out))
 		}

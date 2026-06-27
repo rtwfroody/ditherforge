@@ -76,7 +76,7 @@ func SampleCells(
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	out := []CellSample{}
 	for si_ := range slabs {
-		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil, nil, nil, nil, nil)...)
+		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil, nil, nil, nil, nil, nil)...)
 	}
 	return out
 }
@@ -131,6 +131,7 @@ func SampleSlab(
 	geomSI *voxel.SpatialIndex,
 	geomBuf *voxel.SearchBuf,
 	colorBVH *voxel.RayBVH,
+	colorCorrect func([3]uint8) [3]uint8,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	// The decal lookup indexes stickerModel's faces, which can outnumber
@@ -205,6 +206,17 @@ func SampleSlab(
 				uint8(clampF(gSum/wSum, 0, 255) + 0.5),
 				uint8(clampF(bSum/wSum, 0, 255) + 0.5),
 			}
+			// Apply the color-pin/adjustment correction ONCE, to the cell's
+			// averaged color — matching the removed StageColorAdjust/
+			// StageColorWarp, which corrected the aggregated cell color. The
+			// adjustment (contrast/saturation + clamp) and Lab-space warp are
+			// nonlinear, so correcting each raw sample before averaging would
+			// shift boundary cells. This keeps cell colors bit-identical to
+			// the old post-voxelize stages and runs the warp once per cell, not
+			// once per sample point.
+			if colorCorrect != nil {
+				color = colorCorrect(color)
+			}
 		}
 		out = append(out, CellSample{
 			SlabIdx:  slabIdx,
@@ -247,6 +259,7 @@ func SampleSurfaceColor(
 	geomSI *voxel.SpatialIndex,
 	geomBuf *voxel.SearchBuf,
 	colorBVH *voxel.RayBVH,
+	colorCorrect func([3]uint8) [3]uint8,
 ) ([3]uint8, bool) {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	startBack := slabThick + rayBackMargin
@@ -259,6 +272,11 @@ func SampleSurfaceColor(
 	rgba := voxel.SampleAlongNormal(p, cellN, startBack, reach, model, colorBVH, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
 	if rgba[3] < 128 {
 		return [3]uint8{}, false
+	}
+	// Correct the colour at the sample so colour-aware segmentation cuts on
+	// the same corrected colours the cells are later painted with.
+	if colorCorrect != nil {
+		return colorCorrect([3]uint8{rgba[0], rgba[1], rgba[2]}), true
 	}
 	return [3]uint8{rgba[0], rgba[1], rgba[2]}, true
 }

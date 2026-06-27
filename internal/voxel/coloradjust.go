@@ -1,11 +1,5 @@
 package voxel
 
-import (
-	"context"
-	"runtime"
-	"sync"
-)
-
 // ColorAdjustment holds brightness/contrast/saturation parameters.
 // All values are in the range -100 to +100, with 0 meaning no change.
 type ColorAdjustment struct {
@@ -60,54 +54,6 @@ func clamp8(v float32) uint8 {
 	return uint8(v*255 + 0.5)
 }
 
-// AdjustCellColors applies color adjustments to a slice of cells in parallel.
-// Returns a new slice; the input is not modified.
-func AdjustCellColors(ctx context.Context, cells []ActiveCell, adj ColorAdjustment) ([]ActiveCell, error) {
-	if adj.IsIdentity() {
-		// Return a copy so downstream stages can't mutate the cached voxelize output.
-		out := make([]ActiveCell, len(cells))
-		copy(out, cells)
-		return out, nil
-	}
-
-	out := make([]ActiveCell, len(cells))
-	n := len(cells)
-	numWorkers := runtime.NumCPU()
-	if numWorkers > n {
-		numWorkers = n
-	}
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
-	chunkSize := (n + numWorkers - 1) / numWorkers
-
-	var wg sync.WaitGroup
-	for w := range numWorkers {
-		lo := w * chunkSize
-		hi := lo + chunkSize
-		if hi > n {
-			hi = n
-		}
-		if lo >= hi {
-			continue
-		}
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for i := start; i < end; i++ {
-				if (i-start)%10000 == 0 && ctx.Err() != nil {
-					return
-				}
-				out[i] = cells[i]
-				r, g, b := AdjustColor(cells[i].Color[0], cells[i].Color[1], cells[i].Color[2], adj)
-				out[i].Color = [3]uint8{r, g, b}
-			}
-		}(lo, hi)
-	}
-	wg.Wait()
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return out, nil
-}
+// AdjustColor is applied per-color through ColorTransform (see
+// colortransform.go); the former AdjustCellColors batch helper was removed
+// when color correction moved into the sampler.

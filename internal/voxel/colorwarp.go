@@ -5,12 +5,9 @@
 package voxel
 
 import (
-	"context"
 	"fmt"
 	"math"
-	"runtime"
 	"sort"
-	"sync"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 )
@@ -200,19 +197,11 @@ func labToRGB(L, a, b float64) [3]uint8 {
 	}
 }
 
-// WarpCellColors applies Gaussian RBF color warping to a slice of cells.
-// Each pin maps a source color to a target color; the warp is exact at pin
-// colors and decays smoothly with distance in CIELAB space.
-// Each pin's Sigma controls its falloff in standard delta-E units; 0 means
-// auto-compute from median pairwise distance between pin sources.
-// Returns a new slice; the input is not modified.
-func WarpCellColors(ctx context.Context, cells []ActiveCell, pins []ColorWarpPin) ([]ActiveCell, error) {
-	if len(pins) == 0 {
-		out := make([]ActiveCell, len(cells))
-		copy(out, cells)
-		return out, nil
-	}
-
+// newRBFSystem builds the Gaussian-RBF interpolation system for a set of
+// warp pins. The returned system's eval() maps any input color toward the
+// pin targets, exact at the pin sources and decaying smoothly with CIELAB
+// distance. Pins must be non-empty.
+func newRBFSystem(pins []ColorWarpPin) (*rbfSystem, error) {
 	// Convert pins to Lab.
 	// go-colorful uses Lab values scaled by 1/100 relative to standard CIELAB.
 	sources := make([][3]float64, len(pins))
@@ -239,47 +228,10 @@ func WarpCellColors(ctx context.Context, cells []ActiveCell, pins []ColorWarpPin
 	if err != nil {
 		return nil, fmt.Errorf("color warp: %w", err)
 	}
-
-	// Apply warp in parallel.
-	out := make([]ActiveCell, len(cells))
-	n := len(cells)
-	numWorkers := runtime.NumCPU()
-	if numWorkers > n {
-		numWorkers = n
-	}
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
-	chunkSize := (n + numWorkers - 1) / numWorkers
-
-	var wg sync.WaitGroup
-	for w := range numWorkers {
-		lo := w * chunkSize
-		hi := lo + chunkSize
-		if hi > n {
-			hi = n
-		}
-		if lo >= hi {
-			continue
-		}
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for i := start; i < end; i++ {
-				if (i-start)%10000 == 0 && ctx.Err() != nil {
-					return
-				}
-				out[i] = cells[i]
-				L, a, b := rgbToLab(cells[i].Color)
-				wL, wa, wb := sys.eval(L, a, b)
-				out[i].Color = labToRGB(wL, wa, wb)
-			}
-		}(lo, hi)
-	}
-	wg.Wait()
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return out, nil
+	return sys, nil
 }
+
+// The warp is applied per-color through ColorTransform (see
+// colortransform.go), built on newRBFSystem + rbfSystem.eval above. The
+// former WarpCellColors batch helper was removed when color correction moved
+// into the sampler.

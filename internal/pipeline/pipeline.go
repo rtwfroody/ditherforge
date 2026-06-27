@@ -578,8 +578,8 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	// Merge — the final output mesh. On a warm cache this is the
-	// only intermediate stage we touch; Voxelize/ColorAdjust/Warp/
-	// Dither/Clip stay on disk and are never read.
+	// only intermediate stage we touch; Voxelize/Palette/Dither/Clip
+	// stay on disk and are never read.
 	//
 	// ShowSampledColors debug bypass: skip Merge (which would erase
 	// per-face section provenance via coplanar coalescing) and

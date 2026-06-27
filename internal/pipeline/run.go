@@ -731,7 +731,7 @@ func reportFlipsIfEnabled(clipped cellslicer.ClipResult, shellHalfIdx []byte, lo
 //
 // A "make"-like dependency graph: top-level callers ask for the
 // outputs they need (typically Load/Sticker for previews, Merge/
-// Palette for export). Intermediate stages (Voxelize, ColorAdjust,
+// Palette for export). Intermediate stages (Voxelize, Palette,
 // Dither, Clip, …) are loaded only when something downstream of them
 // can't be served from cache.
 type pipelineRun struct {
@@ -780,14 +780,6 @@ func (r *pipelineRun) Sticker() (*stickerOutput, error) {
 
 func (r *pipelineRun) Voxelize() (*voxelizeOutput, error) {
 	return resolveTyped[voxelizeOutput](r, StageVoxelize)
-}
-
-func (r *pipelineRun) ColorAdjust() (*colorAdjustOutput, error) {
-	return resolveTyped[colorAdjustOutput](r, StageColorAdjust)
-}
-
-func (r *pipelineRun) ColorWarp() (*colorWarpOutput, error) {
-	return resolveTyped[colorWarpOutput](r, StageColorWarp)
 }
 
 func (r *pipelineRun) Palette() (*paletteOutput, error) {
@@ -1327,9 +1319,10 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 
 // Voxelize partitions the geometry mesh into cellslicer slabs and
 // cells, samples a color per cell from the texture-bearing color
-// mesh, and builds the cell-adjacency graph used by Dither. Output
-// cells (visible only) feed ColorAdjust → Dither; the full per-slab
-// cell polygons (vo.CellSlabs) feed Clip.
+// mesh (applying the color-pin/adjustment correction at sample time,
+// see buildColorCorrect), and builds the cell-adjacency graph used by
+// Dither. Output cells (visible only) feed Palette → Dither; the full
+// per-slab cell polygons (vo.CellSlabs) feed Clip.
 // runVoxelize is StageVoxelize's body (see stageDefs).
 func (r *pipelineRun) runVoxelize() (any, error) {
 	lo, err := r.Load()
@@ -1474,6 +1467,17 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 		units = []voxUnit{{geom: lo.Model, colorXform: nil, halfIdx: 0}}
 	}
 
+	// Per-color correction (brightness/contrast/saturation + warp pins),
+	// applied to every sampled color inside the cellslicer so color-aware
+	// segmentation, dither, and the "Show sampled colors" debug view all
+	// see the corrected colors — there is no stage that uses the raw
+	// colors. nil when the correction is identity (skips the per-sample
+	// call entirely).
+	colorCorrect, ccErr := r.buildColorCorrect()
+	if ccErr != nil {
+		return nil, ccErr
+	}
+
 	// Run the cellslicer chain (slice → footprint → partition →
 	// sample → adjacency) once per unit, then concatenate. The
 	// global cell index is the position in the flattened CellSlabs
@@ -1493,7 +1497,7 @@ func (r *pipelineRun) runVoxelize() (any, error) {
 		// whole bar).
 		progLo := visSpanHi + ui*(progress.ScaleTotal-visSpanHi)/len(units)
 		progHi := visSpanHi + (ui+1)*(progress.ScaleTotal-visSpanHi)/len(units)
-		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, colorBVH, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
+		hv, herr := r.sliceSampleHalf(u.geom, colorModel, spatial, colorBVH, stickerModel, stickerSI, decals, baseColorOverride, u.colorXform, colorCorrect, u.halfIdx, cellSizeForSlab, firstLayerH, layerH, stage, progLo, progHi)
 		if herr != nil {
 			return nil, herr
 		}
@@ -1787,6 +1791,7 @@ func (r *pipelineRun) sliceSampleHalf(
 	decals []*voxel.StickerDecal,
 	override voxel.BaseColorOverride,
 	colorXform func([3]float32) [3]float32,
+	colorCorrect func([3]uint8) [3]uint8,
 	halfIdx byte,
 	cellSizeForSlab func(int) float32,
 	firstLayerH, layerH float32,
@@ -2001,7 +2006,7 @@ func (r *pipelineRun) sliceSampleHalf(
 			sample := func(x, y float32) ([3]uint8, bool) {
 				return cellslicer.SampleSurfaceColor(x, y, midZ, slabThick, cs,
 					colorModel, spatial, 0, decals, stickerModel, stickerSI, bufs.sticker,
-					override, colorXform, buf, geom, geomSI, bufs.geom, colorBVH)
+					override, colorXform, buf, geom, geomSI, bufs.geom, colorBVH, colorCorrect)
 			}
 			cells, coverTarget, stats = cellslicer.PartitionSlabAnalyticColor(footprints[i], fpBelow, fpAbove, cs, r.opts.ColorRegionContrast, sample)
 		} else {
@@ -2030,7 +2035,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
-		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker, geom, geomSI, bufs.geom, colorBVH)
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker, geom, geomSI, bufs.geom, colorBVH, colorCorrect)
 		sampleNs.Add(int64(time.Since(t1)))
 		progSlab(int(slabDone.Add(1)), nSlabs)
 	})
@@ -2140,43 +2145,18 @@ func modelZRange(m *loader.LoadedModel) (zMin, zMax float32) {
 	return
 }
 
-// runColorAdjust is StageColorAdjust's body (see stageDefs).
-func (r *pipelineRun) runColorAdjust() (any, error) {
-	vo, err := r.Voxelize()
-	if err != nil {
-		return nil, err
-	}
-	stage := progress.BeginStage(r.tracker, stageNames[StageColorAdjust], false, 0)
-	defer stage.Done()
+// buildColorCorrect assembles the per-color correction applied to every
+// sampled color during Voxelize: brightness/contrast/saturation followed by
+// the warp pins (see voxel.ColorTransform). Returns nil when the correction
+// is identity (no adjustment, no pins) so the sampler can skip it. This
+// replaces the former StageColorAdjust + StageColorWarp post-voxelize stages
+// — folding the math into sampling means segmentation and the debug view
+// also see corrected colors, and removes the warp/voxelize cache-desync.
+func (r *pipelineRun) buildColorCorrect() (func([3]uint8) [3]uint8, error) {
 	adj := voxel.ColorAdjustment{
 		Brightness: r.opts.Brightness,
 		Contrast:   r.opts.Contrast,
 		Saturation: r.opts.Saturation,
-	}
-	tAdj := time.Now()
-	cells, cerr := voxel.AdjustCellColors(r.ctx, vo.Cells, adj)
-	if cerr != nil {
-		return nil, cerr
-	}
-	if !adj.IsIdentity() {
-		plog.Printf("  Adjusted colors (B:%+.0f C:%+.0f S:%+.0f) in %.1fs",
-			r.opts.Brightness, r.opts.Contrast, r.opts.Saturation, time.Since(tAdj).Seconds())
-	}
-	return &colorAdjustOutput{Cells: cells}, nil
-}
-
-// runColorWarp is StageColorWarp's body (see stageDefs).
-func (r *pipelineRun) runColorWarp() (any, error) {
-	cao, err := r.ColorAdjust()
-	if err != nil {
-		return nil, err
-	}
-	stage := progress.BeginStage(r.tracker, stageNames[StageColorWarp], false, 0)
-	defer stage.Done()
-	if len(r.opts.WarpPins) == 0 {
-		cells := make([]voxel.ActiveCell, len(cao.Cells))
-		copy(cells, cao.Cells)
-		return &colorWarpOutput{Cells: cells}, nil
 	}
 	pins := make([]voxel.ColorWarpPin, len(r.opts.WarpPins))
 	for i, p := range r.opts.WarpPins {
@@ -2190,18 +2170,19 @@ func (r *pipelineRun) runColorWarp() (any, error) {
 		}
 		pins[i] = voxel.ColorWarpPin{Source: src[0], Target: tgt[0], Sigma: p.Sigma}
 	}
-	tWarp := time.Now()
-	cells, werr := voxel.WarpCellColors(r.ctx, cao.Cells, pins)
-	if werr != nil {
-		return nil, werr
+	ct, err := voxel.NewColorTransform(adj, pins)
+	if err != nil {
+		return nil, err
 	}
-	plog.Printf("  Warped colors (%d pins) in %.1fs", len(pins), time.Since(tWarp).Seconds())
-	return &colorWarpOutput{Cells: cells}, nil
+	if ct.IsIdentity() {
+		return nil, nil
+	}
+	return ct.Apply, nil
 }
 
 // runPalette is StagePalette's body (see stageDefs).
 func (r *pipelineRun) runPalette() (any, error) {
-	cwo, err := r.ColorWarp()
+	vo, err := r.Voxelize()
 	if err != nil {
 		return nil, err
 	}
@@ -2215,8 +2196,10 @@ func (r *pipelineRun) runPalette() (any, error) {
 	if pcfg.NumColors > export3mf.MaxFilaments {
 		return nil, fmt.Errorf("palette has %d colors but max supported is %d", pcfg.NumColors, export3mf.MaxFilaments)
 	}
-	cells := make([]voxel.ActiveCell, len(cwo.Cells))
-	copy(cells, cwo.Cells)
+	// Voxelize already applied the color correction to each cell's color
+	// (see buildColorCorrect), so these are the corrected colors.
+	cells := make([]voxel.ActiveCell, len(vo.Cells))
+	copy(cells, vo.Cells)
 	ditherMode := r.opts.Dither
 	pal, palTDs, palLabels, palDisplay, perr := voxel.ResolvePalette(r.ctx, cells, pcfg, ditherMode != "none", r.tracker)
 	if perr != nil {

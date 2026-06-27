@@ -53,8 +53,6 @@ const (
 	StageSplit
 	StageSticker // builds decals from mesh, before voxelization
 	StageVoxelize
-	StageColorAdjust
-	StageColorWarp
 	StagePalette
 	StageDither
 	StageClip
@@ -118,15 +116,6 @@ func describeSticker(opts Options) string {
 
 func describeVoxelize(opts Options) string {
 	return fmt.Sprintf("Voxelize: %s @ %.2f/%.2fmm", filepath.Base(opts.Input), opts.NozzleDiameter, opts.LayerHeight)
-}
-
-func describeColorAdjust(opts Options) string {
-	return fmt.Sprintf("Color adjust: %s (B%+.0f C%+.0f S%+.0f)",
-		filepath.Base(opts.Input), opts.Brightness, opts.Contrast, opts.Saturation)
-}
-
-func describeColorWarp(opts Options) string {
-	return fmt.Sprintf("Color warp: %s (%d pins)", filepath.Base(opts.Input), len(opts.WarpPins))
 }
 
 func describePalette(opts Options) string {
@@ -476,8 +465,9 @@ type voxelizeOutput struct {
 	// Cells holds one ActiveCell per visible cellslicer cell, with
 	// the cell's centroid XYZ, sampled Color, and XY area times
 	// LayerHeight. Produced by the Voxelize stage from the cellslicer
-	// partition; consumed by ColorAdjust / ColorWarp / Palette /
-	// Dither without their needing to know the cell topology.
+	// partition (colors already corrected by buildColorCorrect at sample
+	// time); consumed by Palette / Dither without their needing to know
+	// the cell topology.
 	Cells []voxel.ActiveCell
 
 	// CellSlabs is the full slab/cell partition (visible AND hidden
@@ -545,14 +535,6 @@ func (so *stickerOutput) ensureSI() *voxel.SpatialIndex {
 		}
 	})
 	return so.si
-}
-
-type colorAdjustOutput struct {
-	Cells []voxel.ActiveCell
-}
-
-type colorWarpOutput struct {
-	Cells []voxel.ActiveCell
 }
 
 // splitOutput is the result of cutting a watertight model in two and
@@ -888,6 +870,23 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// (voxel.SampleAlongNormal), instead of the laterally-nearest face.
 	// Caches from the nearest-face sampler hold different colors.
 	writeString(h, "alongnormal-v1")
+	// Sampling salt: "colorcorrect-v1" = the brightness/contrast/saturation
+	// adjustment and warp pins are now applied to each sampled color INSIDE
+	// Voxelize (folded in from the former StageColorAdjust + StageColorWarp),
+	// so color-aware segmentation and the sampled-color debug view see the
+	// corrected colors. Caches from the post-voxelize-correction era hold raw
+	// sampled colors and must rebuild. The settings themselves are hashed
+	// below so changing a pin or slider rebuilds Voxelize.
+	writeString(h, "colorcorrect-v1")
+	writeFloat32(h, opts.Brightness)
+	writeFloat32(h, opts.Contrast)
+	writeFloat32(h, opts.Saturation)
+	writeInt(h, len(opts.WarpPins))
+	for _, p := range opts.WarpPins {
+		writeString(h, p.SourceHex)
+		writeString(h, p.TargetHex)
+		writeFloat64(h, p.Sigma)
+	}
 	writeFloat32(h, cells.Layer0XY)
 	writeFloat32(h, cells.UpperXY)
 	writeFloat32(h, cells.Layer0Z)
@@ -919,21 +918,6 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 		// caches hold a wrong-length slice and must rebuild. "v3" = CutFace
 		// also includes connector pocket/peg cylinder cells.
 		writeString(h, "cutface-v3")
-	}
-}
-
-func hashColorAdjustSettings(c *StageCache, h hash.Hash64, opts Options) {
-	writeFloat32(h, opts.Brightness)
-	writeFloat32(h, opts.Contrast)
-	writeFloat32(h, opts.Saturation)
-}
-
-func hashColorWarpSettings(c *StageCache, h hash.Hash64, opts Options) {
-	writeInt(h, len(opts.WarpPins))
-	for _, p := range opts.WarpPins {
-		writeString(h, p.SourceHex)
-		writeString(h, p.TargetHex)
-		writeFloat64(h, p.Sigma)
 	}
 }
 

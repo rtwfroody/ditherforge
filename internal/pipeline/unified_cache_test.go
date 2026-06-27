@@ -48,14 +48,14 @@ func TestStageKeyCascade(t *testing.T) {
 	}
 }
 
-// TestStageKeyDownstreamCascade: changing Brightness (which is in
-// colorAdjustSettings) invalidates StageColorAdjust and every stage
-// after it, but not the upstream stages (Load, Sticker, Voxelize).
+// TestStageKeyDownstreamCascade: changing Brightness (part of the color
+// correction now hashed into Voxelize) invalidates StageVoxelize and every
+// stage after it, but not the upstream stages (Load, Sticker, Split).
 //
 // LayerHeight and NozzleDiameter both legitimately affect StageLoad
 // now (via the post-/pre-wrap decimate inside Load), so they're no
-// longer good "downstream-only" probes. Brightness has no upstream
-// effect by construction.
+// longer good "downstream-only" probes. Brightness has no effect above
+// Voxelize by construction.
 func TestStageKeyDownstreamCascade(t *testing.T) {
 	c := NewStageCache()
 	path := makeFakeInput(t)
@@ -63,12 +63,16 @@ func TestStageKeyDownstreamCascade(t *testing.T) {
 	other := base
 	other.Brightness = 0.5
 
-	for s := StageParse; s < StageColorAdjust; s++ {
+	// Brightness is now applied to sampled colors inside Voxelize (the
+	// color correction was folded in from the former StageColorAdjust /
+	// StageColorWarp stages), so Voxelize and everything downstream of it
+	// must change while the load/split/sticker stages above it stay put.
+	for s := StageParse; s < StageVoxelize; s++ {
 		if c.stageKey(s, base) != c.stageKey(s, other) {
 			t.Errorf("upstream stage %d key changed when only Brightness changed", s)
 		}
 	}
-	for s := StageColorAdjust; s < numStages; s++ {
+	for s := StageVoxelize; s < numStages; s++ {
 		if c.stageKey(s, base) == c.stageKey(s, other) {
 			t.Errorf("stage %d key did not change when Brightness changed", s)
 		}
