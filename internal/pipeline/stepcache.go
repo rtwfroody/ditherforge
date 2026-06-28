@@ -717,6 +717,14 @@ func hashParseSettings(c *StageCache, h hash.Hash64, opts Options) {
 	}
 	writeString(h, v.Input)
 	writeInt(h, v.ObjectIndex)
+	// Cache salt: "alphamode-v1" = the glTF loader now bakes per-face
+	// FaceAlphaMode/FaceAlphaCutoff, and color sampling honors the glTF
+	// alphaMode rules (OPAQUE ignores texture alpha; MASK applies the
+	// cutoff). A model parsed before this field existed decodes it as nil,
+	// which the sampler treats as the legacy "combine alpha as-is" path —
+	// so without this salt a warm parse cache would keep dropping opaque-
+	// material transparent texels. Bumping it forces a fresh parse.
+	writeString(h, "alphamode-v1")
 }
 
 func hashPreloadSettings(c *StageCache, h hash.Hash64, opts Options) {
@@ -878,6 +886,13 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// sampled colors and must rebuild. The settings themselves are hashed
 	// below so changing a pin or slider rebuilds Voxelize.
 	writeString(h, "colorcorrect-v1")
+	// Sampling salt: "alphamode-v1" = color sampling now honors the glTF
+	// material alphaMode (OPAQUE/MASK ignore the texture alpha channel for
+	// both the kept/dropped decision AND the RGB composite; only BLEND/
+	// legacy composites the texture over base color by texel alpha). Caches
+	// from the always-honor-texture-alpha sampler hold different colors and
+	// dropped/kept cells, so they must rebuild.
+	writeString(h, "alphamode-v1")
 	writeFloat32(h, opts.Brightness)
 	writeFloat32(h, opts.Contrast)
 	writeFloat32(h, opts.Saturation)

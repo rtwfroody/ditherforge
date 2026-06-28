@@ -17,12 +17,14 @@ type modelOnDisk struct {
 	UVs            [][2]float32
 	VertexColors   [][4]uint8
 	Textures       []imageraw.Tex
-	FaceTextureIdx []int32
-	FaceAlpha      []float32
-	FaceBaseColor  [][4]uint8
-	NoTextureMask  []bool
-	FaceMeshIdx    []int32
-	NumMeshes      int
+	FaceTextureIdx  []int32
+	FaceAlpha       []float32
+	FaceAlphaMode   []uint8
+	FaceAlphaCutoff []float32
+	FaceBaseColor   [][4]uint8
+	NoTextureMask   []bool
+	FaceMeshIdx     []int32
+	NumMeshes       int
 }
 
 // GobEncode lets gob serialize a LoadedModel. nil receivers encode
@@ -42,12 +44,14 @@ func (m *LoadedModel) GobEncode() ([]byte, error) {
 		Faces:          m.Faces,
 		UVs:            m.UVs,
 		VertexColors:   m.VertexColors,
-		FaceTextureIdx: m.FaceTextureIdx,
-		FaceAlpha:      m.FaceAlpha,
-		FaceBaseColor:  m.FaceBaseColor,
-		NoTextureMask:  m.NoTextureMask,
-		FaceMeshIdx:    m.FaceMeshIdx,
-		NumMeshes:      m.NumMeshes,
+		FaceTextureIdx:  m.FaceTextureIdx,
+		FaceAlpha:       m.FaceAlpha,
+		FaceAlphaMode:   m.FaceAlphaMode,
+		FaceAlphaCutoff: m.FaceAlphaCutoff,
+		FaceBaseColor:   m.FaceBaseColor,
+		NoTextureMask:   m.NoTextureMask,
+		FaceMeshIdx:     m.FaceMeshIdx,
+		NumMeshes:       m.NumMeshes,
 	}
 	if len(m.Textures) > 0 {
 		od.Textures = make([]imageraw.Tex, len(m.Textures))
@@ -75,6 +79,8 @@ func (m *LoadedModel) GobDecode(data []byte) error {
 	m.VertexColors = od.VertexColors
 	m.FaceTextureIdx = od.FaceTextureIdx
 	m.FaceAlpha = od.FaceAlpha
+	m.FaceAlphaMode = od.FaceAlphaMode
+	m.FaceAlphaCutoff = od.FaceAlphaCutoff
 	m.FaceBaseColor = od.FaceBaseColor
 	m.NoTextureMask = od.NoTextureMask
 	m.FaceMeshIdx = od.FaceMeshIdx

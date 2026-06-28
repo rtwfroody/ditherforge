@@ -24,17 +24,51 @@ import (
 // slice field in place. Use CloneForEdit to obtain a working copy first, and
 // extend the clone if adding mutation of additional fields.
 type LoadedModel struct {
-	Vertices       [][3]float32  // world-space, axis-transformed but NOT scaled (file units; apply ScaleModel)
+	Vertices       [][3]float32 // world-space, axis-transformed but NOT scaled (file units; apply ScaleModel)
 	Faces          [][3]uint32
-	UVs            [][2]float32  // per-vertex, aligned to Vertices
+	UVs            [][2]float32 // per-vertex, aligned to Vertices
 	VertexColors   [][4]uint8   // per-vertex RGBA; nil if no vertex colors
 	Textures       []image.Image
-	FaceTextureIdx []int32       // index into Textures; len(Textures) is sentinel for no-texture faces
-	FaceAlpha      []float32     // per-face material alpha (0=transparent, 1=opaque); nil if all opaque
-	FaceBaseColor  [][4]uint8    // per-face material base color (RGBA)
-	NoTextureMask  []bool        // nil if no texture-less faces; true = use base color
-	FaceMeshIdx    []int32       // which original mesh each face belongs to
-	NumMeshes      int           // total number of original meshes
+	FaceTextureIdx []int32   // index into Textures; len(Textures) is sentinel for no-texture faces
+	FaceAlpha      []float32 // per-face material alpha (0=transparent, 1=opaque); nil if all opaque
+	// FaceAlphaMode is the per-face glTF alphaMode (AlphaModeOpaque/Mask/Blend).
+	// nil means "no mode info" — callers fall back to legacy alpha handling
+	// (combine factor×texture alpha as-is), which preserves the behaviour of
+	// loaders that don't populate it (OBJ/DAE/3MF) and of pre-fix caches.
+	FaceAlphaMode []uint8
+	// FaceAlphaCutoff is the per-face MASK cutoff; nil means use the glTF
+	// default (0.5). Only consulted when the face's mode is AlphaModeMask.
+	FaceAlphaCutoff []float32
+	FaceBaseColor   [][4]uint8 // per-face material base color (RGBA)
+	NoTextureMask   []bool     // nil if no texture-less faces; true = use base color
+	FaceMeshIdx     []int32    // which original mesh each face belongs to
+	NumMeshes       int        // total number of original meshes
+}
+
+// glTF alphaMode values (mirrors gltf.AlphaOpaque/Mask/Blend), stored
+// per face in LoadedModel.FaceAlphaMode so the sampler can apply the
+// spec rules without importing the gltf package.
+const (
+	AlphaModeOpaque uint8 = 0
+	AlphaModeMask   uint8 = 1
+	AlphaModeBlend  uint8 = 2
+)
+
+// DefaultAlphaCutoff is the glTF default MASK cutoff (spec §3.9.4).
+const DefaultAlphaCutoff float32 = 0.5
+
+// alphaModeFromGLTF maps a qmuntal/gltf AlphaMode to our local enum with
+// an explicit switch (rather than a numeric cast) so a future library
+// renumber fails loudly here instead of silently mis-mapping every face.
+func alphaModeFromGLTF(m gltf.AlphaMode) uint8 {
+	switch m {
+	case gltf.AlphaMask:
+		return AlphaModeMask
+	case gltf.AlphaBlend:
+		return AlphaModeBlend
+	default: // gltf.AlphaOpaque
+		return AlphaModeOpaque
+	}
 }
 
 // mat4 is a column-major 4x4 float64 matrix.
@@ -126,10 +160,12 @@ type primitiveData struct {
 	uvs          [][2]float32
 	vertexColors [][4]uint8 // per-vertex RGBA; nil if no vertex colors
 	indices      []uint32
-	textureIdx   int     // index into accumulated texture list; -1 if no texture
-	meshIdx      int     // which GLTF mesh this primitive belongs to
+	textureIdx   int      // index into accumulated texture list; -1 if no texture
+	meshIdx      int      // which GLTF mesh this primitive belongs to
 	matAlpha     float32  // material-level alpha (from BaseColorFactor + AlphaMode)
 	baseColor    [4]uint8 // material base color factor (RGBA, 0-255)
+	alphaMode    uint8    // glTF alphaMode (AlphaModeOpaque/Mask/Blend)
+	alphaCutoff  float32  // MASK cutoff (glTF default 0.5)
 }
 
 // clampF32 clamps v to [lo, hi].
@@ -177,6 +213,12 @@ func DeepCloneForMutation(m *LoadedModel) *LoadedModel {
 	}
 	if m.FaceAlpha != nil {
 		c.FaceAlpha = append([]float32(nil), m.FaceAlpha...)
+	}
+	if m.FaceAlphaMode != nil {
+		c.FaceAlphaMode = append([]uint8(nil), m.FaceAlphaMode...)
+	}
+	if m.FaceAlphaCutoff != nil {
+		c.FaceAlphaCutoff = append([]float32(nil), m.FaceAlphaCutoff...)
 	}
 	if m.FaceBaseColor != nil {
 		c.FaceBaseColor = append([][4]uint8(nil), m.FaceBaseColor...)
@@ -365,8 +407,12 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 				texIdx, hasTexture := resolveTexture(prim.Material)
 				alpha := float32(1.0)
 				baseColor := [4]uint8{255, 255, 255, 255}
+				alphaMode := AlphaModeOpaque
+				alphaCutoff := DefaultAlphaCutoff
 				if prim.Material != nil {
 					mat := doc.Materials[*prim.Material]
+					alphaMode = alphaModeFromGLTF(mat.AlphaMode)
+					alphaCutoff = float32(mat.AlphaCutoffOrDefault())
 					if mat.AlphaMode == gltf.AlphaBlend {
 						if pbr := mat.PBRMetallicRoughness; pbr != nil && pbr.BaseColorFactor != nil {
 							alpha = float32(pbr.BaseColorFactor[3])
@@ -391,6 +437,8 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 					meshIdx:      meshIdx,
 					matAlpha:     alpha,
 					baseColor:    baseColor,
+					alphaMode:    alphaMode,
+					alphaCutoff:  alphaCutoff,
 				}
 				if hasTexture {
 					texturedPrims = append(texturedPrims, pd)
@@ -458,9 +506,12 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 	var allVertColors [][4]uint8
 	var allFaceTex []int32
 	var allFaceAlpha []float32
+	var allFaceAlphaMode []uint8
+	var allFaceAlphaCutoff []float32
 	var allFaceBaseColor [][4]uint8
 	var allFaceMesh []int32
 	hasNonOpaque := false
+	hasMaskMode := false
 	hasVertexColors := false
 
 	appendPrim := func(pd primitiveData, texIdx int32) {
@@ -493,10 +544,15 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 			})
 			allFaceTex = append(allFaceTex, texIdx)
 			allFaceAlpha = append(allFaceAlpha, pd.matAlpha)
+			allFaceAlphaMode = append(allFaceAlphaMode, pd.alphaMode)
+			allFaceAlphaCutoff = append(allFaceAlphaCutoff, pd.alphaCutoff)
 			allFaceBaseColor = append(allFaceBaseColor, pd.baseColor)
 			allFaceMesh = append(allFaceMesh, int32(pd.meshIdx))
 			if pd.matAlpha < 1.0 {
 				hasNonOpaque = true
+			}
+			if pd.alphaMode == AlphaModeMask {
+				hasMaskMode = true
 			}
 		}
 	}
@@ -570,23 +626,33 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 		faceAlpha = allFaceAlpha
 	}
 
+	// FaceAlphaMode is always populated for glTF (every face has an explicit
+	// alphaMode, defaulting to OPAQUE), so the sampler can apply the spec
+	// rules. The MASK cutoff array is only carried when some material uses
+	// MASK; otherwise nil → the default cutoff is assumed.
+	var faceAlphaCutoff []float32
+	if hasMaskMode {
+		faceAlphaCutoff = allFaceAlphaCutoff
+	}
+
 	var vertColors [][4]uint8
 	if hasVertexColors {
 		vertColors = allVertColors
 	}
 
 	return &LoadedModel{
-		Vertices:       allVerts,
-		Faces:          allFaces,
-		UVs:            allUVs,
-		VertexColors:   vertColors,
-		Textures:       texList,
-		FaceTextureIdx: allFaceTex,
-		FaceAlpha:      faceAlpha,
-		FaceBaseColor:  allFaceBaseColor,
-		NoTextureMask:  noTextureMask,
-		FaceMeshIdx:    allFaceMesh,
-		NumMeshes:      meshCounter,
+		Vertices:        allVerts,
+		Faces:           allFaces,
+		UVs:             allUVs,
+		VertexColors:    vertColors,
+		Textures:        texList,
+		FaceTextureIdx:  allFaceTex,
+		FaceAlpha:       faceAlpha,
+		FaceAlphaMode:   allFaceAlphaMode,
+		FaceAlphaCutoff: faceAlphaCutoff,
+		FaceBaseColor:   allFaceBaseColor,
+		NoTextureMask:   noTextureMask,
+		FaceMeshIdx:     allFaceMesh,
+		NumMeshes:       meshCounter,
 	}, nil
 }
-

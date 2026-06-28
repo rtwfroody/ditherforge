@@ -41,6 +41,34 @@ func TestLoadedModelGobRoundTripNoTextures(t *testing.T) {
 	}
 }
 
+// TestLoadedModelGobRoundTripAlphaMode: the per-face glTF alphaMode and
+// cutoff survive the gob round-trip. Without this the disk-cached parse
+// stage drops them, FaceAlphaMode decodes as nil, and the alphaMode-aware
+// sampler silently reverts to the legacy (combine-alpha-as-is) path on
+// every warm cache hit.
+func TestLoadedModelGobRoundTripAlphaMode(t *testing.T) {
+	src := &LoadedModel{
+		Vertices:        [][3]float32{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}},
+		Faces:           [][3]uint32{{0, 1, 2}, {0, 1, 2}},
+		FaceAlphaMode:   []uint8{AlphaModeOpaque, AlphaModeMask},
+		FaceAlphaCutoff: []float32{0.5, 0.25},
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(src); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var dst LoadedModel
+	if err := gob.NewDecoder(&buf).Decode(&dst); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(dst.FaceAlphaMode) != 2 || dst.FaceAlphaMode[1] != AlphaModeMask {
+		t.Errorf("FaceAlphaMode not preserved: %+v", dst.FaceAlphaMode)
+	}
+	if len(dst.FaceAlphaCutoff) != 2 || dst.FaceAlphaCutoff[1] != 0.25 {
+		t.Errorf("FaceAlphaCutoff not preserved: %+v", dst.FaceAlphaCutoff)
+	}
+}
+
 // TestLoadedModelGobRoundTripWithTextures: textures survive raw NRGBA
 // round-trip inside the gob payload.
 func TestLoadedModelGobRoundTripWithTextures(t *testing.T) {

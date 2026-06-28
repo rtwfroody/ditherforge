@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"math/rand"
 	"sort"
@@ -290,6 +291,71 @@ func BilinearSample(img image.Image, u, v float32) [4]uint8 {
 	}
 }
 
+// BilinearSampleStraight is like BilinearSample but returns NON-premultiplied
+// (straight) RGB: a fully-transparent texel keeps its authored color instead
+// of collapsing to premultiplied black. Used for glTF OPAQUE/MASK faces,
+// where the alpha channel is ignored and the texture's own RGB is the
+// surface color. The returned alpha is the straight texel alpha (used only
+// to gate the kept/dropped decision, never to premultiply the RGB).
+func BilinearSampleStraight(img image.Image, u, v float32) [4]uint8 {
+	bounds := img.Bounds()
+	W := float32(bounds.Max.X - bounds.Min.X)
+	H := float32(bounds.Max.Y - bounds.Min.Y)
+
+	u = u - float32(math.Floor(float64(u)))
+	v = v - float32(math.Floor(float64(v)))
+
+	px := u * (W - 1)
+	py := v * (H - 1)
+	x0 := int(px)
+	y0 := int(py)
+	x1 := x0 + 1
+	y1 := y0 + 1
+	if x1 >= int(W) {
+		x1 = int(W) - 1
+	}
+	if y1 >= int(H) {
+		y1 = int(H) - 1
+	}
+	fx := px - float32(x0)
+	fy := py - float32(y0)
+
+	// NRGBA stores straight (non-premultiplied) values, so the fast path
+	// reads the Pix buffer directly — the common case for PNG textures.
+	if src, ok := img.(*image.NRGBA); ok {
+		stride := src.Stride
+		at := func(x, y int) (float32, float32, float32, float32) {
+			i := y*stride + x*4
+			return float32(src.Pix[i]), float32(src.Pix[i+1]), float32(src.Pix[i+2]), float32(src.Pix[i+3])
+		}
+		r00, g00, b00, a00 := at(x0, y0)
+		r10, g10, b10, a10 := at(x1, y0)
+		r01, g01, b01, a01 := at(x0, y1)
+		r11, g11, b11, a11 := at(x1, y1)
+		return [4]uint8{
+			bilinearLerp(r00, r10, r01, r11, fx, fy),
+			bilinearLerp(g00, g10, g01, g11, fx, fy),
+			bilinearLerp(b00, b10, b01, b11, fx, fy),
+			bilinearLerp(a00, a10, a01, a11, fx, fy),
+		}
+	}
+	// Generic fallback: convert each corner to straight NRGBA.
+	at := func(x, y int) (float32, float32, float32, float32) {
+		c := color.NRGBAModel.Convert(img.At(x+bounds.Min.X, y+bounds.Min.Y)).(color.NRGBA)
+		return float32(c.R), float32(c.G), float32(c.B), float32(c.A)
+	}
+	r00, g00, b00, a00 := at(x0, y0)
+	r10, g10, b10, a10 := at(x1, y0)
+	r01, g01, b01, a01 := at(x0, y1)
+	r11, g11, b11, a11 := at(x1, y1)
+	return [4]uint8{
+		bilinearLerp(r00, r10, r01, r11, fx, fy),
+		bilinearLerp(g00, g10, g01, g11, fx, fy),
+		bilinearLerp(b00, b10, b01, b11, fx, fy),
+		bilinearLerp(a00, a10, a01, a11, fx, fy),
+	}
+}
+
 func bilinearLerp(a, b, c, d, fx, fy float32) uint8 {
 	v := a*(1-fx)*(1-fy) + b*fx*(1-fy) + c*(1-fx)*fy + d*fx*fy
 	if v < 0 {
@@ -392,6 +458,64 @@ func faceMaterial(faceIdx int, model *loader.LoadedModel) (matAlpha float32, bc 
 	return
 }
 
+// combineAlpha resolves a face's final sample alpha (0..255) from the
+// texel/vertex alpha (texelA, 0..1) and the material, applying the glTF
+// alphaMode rules when the loader supplied per-face mode info:
+//
+//   - OPAQUE: alpha is ignored entirely → fully opaque (glTF spec §3.9.4).
+//   - MASK:   combined alpha ≥ alphaCutoff → opaque, else fully transparent.
+//   - BLEND:  combined alpha (baseColorFactor.a × texel alpha) is used as-is.
+//
+// The combined base-color alpha is factor.a × texel.a, where factor.a is
+// bc[3]/255 (the baseColorFactor alpha). When FaceAlphaMode is nil — loaders
+// that don't populate it (OBJ/DAE/3MF) and pre-fix caches — it falls back to
+// the legacy formula (texel × factor × matAlpha) so their output is unchanged.
+func combineAlpha(model *loader.LoadedModel, faceIdx int, texelA float32, bc [4]uint8, matAlpha float32) uint8 {
+	return uint8(ClampF(combineAlphaF(model, faceIdx, texelA, bc, matAlpha)+0.5, 0, 255))
+}
+
+// combineAlphaF is combineAlpha without the final round-to-uint8, so
+// multi-point averagers (SampleByTrianglePoints) can accumulate raw
+// floats and round once at the end — preserving the legacy path's
+// byte-identical result instead of summing per-point rounding error.
+func combineAlphaF(model *loader.LoadedModel, faceIdx int, texelA float32, bc [4]uint8, matAlpha float32) float32 {
+	if model.FaceAlphaMode != nil {
+		combined := texelA * float32(bc[3]) / 255 // factor.a × texel alpha
+		switch model.FaceAlphaMode[faceIdx] {
+		case loader.AlphaModeOpaque:
+			return 255
+		case loader.AlphaModeMask:
+			cutoff := loader.DefaultAlphaCutoff
+			if model.FaceAlphaCutoff != nil {
+				cutoff = model.FaceAlphaCutoff[faceIdx]
+			}
+			if combined >= cutoff {
+				return 255
+			}
+			return 0
+		default: // AlphaModeBlend
+			return ClampF(combined*255, 0, 255)
+		}
+	}
+	// Legacy path: no per-face alphaMode (non-glTF loaders / stale caches).
+	return ClampF(texelA*float32(bc[3])*matAlpha, 0, 255)
+}
+
+// faceIgnoresTextureAlpha reports whether a face's glTF alphaMode discards
+// the texture's alpha channel for COLOR purposes. OPAQUE and MASK take the
+// surface color straight from the texture RGB (the alpha only gates the
+// kept/dropped decision); BLEND and the legacy non-glTF path composite the
+// texture over the base color by the texel alpha. Faces that ignore texture
+// alpha must read the texture via BilinearSampleStraight, since the default
+// premultiplied sample collapses transparent texels to black.
+func faceIgnoresTextureAlpha(model *loader.LoadedModel, faceIdx int) bool {
+	if model.FaceAlphaMode == nil {
+		return false
+	}
+	m := model.FaceAlphaMode[faceIdx]
+	return m == loader.AlphaModeOpaque || m == loader.AlphaModeMask
+}
+
 // FaceAlpha returns the effective alpha for a face, sampling the texture at
 // the centroid UV and combining with material alpha and base color alpha.
 // Note: centroid sampling is an approximation; large triangles spanning
@@ -407,12 +531,11 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 		c1 := model.VertexColors[f[1]]
 		c2 := model.VertexColors[f[2]]
 		avgA := (float32(c0[3]) + float32(c1[3]) + float32(c2[3])) / 3
-		a := avgA / 255 * float32(bc[3]) * matAlpha
-		return uint8(ClampF(a+0.5, 0, 255))
+		return combineAlpha(model, faceIdx, avgA/255, bc, matAlpha)
 	}
 
 	if texIdx < 0 || int(texIdx) >= len(model.Textures) {
-		return uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
+		return combineAlpha(model, faceIdx, 1, bc, matAlpha)
 	}
 	uv0 := model.UVs[f[0]]
 	uv1 := model.UVs[f[1]]
@@ -422,8 +545,7 @@ func FaceAlpha(faceIdx int, model *loader.LoadedModel) uint8 {
 
 	rgba := BilinearSample(model.Textures[texIdx], u, v)
 	texA := float32(rgba[3]) / 255
-	a := texA * float32(bc[3]) * matAlpha
-	return uint8(ClampF(a+0.5, 0, 255))
+	return combineAlpha(model, faceIdx, texA, bc, matAlpha)
 }
 
 // BaseColorContext bundles the inputs an override may consult when
@@ -664,14 +786,23 @@ func resolveFaceColor(
 		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
 		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
 
-		rgba = BilinearSample(model.Textures[texIdx], u, v)
-		// Alpha-blend texture sample over material base color.
-		texA := float32(rgba[3]) / 255
-		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
-		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
-		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
-		// Combine texture alpha, base color alpha, and material alpha.
-		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
+		if faceIgnoresTextureAlpha(model, int(tri)) {
+			// glTF OPAQUE/MASK: the surface color is the straight texture
+			// RGB (alpha ignored). Sample non-premultiplied so transparent
+			// texels keep their authored color instead of going black.
+			s := BilinearSampleStraight(model.Textures[texIdx], u, v)
+			texA := float32(s[3]) / 255
+			rgba = [4]uint8{s[0], s[1], s[2], combineAlpha(model, int(tri), texA, bc, matAlpha)}
+		} else {
+			// BLEND/legacy: composite the (premultiplied) texture over the
+			// material base color by the texel alpha.
+			rgba = BilinearSample(model.Textures[texIdx], u, v)
+			texA := float32(rgba[3]) / 255
+			rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
+			rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
+			rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
+			rgba[3] = combineAlpha(model, int(tri), texA, bc, matAlpha)
+		}
 	} else if model.VertexColors != nil {
 		// Vertex color interpolation path.
 		c0 := model.VertexColors[f[0]]
@@ -681,17 +812,16 @@ func resolveFaceColor(
 		g := bary[0]*float32(c0[1]) + bary[1]*float32(c1[1]) + bary[2]*float32(c2[1])
 		b := bary[0]*float32(c0[2]) + bary[1]*float32(c1[2]) + bary[2]*float32(c2[2])
 		a := bary[0]*float32(c0[3]) + bary[1]*float32(c1[3]) + bary[2]*float32(c2[3])
-		// Modulate by material base color and alpha.
+		// Modulate by material base color; alpha follows the alphaMode rules.
 		rgba = [4]uint8{
 			uint8(ClampF(r*float32(bc[0])/255+0.5, 0, 255)),
 			uint8(ClampF(g*float32(bc[1])/255+0.5, 0, 255)),
 			uint8(ClampF(b*float32(bc[2])/255+0.5, 0, 255)),
-			uint8(ClampF(a*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+			combineAlpha(model, int(tri), a/255, bc, matAlpha),
 		}
 	} else {
 		// Base color only path.
-		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
-		rgba = [4]uint8{bc[0], bc[1], bc[2], a}
+		rgba = [4]uint8{bc[0], bc[1], bc[2], combineAlpha(model, int(tri), 1, bc, matAlpha)}
 	}
 
 	// Composite sticker decals over the base color. When stickers live on
@@ -891,6 +1021,14 @@ func SampleByTriangleFootprint(p [3]float32, model *loader.LoadedModel, triIdx i
 		uv2 := model.UVs[f[2]]
 		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
 		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+		if faceIgnoresTextureAlpha(model, int(triIdx)) {
+			// glTF OPAQUE/MASK: straight texture RGB, alpha ignored. (The
+			// box-filter footprint path is for opaque high-detail textures,
+			// so the straight bilinear sample is the right fallback here.)
+			s := BilinearSampleStraight(model.Textures[texIdx], u, v)
+			texA := float32(s[3]) / 255
+			return [4]uint8{s[0], s[1], s[2], combineAlpha(model, int(triIdx), texA, bc, matAlpha)}
+		}
 		var rgba [4]uint8
 		if radiusU > 0 || radiusV > 0 {
 			rgba = BoxSample(model.Textures[texIdx], u, v, radiusU, radiusV)
@@ -901,7 +1039,7 @@ func SampleByTriangleFootprint(p [3]float32, model *loader.LoadedModel, triIdx i
 		rgba[0] = uint8(float32(rgba[0])*texA + float32(bc[0])*(1-texA))
 		rgba[1] = uint8(float32(rgba[1])*texA + float32(bc[1])*(1-texA))
 		rgba[2] = uint8(float32(rgba[2])*texA + float32(bc[2])*(1-texA))
-		rgba[3] = uint8(ClampF(texA*float32(bc[3])*matAlpha+0.5, 0, 255))
+		rgba[3] = combineAlpha(model, int(triIdx), texA, bc, matAlpha)
 		return rgba
 	}
 	if model.VertexColors != nil {
@@ -916,11 +1054,10 @@ func SampleByTriangleFootprint(p [3]float32, model *loader.LoadedModel, triIdx i
 			uint8(ClampF(rr*float32(bc[0])/255+0.5, 0, 255)),
 			uint8(ClampF(gg*float32(bc[1])/255+0.5, 0, 255)),
 			uint8(ClampF(bb*float32(bc[2])/255+0.5, 0, 255)),
-			uint8(ClampF(aa*float32(bc[3])/255*matAlpha+0.5, 0, 255)),
+			combineAlpha(model, int(triIdx), aa/255, bc, matAlpha),
 		}
 	}
-	a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
-	return [4]uint8{bc[0], bc[1], bc[2], a}
+	return [4]uint8{bc[0], bc[1], bc[2], combineAlpha(model, int(triIdx), 1, bc, matAlpha)}
 }
 
 // SampleByTrianglePoints is a legacy multi-point averaging path
@@ -945,16 +1082,28 @@ func SampleByTrianglePoints(model *loader.LoadedModel, triIdx int32, pts [][3]fl
 		uv1 := model.UVs[f[1]]
 		uv2 := model.UVs[f[2]]
 		tex := model.Textures[texIdx]
+		ignoreAlpha := faceIgnoresTextureAlpha(model, int(triIdx))
 		for _, p := range pts {
 			bary := sampleBaryAt(p, v0, v1, v2)
 			u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
 			v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
-			rgba := BilinearSample(tex, u, v)
+			var rgba [4]uint8
+			if ignoreAlpha {
+				// glTF OPAQUE/MASK: straight texture RGB, alpha ignored.
+				rgba = BilinearSampleStraight(tex, u, v)
+				sumR += float32(rgba[0])
+				sumG += float32(rgba[1])
+				sumB += float32(rgba[2])
+			} else {
+				// BLEND/legacy: composite premultiplied texture over base.
+				rgba = BilinearSample(tex, u, v)
+				texA := float32(rgba[3]) / 255
+				sumR += float32(rgba[0])*texA + float32(bc[0])*(1-texA)
+				sumG += float32(rgba[1])*texA + float32(bc[1])*(1-texA)
+				sumB += float32(rgba[2])*texA + float32(bc[2])*(1-texA)
+			}
 			texA := float32(rgba[3]) / 255
-			sumR += float32(rgba[0])*texA + float32(bc[0])*(1-texA)
-			sumG += float32(rgba[1])*texA + float32(bc[1])*(1-texA)
-			sumB += float32(rgba[2])*texA + float32(bc[2])*(1-texA)
-			sumA += texA * float32(bc[3]) * matAlpha
+			sumA += combineAlphaF(model, int(triIdx), texA, bc, matAlpha)
 		}
 		return [4]uint8{
 			uint8(ClampF(sumR/n+0.5, 0, 255)),
@@ -975,7 +1124,7 @@ func SampleByTrianglePoints(model *loader.LoadedModel, triIdx int32, pts [][3]fl
 			sumR += rr * float32(bc[0]) / 255
 			sumG += gg * float32(bc[1]) / 255
 			sumB += bb * float32(bc[2]) / 255
-			sumA += aa * float32(bc[3]) / 255 * matAlpha
+			sumA += combineAlphaF(model, int(triIdx), aa/255, bc, matAlpha)
 		}
 		return [4]uint8{
 			uint8(ClampF(sumR/n+0.5, 0, 255)),
@@ -984,8 +1133,7 @@ func SampleByTrianglePoints(model *loader.LoadedModel, triIdx int32, pts [][3]fl
 			uint8(ClampF(sumA/n+0.5, 0, 255)),
 		}
 	default:
-		a := uint8(ClampF(matAlpha*float32(bc[3])+0.5, 0, 255))
-		return [4]uint8{bc[0], bc[1], bc[2], a}
+		return [4]uint8{bc[0], bc[1], bc[2], combineAlpha(model, int(triIdx), 1, bc, matAlpha)}
 	}
 }
 

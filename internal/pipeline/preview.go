@@ -279,6 +279,16 @@ func previewFaceTranslucent(model *loader.LoadedModel, fi int, faceAlpha uint8) 
 	if !faceIsTextured(model, fi) {
 		return false
 	}
+	// OPAQUE and MASK materials ignore the texture's alpha channel (glTF
+	// spec), so a translucent texel does not make the face translucent —
+	// matching the alphaMode-aware output sampler. Only BLEND (and the
+	// legacy nil path) routes a translucent texel to the alpha-blend pass.
+	if model.FaceAlphaMode != nil {
+		switch model.FaceAlphaMode[fi] {
+		case loader.AlphaModeOpaque, loader.AlphaModeMask:
+			return false
+		}
+	}
 	idx := model.FaceTextureIdx[fi]
 	f := model.Faces[fi]
 	uv0 := model.UVs[f[0]]

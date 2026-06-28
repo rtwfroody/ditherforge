@@ -1083,6 +1083,12 @@ func appendSubdividedFace(model *loader.LoadedModel, parentIdx int, face [3]uint
 	if model.FaceAlpha != nil {
 		model.FaceAlpha = append(model.FaceAlpha, model.FaceAlpha[parentIdx])
 	}
+	if model.FaceAlphaMode != nil {
+		model.FaceAlphaMode = append(model.FaceAlphaMode, model.FaceAlphaMode[parentIdx])
+	}
+	if model.FaceAlphaCutoff != nil {
+		model.FaceAlphaCutoff = append(model.FaceAlphaCutoff, model.FaceAlphaCutoff[parentIdx])
+	}
 	if model.FaceBaseColor != nil {
 		model.FaceBaseColor = append(model.FaceBaseColor, model.FaceBaseColor[parentIdx])
 	}
