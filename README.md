@@ -223,6 +223,26 @@ regions that are nearly a single solid color.
 Set the value with the **Color snap (delta E)** slider (0 to 50, default 5).
 Set to 0 to disable.
 
+## How to Keep Color Edges Crisp
+
+Two options in the **Advanced** section keep sharp color boundaries from
+muddying. They are independent and can be used together.
+
+- **Color-aware cells** (on by default) — segments each layer by color and
+  tiles each monochrome region separately, so cell boundaries land *on* color
+  boundaries. A checkerboard or other sharp pattern stays pure black/white
+  instead of averaging to gray along the edges. Color features smaller than one
+  cell are merged away. The **Color contrast (delta E)** slider sets how
+  different two surface colors must be before their boundary is cut into a cell
+  edge — low (~5) cuts almost any edge, higher (~20–30) only crisp ones.
+- **Confine dither to color regions** (off by default) — stops dither error
+  from bleeding across color boundaries. The cell graph is split into color
+  regions and each is dithered in isolation, so a gray area's error can't
+  speckle an adjacent solid black or white area. Smooth gradients still diffuse
+  normally; only sharp color jumps act as barriers. Works with every dither
+  mode. The **Region barrier (delta E)** slider sets how different neighboring
+  colors must be to count as a barrier.
+
 ## How to Choose a Dither Mode
 
 The **Dither** panel selects how each voxel's pre-dither color is mapped onto
@@ -283,20 +303,34 @@ To split a model:
 2. Choose the **Cut plane** (XY, XZ, or YZ) and the **Offset** along that
    axis. The 3D viewer overlays a translucent quad showing the live cut
    position.
-3. Pick a **Connector style**:
+3. Optionally tilt the cut off-axis with the two **Tilt about …** angles
+   (±85° each). Both at 0° gives a flat axis-aligned cut; combine the two
+   for a fully oblique plane.
+4. Pick a **Connector style**:
    - **Pegs** — a solid peg on one half mates with a matching pocket on the
-     other. Best for FDM where dowel hardware isn't on hand.
+     other. Best for FDM where dowel hardware isn't on hand. Two peg
+     options choose which half carries the male pegs.
    - **Dowel/magnet holes** — matching pockets on both halves; print
      or buy dowel pins, or glue in magnets for a magnetic catch.
    - **None** — flat cut, glue-only assembly.
-4. Adjust **Count** (number of connectors along the cut; **Auto** picks 1, 2,
+5. Adjust **Count** (number of connectors along the cut; **Auto** picks 1, 2,
    or 3 based on the cut polygon's inscribed-circle radius), **Diameter**,
    **Depth**, **Clearance** (per-side radial gap on the female feature so
    the peg slides in), and **Bed gap** (space between the two halves on the
    plate) as needed.
-5. Export the result with **File > Export 3MF** as usual. The exported file
+6. Choose how each half rests on the bed with the per-half orientation
+   dropdowns. **Cut face down/up** rests the half on its seam (the default,
+   and it stays flat even when the cut is tilted); the **±axis up** options
+   rest the half on a model side instead.
+7. Export the result with **File > Export 3MF** as usual. The exported file
    contains two build items, one per half, that the slicer treats as
    independent objects.
+
+The freshly exposed cut face is hidden once the halves are reassembled, so
+DitherForge fills it (and any connector pockets) with a single flat filament —
+the nearest palette color to the cut's average — instead of wasting print time
+dithering a surface no one sees. Only a thin rim at the visible perimeter seam
+keeps its dithered detail. This is automatic; there is no toggle.
 
 Stickers, color pins, and base color are applied to the original (unsplit)
 mesh, so they survive the cut and appear on whichever half they land on.
@@ -351,11 +385,12 @@ compatible with OrcaSlicer and BambuStudio.
    across mesh adjacency. Sticker colors are alpha-composited over the base
    texture.
 3. **Split** (optional) — cuts the geometry mesh along the configured plane
-   using CGAL's `Polygon_mesh_processing::clip`, bakes peg or dowel
-   connectors into the cut faces via boolean ops, and lays the two halves
-   side by side on the build plate. Color sampling stays in the original
-   mesh's coordinate frame, so stickers, color pins, and base color
-   survive the cut unchanged.
+   (axis-aligned or tilted) using CGAL's `Polygon_mesh_processing::clip`,
+   bakes peg or dowel connectors into the cut faces via boolean ops, and lays
+   the two halves side by side on the build plate. The hidden cut face is
+   flat-filled with a single filament (only the visible perimeter rim keeps
+   its dither). Color sampling stays in the original mesh's coordinate frame,
+   so stickers, color pins, and base color survive the cut unchanged.
 4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
    layer settings. Each cell gets the color sampled from the original texture
    (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
@@ -548,11 +583,13 @@ glue-up.
 | Split into two parts | off | Master toggle. When off, the rest of the section is hidden and the pipeline behaves as if Split didn't exist. Forces Alpha-wrap on; turning Alpha-wrap off auto-disables Split. |
 | Cut plane | XY | Axis-aligned plane: XY (cut along Z), XZ (cut along Y), or YZ (cut along X). |
 | Offset (mm) | bbox mid | Position of the cut plane along the chosen axis, measured from the model's local origin. Adjustable via number field or slider. |
-| Connector style | Pegs | `Pegs` (built-in male/female), `Dowel/magnet holes` (matching pockets for separate dowel pins or glued-in magnets), or `None` (flat cut). |
+| Tilt about … (°) | 0 | Two angles (±85° each) that tilt the cut off the chosen axis. Both 0° = flat axis-aligned cut; combine for a fully oblique plane. |
+| Connector style | Pegs | `Pegs` (built-in male/female; two options choose which half carries the pegs), `Dowel/magnet holes` (matching pockets for separate dowel pins or glued-in magnets), or `None` (flat cut). |
 | Count | Auto | Number of connectors. `Auto` picks 1, 2, or 3 based on the cut polygon's inscribed-circle radius. |
 | Diameter (mm) | 3.0 | Connector diameter. Hidden when style is None. |
 | Depth (mm) | 2.0 | Connector depth (per side for dowels/magnets). Hidden when style is None. |
 | Clearance (mm) | 0.15 | Per-side clearance applied to the female feature, both radially (pocket diameter) and axially (pocket depth). |
+| Half orientation | Cut face down/up | Per half, how it rests on the bed. `Cut face down/up` rests on the seam (stays flat even when tilted); `±axis up` rests on a model side. |
 
 While the Split panel is open, a translucent overlay in the 3D viewer shows
 the live cut plane through the input model.
@@ -618,6 +655,10 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 |--------|---------|-------------|
 | No merge | off | Disables coplanar triangle merging in the final mesh |
 | No simplify | off | Disables the load-time QEM mesh decimation |
+| Color-aware cells | on | Tiles each layer per color region so cell boundaries land on color boundaries (crisp edges). See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
+| Color contrast (delta E) | 20 | (Color-aware cells.) Minimum CIELAB color difference for a boundary to be cut into a cell edge. |
+| Confine dither to color regions | off | Dithers each color region in isolation so error can't bleed across sharp color boundaries. See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
+| Region barrier (delta E) | 20 | (Confine dither.) Minimum CIELAB color difference for a cell boundary to act as a dither-error barrier. |
 | Alpha-wrap | off | Wraps the input mesh with a watertight shell (CGAL Alpha-wrap) to fix self-intersections, thin walls, and other geometry that slicers choke on. Can be slow on large models. |
 | Alpha (mm) | nozzle diameter | Alpha-wrap probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
 | Offset (mm) | alpha / 30 | How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
