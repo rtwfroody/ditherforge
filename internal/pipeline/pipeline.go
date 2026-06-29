@@ -99,11 +99,11 @@ type Options struct {
 	// in standard CIE76 ΔE units. Smooth gradients (small per-cell steps)
 	// stay connected and keep diffusing; sharp jumps above this are cut.
 	// Only consulted when RegionDither is on.
-	RegionDitherDeltaE  float64 `json:"RegionDitherDeltaE"`
-	Brightness          float32
-	Contrast            float32
-	Saturation          float32
-	Dither              string
+	RegionDitherDeltaE float64 `json:"RegionDitherDeltaE"`
+	Brightness         float32
+	Contrast           float32
+	Saturation         float32
+	Dither             string
 	// RiemersmaInputBias is the per-cell input-bias maximum used by
 	// the Riemersma dither (only consulted when Dither == "riemersma").
 	// 0..1; higher = stronger pull toward nearest-input palette,
@@ -298,17 +298,15 @@ type MeshData struct {
 	// opaque models carry no extra payload.
 	FaceAlpha []uint8 `json:"FaceAlpha,omitempty"`
 
-	// FaceTranslucent (one byte per face, 1 = needs alpha-blend
-	// pipeline, 0 = render opaque) tells the renderer which faces
-	// have any non-opaque contribution at all (per-face alpha OR a
-	// translucent texture sample). Computed from voxel.FaceAlpha so
-	// it matches the output model's translucency criterion. The
-	// renderer needs this to put opaque and translucent faces in
-	// separate draw calls — keeping the opaque ones writing depth
-	// avoids the back-of-mesh depth-sort artifacts that show up when
-	// everything is drawn through the alpha-blend pipeline. Nil when
-	// every face is fully opaque.
-	FaceTranslucent []uint8 `json:"FaceTranslucent,omitempty"`
+	// FaceRenderClass (one byte per face) tells the renderer how to draw
+	// each face: 0 = opaque (depth on, no alpha test), 1 = cutout
+	// (per-fragment alpha test, depth on — transparent texels discarded,
+	// opaque ones write depth), 2 = blend (alpha-blended, depth writes
+	// off — genuinely translucent materials). Derived from the material's
+	// declared properties only; the texture's per-pixel alpha is resolved
+	// per-fragment at draw time rather than collapsed to a per-face flag.
+	// Nil when every face is plain opaque.
+	FaceRenderClass []uint8 `json:"FaceRenderClass,omitempty"`
 	// BaseColorAtlas carries a packed image of per-triangle MaterialX
 	// patches plus per-face-vertex UVs into the atlas. When non-nil
 	// the frontend renders the input mesh with this atlas mapped via

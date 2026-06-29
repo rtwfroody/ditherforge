@@ -421,6 +421,22 @@ func (b *RayBVH) FirstHit(o, d [3]float32, maxDist float32) (tri int32, t, u, v 
 // on it rather than on the colour mesh's own — sometimes inverted — winding.
 // Sole caller is voxel.SampleAlongNormal.
 func (b *RayBVH) FirstHitFront(o, d [3]float32, maxDist float32, cullN [3]float32) (tri int32, t, u, v float32, ok bool) {
+	return b.FirstHitFrontFunc(o, d, maxDist, cullN, nil)
+}
+
+// FirstHitFrontFunc is FirstHitFront with an optional per-hit accept
+// predicate: a front-facing intersection only counts when accept(tri, u, v)
+// returns true (accept==nil accepts every front hit, making this identical
+// to FirstHitFront). Rejected hits do NOT lower the search bound, so the
+// traversal continues past them and returns the nearest ACCEPTED front hit.
+//
+// This is how along-normal color sampling sees through transparent texels:
+// a decal's transparent-background texel (BLEND) or a below-cutoff MASK
+// texel is a hole, so its triangle is rejected and the ray resolves the
+// opaque surface behind it. Because every crossed triangle is tested in one
+// traversal (not a distance march), a panel coincident with the decal it
+// sits on is found at the same t and wins cleanly.
+func (b *RayBVH) FirstHitFrontFunc(o, d [3]float32, maxDist float32, cullN [3]float32, accept func(tri int32, u, v float32) bool) (tri int32, t, u, v float32, ok bool) {
 	inv := rayInvDir(d)
 	bestT := maxDist
 	tri = -1
@@ -432,7 +448,7 @@ func (b *RayBVH) FirstHitFront(o, d [3]float32, maxDist float32, cullN [3]float3
 			}
 			f := b.model.Faces[ti]
 			ht, hu, hv, hok := rayTriHitT(o, d, b.model.Vertices[f[0]], b.model.Vertices[f[1]], b.model.Vertices[f[2]])
-			if hok && ht < bestT {
+			if hok && ht < bestT && (accept == nil || accept(ti, hu, hv)) {
 				bestT = ht
 				tri = ti
 				t, u, v = ht, hu, hv

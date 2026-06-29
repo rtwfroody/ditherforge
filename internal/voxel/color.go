@@ -516,6 +516,33 @@ func faceIgnoresTextureAlpha(model *loader.LoadedModel, faceIdx int) bool {
 	return m == loader.AlphaModeOpaque || m == loader.AlphaModeMask
 }
 
+// faceHitStops reports whether the surface of face tri at barycentric
+// (s,t) is opaque enough to terminate an along-normal color ray, i.e.
+// whether it is a real surface rather than a see-through hole. It mirrors
+// combineAlphaF's alphaMode rules at the hit texel:
+//
+//   - OPAQUE / untextured opaque material: always stops (alpha is ignored).
+//   - MASK: stops only above the material's alpha cutoff (below = hole).
+//   - BLEND / legacy: stops at ≥50% combined alpha; a transparent decal
+//     background is a hole, so the ray continues to the surface behind it.
+//
+// Because a fully-opaque face yields 255 regardless of the texel, opaque
+// models are unaffected — the predicate only ever skips genuinely
+// transparent texels.
+func faceHitStops(model *loader.LoadedModel, tri int32, s, t float32) bool {
+	matAlpha, bc, texIdx := faceMaterial(int(tri), model)
+	texelA := float32(1)
+	if texIdx >= 0 && int(texIdx) < len(model.Textures) && model.UVs != nil {
+		f := model.Faces[tri]
+		bary := [3]float32{1 - s - t, s, t}
+		uv0, uv1, uv2 := model.UVs[f[0]], model.UVs[f[1]], model.UVs[f[2]]
+		u := bary[0]*uv0[0] + bary[1]*uv1[0] + bary[2]*uv2[0]
+		v := bary[0]*uv0[1] + bary[1]*uv1[1] + bary[2]*uv2[1]
+		texelA = float32(BilinearSample(model.Textures[texIdx], u, v)[3]) / 255
+	}
+	return combineAlphaF(model, int(tri), texelA, bc, matAlpha) >= 128
+}
+
 // FaceAlpha returns the effective alpha for a face, sampling the texture at
 // the centroid UV and combining with material alpha and base color alpha.
 // Note: centroid sampling is an approximation; large triangles spanning
@@ -929,7 +956,9 @@ func SampleAlongNormal(
 		// every triangle the ray crosses and returns the nearest front-facing
 		// one, so the front twin always wins and we sample the surface the
 		// viewer sees rather than falling back to a laterally-nearest face.
-		if tri, tt, u, v, ok := bvh.FirstHitFront(o, d, startBack+reach, normal); ok {
+		if tri, tt, u, v, ok := bvh.FirstHitFrontFunc(o, d, startBack+reach, normal, func(t int32, s, tv float32) bool {
+			return faceHitStops(model, t, s, tv)
+		}); ok {
 			// Read color from the material just BENEATH the surface, not
 			// exactly on it. The hit lands on the surface plane; when that
 			// plane coincides with a color-boundary of a position-driven
@@ -1683,6 +1712,7 @@ const recoverQualityWeight = 0.1
 //   - Single-swap per stranded cell. A multi-cell joint optimization
 //     would do better but scales as |palette|^k for k-cell regions;
 //     single-swap is the cheap heuristic.
+//
 // palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion
 // here identically. The stranded-cell local solve still uses the unweighted
 // regionObjective; stranded cells are a small fraction, so the opacity model
@@ -2208,6 +2238,7 @@ func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palA
 //   - slide=true: tour advances by 1 per step (sliding pair); only the
 //     left cell is committed each step, so each cell is scored as both
 //     the right of one pair and the left of the next.
+//
 // palAlpha (see DitherWithNeighbors / Riemersma) opacity-weights each
 // committed cell's window mass by its chosen color's opacity; nil/uniform =
 // identity.

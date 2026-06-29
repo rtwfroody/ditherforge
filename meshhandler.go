@@ -58,11 +58,11 @@ import (
 //	  If 1:
 //	    uint32 nFaceAlpha          (= face count, one byte per face, 0..255)
 //	    uint8[nFaceAlpha]
-//	Face translucent flag (optional, appended after face alpha):
-//	  uint32 hasFaceTranslucent    (0 or 1)
+//	Face render class (optional, appended after face alpha):
+//	  uint32 hasFaceRenderClass    (0 or 1)
 //	  If 1:
-//	    uint32 nFaceTranslucent    (= face count, one byte per face, 0 or 1)
-//	    uint8[nFaceTranslucent]
+//	    uint32 nFaceRenderClass    (= face count, one byte per face, 0..2)
+//	    uint8[nFaceRenderClass]    (0=opaque, 1=cutout, 2=blend)
 func float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
@@ -239,17 +239,18 @@ func (h *meshHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(tmp[:])
 	}
 
-	// Per-face translucency flag (optional). Lets the renderer split
-	// opaque from translucent faces into separate draw calls so
-	// depth writes from opaque geometry are not lost.
-	if len(mesh.FaceTranslucent) > 0 {
-		binary.LittleEndian.PutUint32(tmp[:], 1) // hasFaceTranslucent
+	// Per-face render class (optional): 0 = opaque, 1 = cutout (alpha
+	// test), 2 = blend. Lets the renderer draw each face per-fragment —
+	// alpha-testing cutout faces (so they still write depth) and routing
+	// only genuinely translucent faces to the depth-write-off blend pass.
+	if len(mesh.FaceRenderClass) > 0 {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasFaceRenderClass
 		w.Write(tmp[:])
-		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.FaceTranslucent)))
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.FaceRenderClass)))
 		w.Write(tmp[:])
-		w.Write(mesh.FaceTranslucent)
+		w.Write(mesh.FaceRenderClass)
 	} else {
-		binary.LittleEndian.PutUint32(tmp[:], 0) // no translucency flag
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no render class
 		w.Write(tmp[:])
 	}
 }

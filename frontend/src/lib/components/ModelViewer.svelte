@@ -385,7 +385,12 @@
   // (out of bounds, mask=0, or fully transparent atlas pixel) are
   // discarded, so the underlying base mesh shows through. Used for the
   // alpha-wrap overlay layer.
-  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null, stickerOnly: boolean = false, alphaBlend: boolean = false): THREE.MeshStandardMaterial {
+  // Per-face render classes, mirroring the backend's FaceRenderClass.
+  const RENDER_CLASS_OPAQUE = 0;
+  const RENDER_CLASS_CUTOUT = 1;
+  const RENDER_CLASS_BLEND = 2;
+
+  function createAdjustedMaterial(opts: THREE.MeshStandardMaterialParameters, stickerTex?: THREE.Texture | null, stickerOnly: boolean = false, renderClass: number = RENDER_CLASS_OPAQUE): THREE.MeshStandardMaterial {
     // Defaults tuned to match Orca's Phong look: roughness ~0.55 gives a
     // subtle specular lobe (Orca uses shininess=20), metalness=0 keeps colors
     // true-to-hue. Caller opts win on conflict.
@@ -393,14 +398,21 @@
     if (stickerOnly) {
       mat.transparent = true;
       mat.alphaTest = 0.001;
-    } else if (alphaBlend) {
-      // Translucent batch of the input preview — blend per-pixel
-      // texture alpha and per-face vertex alpha. Disable depth
-      // writes so back-facing translucent fragments don't occlude
-      // each other (the opaque batch in the same scene already
-      // wrote depth, which is what gates them against opaque
-      // geometry). alphaTest still drops fully-transparent pixels
-      // so they don't enter the blend.
+    } else if (renderClass === RENDER_CLASS_CUTOUT) {
+      // Cutout: discard fully/mostly-transparent texels per-fragment but
+      // keep depth writes on, so the opaque parts of a decal render
+      // order-independently like any opaque surface. This is how a decal
+      // on a transparent background draws correctly without classifying
+      // the whole triangle as translucent.
+      mat.transparent = false;
+      mat.alphaTest = 0.5;
+    } else if (renderClass === RENDER_CLASS_BLEND) {
+      // Genuinely translucent material (glass/window): blend per-pixel
+      // texture alpha and per-face vertex alpha. Disable depth writes so
+      // back-facing translucent fragments don't occlude each other (the
+      // opaque/cutout batches already wrote depth, which gates these
+      // against opaque geometry). alphaTest still drops fully-transparent
+      // pixels so they don't enter the blend.
       mat.transparent = true;
       mat.alphaTest = 0.01;
       mat.depthWrite = false;
@@ -473,12 +485,12 @@
     // texture alpha (which the textured path blends per-pixel). Null
     // when every face is fully opaque.
     faceAlpha: Uint8Array | null;
-    // faceTranslucent: per-face flag (1 = needs alpha-blend pipeline,
-    // 0 = render opaque). Centroid-aware, includes texture alpha.
-    // Drives the opaque/translucent split so opaque faces keep
-    // writing depth instead of getting depth-sort artifacts. Null
-    // when every face is fully opaque.
-    faceTranslucent: Uint8Array | null;
+    // faceRenderClass: per-face draw class — 0 = opaque (depth on, no
+    // alpha test), 1 = cutout (per-fragment alpha test, depth on), 2 =
+    // blend (alpha-blended, depth off). Derived from the material only;
+    // the texture's per-pixel alpha is resolved per-fragment at draw
+    // time. Null when every face is plain opaque.
+    faceRenderClass: Uint8Array | null;
   }
 
   interface BaseColorAtlas {
@@ -589,17 +601,17 @@
       }
     }
 
-    // Per-face translucency flag (optional).
-    let faceTranslucent: Uint8Array | null = null;
+    // Per-face render class (optional): 0=opaque, 1=cutout, 2=blend.
+    let faceRenderClass: Uint8Array | null = null;
     if (offset < buf.byteLength) {
-      const hasTrans = view.getUint32(offset, true); offset += 4;
-      if (hasTrans === 1) {
-        const nTrans = view.getUint32(offset, true); offset += 4;
-        faceTranslucent = new Uint8Array(buf.slice(offset, offset + nTrans)); offset += nTrans;
+      const hasClass = view.getUint32(offset, true); offset += 4;
+      if (hasClass === 1) {
+        const nClass = view.getUint32(offset, true); offset += 4;
+        faceRenderClass = new Uint8Array(buf.slice(offset, offset + nClass)); offset += nClass;
       }
     }
 
-    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas, faceAlpha, faceTranslucent };
+    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas, faceAlpha, faceRenderClass };
   }
 
   function hasTextures(td: TypedMeshData): boolean {
@@ -835,29 +847,28 @@
     const faceTexIdx = td.faceTextureIdx!;
     const faces = td.faces;
     const nFaces = faces.length / 3;
-    const ft = td.faceTranslucent;
+    const fr = td.faceRenderClass;
 
     const stickerAtlasTex = await loadStickerAtlas(td);
 
-    // Group faces by (texture index, translucency). Translucent faces
-    // need a separate draw call so they can disable depth writes
-    // without sacrificing the opaque faces' depth buffer — otherwise
-    // back-facing geometry shows through (or disappears) as the
-    // camera rotates and triangle draw order flips.
-    type Group = { texId: number; isTranslucent: boolean; faces: number[] };
+    // Group faces by (texture index, render class). Cutout faces alpha-test
+    // per-fragment while still writing depth; blend faces need a separate
+    // depth-write-off draw call so back-facing translucent geometry doesn't
+    // occlude itself as triangle draw order flips with the camera.
+    type Group = { texId: number; renderClass: number; faces: number[] };
     const groups = new Map<string, Group>();
     for (let f = 0; f < nFaces; f++) {
       const texId = faceTexIdx[f];
-      const isTranslucent = !!(ft && ft[f]);
-      const key = `${texId}|${isTranslucent ? 1 : 0}`;
+      const renderClass = fr ? fr[f] : RENDER_CLASS_OPAQUE;
+      const key = `${texId}|${renderClass}`;
       let g = groups.get(key);
-      if (!g) { g = { texId, isTranslucent, faces: [] }; groups.set(key, g); }
+      if (!g) { g = { texId, renderClass, faces: [] }; groups.set(key, g); }
       g.faces.push(f);
     }
 
     const meshes: SceneData['meshes'] = [];
 
-    for (const { texId, isTranslucent, faces: faceList } of groups.values()) {
+    for (const { texId, renderClass, faces: faceList } of groups.values()) {
       const faceIndices = new Uint32Array(faceList);
       const positions = unpackPositions(td, faceIndices);
 
@@ -887,14 +898,14 @@
 
         const tex = await loadTexture(textures[texId]);
         const opts: THREE.MeshStandardMaterialParameters = { map: tex };
-        if (isTranslucent && td.faceAlpha) {
+        if (renderClass === RENDER_CLASS_BLEND && td.faceAlpha) {
           // Multiply texture alpha by per-face alpha via white-RGB
           // vertex color so the texture color passes through.
           const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
           geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
           opts.vertexColors = true;
         }
-        const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, isTranslucent);
+        const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, renderClass);
         meshes.push({ geometry: geo, material: mat });
       } else {
         // Untextured group: prefer the MaterialX atlas when present
@@ -911,17 +922,17 @@
           geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
           const tex = await loadAtlasTexture(atlas.image);
           const opts: THREE.MeshStandardMaterialParameters = { map: tex };
-          if (isTranslucent && td.faceAlpha) {
+          if (renderClass === RENDER_CLASS_BLEND && td.faceAlpha) {
             const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
             geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
             opts.vertexColors = true;
           }
-          const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, isTranslucent);
+          const mat = createAdjustedMaterial(opts, stickerAtlasTex, false, renderClass);
           meshes.push({ geometry: geo, material: mat });
         } else {
           const { array, itemSize } = unpackFaceColors(td, faceIndices);
           geo.setAttribute('color', new THREE.BufferAttribute(array, itemSize));
-          const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, false, isTranslucent);
+          const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, false, renderClass);
           meshes.push({ geometry: geo, material: mat });
         }
       }
@@ -933,24 +944,20 @@
   async function buildFaceColorScene(td: TypedMeshData, stickerOnly: boolean = false): Promise<SceneData> {
     const nFaces = td.faces.length / 3;
     const stickerAtlasTex = await loadStickerAtlas(td);
-    const ft = td.faceTranslucent;
+    const fr = td.faceRenderClass;
 
-    // Split opaque vs translucent so opaque faces keep writing depth
-    // and translucent faces draw in their own depthWrite=false pass.
-    // When no translucency info is present (output mesh, or fully
-    // opaque input), everything goes through the single opaque pass.
-    const opaqueList: number[] = [];
-    const translucentList: number[] = [];
+    // Split by render class so opaque/cutout faces keep writing depth and
+    // only blend faces draw in their own depthWrite=false pass. When no
+    // class info is present (output mesh, or fully opaque input),
+    // everything falls into the single opaque pass.
+    const classLists: number[][] = [[], [], []];
     for (let f = 0; f < nFaces; f++) {
-      if (ft && ft[f]) translucentList.push(f);
-      else opaqueList.push(f);
+      classLists[fr ? fr[f] : RENDER_CLASS_OPAQUE].push(f);
     }
 
     const meshes: SceneData['meshes'] = [];
-    for (const { faceList, isTranslucent } of [
-      { faceList: opaqueList, isTranslucent: false },
-      { faceList: translucentList, isTranslucent: true },
-    ]) {
+    for (let renderClass = 0; renderClass < classLists.length; renderClass++) {
+      const faceList = classLists[renderClass];
       if (faceList.length === 0) continue;
       const faceIndices = new Uint32Array(faceList);
       const positions = unpackPositions(td, faceIndices);
@@ -966,17 +973,17 @@
         geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
         const tex = await loadAtlasTexture(atlas.image);
         const opts: THREE.MeshStandardMaterialParameters = { map: tex };
-        if (isTranslucent && td.faceAlpha) {
+        if (renderClass === RENDER_CLASS_BLEND && td.faceAlpha) {
           const colorAttr = unpackFaceAlphaWhiteRGBA(td.faceAlpha, faceIndices);
           geo.setAttribute('color', new THREE.BufferAttribute(colorAttr, 4));
           opts.vertexColors = true;
         }
-        const mat = createAdjustedMaterial(opts, stickerAtlasTex, stickerOnly, isTranslucent);
+        const mat = createAdjustedMaterial(opts, stickerAtlasTex, stickerOnly, renderClass);
         meshes.push({ geometry: geo, material: mat });
       } else {
         const { array, itemSize } = unpackFaceColors(td, faceIndices);
         geo.setAttribute('color', new THREE.BufferAttribute(array, itemSize));
-        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly, isTranslucent);
+        const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly, renderClass);
         meshes.push({ geometry: geo, material: mat });
       }
     }

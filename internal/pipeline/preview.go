@@ -83,6 +83,17 @@ func flattenMesh(model *loader.LoadedModel, colorFn func(fi int) (uint8, uint8, 
 	}
 }
 
+// imageIsOpaque reports whether img has no transparency, so it can be
+// JPEG-compressed without losing an alpha channel. The standard library
+// image types (NRGBA, RGBA, Paletted, …) implement Opaque(); types that
+// don't are conservatively treated as potentially transparent (kept PNG).
+func imageIsOpaque(img image.Image) bool {
+	if o, ok := img.(interface{ Opaque() bool }); ok {
+		return o.Opaque()
+	}
+	return false
+}
+
 // buildWrappedMeshData creates a MeshData from the alpha-wrapped
 // geometry mesh for the "Show wrapped" preview toggle. The wrap has
 // no UVs, textures, or per-face colour, so faces are filled with a
@@ -150,7 +161,10 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 	// Encode textures for the frontend preview. Large textures are
 	// compressed to JPEG; small ones (under 128x128) are kept as PNG
 	// since compression saves little and some models rely on precise
-	// sampling of low-res textures.
+	// sampling of low-res textures. Textures with a real alpha channel
+	// are always kept as PNG regardless of size: JPEG has no alpha, so
+	// compressing them would silently drop the transparency the
+	// renderer needs (e.g. decals on a transparent background).
 	if len(model.Textures) > 0 {
 		md.Textures = make([]string, len(model.Textures))
 		for i, img := range model.Textures {
@@ -159,7 +173,7 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 			}
 			var buf bytes.Buffer
 			bounds := img.Bounds()
-			if bounds.Dx() >= 128 && bounds.Dy() >= 128 {
+			if bounds.Dx() >= 128 && bounds.Dy() >= 128 && imageIsOpaque(img) {
 				if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: failed to encode texture %d: %v\n", i, err)
 					continue
@@ -190,32 +204,36 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 		}
 	}
 
-	// Per-face alpha for the preview — material alpha × base-color
-	// alpha × (vertex-color alpha for untextured vertex-painted
-	// faces). Texture alpha is left out so the renderer can blend it
-	// per-pixel through the texture's own alpha channel.
-	//
-	// FaceTranslucent is the centroid-aware companion that also
-	// includes texture alpha; the renderer uses it to put any face
-	// with non-opaque output into a separate alpha-blend draw call so
-	// opaque faces keep writing depth.
-	//
-	// Both arrays are skipped entirely when every face ends up fully
-	// opaque so opaque models carry no extra payload.
+	// Per-face render class + per-face alpha for the preview. The class
+	// (opaque / cutout / blend) is derived from the MATERIAL only — the
+	// texture's per-pixel alpha is handled per-fragment at draw time, so
+	// it never collapses to a per-face decision. FaceAlpha carries the
+	// material/base/vertex alpha (texture alpha excluded) that the blend
+	// pass multiplies in. Both arrays are skipped when every face is
+	// plain opaque so opaque models carry no extra payload.
 	nFaces := len(model.Faces)
 	faceAlpha := make([]uint8, nFaces)
-	faceTranslucent := make([]uint8, nFaces)
-	anyTranslucent := false
+	faceRenderClass := make([]uint8, nFaces)
+	anyNonOpaque := false
+	anyBlend := false
 	for fi := 0; fi < nFaces; fi++ {
 		faceAlpha[fi] = previewFaceAlpha(model, fi)
-		if previewFaceTranslucent(model, fi, faceAlpha[fi]) {
-			faceTranslucent[fi] = 1
-			anyTranslucent = true
+		cls := previewFaceRenderClass(model, fi, faceAlpha[fi])
+		faceRenderClass[fi] = cls
+		if cls != renderClassOpaque {
+			anyNonOpaque = true
+		}
+		if cls == renderClassBlend {
+			anyBlend = true
 		}
 	}
-	if anyTranslucent {
+	if anyNonOpaque {
+		md.FaceRenderClass = faceRenderClass
+	}
+	// FaceAlpha is only consumed by the blend pass; attach it only when
+	// some face is genuinely blended.
+	if anyBlend {
 		md.FaceAlpha = faceAlpha
-		md.FaceTranslucent = faceTranslucent
 	}
 
 	return md
@@ -267,37 +285,53 @@ func previewFaceAlpha(model *loader.LoadedModel, fi int) uint8 {
 	return uint8(a + 0.5)
 }
 
-// previewFaceTranslucent reports whether a face has any non-opaque
-// contribution in the rendered preview — either non-255 per-face
-// alpha or a translucent texture sample at the centroid (when the
-// face is actually textured in the rendered output, i.e. not masked
-// out). Used to route the face to the alpha-blend draw call.
-func previewFaceTranslucent(model *loader.LoadedModel, fi int, faceAlpha uint8) bool {
+// Per-face preview render classes (carried in MeshData.FaceRenderClass).
+// The renderer draws each face per-fragment according to its class instead
+// of pre-classifying a whole triangle as opaque-or-translucent from one
+// texel sample.
+const (
+	// renderClassOpaque: draw opaque, depth on, no alpha test. Untextured
+	// opaque faces and glTF OPAQUE textured faces (whose texture alpha is
+	// ignored per spec).
+	renderClassOpaque uint8 = 0
+	// renderClassCutout: draw with per-fragment alpha test, depth on.
+	// Transparent texels are discarded while opaque ones still write
+	// depth — the order-independent way to render decals on a transparent
+	// background. glTF MASK/BLEND textured faces and legacy textured faces.
+	renderClassCutout uint8 = 1
+	// renderClassBlend: draw alpha-blended with depth writes OFF. The
+	// genuinely semi-transparent case (glass/windows), where the MATERIAL
+	// declares partial transparency (material/base/vertex alpha < 1).
+	renderClassBlend uint8 = 2
+)
+
+// previewFaceRenderClass classifies how a face must be drawn in the input
+// preview, from the MATERIAL's declared properties only — never by sampling
+// the texture. A textured face's per-pixel alpha is resolved per-fragment
+// at draw time (alpha test for cutout, blending for translucent), so there
+// is no need — and no correct way — to collapse it to a per-face decision.
+func previewFaceRenderClass(model *loader.LoadedModel, fi int, faceAlpha uint8) uint8 {
+	// Material declares itself translucent (matAlpha/baseColor/vertex
+	// alpha < 1): a real glass-like surface that must be alpha-blended.
 	if faceAlpha < 255 {
-		return true
+		return renderClassBlend
 	}
 	if !faceIsTextured(model, fi) {
-		return false
+		return renderClassOpaque
 	}
-	// OPAQUE and MASK materials ignore the texture's alpha channel (glTF
-	// spec), so a translucent texel does not make the face translucent —
-	// matching the alphaMode-aware output sampler. Only BLEND (and the
-	// legacy nil path) routes a translucent texel to the alpha-blend pass.
 	if model.FaceAlphaMode != nil {
 		switch model.FaceAlphaMode[fi] {
-		case loader.AlphaModeOpaque, loader.AlphaModeMask:
-			return false
+		case loader.AlphaModeOpaque:
+			// glTF OPAQUE ignores the texture's alpha channel entirely.
+			return renderClassOpaque
+		case loader.AlphaModeMask, loader.AlphaModeBlend:
+			return renderClassCutout
 		}
 	}
-	idx := model.FaceTextureIdx[fi]
-	f := model.Faces[fi]
-	uv0 := model.UVs[f[0]]
-	uv1 := model.UVs[f[1]]
-	uv2 := model.UVs[f[2]]
-	u := (uv0[0] + uv1[0] + uv2[0]) / 3
-	v := (uv0[1] + uv1[1] + uv2[1]) / 3
-	rgba := voxel.BilinearSample(model.Textures[idx], u, v)
-	return rgba[3] < 255
+	// Legacy loaders (OBJ/DAE/3MF, stale caches) supply no alphaMode; a
+	// textured face may carry a meaningful alpha channel, so cut it out.
+	// Textures without alpha discard nothing, so cutout is safe.
+	return renderClassCutout
 }
 
 // sampleFaceColor returns an RGB color for a face using vertex colors, base

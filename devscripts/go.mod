@@ -37,6 +37,7 @@ require (
 	github.com/qmuntal/gltf v0.27.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/schollz/progressbar/v3 v3.19.0 // indirect
+	github.com/udhos/gwob v1.0.0 // indirect
 	golang.org/x/image v0.25.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/term v0.29.0 // indirect
