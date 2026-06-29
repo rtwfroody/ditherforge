@@ -66,6 +66,10 @@ export function OpenMaterialXFile() {
   return window['go']['main']['App']['OpenMaterialXFile']();
 }
 
+export function OpenModelDialog() {
+  return window['go']['main']['App']['OpenModelDialog']();
+}
+
 export function OpenStickerImage() {
   return window['go']['main']['App']['OpenStickerImage']();
 }

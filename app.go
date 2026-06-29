@@ -1066,14 +1066,26 @@ func (a *App) SaveSettingsDialog(s Settings) (string, error) {
 	return path, nil
 }
 
-// OpenFileDialog opens a file picker that accepts .json, .glb, and .3mf files.
-// Returns the selected path, or empty if cancelled.
+// OpenFileDialog opens a file picker for DitherForge settings JSON files.
+// The input model is now picked separately via OpenModelDialog (it is a
+// regular setting in the left panel, not a File > Open target). Returns the
+// selected path, or empty if cancelled.
 func (a *App) OpenFileDialog() (string, error) {
 	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
-		Title: "Open",
+		Title: "Open Settings",
 		Filters: []wailsRuntime.FileFilter{
-			{DisplayName: "All Supported (*.json, *.glb, *.3mf, *.stl, *.obj, *.dae, *.zip)", Pattern: "*.json;*.glb;*.3mf;*.stl;*.obj;*.dae;*.zip"},
 			{DisplayName: "DitherForge Settings (*.json)", Pattern: "*.json"},
+		},
+	})
+}
+
+// OpenModelDialog opens a file picker for the input 3D model. Kept separate
+// from OpenFileDialog so the input model can be changed independently as a
+// setting without going through the File menu.
+func (a *App) OpenModelDialog() (string, error) {
+	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Open Model",
+		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3D Models (*.glb, *.3mf, *.stl, *.obj, *.dae, *.zip)", Pattern: "*.glb;*.3mf;*.stl;*.obj;*.dae;*.zip"},
 		},
 	})

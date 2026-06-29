@@ -13,7 +13,7 @@
   import HelpTip from '$lib/components/HelpTip.svelte';
   import SettingsSection from '$lib/components/SettingsSection.svelte';
   import SplitControls from '$lib/components/SplitControls.svelte';
-  import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon } from '@lucide/svelte';
+  import { LockIcon, LockOpenIcon, LoaderCircleIcon, SunIcon, MoonIcon, ChevronDownIcon } from '@lucide/svelte';
   import * as Menubar from '$lib/components/ui/menubar';
   import ModelViewer from '$lib/components/ModelViewer.svelte';
   import CollectionPicker from '$lib/components/CollectionPicker.svelte';
@@ -45,7 +45,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, OpenModelDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -398,26 +398,55 @@
   let placingStickerIndex = $state(-1);
   const placingSticker = $derived(placingStickerIndex >= 0 ? stickers[placingStickerIndex] ?? null : null);
 
-  // Recent files (persisted in localStorage).
+  // Recent files (persisted in localStorage). Input models and settings JSON
+  // are now picked through separate menus/controls, so each keeps its own
+  // recent list rather than sharing one mixed list.
   const MAX_RECENT = 10;
-  function loadRecentFiles(): string[] {
+  function loadRecentList(key: string): string[] {
     try {
-      const raw = JSON.parse(localStorage.getItem('recentFiles') || '[]');
+      const raw = JSON.parse(localStorage.getItem(key) || '[]');
       return Array.isArray(raw) ? raw.filter((x: unknown) => typeof x === 'string') : [];
     } catch {
       return [];
     }
   }
-  let recentFiles = $state<string[]>(loadRecentFiles());
 
-  function addRecentFile(path: string) {
-    recentFiles = [path, ...recentFiles.filter(p => p !== path)].slice(0, MAX_RECENT);
-    localStorage.setItem('recentFiles', JSON.stringify(recentFiles));
+  // One-time migration: the old combined 'recentFiles' list mixed models and
+  // settings. Split it by extension into the two new lists, then drop it.
+  (function migrateRecentFiles() {
+    const legacy = localStorage.getItem('recentFiles');
+    if (legacy === null) return;
+    if (localStorage.getItem('recentModels') === null && localStorage.getItem('recentSettings') === null) {
+      const all = loadRecentList('recentFiles');
+      const models = all.filter(p => p.split('.').pop()?.toLowerCase() !== 'json').slice(0, MAX_RECENT);
+      const settings = all.filter(p => p.split('.').pop()?.toLowerCase() === 'json').slice(0, MAX_RECENT);
+      localStorage.setItem('recentModels', JSON.stringify(models));
+      localStorage.setItem('recentSettings', JSON.stringify(settings));
+    }
+    localStorage.removeItem('recentFiles');
+  })();
+
+  let recentModels = $state<string[]>(loadRecentList('recentModels'));
+  let recentSettings = $state<string[]>(loadRecentList('recentSettings'));
+
+  function addRecentModel(path: string) {
+    recentModels = [path, ...recentModels.filter(p => p !== path)].slice(0, MAX_RECENT);
+    localStorage.setItem('recentModels', JSON.stringify(recentModels));
   }
 
-  function removeRecentFile(path: string) {
-    recentFiles = recentFiles.filter(p => p !== path);
-    localStorage.setItem('recentFiles', JSON.stringify(recentFiles));
+  function removeRecentModel(path: string) {
+    recentModels = recentModels.filter(p => p !== path);
+    localStorage.setItem('recentModels', JSON.stringify(recentModels));
+  }
+
+  function addRecentSettings(path: string) {
+    recentSettings = [path, ...recentSettings.filter(p => p !== path)].slice(0, MAX_RECENT);
+    localStorage.setItem('recentSettings', JSON.stringify(recentSettings));
+  }
+
+  function removeRecentSettings(path: string) {
+    recentSettings = recentSettings.filter(p => p !== path);
+    localStorage.setItem('recentSettings', JSON.stringify(recentSettings));
   }
 
   // Collection editor dialog state.
@@ -1092,19 +1121,23 @@
   function proceedWithInput(path: string) {
     clearViewportMesh();
     inputFile = path;
-    // Stickers are tied to the previous model's geometry; clear them.
-    // Warp pins reference colors sampled from the previous model; clear too.
-    stickers = [];
+    // The input model is just another setting now: changing it must not reset
+    // the rest of the configuration. Stickers and warp pins are preserved —
+    // sticker positions/scales are stored as fractions of the model's max
+    // extent, so they rescale with the new model rather than being pinned to
+    // stale mm coordinates; warp pins are color-based and carry over too.
+    // Clear only the cached native extent (so mm displays recompute against the
+    // new model) and cancel any in-progress placement that referenced the old
+    // model's geometry.
     placingStickerIndex = -1;
-    nativeExtentMM = null;
-    warpPins = [];
     pickingPinIndex = -1;
+    nativeExtentMM = null;
     reloadSeq++;
     // Clear settingsPath synchronously so a save before DefaultSettingsPath
     // resolves (or if it fails) can't write to the previous model's file.
     settingsPath = '';
     DefaultSettingsPath(path).then(p => settingsPath = p).catch(() => {});
-    addRecentFile(path);
+    addRecentModel(path);
     // The $effect tracks reloadSeq, so bumping it above ensures the pipeline
     // runs even when the path is unchanged (file on disk may have changed).
   }
@@ -1509,7 +1542,7 @@
     }
     try {
       await SaveSettings(settingsPath, serializeSettings() as any);
-      addRecentFile(settingsPath);
+      addRecentSettings(settingsPath);
       statusMessage = `Saved to ${settingsPath}`;
       statusType = 'success';
     } catch (err: any) {
@@ -1524,7 +1557,7 @@
       const path = await SaveSettingsDialog(serializeSettings() as any);
       if (path) {
         settingsPath = path;
-        addRecentFile(path);
+        addRecentSettings(path);
         statusMessage = `Saved to ${path}`;
         statusType = 'success';
       }
@@ -1542,7 +1575,7 @@
         if (result && result.path) {
           settingsPath = result.path;
           applySettings(result.settings, result.legacyAbsoluteUnits);
-          addRecentFile(path);
+          addRecentSettings(path);
           statusMessage = `Loaded from ${result.path}`;
           statusType = 'success';
         }
@@ -1550,21 +1583,41 @@
         await openInputModel(path);
       }
     } catch (err: any) {
-      removeRecentFile(path);
+      removeRecentSettings(path);
+      removeRecentModel(path);
       statusMessage = `Open error: ${err}`;
       statusType = 'error';
     }
   }
 
+  // File > Open: settings JSON only. The input model is chosen via the
+  // dedicated control at the top of the settings panel (handleOpenModel).
   async function handleOpen() {
     const path = await OpenFileDialog();
     if (!path) return;
     await openFile(path);
   }
 
-  function clearRecentFiles() {
-    recentFiles = [];
-    localStorage.removeItem('recentFiles');
+  async function handleOpenModel() {
+    const path = await OpenModelDialog();
+    if (!path) return;
+    try {
+      await openInputModel(path);
+    } catch (err: any) {
+      removeRecentModel(path);
+      statusMessage = `Open error: ${err}`;
+      statusType = 'error';
+    }
+  }
+
+  function clearRecentSettings() {
+    recentSettings = [];
+    localStorage.removeItem('recentSettings');
+  }
+
+  function clearRecentModels() {
+    recentModels = [];
+    localStorage.removeItem('recentModels');
   }
 
   // Snapshot the pristine state declared by the $state initializers
@@ -1763,18 +1816,18 @@
       <Menubar.Content>
         <Menubar.Item onSelect={handleNew}>New</Menubar.Item>
         <Menubar.Separator />
-        <Menubar.Item onSelect={handleOpen}>Open...</Menubar.Item>
+        <Menubar.Item onSelect={handleOpen}>Open JSON...</Menubar.Item>
         <Menubar.Sub>
-          <Menubar.SubTrigger disabled={recentFiles.length === 0}>Open Recent</Menubar.SubTrigger>
+          <Menubar.SubTrigger disabled={recentSettings.length === 0}>Open Recent JSON</Menubar.SubTrigger>
           <Menubar.SubContent align="start">
-            {#each recentFiles as path}
+            {#each recentSettings as path}
               <Menubar.Item onSelect={() => openFile(path)}>
                 {path.split(/[/\\]/).pop()}
                 <span class="text-muted-foreground ml-auto pl-4 text-xs truncate max-w-48" title={path}>{shortenPath(path)}</span>
               </Menubar.Item>
             {/each}
             <Menubar.Separator />
-            <Menubar.Item onSelect={clearRecentFiles}>Clear Recent</Menubar.Item>
+            <Menubar.Item onSelect={clearRecentSettings}>Clear Recent</Menubar.Item>
           </Menubar.SubContent>
         </Menubar.Sub>
         <Menubar.Item onSelect={handleSave} disabled={!settingsPath}>Save JSON</Menubar.Item>
@@ -1926,6 +1979,50 @@
             </HelpTip>
           {/snippet}
           <div class="space-y-6">
+            <!-- Model file: one compact row. The select shows the current
+                 file and doubles as the picker — "Browse for file…" opens the
+                 native dialog and recent entries load instantly. Changing the
+                 model swaps only the model: all other settings, stickers, and
+                 color pins are kept (sticker placement is a fraction of the
+                 model extent, so it rescales with the new model). -->
+            <div class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 items-center">
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-medium">File</span>
+                <HelpTip>
+                  The 3D model to convert. Changing it swaps only the model —
+                  all other settings, stickers, and color pins are kept.
+                </HelpTip>
+              </div>
+              <Menubar.Root class="h-auto w-full min-w-0 gap-0 rounded-none border-0 bg-transparent p-0">
+                <Menubar.Menu>
+                  <Menubar.Trigger class="h-9 w-full min-w-0 justify-between gap-2 rounded-md border border-input bg-background px-2 font-normal {inputFile ? '' : 'text-muted-foreground'}">
+                    <span class="truncate" title={inputFile}>
+                      {inputFile ? inputFile.split(/[/\\]/).pop() : 'No model selected'}
+                    </span>
+                    <ChevronDownIcon class="size-4 shrink-0 opacity-60" />
+                  </Menubar.Trigger>
+                  <Menubar.Content align="start" class="min-w-56">
+                    <Menubar.Item onSelect={handleOpenModel}>Browse for file…</Menubar.Item>
+                    {#if recentModels.length > 0}
+                      <Menubar.Sub>
+                        <Menubar.SubTrigger>Recent</Menubar.SubTrigger>
+                        <Menubar.SubContent class="max-w-80">
+                          {#each recentModels as p}
+                            <Menubar.Item onSelect={() => openInputModel(p)}>
+                              {p.split(/[/\\]/).pop()}
+                              <span class="text-muted-foreground ml-auto pl-4 text-xs truncate max-w-48" title={p}>{shortenPath(p)}</span>
+                            </Menubar.Item>
+                          {/each}
+                          <Menubar.Separator />
+                          <Menubar.Item onSelect={clearRecentModels}>Clear recent</Menubar.Item>
+                        </Menubar.SubContent>
+                      </Menubar.Sub>
+                    {/if}
+                  </Menubar.Content>
+                </Menubar.Menu>
+              </Menubar.Root>
+            </div>
+
             <!-- Size / Scale on its own row -->
             <div class="grid grid-cols-2 gap-x-4 gap-y-2 items-end">
               <div class="flex items-center gap-3">
