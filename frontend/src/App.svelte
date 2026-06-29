@@ -2407,7 +2407,7 @@
                 <Checkbox bind:checked={colorAwareCells} />
                 Color-aware cells
                 <HelpTip>
-                  Segment each layer by color and tile each monochrome region separately, so cell boundaries land on color boundaries. Sharp patterns (e.g. a checkerboard) stay pure black/white instead of averaging to gray at the edges. Color features smaller than one cell are merged away. Off by default.
+                  Segment each layer by color and tile each monochrome region separately, so cell boundaries land on color boundaries. Sharp patterns (e.g. a checkerboard) stay pure black/white instead of averaging to gray at the edges. Color features smaller than one cell are merged away. On by default.
                 </HelpTip>
               </label>
               {#if colorAwareCells}
