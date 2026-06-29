@@ -363,18 +363,22 @@ func buildObjectModel(model *loader.LoadedModel, assignments []int32, objUUID st
 	sb.WriteString(`<mesh><vertices>`)
 
 	for _, v := range model.Vertices {
-		fmt.Fprintf(&sb, `<vertex x="%.6f" y="%.6f" z="%.6f"/>`, v[0], v[1], v[2])
+		// Round to 0.01mm (10µm): below any printer's resolution, and trims
+		// non-significant digits that bloat the (compressed) file for no benefit.
+		fmt.Fprintf(&sb, `<vertex x="%.2f" y="%.2f" z="%.2f"/>`, v[0], v[1], v[2])
 	}
 	sb.WriteString(`</vertices>`)
 
-	// Snap vertices to export precision for degenerate detection.
+	// Snap vertices to export precision (0.01mm, matching %.2f above) for
+	// degenerate detection: triangles whose vertices collapse to the same
+	// rounded point are dropped.
 	type snapV struct{ x, y, z int32 }
 	snapped := make([]snapV, len(model.Vertices))
 	for i, v := range model.Vertices {
 		snapped[i] = snapV{
-			int32(math.Round(float64(v[0]) * 1e6)),
-			int32(math.Round(float64(v[1]) * 1e6)),
-			int32(math.Round(float64(v[2]) * 1e6)),
+			int32(math.Round(float64(v[0]) * 1e2)),
+			int32(math.Round(float64(v[1]) * 1e2)),
+			int32(math.Round(float64(v[2]) * 1e2)),
 		}
 	}
 
