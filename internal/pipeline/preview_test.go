@@ -9,6 +9,43 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 )
 
+// TestBuildInputMeshDataVertexColoredNoTexture guards a crash on GLB models
+// that carry vertex colors but no texture (e.g. Bowl1.glb). The glTF loader
+// marks such faces with FaceTextureIdx = -1 ("use FaceColors") rather than the
+// len(Textures) sentinel, and they are not in NoTextureMask. The preview
+// builder must treat the negative index as "no texture" instead of indexing
+// Textures[-1].
+func TestBuildInputMeshDataVertexColoredNoTexture(t *testing.T) {
+	model := &loader.LoadedModel{
+		Vertices: [][3]float32{
+			{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+		},
+		Faces: [][3]uint32{
+			{0, 1, 2},
+			{0, 2, 3},
+		},
+		VertexColors: [][4]uint8{
+			{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 255, 0, 255},
+		},
+		// -1 is the loader's "vertex-colored, use FaceColors" marker; no
+		// Textures, no NoTextureMask. This used to panic at Textures[-1].
+		FaceTextureIdx: []int32{-1, -1},
+	}
+
+	md := buildInputMeshData(model) // must not panic
+	if md == nil {
+		t.Fatal("buildInputMeshData returned nil")
+	}
+	if got := len(md.FaceTextureIdx); got != len(model.Faces) {
+		t.Fatalf("FaceTextureIdx len: got %d, want %d", got, len(model.Faces))
+	}
+	for fi, idx := range md.FaceTextureIdx {
+		if idx != -1 {
+			t.Errorf("face %d texture index = %d, want -1 (no texture)", fi, idx)
+		}
+	}
+}
+
 // TestBuildStickerOverlayMesh verifies the alpha-wrap overlay mesh has
 // the structural invariants the frontend depends on: one face per sticker
 // triangle, 6 sticker UVs per face, mask=1 everywhere, atlas non-empty.

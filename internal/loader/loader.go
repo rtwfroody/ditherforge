@@ -8,6 +8,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,50 @@ import (
 	"github.com/qmuntal/gltf"
 	"github.com/qmuntal/gltf/modeler"
 )
+
+// linearToSRGB encodes a linear-light value in [0,1] to an 8-bit sRGB byte.
+func linearToSRGB(l float64) uint8 {
+	if l <= 0.0031308 {
+		l = 12.92 * l
+	} else {
+		l = 1.055*math.Pow(l, 1.0/2.4) - 0.055
+	}
+	if l < 0 {
+		l = 0
+	}
+	if l > 1 {
+		l = 1
+	}
+	return uint8(l*255 + 0.5)
+}
+
+// readVertexColorsSRGB reads a glTF COLOR_0 accessor into 8-bit sRGB RGBA.
+//
+// glTF stores vertex colors in LINEAR space, whereas the rest of the pipeline
+// (ΔE, dithering, palette matching, texture bytes) works in sRGB. Two things
+// must happen here that modeler.ReadColor gets wrong:
+//   - Precision: ReadColor narrows a normalized UNSIGNED_SHORT accessor to its
+//     low byte instead of scaling, mangling the color. ReadColor64 preserves
+//     the full 16-bit normalized value.
+//   - Color space: the linear value is encoded to sRGB so painted colors match
+//     their on-screen (Blender) appearance and the sRGB filament palette.
+func readVertexColorsSRGB(doc *gltf.Document, acc *gltf.Accessor) ([][4]uint8, error) {
+	c64, err := modeler.ReadColor64(doc, acc, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][4]uint8, len(c64))
+	for i, c := range c64 {
+		out[i] = [4]uint8{
+			linearToSRGB(float64(c[0]) / 65535),
+			linearToSRGB(float64(c[1]) / 65535),
+			linearToSRGB(float64(c[2]) / 65535),
+			// Alpha is linear-coded but NOT gamma-encoded in sRGB; scale directly.
+			uint8((uint32(c[3])*255 + 32767) / 65535),
+		}
+	}
+	return out, nil
+}
 
 // LoadedModel holds all extracted data from a GLB file.
 //
@@ -369,7 +414,7 @@ func LoadGLB(path string, objectIndex int) (*LoadedModel, error) {
 					}
 					if colorAttrIdx, ok := prim.Attributes[gltf.COLOR_0]; ok {
 						if acc := doc.Accessors[colorAttrIdx]; acc.BufferView != nil {
-							vertexColors, _ = modeler.ReadColor(doc, acc, nil)
+							vertexColors, _ = readVertexColorsSRGB(doc, acc)
 							if len(vertexColors) != len(positions) {
 								vertexColors = nil
 							}

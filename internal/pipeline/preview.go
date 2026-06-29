@@ -193,10 +193,12 @@ func buildInputMeshData(model *loader.LoadedModel) *MeshData {
 	if model.FaceTextureIdx != nil {
 		md.FaceTextureIdx = make([]int32, len(model.FaceTextureIdx))
 		for fi, idx := range model.FaceTextureIdx {
-			// Mark faces without texture as -1.
+			// Mark faces without texture as -1. idx can be negative for
+			// vertex-colored faces (the loader's "use FaceColors" marker),
+			// which must not index Textures.
 			if model.NoTextureMask != nil && model.NoTextureMask[fi] {
 				md.FaceTextureIdx[fi] = -1
-			} else if int(idx) >= len(model.Textures) || model.Textures[idx] == nil {
+			} else if idx < 0 || int(idx) >= len(model.Textures) || model.Textures[idx] == nil {
 				md.FaceTextureIdx[fi] = -1
 			} else {
 				md.FaceTextureIdx[fi] = idx
