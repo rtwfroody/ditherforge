@@ -917,12 +917,19 @@ func SampleAlongNormal(
 		d := [3]float32{-normal[0], -normal[1], -normal[2]}
 		// Backface cull, exactly as a viewer does: `normal` is the cell's
 		// outward direction, so its own exterior surface faces the same way
-		// (n·normal > 0). A first hit that faces the opposite way is the
-		// inner side of a coincident shell, or the far wall of a solid the
-		// ray punched through — never this cell's own surface. Reject it and
-		// fall through to the cull-aware nearest search, which resolves to
-		// the front-facing (outward) surface instead.
-		if tri, tt, u, v, ok := bvh.FirstHit(o, d, startBack+reach); ok && faceFrontOf(model, tri, normal) {
+		// (n·normal > 0). A hit that faces the opposite way is the inner side
+		// of a coincident shell, or the far wall of a solid the ray punched
+		// through — never this cell's own surface. The cull runs INSIDE the
+		// hit query (FirstHitFront), not as a reject of the single nearest
+		// hit: when a colour surface is two-sided (the Nord rear panel is a
+		// coincident shell — black -Y front, white +Y back, at the same point)
+		// FirstHit returns one of the pair arbitrarily, and rejecting the back
+		// one after the fact can't recover its coincident front twin (a
+		// distance step can't separate them). FirstHitFront instead tests
+		// every triangle the ray crosses and returns the nearest front-facing
+		// one, so the front twin always wins and we sample the surface the
+		// viewer sees rather than falling back to a laterally-nearest face.
+		if tri, tt, u, v, ok := bvh.FirstHitFront(o, d, startBack+reach, normal); ok {
 			// Read color from the material just BENEATH the surface, not
 			// exactly on it. The hit lands on the surface plane; when that
 			// plane coincides with a color-boundary of a position-driven
@@ -947,16 +954,6 @@ func SampleAlongNormal(
 		}
 	}
 	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, normal)
-}
-
-// faceFrontOf reports whether triangle tri faces the same way as
-// `outward` (its geometric normal n satisfies n·outward > 0). Used to
-// backface-cull along-normal ray hits: the cell's outward normal is
-// `outward`, so its own exterior surface faces that way; an
-// opposite-facing first hit is an inner/far surface to reject.
-func faceFrontOf(model *loader.LoadedModel, tri int32, outward [3]float32) bool {
-	n := FaceNormal(int(tri), model)
-	return n[0]*outward[0]+n[1]*outward[1]+n[2]*outward[2] > 0
 }
 
 // Neighbor holds a precomputed neighbor reference with its diffusion weight.

@@ -404,3 +404,41 @@ func (b *RayBVH) FirstHit(o, d [3]float32, maxDist float32) (tri int32, t, u, v 
 	})
 	return tri, t, u, v, tri >= 0
 }
+
+// FirstHitFront is FirstHit but skips triangles whose geometric normal does
+// not face toward cullN (n·cullN <= 0), returning the nearest FRONT-facing
+// intersection. The cull is applied INSIDE the traversal: every triangle the
+// ray crosses is tested, and the nearest front-facing one wins. A back-facing
+// triangle that is coincident with (or just in front of) the front-facing one
+// it would otherwise mask therefore cannot hide it — unlike a distance-
+// stepping march, which cannot separate two triangles at the same point. This
+// is exactly the failure on the Nord rear panel, a two-sided colour shell
+// (black −Y front, white +Y back, coincident): hitting the back copy first,
+// the old march stepped past BOTH and fell back to the adjacent red trim.
+//
+// cullN is the cell's outward normal (need not be unit); it is the reliable
+// orientation reference (it comes from the alpha-wrap geom), so the cull keys
+// on it rather than on the colour mesh's own — sometimes inverted — winding.
+// Sole caller is voxel.SampleAlongNormal.
+func (b *RayBVH) FirstHitFront(o, d [3]float32, maxDist float32, cullN [3]float32) (tri int32, t, u, v float32, ok bool) {
+	inv := rayInvDir(d)
+	bestT := maxDist
+	tri = -1
+	b.traverseRay(o, inv, &bestT, func(tris []int32) bool {
+		for _, ti := range tris {
+			n := FaceNormal(int(ti), b.model)
+			if n[0]*cullN[0]+n[1]*cullN[1]+n[2]*cullN[2] <= 0 {
+				continue // back-facing relative to the cell's outward dir
+			}
+			f := b.model.Faces[ti]
+			ht, hu, hv, hok := rayTriHitT(o, d, b.model.Vertices[f[0]], b.model.Vertices[f[1]], b.model.Vertices[f[2]])
+			if hok && ht < bestT {
+				bestT = ht
+				tri = ti
+				t, u, v = ht, hu, hv
+			}
+		}
+		return true
+	})
+	return tri, t, u, v, tri >= 0
+}
