@@ -740,6 +740,20 @@ func (a *App) DebugCellsSlabSVG(slabIdx int) (*DebugCellsSlabResult, error) {
 	}, nil
 }
 
+// SelectCellDiagnostics resolves a picked point on the output model (in
+// preview-mm world coordinates, as the 3D viewer's raycaster reports it)
+// to a Voxelize cell and returns that cell's color-sampling diagnostics:
+// the cell's outward normal plus every jittered sample ray (origin,
+// direction, what surface it hit, the color it read). Powers the Debug ▸
+// Select Cell tool. Requires the pipeline to have run through Voxelize.
+func (a *App) SelectCellDiagnostics(x, y, z float64) (*pipeline.CellDiagInfo, error) {
+	last := a.lastOpts.Load()
+	if last == nil {
+		return nil, fmt.Errorf("no model loaded yet — run the pipeline first")
+	}
+	return pipeline.CellDiagnosticsAt(a.cache, *last, [3]float32{float32(x), float32(y), float32(z)})
+}
+
 // Version returns the application version string.
 func (a *App) Version() string {
 	return pipeline.Version

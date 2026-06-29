@@ -932,6 +932,35 @@ const surfaceColorInsetMM = 1e-3
 // in range (degenerate normal, deep void) it falls back to nearest-face
 // sampling so coverage never regresses. normal must be unit length and
 // in model's coordinate frame; bvh is built over model.
+// RayTrace captures the geometry of a single along-normal color sample
+// so the "Select Cell" debug tool can show exactly where a ray started,
+// which way it pointed, and what surface it hit. Filled by
+// SampleAlongNormalTrace; ignored (nil) on the normal sampling path.
+type RayTrace struct {
+	// BVHUsed is true when an along-normal ray was actually cast (a BVH
+	// was supplied and the cell had a non-zero outward normal). When
+	// false the sampler went straight to the nearest-face fallback.
+	BVHUsed bool
+	// Origin/Dir/MaxT describe the cast ray: Origin = p + normal*startBack
+	// (started outward to clear the printed skin), Dir = -normal
+	// (normalized inward), MaxT = startBack+reach (how far it searches).
+	Origin [3]float32
+	Dir    [3]float32
+	MaxT   float32
+	// Hit is true when the along-normal ray found a front-facing surface.
+	// HitTri/HitT/HitPoint describe that hit (HitPoint is the inset point
+	// the color was actually read from, just beneath the surface).
+	Hit      bool
+	HitTri   int32
+	HitT     float32
+	HitPoint [3]float32
+	// Fallback is true when the along-normal ray missed (or BVHUsed is
+	// false) and the color came from SampleNearestColorWithSticker.
+	Fallback bool
+	// Color is the resolved RGBA this sample contributed.
+	Color [4]uint8
+}
+
 func SampleAlongNormal(
 	p, normal [3]float32, startBack, reach float32,
 	model *loader.LoadedModel, bvh *RayBVH, si *SpatialIndex, radius float32, buf *SearchBuf,
@@ -939,9 +968,41 @@ func SampleAlongNormal(
 	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
 	override BaseColorOverride,
 ) [4]uint8 {
+	return sampleAlongNormalImpl(p, normal, startBack, reach, model, bvh, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, nil)
+}
+
+// SampleAlongNormalTrace is SampleAlongNormal that additionally returns a
+// RayTrace describing the cast ray and its hit — used by the Select Cell
+// debug tool. The returned color is identical to SampleAlongNormal's.
+func SampleAlongNormalTrace(
+	p, normal [3]float32, startBack, reach float32,
+	model *loader.LoadedModel, bvh *RayBVH, si *SpatialIndex, radius float32, buf *SearchBuf,
+	decals []*StickerDecal,
+	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+	override BaseColorOverride,
+) ([4]uint8, RayTrace) {
+	var tr RayTrace
+	rgba := sampleAlongNormalImpl(p, normal, startBack, reach, model, bvh, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, &tr)
+	return rgba, tr
+}
+
+func sampleAlongNormalImpl(
+	p, normal [3]float32, startBack, reach float32,
+	model *loader.LoadedModel, bvh *RayBVH, si *SpatialIndex, radius float32, buf *SearchBuf,
+	decals []*StickerDecal,
+	stickerModel *loader.LoadedModel, stickerSI *SpatialIndex, stickerBuf *SearchBuf,
+	override BaseColorOverride,
+	tr *RayTrace,
+) [4]uint8 {
 	if bvh != nil && normal != ([3]float32{}) {
 		o := [3]float32{p[0] + normal[0]*startBack, p[1] + normal[1]*startBack, p[2] + normal[2]*startBack}
 		d := [3]float32{-normal[0], -normal[1], -normal[2]}
+		if tr != nil {
+			tr.BVHUsed = true
+			tr.Origin = o
+			tr.Dir = d
+			tr.MaxT = startBack + reach
+		}
 		// Backface cull, exactly as a viewer does: `normal` is the cell's
 		// outward direction, so its own exterior surface faces the same way
 		// (n·normal > 0). A hit that faces the opposite way is the inner side
@@ -979,10 +1040,23 @@ func SampleAlongNormal(
 				hit[1] += d[1] * s
 				hit[2] += d[2] * s
 			}
-			return resolveFaceColor(hit, model, tri, u, v, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+			rgba := resolveFaceColor(hit, model, tri, u, v, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
+			if tr != nil {
+				tr.Hit = true
+				tr.HitTri = tri
+				tr.HitT = tt
+				tr.HitPoint = hit
+				tr.Color = rgba
+			}
+			return rgba
 		}
 	}
-	return SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, normal)
+	rgba := SampleNearestColorWithSticker(p, model, si, radius, buf, decals, stickerModel, stickerSI, stickerBuf, override, normal)
+	if tr != nil {
+		tr.Fallback = true
+		tr.Color = rgba
+	}
+	return rgba
 }
 
 // Neighbor holds a precomputed neighbor reference with its diffusion weight.

@@ -102,6 +102,10 @@ export function SaveSettingsDialog(arg1) {
   return window['go']['main']['App']['SaveSettingsDialog'](arg1);
 }
 
+export function SelectCellDiagnostics(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SelectCellDiagnostics'](arg1, arg2, arg3);
+}
+
 export function SplitPreview(arg1) {
   return window['go']['main']['App']['SplitPreview'](arg1);
 }

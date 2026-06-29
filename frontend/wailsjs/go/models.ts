@@ -170,6 +170,113 @@ export namespace main {
 
 export namespace pipeline {
 	
+	export class CellDiagRay {
+	    point: number[];
+	    colorPoint: number[];
+	    bvhUsed: boolean;
+	    origin: number[];
+	    dir: number[];
+	    maxT: number;
+	    hit: boolean;
+	    hitTri: number;
+	    hitT: number;
+	    hitPoint: number[];
+	    fallback: boolean;
+	    color: number[];
+	    counted: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CellDiagRay(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.point = source["point"];
+	        this.colorPoint = source["colorPoint"];
+	        this.bvhUsed = source["bvhUsed"];
+	        this.origin = source["origin"];
+	        this.dir = source["dir"];
+	        this.maxT = source["maxT"];
+	        this.hit = source["hit"];
+	        this.hitTri = source["hitTri"];
+	        this.hitT = source["hitT"];
+	        this.hitPoint = source["hitPoint"];
+	        this.fallback = source["fallback"];
+	        this.color = source["color"];
+	        this.counted = source["counted"];
+	    }
+	}
+	export class CellDiagInfo {
+	    found: boolean;
+	    slabIdx: number;
+	    cellIdx: number;
+	    halfIdx: number;
+	    split: boolean;
+	    slabZBot: number;
+	    slabZTop: number;
+	    centroid: number[];
+	    normal: number[];
+	    areaMM2: number;
+	    startBack: number;
+	    reach: number;
+	    storedColor: number[];
+	    storedAlpha: boolean;
+	    recomputedColor: number[];
+	    recomputedAlpha: boolean;
+	    previewScale: number;
+	    pickPointPreview: number[];
+	    pickPointCell: number[];
+	    matchedByNearest: boolean;
+	    rays: CellDiagRay[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CellDiagInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.found = source["found"];
+	        this.slabIdx = source["slabIdx"];
+	        this.cellIdx = source["cellIdx"];
+	        this.halfIdx = source["halfIdx"];
+	        this.split = source["split"];
+	        this.slabZBot = source["slabZBot"];
+	        this.slabZTop = source["slabZTop"];
+	        this.centroid = source["centroid"];
+	        this.normal = source["normal"];
+	        this.areaMM2 = source["areaMM2"];
+	        this.startBack = source["startBack"];
+	        this.reach = source["reach"];
+	        this.storedColor = source["storedColor"];
+	        this.storedAlpha = source["storedAlpha"];
+	        this.recomputedColor = source["recomputedColor"];
+	        this.recomputedAlpha = source["recomputedAlpha"];
+	        this.previewScale = source["previewScale"];
+	        this.pickPointPreview = source["pickPointPreview"];
+	        this.pickPointCell = source["pickPointCell"];
+	        this.matchedByNearest = source["matchedByNearest"];
+	        this.rays = this.convertValues(source["rays"], CellDiagRay);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class SplitPreviewResult {
 	    origin: number[];
 	    normal: number[];

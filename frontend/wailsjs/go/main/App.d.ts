@@ -55,6 +55,8 @@ export function SaveSettings(arg1:string,arg2:settings.Settings):Promise<void>;
 
 export function SaveSettingsDialog(arg1:settings.Settings):Promise<string>;
 
+export function SelectCellDiagnostics(arg1:number,arg2:number,arg3:number):Promise<pipeline.CellDiagInfo>;
+
 export function SplitPreview(arg1:pipeline.SplitSettings):Promise<pipeline.SplitPreviewResult>;
 
 export function ValidateMaterialX(arg1:string):Promise<string>;

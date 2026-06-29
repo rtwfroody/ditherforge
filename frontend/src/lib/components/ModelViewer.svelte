@@ -7,6 +7,7 @@
   import ColorPicker3D from './ColorPicker3D.svelte';
   import StickerPlacer from './StickerPlacer.svelte';
   import TrianglePicker3D from './TrianglePicker3D.svelte';
+  import CellPicker3D from './CellPicker3D.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -62,12 +63,14 @@
     saturation = 0,
     pickMode = false,
     pickTriangleMode = false,
+    pickCellMode = false,
     stickerPlaceMode = false,
     stickerImage = '',
     stickerSize = 1,
     stickerRotation = 0,
     onColorPick,
     onTrianglePick,
+    onCellPick,
     onStickerPlace,
     warpPins = [],
     loading = '',
@@ -89,6 +92,7 @@
     saturation?: number;
     pickMode?: boolean;
     pickTriangleMode?: boolean;
+    pickCellMode?: boolean;
     stickerPlaceMode?: boolean;
     stickerImage?: string;
     stickerSize?: number;
@@ -103,6 +107,12 @@
         [number, number, number],
         [number, number, number],
       ];
+    }) => void;
+    onCellPick?: (hit: {
+      viewerId: string;
+      viewerLabel: string;
+      faceIndex: number;
+      point: [number, number, number];
     }) => void;
     onStickerPlace?: (point: [number, number, number], normal: [number, number, number], cameraUp: [number, number, number]) => void;
     warpPins?: WarpPin[];
@@ -1434,6 +1444,7 @@
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
         <TrianglePicker3D pickMode={pickTriangleMode} onPick={(h) => onTrianglePick?.({ viewerId, viewerLabel: label, ...h })} />
+        <CellPicker3D pickMode={pickCellMode} onPick={(h) => onCellPick?.({ viewerId, viewerLabel: label, ...h })} />
         <StickerPlacer active={stickerPlaceMode} onPlace={onStickerPlace} {stickerImage} {stickerSize} {stickerRotation} />
       </Canvas>
     {:else if errorMessage}

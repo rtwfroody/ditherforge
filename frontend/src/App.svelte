@@ -24,6 +24,7 @@
   import ObjectPicker from '$lib/components/ObjectPicker.svelte';
   import DebugCellsDialog from '$lib/components/DebugCellsDialog.svelte';
   import TriangleInfoDialog from '$lib/components/TriangleInfoDialog.svelte';
+  import CellInfoDialog from '$lib/components/CellInfoDialog.svelte';
   import type { StickerUI } from '$lib/components/StickerPanel.svelte';
   import { SharedCamera } from '$lib/components/SharedCamera.svelte';
   import { contrastColor } from '$lib/utils';
@@ -44,11 +45,11 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
-  import type { loader, settings } from '../wailsjs/go/models';
+  import type { loader, settings, pipeline } from '../wailsjs/go/models';
 
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
   function log(msg: string) {
@@ -505,6 +506,31 @@
     pickedTriangle = hit;
     triangleSelectMode = false;
     triangleInfoDialogOpen = true;
+  }
+
+  let cellSelectMode = $state(false);
+  let cellInfoDialogOpen = $state(false);
+  let cellInfoLoading = $state(false);
+  let cellInfoError = $state('');
+  let cellInfo = $state<pipeline.CellDiagInfo | null>(null);
+  async function handleCellPick(hit: {
+    viewerId: string;
+    viewerLabel: string;
+    faceIndex: number;
+    point: [number, number, number];
+  }) {
+    cellSelectMode = false;
+    cellInfo = null;
+    cellInfoError = '';
+    cellInfoLoading = true;
+    cellInfoDialogOpen = true;
+    try {
+      cellInfo = await SelectCellDiagnostics(hit.point[0], hit.point[1], hit.point[2]);
+    } catch (e) {
+      cellInfoError = String(e);
+    } finally {
+      cellInfoLoading = false;
+    }
   }
 
   // Binary mesh URLs for the 3D viewers live inside the single `run`
@@ -1720,6 +1746,7 @@
   onkeydown={(e) => {
     if (e.key === 'Escape') {
       if (triangleSelectMode) { triangleSelectMode = false; }
+      if (cellSelectMode) { cellSelectMode = false; }
       viewMenuOpen = false;
       outputViewMenuOpen = false;
     }
@@ -1781,6 +1808,9 @@
         </Menubar.Item>
         <Menubar.Item onSelect={() => { triangleSelectMode = true; }} disabled={!inputMeshUrl && !outputMeshUrl}>
           Select Triangle…
+        </Menubar.Item>
+        <Menubar.Item onSelect={() => { cellSelectMode = true; }} disabled={!outputMeshUrl || running}>
+          Select Cell…
         </Menubar.Item>
       </Menubar.Content>
     </Menubar.Menu>
@@ -2517,7 +2547,7 @@
       </div>
     </div>
     <div class="flex-1 min-h-0 relative">
-      <ModelViewer meshUrl={outputMesh} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} />
+      <ModelViewer meshUrl={outputMesh} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} pickCellMode={cellSelectMode} onCellPick={handleCellPick} />
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"
@@ -2649,5 +2679,6 @@
 
 <DebugCellsDialog bind:open={debugCellsDialogOpen} />
 <TriangleInfoDialog bind:open={triangleInfoDialogOpen} pick={pickedTriangle} />
+<CellInfoDialog bind:open={cellInfoDialogOpen} info={cellInfo} error={cellInfoError} loading={cellInfoLoading} />
 
 </Tooltip.Provider>

@@ -1,15 +1,16 @@
 <script lang="ts">
   // Lives inside a threlte <Canvas>. When pickMode is true, a tap (a
   // pointerdown→pointerup with negligible movement) raycasts into the
-  // scene and reports the picked face's three vertex positions (in world
-  // coordinates) via onPick.
+  // scene and reports the picked surface point (world coordinates, i.e.
+  // preview-mm) plus the hit face index via onPick. The backend resolves
+  // which Voxelize cell sits under that point.
   //
-  // Uses pointerdown/pointerup with a movement threshold rather than a
-  // `click` listener: OrbitControls captures the pointer on the canvas,
-  // so `click` never fires and pointerup never reaches a canvas-bound
-  // listener. Recording the down on the canvas and catching the up on
-  // window sidesteps both; the tap-vs-drag threshold lets the user still
-  // rotate (drag) while picking. Sibling of CellPicker3D.
+  // We use pointerdown/pointerup with a movement threshold rather than a
+  // plain `click` listener: OrbitControls captures the pointer on the
+  // canvas, so the synthesized `click` never fires and pointerup never
+  // reaches a canvas-bound listener. Recording the down on the canvas and
+  // catching the up on window (capture phase) sidesteps both, and the
+  // tap-vs-drag threshold lets the user still rotate (drag) while picking.
   import { useThrelte } from '@threlte/core';
   import * as THREE from 'three';
   import { WebGLRenderer } from 'three';
@@ -21,16 +22,14 @@
     pickMode?: boolean;
     onPick?: (hit: {
       faceIndex: number;
-      vertices: [
-        [number, number, number],
-        [number, number, number],
-        [number, number, number],
-      ];
+      point: [number, number, number];
     }) => void;
   } = $props();
 
   const { renderer, camera, scene } = useThrelte();
 
+  // A pointerup within DRAG_PX of its pointerdown is a pick; more was a
+  // rotate/pan drag and is ignored.
   const DRAG_PX = 5;
   let downX = 0;
   let downY = 0;
@@ -52,25 +51,13 @@
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(ndc, cam);
     const hits = raycaster.intersectObjects(scene.children, true);
-    const hit = hits.find((h) => h.object instanceof THREE.Mesh && h.face && h.faceIndex != null);
-    if (!hit || !hit.face || hit.faceIndex == null) return;
-    const mesh = hit.object as THREE.Mesh;
-    const faceIndex = hit.faceIndex;
-
-    const geometry = mesh.geometry as THREE.BufferGeometry;
-    const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute | null;
-    if (!posAttr) return;
-
-    mesh.updateMatrixWorld();
-    const readVertex = (vi: number): [number, number, number] => {
-      const v = new THREE.Vector3(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
-      v.applyMatrix4(mesh.matrixWorld);
-      return [v.x, v.y, v.z];
-    };
+    // First mesh hit with a face index (skip gizmos / helpers).
+    const hit = hits.find((h) => h.object instanceof THREE.Mesh && h.faceIndex != null);
+    if (!hit || hit.faceIndex == null) return;
 
     onPick({
-      faceIndex,
-      vertices: [readVertex(hit.face.a), readVertex(hit.face.b), readVertex(hit.face.c)],
+      faceIndex: hit.faceIndex,
+      point: [hit.point.x, hit.point.y, hit.point.z],
     });
   }
 
