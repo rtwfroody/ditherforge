@@ -198,6 +198,7 @@
   let regionDither = $state(false);
   let regionDitherDeltaE = $state(20);
   let committedRegionDitherDeltaE = $state(20);
+  let rejectColorOutliers = $state(true);
   let stats = $state(false);
   // Debug: when true, the output mesh is colored by each face's
   // originating section's raw sampled RGB instead of the dithered
@@ -1218,6 +1219,7 @@
       colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
       regionDither,
       regionDitherDeltaE: useC ? committedRegionDitherDeltaE : regionDitherDeltaE,
+      rejectColorOutliers,
       stats,
       showSampledColors,
       alphaWrap,
@@ -1430,6 +1432,7 @@
     { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
     { key: 'regionDither',                    validate: pickBool,                                          apply: (v) => { regionDither = v; } },
     { key: 'regionDitherDeltaE',              validate: pickNumber,                                        apply: (v) => { regionDitherDeltaE = v; committedRegionDitherDeltaE = v; } },
+    { key: 'rejectColorOutliers',             validate: pickBool,                                          apply: (v) => { rejectColorOutliers = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
     { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
@@ -2542,6 +2545,13 @@
                   <Slider type="single" min={0} max={50} step={1} value={regionDitherDeltaE} onValueChange={(v: number) => regionDitherDeltaE = v} onValueCommit={(v: number) => committedRegionDitherDeltaE = v} />
                 </div>
               {/if}
+              <label class="flex items-center gap-2 text-sm">
+                <Checkbox bind:checked={rejectColorOutliers} />
+                Reject color outliers
+                <HelpTip>
+                  When almost all of a cell's color samples agree (one color holds at least 75% of them), drop the stray 1-2 samples that strayed across a color boundary into the cell instead of letting them pull the cell's averaged color. Genuinely mixed cells (no clear majority) keep every sample, so dithering is unaffected. On by default.
+                </HelpTip>
+              </label>
               <label class="flex items-center gap-2 text-sm">
                 <Checkbox bind:checked={honorTD} />
                 Honor TD

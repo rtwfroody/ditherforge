@@ -57,6 +57,7 @@ func SampleCellTrace(
 	override voxel.BaseColorOverride, colorXform func([3]float32) [3]float32,
 	buf, stickerBuf *voxel.SearchBuf, colorBVH *voxel.RayBVH,
 	colorCorrect func([3]uint8) [3]uint8,
+	rejectOutliers bool,
 ) CellTrace {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	if buf == nil {
@@ -82,30 +83,34 @@ func SampleCellTrace(
 		StartBack: startBack,
 		Reach:     reach,
 	}
-	var rSum, gSum, bSum, wSum float32
+	// Collect the alpha-counted samples (alpha ≥ 128) and remember which
+	// ray each came from, then aggregate exactly as SampleSlab does. With
+	// outlier rejection on, a ray that passed the alpha gate but landed in
+	// a dropped minority cluster shows up as not Counted, so the debug
+	// dialog reveals which stray samples were excluded from the average.
+	var samples []weightedColor
+	var sampleRay []int
 	for _, p := range points {
 		cp := p
 		if colorXform != nil {
 			cp = colorXform(p)
 		}
 		rgba, tr := voxel.SampleAlongNormalTrace(cp, normal, startBack, reach, model, colorBVH, si, searchRadius, buf, decals, stickerModel, stickerSI, stickerBuf, override)
-		counted := rgba[3] >= 128
-		if counted {
+		if rgba[3] >= 128 {
 			ct.AnyAlpha = true
-			w := float32(rgba[3]) / 255
-			rSum += float32(rgba[0]) * w
-			gSum += float32(rgba[1]) * w
-			bSum += float32(rgba[2]) * w
-			wSum += w
+			samples = append(samples, weightedColor{
+				c: [3]uint8{rgba[0], rgba[1], rgba[2]},
+				w: float32(rgba[3]) / 255,
+			})
+			sampleRay = append(sampleRay, len(ct.Rays))
 		}
-		ct.Rays = append(ct.Rays, CellSampleRay{Point: p, ColorPoint: cp, Trace: tr, Counted: counted})
+		ct.Rays = append(ct.Rays, CellSampleRay{Point: p, ColorPoint: cp, Trace: tr, Counted: false})
 	}
-	if wSum > 0 {
-		ct.AvgColor = [3]uint8{
-			uint8(clampF(rSum/wSum, 0, 255) + 0.5),
-			uint8(clampF(gSum/wSum, 0, 255) + 0.5),
-			uint8(clampF(bSum/wSum, 0, 255) + 0.5),
+	if avg, used, ok := reduceCellSamples(samples, rejectOutliers, true); ok {
+		for i, ri := range sampleRay {
+			ct.Rays[ri].Counted = used[i]
 		}
+		ct.AvgColor = avg
 		if colorCorrect != nil {
 			ct.AvgColor = colorCorrect(ct.AvgColor)
 		}

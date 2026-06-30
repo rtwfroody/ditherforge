@@ -431,6 +431,7 @@ export namespace settings {
 	    colorRegionContrast: number;
 	    regionDither: boolean;
 	    regionDitherDeltaE: number;
+	    rejectColorOutliers: boolean;
 	    stats: boolean;
 	    showSampledColors: boolean;
 	    alphaWrap: boolean;
@@ -489,6 +490,7 @@ export namespace settings {
 	        this.colorRegionContrast = source["colorRegionContrast"];
 	        this.regionDither = source["regionDither"];
 	        this.regionDitherDeltaE = source["regionDitherDeltaE"];
+	        this.rejectColorOutliers = source["rejectColorOutliers"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
 	        this.alphaWrap = source["alphaWrap"];

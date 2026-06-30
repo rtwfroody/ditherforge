@@ -166,6 +166,7 @@ func nonDefaultSettings() Settings {
 		ColorRegionContrast:   33,
 		RegionDither:          true,
 		RegionDitherDeltaE:    27,
+		RejectColorOutliers:   true,
 		Stats:                 true,
 		ShowSampledColors:     true,
 		AlphaWrap:             true,

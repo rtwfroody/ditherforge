@@ -100,10 +100,19 @@ type Options struct {
 	// stay connected and keep diffusing; sharp jumps above this are cut.
 	// Only consulted when RegionDither is on.
 	RegionDitherDeltaE float64 `json:"RegionDitherDeltaE"`
-	Brightness         float32
-	Contrast           float32
-	Saturation         float32
-	Dither             string
+	// RejectColorOutliers drops minority outlier samples when colouring a
+	// cell: each cell's interior colour samples are grouped by CIE76 ΔE,
+	// and when one cluster holds at least 75% of the sampling weight, only
+	// that dominant cluster is averaged into the cell colour (the stray 1-2
+	// samples that crossed a colour boundary into the cell are discarded).
+	// Cells with no clearly dominant cluster (genuinely mixed/dithered
+	// regions) keep the full average, so dithering is unaffected. On by
+	// default; toggling it rebuilds the voxelize cache.
+	RejectColorOutliers bool `json:"RejectColorOutliers"`
+	Brightness          float32
+	Contrast            float32
+	Saturation          float32
+	Dither              string
 	// RiemersmaInputBias is the per-cell input-bias maximum used by
 	// the Riemersma dither (only consulted when Dither == "riemersma").
 	// 0..1; higher = stronger pull toward nearest-input palette,

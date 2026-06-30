@@ -40,6 +40,7 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		ColorRegionContrast:                  s.ColorRegionContrast,
 		RegionDither:                         s.RegionDither,
 		RegionDitherDeltaE:                   s.RegionDitherDeltaE,
+		RejectColorOutliers:                  s.RejectColorOutliers,
 		ShowSampledColors:                    s.ShowSampledColors,
 		Stats:                                s.Stats,
 		ColorSnap:                            s.ColorSnap,

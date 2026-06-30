@@ -188,6 +188,7 @@ func CellDiagnosticsAt(cache *StageCache, opts Options, pick [3]float32) (*CellD
 		colorModel, spatial, vo.CellSize, 0,
 		decals, stickerModel, stickerSI,
 		override, colorXform, nil, nil, colorBVH, colorCorrect,
+		opts.RejectColorOutliers,
 	)
 
 	info.Centroid = ct.Centroid

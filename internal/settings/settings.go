@@ -133,13 +133,18 @@ type Settings struct {
 	// RegionDither (advanced) confines the dither to colour regions so a
 	// grey region's diffused error can't bleed into an adjacent solid
 	// black/white region. Independent of colorAwareCells; off by default.
-	RegionDither        bool                `json:"regionDither"`
-	RegionDitherDeltaE  float64             `json:"regionDitherDeltaE"`
-	Stats               bool                `json:"stats"`
-	ShowSampledColors   bool                `json:"showSampledColors"`
-	AlphaWrap           bool                `json:"alphaWrap"`
-	AlphaWrapAlpha      string              `json:"alphaWrapAlpha"`
-	AlphaWrapOffset     string              `json:"alphaWrapOffset"`
+	RegionDither       bool    `json:"regionDither"`
+	RegionDitherDeltaE float64 `json:"regionDitherDeltaE"`
+	// RejectColorOutliers discards stray minority colour samples when a
+	// cell's interior samples are dominated (≥75% by ΔE cluster) by one
+	// colour, so a lone sample straying across a colour boundary doesn't
+	// pull the cell's averaged colour. On by default.
+	RejectColorOutliers bool   `json:"rejectColorOutliers"`
+	Stats               bool   `json:"stats"`
+	ShowSampledColors   bool   `json:"showSampledColors"`
+	AlphaWrap           bool   `json:"alphaWrap"`
+	AlphaWrapAlpha      string `json:"alphaWrapAlpha"`
+	AlphaWrapOffset     string `json:"alphaWrapOffset"`
 	// Voxel-grid XY multipliers. See Default for the values missing-from-JSON
 	// keys are filled with on load.
 	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
@@ -200,6 +205,7 @@ func Default() Settings {
 		ColorRegionContrast:   20,
 		RegionDither:          false,
 		RegionDitherDeltaE:    20,
+		RejectColorOutliers:   true,
 		Stats:                 false,
 		ShowSampledColors:     false,
 		AlphaWrap:             false,

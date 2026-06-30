@@ -2035,7 +2035,7 @@ func (r *pipelineRun) sliceSampleHalf(
 		}
 		t1 := time.Now()
 		partitionNs.Add(int64(t1.Sub(t0)))
-		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker, geom, geomSI, bufs.geom, colorBVH, colorCorrect)
+		perSlabSamples[i] = cellslicer.SampleSlab(&slabs[i], i, colorModel, spatial, cs, 0, decals, stickerModel, stickerSI, override, colorXform, buf, bufs.sticker, geom, geomSI, bufs.geom, colorBVH, colorCorrect, r.opts.RejectColorOutliers)
 		sampleNs.Add(int64(time.Since(t1)))
 		progSlab(int(slabDone.Add(1)), nSlabs)
 	})

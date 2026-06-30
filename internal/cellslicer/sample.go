@@ -71,14 +71,118 @@ func SampleCells(
 	searchRadius float32,
 	decals []*voxel.StickerDecal,
 	override voxel.BaseColorOverride,
+	rejectOutliers bool,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	buf := voxel.NewSearchBuf(len(model.Faces))
 	out := []CellSample{}
 	for si_ := range slabs {
-		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil, nil, nil, nil, nil, nil)...)
+		out = append(out, SampleSlab(&slabs[si_], si_, model, si, cellSize, searchRadius, decals, nil, nil, override, nil, buf, nil, nil, nil, nil, nil, nil, rejectOutliers)...)
 	}
 	return out
+}
+
+const (
+	// outlierClusterDeltaE is the CIE76 ΔE radius within which two cell
+	// color samples are treated as "the same color" when grouping a
+	// cell's interior samples for outlier rejection. Small enough that
+	// genuinely different colors land in separate clusters; large enough
+	// that texture/anti-aliasing noise within one color stays together.
+	outlierClusterDeltaE = 10.0
+	// outlierDominanceFrac is the share of total sampling weight a single
+	// ΔE cluster must hold before the minority samples are discarded as
+	// outliers. At 0.75 a lone stray sample (e.g. one ray that strayed
+	// across a color boundary into the cell) is dropped, while a genuinely
+	// mixed/dithered cell (no cluster reaching 75%) keeps every sample.
+	outlierDominanceFrac = 0.75
+)
+
+// weightedColor is one alpha-counted interior color sample: its sRGB
+// triplet and its alpha-derived averaging weight.
+type weightedColor struct {
+	c [3]uint8
+	w float32
+}
+
+// reduceCellSamples folds a cell's counted color samples into one cell
+// color via an alpha-weighted mean. When rejectOutliers is set and a
+// single ΔE cluster of the samples carries at least outlierDominanceFrac
+// of the total weight, only that dominant cluster is averaged and the
+// minority outliers are dropped; otherwise (rejection off, or no clear
+// dominant cluster) every sample is averaged, leaving dithered/mixed
+// cells untouched. used[i] reports whether samples[i] contributed, for
+// the Select Cell debug tool — but only when wantUsed is set; the
+// production path discards it, so it stays nil (and unallocated) there.
+// ok is false when samples is empty.
+//
+// With rejection off, samples are summed in input order with no
+// clustering, so the result is bit-identical to a plain alpha-weighted
+// average. Clustering is greedy and keyed off each cluster's first
+// member; given the deterministic interior-sample order it is stable.
+func reduceCellSamples(samples []weightedColor, rejectOutliers, wantUsed bool) (color [3]uint8, used []bool, ok bool) {
+	n := len(samples)
+	if n == 0 {
+		return [3]uint8{}, nil, false
+	}
+	if wantUsed {
+		used = make([]bool, n)
+	}
+
+	useDominantOnly := false
+	var dom int
+	var cluster []int
+	if rejectOutliers {
+		cluster = make([]int, n)
+		var reps [][3]uint8
+		var clusterW []float32
+		for i, s := range samples {
+			ci := -1
+			for k, rep := range reps {
+				if deltaE76(s.c, rep) <= outlierClusterDeltaE {
+					ci = k
+					break
+				}
+			}
+			if ci < 0 {
+				ci = len(reps)
+				reps = append(reps, s.c)
+				clusterW = append(clusterW, 0)
+			}
+			cluster[i] = ci
+			clusterW[ci] += s.w
+		}
+		var domW, totW float32
+		for k, w := range clusterW {
+			totW += w
+			if w > domW {
+				domW, dom = w, k
+			}
+		}
+		useDominantOnly = len(reps) > 1 && totW > 0 && domW >= outlierDominanceFrac*totW
+	}
+
+	var rSum, gSum, bSum, wSum float32
+	for i, s := range samples {
+		if useDominantOnly && cluster[i] != dom {
+			continue
+		}
+		if used != nil {
+			used[i] = true
+		}
+		rSum += float32(s.c[0]) * s.w
+		gSum += float32(s.c[1]) * s.w
+		bSum += float32(s.c[2]) * s.w
+		wSum += s.w
+	}
+	if wSum <= 0 {
+		return [3]uint8{}, used, false
+	}
+	color = [3]uint8{
+		uint8(clampF(rSum/wSum, 0, 255) + 0.5),
+		uint8(clampF(gSum/wSum, 0, 255) + 0.5),
+		uint8(clampF(bSum/wSum, 0, 255) + 0.5),
+	}
+	return color, used, true
 }
 
 // SampleSlab colors every cell in slab with the same algorithm
@@ -132,6 +236,7 @@ func SampleSlab(
 	geomBuf *voxel.SearchBuf,
 	colorBVH *voxel.RayBVH,
 	colorCorrect func([3]uint8) [3]uint8,
+	rejectOutliers bool,
 ) []CellSample {
 	searchRadius = resolveSearchRadius(searchRadius, cellSize)
 	// The decal lookup indexes stickerModel's faces, which can outnumber
@@ -182,8 +287,7 @@ func SampleSlab(
 		// the rejection-sampling fallback fills the budget with a
 		// deterministic in-polygon walk.
 		points := cellInteriorSamplePoints(c.Outer, cx, cy, midZ)
-		var rSum, gSum, bSum, wSum float32
-		anyAlpha := false
+		samples := make([]weightedColor, 0, len(points))
 		for _, p := range points {
 			if colorXform != nil {
 				p = colorXform(p)
@@ -192,20 +296,18 @@ func SampleSlab(
 			if rgba[3] < 128 {
 				continue
 			}
-			anyAlpha = true
-			w := float32(rgba[3]) / 255
-			rSum += float32(rgba[0]) * w
-			gSum += float32(rgba[1]) * w
-			bSum += float32(rgba[2]) * w
-			wSum += w
+			samples = append(samples, weightedColor{
+				c: [3]uint8{rgba[0], rgba[1], rgba[2]},
+				w: float32(rgba[3]) / 255,
+			})
 		}
+		anyAlpha := len(samples) > 0
 		var color [3]uint8
-		if wSum > 0 {
-			color = [3]uint8{
-				uint8(clampF(rSum/wSum, 0, 255) + 0.5),
-				uint8(clampF(gSum/wSum, 0, 255) + 0.5),
-				uint8(clampF(bSum/wSum, 0, 255) + 0.5),
-			}
+		// reduceCellSamples drops minority outlier samples when one ΔE
+		// cluster dominates (rejectOutliers); with it off it is a plain
+		// alpha-weighted average, bit-identical to the old aggregation.
+		if avg, _, ok := reduceCellSamples(samples, rejectOutliers, false); ok {
+			color = avg
 			// Apply the color-pin/adjustment correction ONCE, to the cell's
 			// averaged color — matching the removed StageColorAdjust/
 			// StageColorWarp, which corrected the aggregated cell color. The

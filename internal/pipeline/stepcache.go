@@ -925,6 +925,9 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 		// The ΔE threshold changes which colour edges become cuts.
 		writeFloat64(h, opts.ColorRegionContrast)
 	}
+	// RejectColorOutliers changes each cell's averaged colour (drops stray
+	// minority samples), so toggling it must rebuild the voxelize cache.
+	writeBool(h, opts.RejectColorOutliers)
 	if opts.Split.Enabled {
 		// Voxelize emits a per-cell CutFace flag (and CellSample.Normal) for
 		// the flat cut-face fill. Salt only the split path so non-split caches
