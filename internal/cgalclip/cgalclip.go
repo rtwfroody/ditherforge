@@ -20,12 +20,16 @@
 //
 // Failure modes worth knowing about:
 //
-//   - Self-intersecting input. Clip is configured with
-//     throw_on_self_intersection(true) so a non-watertight input
-//     surfaces a CGAL exception ("Self_intersection_exception")
-//     rather than producing garbage. Alpha-wrapped meshes are
-//     supposed to be self-intersection-free; if you hit this,
-//     re-run alpha-wrap with a tighter offset.
+//   - Self-intersecting input. Clip first repairs self-intersections
+//     in place (CGAL's local remove_self_intersections) because the
+//     plane corefinement otherwise aborts with "Unauthorized
+//     intersections of constraints" where the plane crosses an
+//     intersecting region. Alpha-wrapped meshes are intersection-free,
+//     but the post-wrap QEM decimation can reintroduce a few hundred
+//     pairs in thin regions; the repair clears them while keeping the
+//     mesh a valid 2-manifold. Truly garbage input that still self-
+//     intersects after the repair surfaces a CGAL exception via
+//     throw_on_self_intersection(true).
 //   - Plane misses the input (no triangles cross). The clipped half
 //     is empty and Clip returns an error.
 //   - Plane lies tangent to a face. CGAL is strict; one half
