@@ -13,9 +13,11 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 ## Quick Start
 
 1. Launch `ditherforge`
-2. Use **File > Open** to select a `.glb`, `.3mf`, `.stl`, `.obj`, or `.dae`
-   (COLLADA) file (an OBJ or COLLADA model packaged in a `.zip` alongside its
-   `.mtl`/textures also works)
+2. In the **Model** section, click the **File** dropdown and choose **Browse
+   for file…** to select a `.glb`, `.3mf`, `.stl`, `.obj`, or `.dae` (COLLADA)
+   file (an OBJ or COLLADA model packaged in a `.zip` alongside its
+   `.mtl`/textures also works). Previously loaded models are one click away
+   under the dropdown's **Recent** submenu.
 3. Set **Nozzle diameter** and **Layer height** to match your slicer
 4. Set **Size (mm)** to your target print size
 5. Optionally, open the **Stickers** panel to apply PNG or JPEG images onto the model surface
@@ -26,7 +28,11 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
 
 All sidebar sections are collapsible — click a section header to fold or expand it.
 
-**File > Open Recent** lists both recently opened models and recently used JSON settings files.
+The input model is just another setting: swapping it from the **Model** dropdown
+keeps the rest of your configuration — palette, adjustments, stickers, and color
+pins all carry over (sticker placements rescale to the new model's size). The
+**File** menu is JSON-only: **Open JSON…** and **Open Recent JSON** load and
+list saved settings files.
 
 For real use, you'll want to update your Inventory filament collection as
 described right below.
@@ -353,8 +359,10 @@ adjustments, size, and nozzle settings — to a JSON file.
 
 Use **File > Save JSON As...** to save to a new file.
 
-Use **File > Open** and select a `.json` file to restore all settings and
-re-open the associated model.
+Use **File > Open JSON…** and select a `.json` file to restore all settings and
+re-open the associated model. Recently loaded settings files are listed under
+**File > Open Recent JSON**. (To swap only the model without touching other
+settings, use the **File** dropdown in the **Model** section instead.)
 
 Settings files are automatically associated with the input model. When you open
 a model, DitherForge suggests a default settings path based on the model's
@@ -537,6 +545,7 @@ cylinders or gentle curves where wrapping around the surface matters.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| Model file | none | The 3D model to convert, picked from the **File** dropdown at the top of the Model section (**Browse for file…** or **Recent**). Changing it swaps only the model — all other settings, stickers, and color pins are kept. |
 | Printer | Snapmaker U1 | Target printer profile. Restricts which nozzle and layer-height values are selectable, and determines which printer/process settings are embedded in the exported 3MF. |
 | Size (mm) | 100 | Scale the model so its largest extent equals this value in mm |
 | Scale | 1.0 | Relative scale multiplier |
@@ -641,7 +650,8 @@ solid-color regions.
 |-----------|-----------|---------|
 | Save | File > Save JSON | Saves to current path; prompts for path if unsaved |
 | Save to new file | File > Save JSON As... | Always prompts for a file path |
-| Load | File > Open | Opening a `.json` file restores all settings and re-opens the model |
+| Load | File > Open JSON… | Opening a `.json` file restores all settings and re-opens the model |
+| Recent | File > Open Recent JSON | Lists recently loaded settings files |
 
 Saved settings include: input file path, size/scale, nozzle diameter, layer
 height, palette (locked colors and collection), color adjustments, color pins,
