@@ -305,14 +305,18 @@ func gridFromLabels(labels [][]int32, colors map[int32][3]uint8) *colorGrid {
 	return g
 }
 
-// TestPickMergeVictimPrefersClosestColor pins the ΔE-aware merge target
-// choice. A thin dark strip (label 1) sits between a white region (label 0)
-// and a black region (label 2). The strip touches WHITE on more edges than
-// black, so the old adjacency-only rule merged it into white — leaving the
-// surviving cut at the low-contrast dark↔black edge and letting white cells
-// average toward grey. Perceptually the strip is far closer to black, so the
-// fix merges it into black, keeping the crisp white↔dark cut.
-func TestPickMergeVictimPrefersClosestColor(t *testing.T) {
+// TestMergeTargetPrefersClosestColor pins the ΔE-aware merge target choice.
+// A thin dark strip (label 1) sits between a white region (label 0) and a
+// black region (label 2). The strip touches WHITE on more edges than black,
+// so the old adjacency-only rule merged it into white — leaving the surviving
+// cut at the low-contrast dark↔black edge and letting white cells average
+// toward grey. Perceptually the strip is far closer to black, so the fix
+// merges it into black, keeping the crisp white↔dark cut.
+//
+// It exercises mergeTarget directly — the helper enforceMinSize actually uses
+// for target selection — rather than a victim-selection wrapper, so there is
+// no test-only code path that could silently diverge from production.
+func TestMergeTargetPrefersClosestColor(t *testing.T) {
 	const white, strip, black = int32(0), int32(1), int32(2)
 	// 3×4 grid. Strip = the two nodes in column 1, rows 0-1 (2 nodes, the
 	// smallest region → the victim). White wraps under it at (2,1), so the
@@ -329,12 +333,20 @@ func TestPickMergeVictimPrefersClosestColor(t *testing.T) {
 		black: {0, 0, 0},
 	}
 	g := gridFromLabels(labels, colors)
+	s := g.newMergeState()
 
-	victim, target := g.pickMergeVictim(map[int32]bool{})
-	if victim != strip {
-		t.Fatalf("victim = %d, want the smallest (strip=%d)", victim, strip)
+	// The strip is the smallest region, so enforceMinSize's heap would pop it
+	// as the victim first.
+	if s.area[strip] != 2 {
+		t.Fatalf("strip area = %d, want 2", s.area[strip])
 	}
-	if target != black {
+	for lab, a := range s.area {
+		if a < s.area[strip] {
+			t.Fatalf("label %d has area %d < strip's %d; strip must be the smallest victim", lab, a, s.area[strip])
+		}
+	}
+
+	if target := g.mergeTarget(strip, s); target != black {
 		t.Fatalf("merge target = %d, want the perceptually closest neighbour (black=%d); "+
 			"adjacency-only would have picked white=%d", target, black, white)
 	}

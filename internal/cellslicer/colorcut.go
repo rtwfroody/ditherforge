@@ -1,6 +1,7 @@
 package cellslicer
 
 import (
+	"container/heap"
 	"math"
 
 	clipper "github.com/ctessum/go.clipper"
@@ -329,36 +330,121 @@ func (g *colorGrid) enforceMinSize(cellSize float32) {
 	}
 	r2 := radius * radius
 
-	// frozen holds sub-cell components that have no neighbour to merge
-	// into (a single-colour island smaller than a cell, filling its own
-	// disconnected coverTarget piece). They keep their label rather than
-	// being dropped: dropping would leave that piece of coverTarget with
-	// no region and hence no cells — an uncovered hole in the printed
-	// shell, violating the disjoint-union==coverTarget invariant. One
-	// undersized cell there beats a hole. Frozen labels are excluded from
-	// future victim selection so the loop terminates.
+	// Incremental bookkeeping so a pass is no longer a full-grid rescan
+	// (the old version rebuilt the deep set, the area map, and rewrote the
+	// whole label array every merge — quadratic on a noisy surface with
+	// thousands of initial labels over a 10⁵–10⁶ node grid).
 	//
-	// No iteration cap: each pass either merges a victim (total label
-	// count −1) or freezes one (a label is frozen at most once), so the
-	// fixpoint is reached in O(initial label count) passes.
-	frozen := make(map[int32]bool)
+	//   - s (mergeState) holds each label's node list, area, and colour
+	//     accumulator; a merge touches only the victim's nodes and folds
+	//     its area/colour into the target in O(victim) instead of O(grid).
+	//
+	//   - deep is MONOTONE: merging can only make a label deep, never
+	//     un-deep — a deep node's disk holds only own-label and outside
+	//     nodes, and relabelling never injects a foreign label into it — so
+	//     it is carried across passes. Only the merge target's nodes near
+	//     the seam can newly qualify, so each pass re-examines just those
+	//     rather than rescanning the whole grid with a per-node disk scan.
+	//
+	//   - skip = deep ∪ frozen, grow-only. frozen holds sub-cell islands
+	//     with no neighbour to merge into (a single-colour island smaller
+	//     than a cell, filling its own disconnected coverTarget piece).
+	//     They keep their label rather than being dropped: dropping would
+	//     leave that piece of coverTarget with no region and hence no cells
+	//     — an uncovered hole in the printed shell, violating the
+	//     disjoint-union==coverTarget invariant. One undersized cell there
+	//     beats a hole. Frozen labels are excluded from future victim
+	//     selection so the loop terminates.
+	//
+	// No iteration cap: each pass either merges a victim (label count −1) or
+	// freezes one (a label is frozen at most once), so the fixpoint is
+	// reached in O(initial label count) passes.
+	s := g.newMergeState()
+	deep := g.deepLabels(rCells, r2)
+	skip := make(map[int32]bool, len(deep))
+	for lab := range deep {
+		skip[lab] = true
+	}
+
+	// Victim selection is a min-heap keyed by (area, label) rather than a
+	// per-pass linear scan of every surviving label — that scan, repeated
+	// once per merge, was itself O(labels²) and kept the whole routine
+	// quadratic even after the grid rescans were removed. Entries are never
+	// removed on merge; instead a pop is validated against the live area map
+	// (a merged-away or resized label yields a stale entry, discarded), and
+	// the target's grown area is re-pushed. Total pushes ≤ initial labels +
+	// merges, so the loop is O(labels·log labels). The heap orders by (area
+	// asc, label asc) — identical to the old scan's tie-break — so the merge
+	// sequence, and thus the final cell count, is unchanged and cache-stable.
+	h := make(areaHeap, 0, len(s.area))
+	for lab, a := range s.area {
+		h = append(h, areaItem{area: a, label: lab})
+	}
+	heap.Init(&h)
+
 	for {
-		skip := g.deepLabels(rCells, r2)
-		for lab := range frozen {
-			skip[lab] = true
+		// Pop the smallest non-deep, non-frozen component (smallest features
+		// are the surest sub-cell noise), skipping stale/skipped entries.
+		victim := int32(-1)
+		for h.Len() > 0 {
+			it := heap.Pop(&h).(areaItem)
+			if skip[it.label] {
+				continue
+			}
+			if a, ok := s.area[it.label]; !ok || a != it.area {
+				continue // stale: label merged away or resized since pushed
+			}
+			victim = it.label
+			break
 		}
-		// Pick the smallest non-deep, non-frozen component and merge it
-		// first (smallest features are the surest sub-cell noise).
-		victim, target := g.pickMergeVictim(skip)
 		if victim < 0 {
 			break // every surviving component is deep or frozen
 		}
+		target := g.mergeTarget(victim, s)
 		if target < 0 {
-			frozen[victim] = true
+			skip[victim] = true // freeze: no neighbour to merge into
 			continue
 		}
-		g.relabel(victim, target)
+		vnodes := s.merge(g, victim, target)
+		heap.Push(&h, areaItem{area: s.area[target], label: target})
+		// Deep is monotone and only the target can newly qualify, so update
+		// it in place instead of recomputing deepLabels over the whole grid.
+		if !deep[target] && g.targetBecameDeep(vnodes, target, rCells, r2) {
+			deep[target] = true
+			skip[target] = true
+		}
 	}
+}
+
+// areaItem is one heap entry: a label and the area it had when pushed.
+// enforceMinSize re-pushes a label whenever its area grows, so several
+// entries for one label may coexist; the live area map disambiguates the
+// current one from stale leftovers at pop time.
+type areaItem struct {
+	area  int
+	label int32
+}
+
+// areaHeap is a min-heap over areaItem ordered by (area asc, label asc) —
+// the same total order the old linear victim scan used, so the smallest
+// label wins ties deterministically (cache-stable merge sequence).
+type areaHeap []areaItem
+
+func (h areaHeap) Len() int { return len(h) }
+func (h areaHeap) Less(i, j int) bool {
+	if h[i].area != h[j].area {
+		return h[i].area < h[j].area
+	}
+	return h[i].label < h[j].label
+}
+func (h areaHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *areaHeap) Push(x any)   { *h = append(*h, x.(areaItem)) }
+func (h *areaHeap) Pop() any {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
 }
 
 // deepLabels returns the set of labels that have at least one deep node.
@@ -410,43 +496,15 @@ func (g *colorGrid) isDeep(idx int, rCells int, r2 float32) bool {
 	return true
 }
 
-// pickMergeVictim returns the smallest labelled component not in skip and
-// the neighbour label it should merge into (the perceptually closest one,
-// i.e. smallest CIE76 ΔE to the victim's mean colour). target is -1 when
-// the victim has no labelled neighbour. victim is -1 when every component
-// is in skip.
-func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) {
-	area := make(map[int32]int)
-	for idx := range g.inside {
-		if g.inside[idx] && g.label[idx] >= 0 {
-			area[g.label[idx]]++
-		}
-	}
-	victim = -1
-	bestArea := int(^uint(0) >> 1)
-	for lab, a := range area {
-		if skip[lab] {
-			continue
-		}
-		// Smallest area wins; ties broken by smallest label id so the
-		// choice is independent of Go's randomized map iteration order.
-		// Without the tie-break the merge sequence (and thus the final
-		// cell count) varies run to run, which desyncs the voxelize /
-		// palette caches and panics the dither stage on a partial bust.
-		if a < bestArea || (a == bestArea && lab < victim) {
-			bestArea = a
-			victim = lab
-		}
-	}
-	if victim < 0 {
-		return -1, -1
-	}
-	// Count shared adjacency with each neighbouring label.
+// mergeTarget returns the neighbour label victim should merge into: the
+// perceptually closest one (smallest CIE76 ΔE to victim's mean colour), or
+// -1 when victim has no labelled neighbour. Only victim's own nodes are
+// scanned, so the cost is O(victim), not O(grid).
+func (g *colorGrid) mergeTarget(victim int32, s *mergeState) int32 {
+	// Count shared adjacency with each neighbouring label by scanning only
+	// the victim's own nodes (the smallest component), not the whole grid.
 	adj := make(map[int32]int)
-	for idx := range g.inside {
-		if !g.inside[idx] || g.label[idx] != victim {
-			continue
-		}
+	for _, idx := range s.nodes[victim] {
 		r := idx / g.cols
 		c := idx % g.cols
 		for _, d := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
@@ -477,14 +535,13 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 	// rather than feeding a runaway blob, nucleating multiple bands. A
 	// colour-unknown neighbour (all-miss, no surface) or an all-miss victim
 	// gets ΔE = +Inf, so it sorts last and the geometry order decides.
-	mean := g.labelMeanColors()
-	vCol, vHas := mean[victim]
-	target = -1
+	vCol, vHas := s.mean(victim)
+	target := int32(-1)
 	var bestDE float64
 	var bestAdj int
 	for nl, n := range adj {
 		dE := math.MaxFloat64
-		if nCol, ok := mean[nl]; ok && vHas {
+		if nCol, ok := s.mean(nl); ok && vHas {
 			dE = deltaE76(vCol, nCol)
 		}
 		better := false
@@ -495,8 +552,8 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 			better = dE < bestDE
 		case n != bestAdj:
 			better = n > bestAdj
-		case area[nl] != area[target]:
-			better = area[nl] < area[target]
+		case s.area[nl] != s.area[target]:
+			better = s.area[nl] < s.area[target]
 		default:
 			better = nl < target
 		}
@@ -504,45 +561,120 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 			bestDE, bestAdj, target = dE, n, nl
 		}
 	}
-	return victim, target
+	return target
 }
 
-// labelMeanColors returns the mean sampled colour of each label over its
-// non-miss nodes. Labels that are entirely miss (no surface hit anywhere)
-// have no entry — callers treat them as colour-unknown.
-func (g *colorGrid) labelMeanColors() map[int32][3]uint8 {
-	sum := make(map[int32][3]uint64)
-	cnt := make(map[int32]int)
+// mergeState is the incrementally-maintained bookkeeping enforceMinSize
+// carries across passes so no operation rescans the whole grid: per-label
+// inside-node lists (a merge rewrites only the victim's nodes), areas, and
+// a colour accumulator (sum/cnt) yielding each label's mean colour.
+type mergeState struct {
+	nodes map[int32][]int     // inside node indices per label
+	area  map[int32]int       // == len(nodes[lab])
+	sum   map[int32][3]uint64 // Σ colour over the label's non-miss nodes
+	cnt   map[int32]int       // # non-miss nodes (mean = sum/cnt)
+}
+
+func (g *colorGrid) newMergeState() *mergeState {
+	s := &mergeState{
+		nodes: make(map[int32][]int),
+		area:  make(map[int32]int),
+		sum:   make(map[int32][3]uint64),
+		cnt:   make(map[int32]int),
+	}
 	for idx := range g.inside {
-		if !g.inside[idx] || g.miss[idx] {
+		if !g.inside[idx] {
 			continue
 		}
 		lab := g.label[idx]
 		if lab < 0 {
 			continue
 		}
-		c := g.col[idx]
-		s := sum[lab]
-		s[0] += uint64(c[0])
-		s[1] += uint64(c[1])
-		s[2] += uint64(c[2])
-		sum[lab] = s
-		cnt[lab]++
-	}
-	mean := make(map[int32][3]uint8, len(cnt))
-	for lab, n := range cnt {
-		s := sum[lab]
-		mean[lab] = [3]uint8{uint8(s[0] / uint64(n)), uint8(s[1] / uint64(n)), uint8(s[2] / uint64(n))}
-	}
-	return mean
-}
-
-func (g *colorGrid) relabel(from, to int32) {
-	for idx := range g.label {
-		if g.inside[idx] && g.label[idx] == from {
-			g.label[idx] = to
+		s.nodes[lab] = append(s.nodes[lab], idx)
+		s.area[lab]++
+		if !g.miss[idx] {
+			c := g.col[idx]
+			su := s.sum[lab]
+			su[0] += uint64(c[0])
+			su[1] += uint64(c[1])
+			su[2] += uint64(c[2])
+			s.sum[lab] = su
+			s.cnt[lab]++
 		}
 	}
+	return s
+}
+
+// mean returns the mean sampled colour of a label over its non-miss nodes,
+// and false when the label is entirely miss (no surface hit anywhere) —
+// callers treat that as colour-unknown.
+func (s *mergeState) mean(lab int32) ([3]uint8, bool) {
+	n := s.cnt[lab]
+	if n == 0 {
+		return [3]uint8{}, false
+	}
+	su := s.sum[lab]
+	return [3]uint8{uint8(su[0] / uint64(n)), uint8(su[1] / uint64(n)), uint8(su[2] / uint64(n))}, true
+}
+
+// merge relabels every victim node to target on the grid and folds the
+// victim's area/colour bookkeeping into target, all in O(victim) rather
+// than a full-grid rewrite. It returns the relabelled node indices so the
+// caller can re-test target deepness locally. victim is dropped from state.
+func (s *mergeState) merge(g *colorGrid, victim, target int32) []int {
+	vnodes := s.nodes[victim]
+	for _, idx := range vnodes {
+		g.label[idx] = target
+	}
+	s.nodes[target] = append(s.nodes[target], vnodes...)
+	s.area[target] += s.area[victim]
+	st, sv := s.sum[target], s.sum[victim]
+	st[0] += sv[0]
+	st[1] += sv[1]
+	st[2] += sv[2]
+	s.sum[target] = st
+	s.cnt[target] += s.cnt[victim]
+	delete(s.nodes, victim)
+	delete(s.area, victim)
+	delete(s.sum, victim)
+	delete(s.cnt, victim)
+	return vnodes
+}
+
+// targetBecameDeep reports whether target now admits a deep node as a
+// result of just absorbing the given (already-relabelled) victim nodes. A
+// node's deepness depends only on labels within rCells of it, so the only
+// nodes whose deepness can have changed are target nodes within that radius
+// of a relabelled node — this checks exactly that candidate set (a
+// Chebyshev-box superset of the disk; extra candidates are harmless because
+// isDeep is ground truth). Short-circuits on the first deep node found.
+func (g *colorGrid) targetBecameDeep(vnodes []int, target int32, rCells int, r2 float32) bool {
+	seen := make(map[int]bool)
+	for _, v := range vnodes {
+		vr := v / g.cols
+		vc := v % g.cols
+		for dr := -rCells; dr <= rCells; dr++ {
+			nr := vr + dr
+			if nr < 0 || nr >= g.rows {
+				continue
+			}
+			for dc := -rCells; dc <= rCells; dc++ {
+				nc := vc + dc
+				if nc < 0 || nc >= g.cols {
+					continue
+				}
+				nidx := nr*g.cols + nc
+				if seen[nidx] || !g.inside[nidx] || g.label[nidx] != target {
+					continue
+				}
+				seen[nidx] = true
+				if g.isDeep(nidx, rCells, r2) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // buildRegionFootprints turns each surviving label into a Footprint:
