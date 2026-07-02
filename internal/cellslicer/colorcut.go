@@ -182,10 +182,11 @@ type colorGrid struct {
 	pitch      float32 // node spacing in mm
 	minX, minY float32 // world coords of node (0,0)
 	cols, rows int
-	inside     []bool     // len cols*rows
-	col        [][3]uint8 // sampled colour, valid where inside && !miss
-	miss       []bool     // ray found no surface at this node
-	label      []int32    // component id, -1 until labelled
+	inside     []bool       // len cols*rows
+	col        [][3]uint8   // sampled colour, valid where inside && !miss
+	lab        [][3]float64 // CIELAB of col (go-colorful scale), valid where inside && !miss
+	miss       []bool       // ray found no surface at this node
+	label      []int32      // component id, -1 until labelled
 
 	contrast    float64 // CIE76 ΔE join threshold
 	insideCount int
@@ -250,6 +251,7 @@ func buildColorGrid(coverTarget *Footprint, cellSize float32, contrastDeltaE flo
 		rows:     rows,
 		inside:   make([]bool, cols*rows),
 		col:      make([][3]uint8, cols*rows),
+		lab:      make([][3]float64, cols*rows),
 		miss:     make([]bool, cols*rows),
 		label:    make([]int32, cols*rows),
 		contrast: contrastDeltaE,
@@ -270,6 +272,15 @@ func buildColorGrid(coverTarget *Footprint, cellSize float32, contrastDeltaE flo
 				g.miss[idx] = true
 			} else {
 				g.col[idx] = col
+				// Cache CIELAB once per node so the labelComponents join test
+				// (up to 4 comparisons per node) is a plain Euclidean distance
+				// instead of re-linearising both endpoints on every compare.
+				l, a, b := colorful.Color{
+					R: float64(col[0]) / 255,
+					G: float64(col[1]) / 255,
+					B: float64(col[2]) / 255,
+				}.Lab()
+				g.lab[idx] = [3]float64{l, a, b}
 			}
 		}
 	}
@@ -325,7 +336,12 @@ func (g *colorGrid) joins(a, b int) bool {
 	if g.miss[a] || g.miss[b] {
 		return g.miss[a] && g.miss[b]
 	}
-	return deltaE76(g.col[a], g.col[b]) <= g.contrast
+	// Cached-Lab Euclidean distance — bit-identical to
+	// deltaE76(g.col[a], g.col[b]) (same DistanceLab math, ×100), but the
+	// sRGB→Lab linearisation was paid once at grid build, not per compare.
+	la, lb := g.lab[a], g.lab[b]
+	dL, dA, dB := la[0]-lb[0], la[1]-lb[1], la[2]-lb[2]
+	return math.Sqrt(dL*dL+dA*dA+dB*dB)*100 <= g.contrast
 }
 
 // enforceMinSize repeatedly merges any component that admits no disk of
