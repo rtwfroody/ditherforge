@@ -3,6 +3,7 @@ package cellslicer
 import (
 	"container/heap"
 	"math"
+	"sort"
 
 	clipper "github.com/ctessum/go.clipper"
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -19,7 +20,11 @@ import (
 // without producing a sub-minimum cell, so it is merged into a
 // neighbour (and that boundary is simply not cut). This is the
 // resolution floor — seed placement cannot beat it — and it lives here,
-// in segmentation, before any footprint is cut.
+// in segmentation, before any footprint is cut. It is enforced in two
+// steps: enforceMinSize merges away whole regions that admit no
+// cellSize disk anywhere, then reassignShallowNodes cedes sub-cell
+// tendrils of the survivors (thin protrusions a whole-region merge
+// can't see) to the neighbouring region that can tile them.
 
 // ColorRegions partitions coverTarget into monochrome sub-region
 // footprints. sample(x, y) returns the printed-surface colour at the
@@ -33,9 +38,17 @@ import (
 // cuts only crisp edges.
 //
 // Guarantees:
-//   - every returned region admits a disk of diameter ~cellSize (no
-//     region is thinner than one cell anywhere it matters — sub-cell
-//     features are merged into a neighbour);
+//   - every returned region admits a disk of diameter ~cellSize, and no
+//     region keeps a sub-cell tendril of its own colour dangling between
+//     other regions or the silhouette — whole sub-cell features merge
+//     into a neighbour (enforceMinSize) and sub-cell protrusions of
+//     surviving regions are ceded to the nearest neighbouring region,
+//     where they thicken a boundary instead of tiling into slivers
+//     (reassignShallowNodes). Exceptions, both bounded: isolated
+//     sub-cell coverTarget islands are kept undersized rather than
+//     dropped (a hole is worse), and a thin spike of coverTarget itself
+//     stays with its parent region (no segmentation can widen the
+//     footprint — the plain partition tiles it the same way);
 //   - the returned regions are disjoint and their union is coverTarget
 //     (clipped exactly to it), so tiling each one tiles the whole shell.
 //
@@ -52,6 +65,7 @@ func ColorRegions(coverTarget *Footprint, cellSize float32, contrastDeltaE float
 	}
 	g.labelComponents()
 	g.enforceMinSize(cellSize)
+	g.reassignShallowNodes(cellSize)
 	regions := g.buildRegionFootprints(coverTarget)
 	if len(regions) <= 1 {
 		// One colour (or one surviving region) — no boundary to honour.
@@ -675,6 +689,172 @@ func (g *colorGrid) targetBecameDeep(vnodes []int, target int32, rCells int, r2 
 		}
 	}
 	return false
+}
+
+// reassignShallowNodes cedes sub-cell tendrils to a region that can tile
+// them. enforceMinSize guarantees only that every surviving label admits
+// a cellSize disk SOMEWHERE — a label shaped like a fat blob with a thin
+// strip running along a colour edge or the silhouette is "deep" and
+// survives whole, and the strip then tiles into sub-cellSize sliver
+// cells via ringSeeds' thin-feature fallback.
+//
+// The pass keeps each label's core — the nodes within the min-size disk
+// radius of a deep node of their own label, i.e. the label's
+// morphological opening by that disk — and reassigns every remaining
+// shallow node to the geodesically nearest core (multi-source BFS,
+// 4-connected through inside nodes). The cases fall out without special
+// handling:
+//
+//   - a tendril running alongside another region flows into that
+//     neighbour: its nodes are > radius from their own core by
+//     definition of shallow, but only a node or two from the
+//     neighbour's. The receiver only gets FATTER there (it absorbs area
+//     adjacent to its body), so no new sliver is created;
+//   - a thin silhouette spike (outside on both sides) stays with its
+//     parent — the parent core is the only one reachable. The footprint
+//     itself is sub-cell there, which no segmentation can fix; the
+//     plain partition tiles it the same way;
+//   - frozen islands (no deep node in their component) are unreachable
+//     and keep their label, so no node is ever dropped and the regions'
+//     disjoint-union==coverTarget invariant holds.
+//
+// On a straight cut every node is already core (deep nodes sit just
+// inside the boundary and their disks reach back to it), so the common
+// no-tendril case exits after one linear scan.
+//
+// Determinism (cache-critical: a nondeterministic partition desyncs the
+// voxelize/palette caches and panics dither): BFS claims are resolved
+// per distance layer with the smallest claiming label winning, and each
+// layer is applied in sorted node order, so the result is independent
+// of map iteration order.
+func (g *colorGrid) reassignShallowNodes(cellSize float32) {
+	// With fewer than two surviving labels there is no other basin for a
+	// tendril to flow into.
+	firstLab := int32(-1)
+	multi := false
+	for idx, lab := range g.label {
+		if !g.inside[idx] || lab < 0 {
+			continue
+		}
+		if firstLab < 0 {
+			firstLab = lab
+		} else if lab != firstLab {
+			multi = true
+			break
+		}
+	}
+	if !multi {
+		return
+	}
+
+	radius := cellSize * 0.5
+	rCells := int(radius/g.pitch + 0.999)
+	if rCells < 1 {
+		rCells = 1
+	}
+	r2 := radius * radius
+
+	// Core = the deep nodes dilated by the same disk isDeep uses. A deep
+	// node's disk holds only own-label inside nodes (that is the
+	// definition), so marking every inside node in it stays within the
+	// label.
+	core := make([]bool, len(g.label))
+	for idx := range g.label {
+		if !g.inside[idx] || g.label[idx] < 0 || !g.isDeep(idx, rCells, r2) {
+			continue
+		}
+		r := idx / g.cols
+		c := idx % g.cols
+		for dr := -rCells; dr <= rCells; dr++ {
+			nr := r + dr
+			if nr < 0 || nr >= g.rows {
+				continue
+			}
+			for dc := -rCells; dc <= rCells; dc++ {
+				nc := c + dc
+				if nc < 0 || nc >= g.cols {
+					continue
+				}
+				dx := float32(dc) * g.pitch
+				dy := float32(dr) * g.pitch
+				if dx*dx+dy*dy > r2 {
+					continue
+				}
+				nidx := nr*g.cols + nc
+				if g.inside[nidx] {
+					core[nidx] = true
+				}
+			}
+		}
+	}
+
+	anyShallow := false
+	for idx := range g.label {
+		if g.inside[idx] && g.label[idx] >= 0 && !core[idx] {
+			anyShallow = true
+			break
+		}
+	}
+	if !anyShallow {
+		return
+	}
+
+	// Multi-source BFS from the core boundary. assigned doubles as the
+	// visited set; core nodes are terminal sources and never reassigned.
+	assigned := core
+	frontier := make([]int, 0, 1024)
+	for idx := range g.label {
+		if !core[idx] {
+			continue
+		}
+		r := idx / g.cols
+		c := idx % g.cols
+		for _, d := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+			nc, nr := c+d[0], r+d[1]
+			if nc < 0 || nc >= g.cols || nr < 0 || nr >= g.rows {
+				continue
+			}
+			nidx := nr*g.cols + nc
+			if g.inside[nidx] && !core[nidx] {
+				frontier = append(frontier, idx)
+				break
+			}
+		}
+	}
+	for len(frontier) > 0 {
+		claims := make(map[int]int32)
+		for _, idx := range frontier {
+			lab := g.label[idx]
+			r := idx / g.cols
+			c := idx % g.cols
+			for _, d := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				nc, nr := c+d[0], r+d[1]
+				if nc < 0 || nc >= g.cols || nr < 0 || nr >= g.rows {
+					continue
+				}
+				nidx := nr*g.cols + nc
+				if !g.inside[nidx] || assigned[nidx] {
+					continue
+				}
+				if cur, ok := claims[nidx]; !ok || lab < cur {
+					claims[nidx] = lab
+				}
+			}
+		}
+		if len(claims) == 0 {
+			break
+		}
+		next := make([]int, 0, len(claims))
+		for nidx := range claims {
+			next = append(next, nidx)
+		}
+		sort.Ints(next)
+		for _, nidx := range next {
+			g.label[nidx] = claims[nidx]
+			assigned[nidx] = true
+		}
+		frontier = next
+	}
 }
 
 // buildRegionFootprints turns each surviving label into a Footprint:

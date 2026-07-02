@@ -274,6 +274,63 @@ func TestColorRegionsNoNeckOverlap(t *testing.T) {
 	}
 }
 
+// TestColorRegionsTendrilCeded pins the shallow-node reassignment
+// (reassignShallowNodes). A black half-plane with a 0.3mm black strip
+// (< cellSize) running along the bottom silhouette under the white half
+// is ONE flood-fill component, and it is deep (the half-plane admits
+// plenty of cellSize disks), so enforceMinSize's whole-region merge never
+// touches it — the strip used to survive as a tendril of the black region
+// and tile into sub-cellSize sliver cells via ringSeeds' thin-feature
+// fallback. The tendril's shallow nodes must instead be ceded to the
+// white region, whose footprint then reaches the bottom silhouette there.
+func TestColorRegionsTendrilCeded(t *testing.T) {
+	const size = 10.0
+	const cellSize = 1.0
+
+	cover := squareFootprint(size)
+	sample := func(x, y float32) ([3]uint8, bool) {
+		if x < 5.0 || y < 0.3 {
+			return [3]uint8{0, 0, 0}, true // black half + bottom strip
+		}
+		return [3]uint8{255, 255, 255}, true
+	}
+
+	regions := ColorRegions(cover, cellSize, 30, sample)
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions, got %d", len(regions))
+	}
+	regionAt := func(x, y float32) *Footprint {
+		for _, r := range regions {
+			if r.Contains(x, y) {
+				return r
+			}
+		}
+		return nil
+	}
+	black := regionAt(2, 5)
+	white := regionAt(7.5, 5)
+	if black == nil || white == nil || black == white {
+		t.Fatalf("could not identify distinct black/white regions")
+	}
+	// Mid-tendril, well past the sub-cell stub allowed near the
+	// attachment point: must belong to WHITE now.
+	if black.Contains(7.5, 0.1) {
+		t.Errorf("tendril at (7.5, 0.1) still belongs to the black region — shallow nodes not ceded")
+	}
+	if !white.Contains(7.5, 0.1) {
+		t.Errorf("tendril at (7.5, 0.1) is not covered by the white region — hole in coverTarget")
+	}
+	// The regions must still tile the whole coverTarget.
+	var total float64
+	for _, r := range regions {
+		total += footprintArea(r)
+	}
+	want := footprintArea(cover)
+	if d := math.Abs(total-want) / want; d > 0.02 {
+		t.Errorf("regions do not tile coverTarget after reassignment: total=%.3f want=%.3f (%.1f%% off)", total, want, d*100)
+	}
+}
+
 // gridFromLabels builds a colorGrid directly from a rows×cols label map and
 // a per-label colour, for white-box tests of the merge logic. label -1 means
 // "outside" (inside=false). All labelled nodes are surface hits (never miss).

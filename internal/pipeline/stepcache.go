@@ -921,7 +921,11 @@ func hashVoxelizeSettings(c *StageCache, h hash.Hash64, opts Options) {
 		// Salt the colour-aware tiling so its caches rebuild when the
 		// per-region seeding changes (baseline caches are unaffected).
 		// "v2" = ring seeds thinned to kill the thin-band seed overlap.
-		writeString(h, "colorcells-v2")
+		// "v3" = min-size merge target is now ΔE-aware (keeps the
+		// high-contrast edge) and sub-cell tendrils of surviving regions
+		// are ceded to the nearest neighbouring region
+		// (reassignShallowNodes) instead of tiling into sliver cells.
+		writeString(h, "colorcells-v3")
 		// The ΔE threshold changes which colour edges become cuts.
 		writeFloat64(h, opts.ColorRegionContrast)
 	}
