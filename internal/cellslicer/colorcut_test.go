@@ -273,3 +273,75 @@ func TestColorRegionsNoNeckOverlap(t *testing.T) {
 		}
 	}
 }
+
+// gridFromLabels builds a colorGrid directly from a rows×cols label map and
+// a per-label colour, for white-box tests of the merge logic. label -1 means
+// "outside" (inside=false). All labelled nodes are surface hits (never miss).
+func gridFromLabels(labels [][]int32, colors map[int32][3]uint8) *colorGrid {
+	rows := len(labels)
+	cols := len(labels[0])
+	g := &colorGrid{
+		pitch:  0.25,
+		cols:   cols,
+		rows:   rows,
+		inside: make([]bool, cols*rows),
+		col:    make([][3]uint8, cols*rows),
+		miss:   make([]bool, cols*rows),
+		label:  make([]int32, cols*rows),
+	}
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			idx := r*cols + c
+			lab := labels[r][c]
+			g.label[idx] = lab
+			if lab < 0 {
+				continue
+			}
+			g.inside[idx] = true
+			g.insideCount++
+			g.col[idx] = colors[lab]
+		}
+	}
+	return g
+}
+
+// TestPickMergeVictimPrefersClosestColor pins the ΔE-aware merge target
+// choice. A thin dark strip (label 1) sits between a white region (label 0)
+// and a black region (label 2). The strip touches WHITE on more edges than
+// black, so the old adjacency-only rule merged it into white — leaving the
+// surviving cut at the low-contrast dark↔black edge and letting white cells
+// average toward grey. Perceptually the strip is far closer to black, so the
+// fix merges it into black, keeping the crisp white↔dark cut.
+func TestPickMergeVictimPrefersClosestColor(t *testing.T) {
+	const white, strip, black = int32(0), int32(1), int32(2)
+	// 3×4 grid. Strip = the two nodes in column 1, rows 0-1 (2 nodes, the
+	// smallest region → the victim). White wraps under it at (2,1), so the
+	// strip shares 3 edges with white vs 2 with black — white wins on
+	// adjacency, black wins on colour.
+	labels := [][]int32{
+		{white, strip, black, black},
+		{white, strip, black, black},
+		{white, white, black, black},
+	}
+	colors := map[int32][3]uint8{
+		white: {255, 255, 255},
+		strip: {40, 40, 40}, // dark grey: ΔE-close to black, far from white
+		black: {0, 0, 0},
+	}
+	g := gridFromLabels(labels, colors)
+
+	victim, target := g.pickMergeVictim(map[int32]bool{})
+	if victim != strip {
+		t.Fatalf("victim = %d, want the smallest (strip=%d)", victim, strip)
+	}
+	if target != black {
+		t.Fatalf("merge target = %d, want the perceptually closest neighbour (black=%d); "+
+			"adjacency-only would have picked white=%d", target, black, white)
+	}
+
+	// Sanity: the strip really does touch white more than black, so this
+	// test would pass trivially under the old rule only by coincidence.
+	if dW, dB := deltaE76(colors[strip], colors[white]), deltaE76(colors[strip], colors[black]); dB >= dW {
+		t.Fatalf("test setup broken: strip must be closer to black (ΔE_black=%.1f) than white (ΔE_white=%.1f)", dB, dW)
+	}
+}

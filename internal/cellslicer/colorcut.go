@@ -1,6 +1,8 @@
 package cellslicer
 
 import (
+	"math"
+
 	clipper "github.com/ctessum/go.clipper"
 	colorful "github.com/lucasb-eyer/go-colorful"
 )
@@ -408,10 +410,11 @@ func (g *colorGrid) isDeep(idx int, rCells int, r2 float32) bool {
 	return true
 }
 
-// pickMergeVictim returns the smallest labelled component not in skip
-// and the neighbour label it should merge into (the one it shares the
-// most 4-adjacency with). target is -1 when the victim has no labelled
-// neighbour. victim is -1 when every component is in skip.
+// pickMergeVictim returns the smallest labelled component not in skip and
+// the neighbour label it should merge into (the perceptually closest one,
+// i.e. smallest CIE76 ΔE to the victim's mean colour). target is -1 when
+// the victim has no labelled neighbour. victim is -1 when every component
+// is in skip.
 func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) {
 	area := make(map[int32]int)
 	for idx := range g.inside {
@@ -458,33 +461,80 @@ func (g *colorGrid) pickMergeVictim(skip map[int32]bool) (victim, target int32) 
 			}
 		}
 	}
+	// Choose the merge target by perceptual similarity: absorb the victim
+	// into the neighbour whose mean colour is closest (smallest CIE76 ΔE),
+	// so the boundary that SURVIVES the merge is the highest-contrast one. A
+	// thin dark strip between a white and a black region thus merges into
+	// black — leaving the crisp white↔dark cut — rather than into whichever
+	// side it happens to touch most (which could leave the survivor at the
+	// low-contrast dark↔black edge). ΔE is deterministic, so the merge
+	// sequence and final cell count stay reproducible (a hard requirement:
+	// non-determinism desyncs the voxelize/palette caches and panics dither).
+	//
+	// Ties on colour fall back to the old geometry order: most shared
+	// 4-adjacency, then smaller area, then smaller label. Preferring the
+	// SMALLER neighbour on a tie keeps victims attaching to nascent regions
+	// rather than feeding a runaway blob, nucleating multiple bands. A
+	// colour-unknown neighbour (all-miss, no surface) or an all-miss victim
+	// gets ΔE = +Inf, so it sorts last and the geometry order decides.
+	mean := g.labelMeanColors()
+	vCol, vHas := mean[victim]
 	target = -1
-	best := 0
+	var bestDE float64
+	var bestAdj int
 	for nl, n := range adj {
-		// Most shared adjacency wins. Ties are broken deterministically
-		// (map iteration order is randomized in Go) but NOT by a plain
-		// label compare: smallest-label would always merge toward the
-		// same side, sweeping a whole gradient into one runaway region.
-		// Prefer the SMALLER neighbour instead, so victims attach to
-		// nascent regions rather than feeding an already-large (and soon
-		// deep-protected) blob — this nucleates multiple bands the way the
-		// old random order did, while staying reproducible. Final tie:
-		// smallest label.
-		if n > best || (n == best && target >= 0 && betterMergeTarget(area, nl, target)) {
-			best = n
-			target = nl
+		dE := math.MaxFloat64
+		if nCol, ok := mean[nl]; ok && vHas {
+			dE = deltaE76(vCol, nCol)
+		}
+		better := false
+		switch {
+		case target < 0:
+			better = true
+		case dE != bestDE:
+			better = dE < bestDE
+		case n != bestAdj:
+			better = n > bestAdj
+		case area[nl] != area[target]:
+			better = area[nl] < area[target]
+		default:
+			better = nl < target
+		}
+		if better {
+			bestDE, bestAdj, target = dE, n, nl
 		}
 	}
 	return victim, target
 }
 
-// betterMergeTarget reports whether neighbour label a is a better merge
-// target than the current best b: smaller area first, then smaller label.
-func betterMergeTarget(area map[int32]int, a, b int32) bool {
-	if area[a] != area[b] {
-		return area[a] < area[b]
+// labelMeanColors returns the mean sampled colour of each label over its
+// non-miss nodes. Labels that are entirely miss (no surface hit anywhere)
+// have no entry — callers treat them as colour-unknown.
+func (g *colorGrid) labelMeanColors() map[int32][3]uint8 {
+	sum := make(map[int32][3]uint64)
+	cnt := make(map[int32]int)
+	for idx := range g.inside {
+		if !g.inside[idx] || g.miss[idx] {
+			continue
+		}
+		lab := g.label[idx]
+		if lab < 0 {
+			continue
+		}
+		c := g.col[idx]
+		s := sum[lab]
+		s[0] += uint64(c[0])
+		s[1] += uint64(c[1])
+		s[2] += uint64(c[2])
+		sum[lab] = s
+		cnt[lab]++
 	}
-	return a < b
+	mean := make(map[int32][3]uint8, len(cnt))
+	for lab, n := range cnt {
+		s := sum[lab]
+		mean[lab] = [3]uint8{uint8(s[0] / uint64(n)), uint8(s[1] / uint64(n)), uint8(s[2] / uint64(n))}
+	}
+	return mean
 }
 
 func (g *colorGrid) relabel(from, to int32) {
