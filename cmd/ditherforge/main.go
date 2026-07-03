@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/alexflint/go-arg"
@@ -123,7 +125,42 @@ func main() {
 	}
 	cb := &pipeline.Callbacks{Progress: progress.NewCLITracker()}
 
+	// Env-gated CPU profiling (harmless when unset). Pair with
+	// DITHERFORGE_STOP_AFTER_LOAD=1 to profile just the load phase.
+	// stopProfile is called explicitly right after RunCached (not via
+	// defer) so the many os.Exit paths below don't skip it.
+	stopProfile := func() {}
+	if pf := os.Getenv("DITHERFORGE_CPUPROFILE"); pf != "" {
+		f, ferr := os.Create(pf)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "cpuprofile: %v\n", ferr)
+		} else {
+			_ = pprof.StartCPUProfile(f)
+			stopProfile = func() {
+				pprof.StopCPUProfile()
+				f.Close()
+				fmt.Fprintf(os.Stderr, "wrote CPU profile to %s\n", pf)
+				if mf := os.Getenv("DITHERFORGE_MEMPROFILE"); mf != "" {
+					if m, merr := os.Create(mf); merr == nil {
+						runtime.GC()
+						_ = pprof.WriteHeapProfile(m)
+						m.Close()
+						fmt.Fprintf(os.Stderr, "wrote heap profile to %s\n", mf)
+					}
+				}
+			}
+		}
+	}
+
 	pr, runErr := pipeline.RunCached(ctx, cache, opts, cb)
+	stopProfile()
+	if os.Getenv("DITHERFORGE_STOP_AFTER_LOAD") != "" {
+		if runErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", runErr)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Even if RunCached fails, the Voxelize stage may have completed —
 	// emit debug cell PNGs from the cache before exiting.

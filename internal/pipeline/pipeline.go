@@ -11,6 +11,7 @@ import (
 	_ "image/png"
 	"log"
 	"math"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -493,6 +494,14 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 				ModelExtentMM: ext,
 			}, nil
 		}
+	}
+
+	// Load-phase profiling escape hatch (env-gated, harmless when unset):
+	// stop the pipeline right after StageLoad so a CPU profile captures
+	// only Parse+Preload+Load. Returns a minimal result.
+	if os.Getenv("DITHERFORGE_STOP_AFTER_LOAD") != "" {
+		plog.Printf("DITHERFORGE_STOP_AFTER_LOAD: stopping after load (%.1fs total)", time.Since(start).Seconds())
+		return &ProcessResult{ModelExtentMM: modelMaxExtent(lo.ColorModel)}, nil
 	}
 
 	// Sticker — needed for the input preview overlay.
