@@ -1,7 +1,6 @@
 package voxel
 
 import (
-	"container/heap"
 	"context"
 	"math"
 	"time"
@@ -102,30 +101,80 @@ type collapseEntry struct {
 	pos   [3]float32
 	v1ver int
 	v2ver int
-	idx   int // heap index
 }
 
-type collapseHeap []*collapseEntry
+// collapseHeap is a binary min-heap of collapseEntry values ordered by cost.
+//
+// Entries are stored inline (by value) rather than as pointers so that the
+// cost comparison in less() reads from the contiguous backing array instead
+// of chasing a random-address pointer per comparison — the pop-heavy sift
+// loop was cache-miss bound on the old []*collapseEntry layout. Storing values
+// also lets push() append directly, avoiding a per-edge heap allocation.
+//
+// The sift routines below are a by-value transcription of container/heap's
+// up/down/Init/Push/Pop. They perform the exact same sequence of comparisons
+// and swaps as the standard library on the same inputs, so the pop order —
+// and therefore the decimated mesh — is bit-identical to the pointer-heap
+// version, including tie-breaks between equal-cost entries.
+type collapseHeap []collapseEntry
 
-func (h collapseHeap) Len() int           { return len(h) }
-func (h collapseHeap) Less(i, j int) bool { return h[i].cost < h[j].cost }
-func (h collapseHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-	h[i].idx = i
-	h[j].idx = j
+func (h collapseHeap) less(i, j int) bool { return h[i].cost < h[j].cost }
+func (h collapseHeap) swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+// init establishes the heap invariant over the current contents.
+func (h collapseHeap) init() {
+	n := len(h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
 }
-func (h *collapseHeap) Push(x any) {
-	c := x.(*collapseEntry)
-	c.idx = len(*h)
+
+// push appends c and sifts it up into place.
+func (h *collapseHeap) push(c collapseEntry) {
 	*h = append(*h, c)
+	h.up(len(*h) - 1)
 }
-func (h *collapseHeap) Pop() any {
+
+// pop removes and returns the minimum-cost entry.
+func (h *collapseHeap) pop() collapseEntry {
 	old := *h
-	n := len(old)
-	c := old[n-1]
-	old[n-1] = nil
-	*h = old[:n-1]
+	n := len(old) - 1
+	old.swap(0, n)
+	old.down(0, n)
+	c := old[n]
+	*h = old[:n]
 	return c
+}
+
+func (h collapseHeap) up(j int) {
+	for {
+		i := (j - 1) / 2 // parent
+		if i == j || !h.less(j, i) {
+			break
+		}
+		h.swap(i, j)
+		j = i
+	}
+}
+
+func (h collapseHeap) down(i0, n int) bool {
+	i := i0
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
+			break
+		}
+		j := j1 // left child
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2 // = 2*i + 2  // right child
+		}
+		if !h.less(j, i) {
+			break
+		}
+		h.swap(i, j)
+		i = j
+	}
+	return i > i0
 }
 
 type decimator struct {
@@ -240,11 +289,11 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 			}
 		}
 	}
-	heap.Init(&d.h)
+	d.h.init()
 
 	// Collapse edges.
 	collapseCount := 0
-	for d.activeFaces > targetFaces && d.h.Len() > 0 {
+	for d.activeFaces > targetFaces && len(d.h) > 0 {
 		if collapseCount%1000 == 0 {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
@@ -252,7 +301,7 @@ func Decimate(ctx context.Context, verts [][3]float32, faces [][3]uint32, target
 			tracker.StageProgress("Decimating", initialFaces-d.activeFaces)
 		}
 		collapseCount++
-		c := heap.Pop(&d.h).(*collapseEntry)
+		c := d.h.pop()
 		if !d.vertAlive[c.edge.v1] || !d.vertAlive[c.edge.v2] {
 			continue
 		}
@@ -327,7 +376,7 @@ func (d *decimator) pushEdge(ek decimEdgeKey) {
 		scale = 1
 	}
 	cost *= scale
-	heap.Push(&d.h, &collapseEntry{
+	d.h.push(collapseEntry{
 		edge:  ek,
 		cost:  cost,
 		pos:   pos,
