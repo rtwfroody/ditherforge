@@ -91,10 +91,37 @@ const OpenEdgeBloatMM = 0.005
 //
 // slabSrc holds the source Manifold and its per-slab pre-split pieces,
 // shared by the per-cell and merged clip entry points.
+//
+// The per-slab pre-split (see runSplit) runs in its own goroutine so the
+// clip worker pool can start immediately and pick up each slab's jobs as
+// soon as that slab's piece is produced, rather than waiting for the whole
+// bottom-up split chain to finish first. perSlab[si] is written exactly
+// once — by the split goroutine — and ready[si] is closed immediately
+// after, so a consumer that has observed ready[si] closed sees the final
+// perSlab[si] with no further synchronisation. src, srcID, perSlab length,
+// order and ready are all fixed before the goroutine starts.
 type slabSrc struct {
 	src     *manifoldbool.Manifold
 	srcID   int32
 	perSlab []*manifoldbool.Manifold
+	// order is the slab indices in bottom-up Z order — the order runSplit
+	// emits pieces in, and the order the clip dispatcher releases jobs in.
+	order []int
+	// ready[si] is closed once perSlab[si] is final (either the split
+	// produced it, or the split failed/was cancelled and abandoned it —
+	// waitSlab distinguishes via splitErr). In the no-split case every
+	// channel is pre-closed.
+	ready []chan struct{}
+
+	// splitCancel stops the split goroutine on teardown; nil in the
+	// no-split case. splitDone is closed when the goroutine exits (or
+	// pre-closed in the no-split case), so close() can free pieces only
+	// once the writer has stopped. splitErr (guarded by splitMu) holds
+	// the first split error, surfaced to consumers via waitSlab.
+	splitCancel context.CancelFunc
+	splitDone   chan struct{}
+	splitMu     sync.Mutex
+	splitErr    error
 }
 
 // ClipProgress carries optional progress callbacks for the clip entry
@@ -128,10 +155,18 @@ func (p *ClipProgress) jobs() func(done, total int) {
 	return p.Jobs
 }
 
-// buildSlabSrc dedups the model, builds its source Manifold, and
-// pre-splits it into one Manifold per slab (see the per-slab rationale
-// in ClipMeshToCellsManifold). The caller must call close() when done.
-// onSplit (may be nil) ticks once per plane cut during the pre-split.
+// buildSlabSrc dedups the model, builds its source Manifold, and starts
+// pre-splitting it into one Manifold per slab (see the per-slab rationale
+// in ClipMeshToCellsManifold). The split runs in a background goroutine
+// (runSplit) so the clip worker pool can begin as soon as the first slab
+// piece is ready; runClipJobs gates each slab's jobs on its piece via
+// waitSlab. The caller must call close() when done — it stops the split
+// goroutine and frees every piece.
+//
+// The slab contiguity/order check is done synchronously here so a
+// malformed slab list surfaces as an error from buildSlabSrc, exactly as
+// before, rather than only once a worker touches the piece. onSplit (may
+// be nil) ticks once per plane cut, now from the split goroutine.
 func buildSlabSrc(ctx context.Context, model *loader.LoadedModel, slabs []Slab, onSplit func(done, total int)) (*slabSrc, error) {
 	verts, faces := DedupVertsByPosition(model.Vertices, model.Faces)
 	if len(verts) == 0 || len(faces) == 0 {
@@ -141,24 +176,42 @@ func buildSlabSrc(ctx context.Context, model *loader.LoadedModel, slabs []Slab, 
 	if err != nil {
 		return nil, fmt.Errorf("cellslicer/manifold: build source Manifold: %w", err)
 	}
-	// Pre-split src into one Manifold per slab. Each per-cell
-	// Intersection only walks the BVH of its own slab, cutting cgo and
-	// boolean cost on tall models with many slabs. The per-slab
-	// Manifold's own OriginalID is derived (-1); src's faces still
-	// carry srcID via per-face run_original_id, so ToMeshFiltered(srcID)
-	// downstream still recovers source-surface-only output and drops
-	// the plane-cut faces split_by_plane adds.
-	perSlab, err := splitSrcBySlabs(ctx, src, slabs, onSplit)
+	order, err := slabZOrder(slabs)
 	if err != nil {
 		src.Close()
 		return nil, fmt.Errorf("cellslicer/manifold: pre-split src by slab: %w", err)
 	}
-	return &slabSrc{src: src, srcID: src.OriginalID(), perSlab: perSlab}, nil
+	ss := &slabSrc{
+		src:       src,
+		srcID:     src.OriginalID(),
+		perSlab:   make([]*manifoldbool.Manifold, len(slabs)),
+		order:     order,
+		ready:     make([]chan struct{}, len(slabs)),
+		splitDone: make(chan struct{}),
+	}
+	for i := range ss.ready {
+		ss.ready[i] = make(chan struct{})
+	}
+	if len(slabs) <= 1 {
+		// One (or zero) slabs — no split needed; workers use src
+		// directly via the nil perSlab sentinel. Everything is ready now
+		// and there is no goroutine to stop.
+		for i := range ss.ready {
+			close(ss.ready[i])
+		}
+		close(ss.splitDone)
+		return ss, nil
+	}
+	splitCtx, cancel := context.WithCancel(ctx)
+	ss.splitCancel = cancel
+	go ss.runSplit(splitCtx, slabs, onSplit)
+	return ss, nil
 }
 
 // slabManifold returns the per-slab source Manifold for slab si, or src
-// itself when splitSrcBySlabs took its no-split early return (len(slabs)
-// ≤ 1, leaving perSlab[si] nil).
+// itself when there was no split (len(slabs) ≤ 1, leaving perSlab[si]
+// nil). Callers must have observed ready[si] closed (via waitSlab) first,
+// so perSlab[si] is the final value the split goroutine wrote.
 func (s *slabSrc) slabManifold(si int) *manifoldbool.Manifold {
 	if m := s.perSlab[si]; m != nil {
 		return m
@@ -166,7 +219,30 @@ func (s *slabSrc) slabManifold(si int) *manifoldbool.Manifold {
 	return s.src
 }
 
+// waitSlab blocks until slab si's piece is ready (or the split failed or
+// ctx was cancelled). It returns the split error if the split goroutine
+// recorded one, ctx.Err() on cancellation, or nil when perSlab[si] is
+// ready to use.
+func (s *slabSrc) waitSlab(ctx context.Context, si int) error {
+	select {
+	case <-s.ready[si]:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.splitMu.Lock()
+	err := s.splitErr
+	s.splitMu.Unlock()
+	return err
+}
+
 func (s *slabSrc) close() {
+	// Stop the split goroutine and wait for it to exit before freeing any
+	// piece — it writes perSlab concurrently, so freeing before it stops
+	// would race. splitDone is pre-closed in the no-split case.
+	if s.splitCancel != nil {
+		s.splitCancel()
+	}
+	<-s.splitDone
 	closeSlabManifolds(s.perSlab)
 	s.src.Close()
 }
@@ -198,7 +274,11 @@ func ClipMeshToCellsManifoldProgress(ctx context.Context, model *loader.LoadedMo
 			refs = append(refs, cellRef{globalOffsets[si] + ci, si, ci})
 		}
 	}
-	return runClipJobs(ctx, len(refs), func(i int) (int, [][3]float32, [][3]uint32, error) {
+	jobSlab := make([]int, len(refs))
+	for i, r := range refs {
+		jobSlab[i] = r.slabIdx
+	}
+	return runClipJobs(ctx, ss, jobSlab, func(i int) (int, [][3]float32, [][3]uint32, error) {
 		r := refs[i]
 		s := &slabs[r.slabIdx]
 		v, f, cerr := clipOneCellManifold(ss.slabManifold(r.slabIdx), ss.srcID, &s.Cells[r.cellIdx], s.ZBot, s.ZTop)
@@ -210,10 +290,19 @@ func ClipMeshToCellsManifoldProgress(ctx context.Context, model *loader.LoadedMo
 }
 
 // runClipJobs is the shared worker-pool engine behind both clip entry
-// points (per-cell and merged-cell). It runs n independent clip jobs
-// across NumCPU workers and concatenates the surviving meshes — in job
-// order, into one unified vertex table — tagging every face with the
-// global cell index its job returned.
+// points (per-cell and merged-cell). It runs one clip job per entry of
+// jobSlab across NumCPU workers and concatenates the surviving meshes —
+// in job order, into one unified vertex table — tagging every face with
+// the global cell index its job returned.
+//
+// jobSlab[i] is the slab index job i clips against (its piece is
+// ss.perSlab[jobSlab[i]]). A dispatcher goroutine walks the slabs in
+// split-emit (Z) order and releases each slab's jobs only once ss has
+// produced that slab's pre-split piece (ss.waitSlab), so the worker pool
+// starts immediately and the ~sequential pre-split (runSplit) overlaps
+// the parallel clip instead of running entirely before it. Because
+// results are written into their original job-index slot, this scheduling
+// never changes the output bytes — only when each boolean runs.
 //
 // clip(i) produces the surface-only mesh for job i and the rep cell
 // index to tag its faces with; it must already wrap any error with job
@@ -229,14 +318,17 @@ func ClipMeshToCellsManifoldProgress(ctx context.Context, model *loader.LoadedMo
 // distinct increasing count — but workers may deliver them out of
 // order; consumers must tolerate that (progress.Stage.Span does).
 //
-// Cancellation: workers check ctx before each job and stop picking up
-// new ones once it is done; runClipJobs then returns ctx.Err().
+// Cancellation: workers check ctx before each job and stop picking up new
+// ones once it is done; the dispatcher unblocks on ctx via waitSlab.
+// runClipJobs then returns ctx.Err(). A split failure surfaces the same
+// way — waitSlab returns it and it becomes the stage error.
 //
 // Panic containment: a panic in clip is captured as the job's error
 // (stack preserved) instead of crashing the process — goroutine panics
 // can't be recovered anywhere else, and the clip jobs call into native
 // Manifold code where a malformed cell is most likely to blow up.
-func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error), onJob func(done, total int)) (ClipResult, error) {
+func runClipJobs(ctx context.Context, ss *slabSrc, jobSlab []int, clip func(i int) (rep int, verts [][3]float32, faces [][3]uint32, err error), onJob func(done, total int)) (ClipResult, error) {
+	n := len(jobSlab)
 	type result struct {
 		rep   int
 		verts [][3]float32
@@ -251,17 +343,52 @@ func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts []
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
-	jobCh := make(chan int, n)
-	for i := 0; i < n; i++ {
-		jobCh <- i
+	// Group jobs by slab, preserving ascending job-index order within each
+	// slab (the original dispatch order). The dispatcher releases a slab's
+	// jobs once its piece is ready.
+	jobsBySlab := make([][]int, len(ss.ready))
+	for ji, si := range jobSlab {
+		jobsBySlab[si] = append(jobsBySlab[si], ji)
 	}
-	close(jobCh)
+	// Buffered to n so the dispatcher never blocks handing off jobs, even
+	// if every worker has already exited on cancellation.
+	jobCh := make(chan int, n)
 	var (
 		wg     sync.WaitGroup
 		errMu  sync.Mutex
 		firstE error
 		nDone  atomic.Int64
 	)
+	setErr := func(e error) {
+		errMu.Lock()
+		if firstE == nil {
+			firstE = e
+		}
+		errMu.Unlock()
+	}
+	// Dispatcher: gate each slab's jobs on its pre-split piece. Walking in
+	// ss.order (Z-emit order) means the frontier of released jobs follows
+	// the split, so workers always have runnable jobs while the split runs
+	// ahead of them.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(jobCh)
+		for _, si := range ss.order {
+			if err := ss.waitSlab(ctx, si); err != nil {
+				// A genuine split failure (ctx not cancelled) becomes the
+				// stage error; a cancellation is reported via ctx.Err()
+				// after wg.Wait, matching the worker path.
+				if ctx.Err() == nil {
+					setErr(err)
+				}
+				return
+			}
+			for _, ji := range jobsBySlab[si] {
+				jobCh <- ji
+			}
+		}
+	}()
 	// safeClip converts a panicking clip job into an error result so
 	// the worker goroutine survives (see the doc comment).
 	safeClip := func(ji int) (rep int, v [][3]float32, f [][3]uint32, cerr error) {
@@ -285,11 +412,7 @@ func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts []
 					onJob(int(nDone.Add(1)), n)
 				}
 				if cerr != nil {
-					errMu.Lock()
-					if firstE == nil {
-						firstE = cerr
-					}
-					errMu.Unlock()
+					setErr(cerr)
 					continue
 				}
 				if len(f) == 0 {
@@ -335,31 +458,13 @@ func runClipJobs(ctx context.Context, n int, clip func(i int) (rep int, verts []
 	return cr, nil
 }
 
-// splitSrcBySlabs pre-splits src into one Manifold per slab by walking
-// the slab Z planes bottom-up. The returned slice is indexed by slab
-// index (not Z order). Entries may be nil — that signals "use src
-// directly" and currently only happens when len(slabs) ≤ 1 (no
-// splitting needed). closeSlabManifolds takes care of the nil handling.
-//
-// Assumes neighbouring slabs are contiguous in Z; gaps would leave a
-// floating sliver between slabs that gets attached to the wrong side.
-// SlabBoundaryPlanes-derived partitions satisfy this; defensive callers
-// that pass arbitrary slab lists should verify it first.
-//
-// onSplit (may be nil) ticks once per plane cut with (cuts done,
-// len(slabs)-1); the cuts run sequentially bottom-up.
-//
-// Cancellation: checked between plane cuts. On cancel the pieces
-// allocated so far are rolled back (closed) and ctx.Err() is returned.
-func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Slab, onSplit func(done, total int)) ([]*manifoldbool.Manifold, error) {
-	perSlab := make([]*manifoldbool.Manifold, len(slabs))
-	if len(slabs) <= 1 {
-		// One (or zero) slabs — no split needed; per-cell workers use
-		// src directly via the nil sentinel.
-		return perSlab, nil
-	}
-	// Walk slabs bottom-up. Sort indexes so we can split planes in Z
-	// order even if caller passed slabs out of order.
+// slabZOrder returns the slab indices sorted bottom-up by ZBot — the
+// order runSplit walks the Z planes in — after verifying the slabs are
+// contiguous in Z. A gap would leave model geometry stranded between
+// slabs and silently attached to the wrong side by split_by_plane;
+// SlabBoundaryPlanes-derived partitions satisfy contiguity, but this is
+// checked defensively for alternate callers. Returns an error on any gap.
+func slabZOrder(slabs []Slab) ([]int, error) {
 	order := make([]int, len(slabs))
 	for i := range order {
 		order[i] = i
@@ -371,8 +476,6 @@ func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Sl
 	// bottom (within a small float tolerance — slab Z planes come from
 	// the same SlabBoundaryPlanes generator so exact equality is
 	// expected, but defensive against rounding in alternate callers).
-	// A gap leaves model geometry stranded between slabs and silently
-	// attached to the wrong side by split_by_plane.
 	const zEps = 1e-5
 	for k := 0; k < len(order)-1; k++ {
 		gap := slabs[order[k+1]].ZBot - slabs[order[k]].ZTop
@@ -381,35 +484,66 @@ func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Sl
 				order[k], slabs[order[k]].ZTop, order[k+1], slabs[order[k+1]].ZBot, gap)
 		}
 	}
-	// current holds the unallocated remainder of src as we split off
-	// each slab. For k=0, current==src (caller-owned, do NOT close).
-	// After the first split, current is a freshly allocated "above"
-	// piece that we own and must close before re-assigning.
-	current := src
+	return order, nil
+}
+
+// runSplit pre-splits src into one Manifold per slab by walking the slab
+// Z planes bottom-up (s.order), writing each piece into s.perSlab and
+// closing s.ready[si] as it is produced. It runs in its own goroutine so
+// the clip worker pool can start clipping already-produced pieces while
+// the remaining planes are still being cut — the same sequential chain of
+// split_by_plane calls as before, just overlapped with the clip jobs.
+//
+// The split only touches src and its own private remainder ("current"),
+// never a previously-emitted piece, so concurrent read-only clip ops on
+// those pieces are safe.
+//
+// onSplit (may be nil) ticks once per plane cut with (cuts done,
+// len(order)-1).
+//
+// Cancellation / error: on ctx cancel or a SplitByPlane failure the
+// remainder we own is freed and every not-yet-produced slab's ready
+// channel is closed with splitErr set, so waiters unblock and surface the
+// error rather than hang. Already-emitted pieces are left intact — clip
+// jobs may still be reading them; close() frees them once every worker
+// has stopped.
+func (s *slabSrc) runSplit(ctx context.Context, slabs []Slab, onSplit func(done, total int)) {
+	defer close(s.splitDone)
+	order := s.order
+	// current holds the unallocated remainder of src as we split off each
+	// slab. For k=0, current==src (owned by slabSrc, freed by close via
+	// s.src, not here). After the first split, current is a freshly
+	// allocated "above" piece we own and must close before re-assigning.
+	current := s.src
 	ownsCurrent := false
-	rollback := func(upTo int) {
-		for j := 0; j < upTo; j++ {
-			if m := perSlab[order[j]]; m != nil {
-				m.Close()
-				perSlab[order[j]] = nil
-			}
+	// fail records the error, frees the owned remainder, and closes the
+	// ready channels for every slab from Z-order position k onward (the
+	// ones this run never produced) so waiters unblock.
+	fail := func(err error, k int) {
+		s.splitMu.Lock()
+		if s.splitErr == nil {
+			s.splitErr = err
 		}
+		s.splitMu.Unlock()
 		if ownsCurrent {
 			current.Close()
+		}
+		for j := k; j < len(order); j++ {
+			close(s.ready[order[j]])
 		}
 	}
 	for k := 0; k < len(order)-1; k++ {
 		if err := ctx.Err(); err != nil {
-			rollback(k)
-			return nil, err
+			fail(err, k)
+			return
 		}
 		si := order[k]
 		// Plane is the boundary between slab order[k] and slab order[k+1].
-		// Contiguity is checked above, so slabs[si].ZTop ==
+		// Contiguity was checked by slabZOrder, so slabs[si].ZTop ==
 		// slabs[order[k+1]].ZBot.
 		zPlane := float64(slabs[si].ZTop)
 		above, below, err := manifoldbool.SplitByPlane(current, 0, 0, 1, zPlane)
-		// First iteration: current==src (caller-owned, ownsCurrent
+		// First iteration: current==src (owned by slabSrc, ownsCurrent
 		// false → skipped). Subsequent iterations: current is the
 		// previously-allocated "above" piece we own.
 		if ownsCurrent {
@@ -417,12 +551,12 @@ func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Sl
 			ownsCurrent = false
 		}
 		if err != nil {
-			// SplitByPlane closed above/below already on error; just
-			// release any previously emitted per-slab pieces.
-			rollback(k)
-			return nil, fmt.Errorf("split at z=%g (slab %d): %w", zPlane, si, err)
+			// SplitByPlane closed above/below already on error.
+			fail(fmt.Errorf("split at z=%g (slab %d): %w", zPlane, si, err), k)
+			return
 		}
-		perSlab[si] = below
+		s.perSlab[si] = below
+		close(s.ready[si])
 		current = above
 		ownsCurrent = true
 		if onSplit != nil {
@@ -430,11 +564,12 @@ func splitSrcBySlabs(ctx context.Context, src *manifoldbool.Manifold, slabs []Sl
 		}
 	}
 	// The remaining "current" is the topmost slab's portion.
-	perSlab[order[len(order)-1]] = current
-	return perSlab, nil
+	last := order[len(order)-1]
+	s.perSlab[last] = current
+	close(s.ready[last])
 }
 
-// closeSlabManifolds closes every per-slab Manifold splitSrcBySlabs
+// closeSlabManifolds closes every per-slab Manifold runSplit
 // allocated. nil entries (the "use src directly" sentinel) are skipped;
 // the caller still owns src and closes it separately.
 func closeSlabManifolds(perSlab []*manifoldbool.Manifold) {

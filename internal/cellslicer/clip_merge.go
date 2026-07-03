@@ -191,8 +191,13 @@ func ClipMeshToMergedCellsManifoldProgress(ctx context.Context, model *loader.Lo
 	groups := growSameColorCellGroups(slabs, cellColor)
 
 	// One job per merged group; faces are tagged with the group's
-	// representative global cell index.
-	cr, err := runClipJobs(ctx, len(groups), func(i int) (int, [][3]float32, [][3]uint32, error) {
+	// representative global cell index. jobSlab lets runClipJobs release
+	// each group's clip only once its slab's pre-split piece is ready.
+	jobSlab := make([]int, len(groups))
+	for i := range groups {
+		jobSlab[i] = groups[i].slabIdx
+	}
+	cr, err := runClipJobs(ctx, ss, jobSlab, func(i int) (int, [][3]float32, [][3]uint32, error) {
 		g := &groups[i]
 		s := &slabs[g.slabIdx]
 		v, f, cerr := clipOneGroupManifold(ss.slabManifold(g.slabIdx), ss.srcID, s.Cells, g.cellIdxs, s.ZBot, s.ZTop)
