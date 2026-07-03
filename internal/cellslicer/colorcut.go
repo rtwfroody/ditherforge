@@ -256,13 +256,20 @@ func buildColorGrid(coverTarget *Footprint, cellSize float32, contrastDeltaE flo
 		label:    make([]int32, cols*rows),
 		contrast: contrastDeltaE,
 	}
+	// rowInside is a scanline classification of one grid row. Filling it
+	// per row (crossings computed once per row) is bit-identical to
+	// calling coverTarget.Contains per node but avoids the O(nodes×edges)
+	// ray cast that dominated buildColorGrid on large footprints.
+	rowInside := make([]bool, cols)
+	var xsScratch []float32
 	for r := 0; r < rows; r++ {
 		y := minY + float32(r)*pitch
+		coverTarget.scanlineInside(y, minX, pitch, cols, rowInside, &xsScratch)
 		for c := 0; c < cols; c++ {
 			x := minX + float32(c)*pitch
 			idx := r*cols + c
 			g.label[idx] = -1
-			if !coverTarget.Contains(x, y) {
+			if !rowInside[c] {
 				continue
 			}
 			g.inside[idx] = true

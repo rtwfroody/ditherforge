@@ -2,6 +2,7 @@ package cellslicer
 
 import (
 	"math"
+	"sort"
 
 	clipper "github.com/ctessum/go.clipper"
 )
@@ -241,6 +242,64 @@ func (fp *Footprint) Bounds() (minX, minY, maxX, maxY float32, ok bool) {
 		}
 	}
 	return minX, minY, maxX, maxY, true
+}
+
+// scanlineInside classifies a whole horizontal row of regularly-spaced
+// grid nodes at world-y `y` (node c sits at x = minX + c*pitch, for
+// c in [0,cols)) as inside fp or not, writing the result into out (len
+// cols). It is a bit-identical, amortised replacement for calling
+// fp.Contains(x, y) once per node: it reproduces the even-odd parity
+// across loops, each loop's bbox reject, and the SAME float32 crossing
+// expression as pointInPolygon, but computes each loop's edge crossings
+// once per row (O(edges)) instead of once per node. scratch holds a
+// reusable []float32 backing array for the per-loop crossing list so
+// repeated rows do not re-allocate.
+func (fp *Footprint) scanlineInside(y, minX, pitch float32, cols int, out []bool, scratch *[]float32) {
+	for c := 0; c < cols; c++ {
+		out[c] = false
+	}
+	xs := (*scratch)[:0]
+	for i := range fp.Loops {
+		lp := &fp.Loops[i]
+		// Same reject as FootprintLoop.Contains: a loop whose Y bbox
+		// excludes this row contains no node in the row.
+		if y < lp.MinY || y > lp.MaxY {
+			continue
+		}
+		// Collect the loop's X-crossings with the horizontal line y,
+		// using the identical edge condition and crossing formula as
+		// pointInPolygon so classification is bit-for-bit identical.
+		xs = xs[:0]
+		pts := lp.Points
+		n := len(pts)
+		for a, b := 0, n-1; a < n; b, a = a, a+1 {
+			if (pts[a][1] > y) != (pts[b][1] > y) {
+				xIntersect := (pts[b][0]-pts[a][0])*(y-pts[a][1])/(pts[b][1]-pts[a][1]) + pts[a][0]
+				xs = append(xs, xIntersect)
+			}
+		}
+		if len(xs) == 0 {
+			continue
+		}
+		sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+		// For each node: FootprintLoop.Contains rejects x outside the
+		// loop's X bbox; otherwise pointInPolygon toggles once per
+		// crossing with x < xIntersect, so the loop contains the node
+		// iff an odd number of crossings are strictly greater than x.
+		// Toggle out[c] to accumulate the even-odd parity across loops
+		// (== Footprint.Contains' n%2 test).
+		for c := 0; c < cols; c++ {
+			x := minX + float32(c)*pitch
+			if x < lp.MinX || x > lp.MaxX {
+				continue
+			}
+			k := sort.Search(len(xs), func(i int) bool { return xs[i] > x })
+			if (len(xs)-k)%2 == 1 {
+				out[c] = !out[c]
+			}
+		}
+	}
+	*scratch = xs
 }
 
 // pointInPolygon is even-odd ray cast along +X.
