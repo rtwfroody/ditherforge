@@ -343,6 +343,18 @@ func runClipJobs(ctx context.Context, ss *slabSrc, jobSlab []int, clip func(i in
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
+	// When there are at least as many jobs as workers, the Go worker pool
+	// alone saturates the cores, so pin Manifold's internal TBB to a single
+	// thread: each boolean runs sequentially and TBB adds no per-op
+	// scheduling overhead or oversubscription against the pool. Measured on
+	// Bowl1 (86k merged-cell booleans, 12 cores): ~29s → ~26s clip, output
+	// bit-identical. For a handful of large jobs (n < workers, e.g. tiny
+	// test models) the cores would otherwise sit idle, so leave TBB at its
+	// default there to parallelise each boolean internally.
+	if n >= runtime.NumCPU() {
+		manifoldbool.SetMaxParallelism(1)
+		defer manifoldbool.SetMaxParallelism(0)
+	}
 	// Group jobs by slab, preserving ascending job-index order within each
 	// slab (the original dispatch order). The dispatcher releases a slab's
 	// jobs once its piece is ready.
