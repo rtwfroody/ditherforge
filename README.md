@@ -238,7 +238,10 @@ muddying. They are independent and can be used together.
   tiles each monochrome region separately, so cell boundaries land *on* color
   boundaries. A checkerboard or other sharp pattern stays pure black/white
   instead of averaging to gray along the edges. Color features smaller than one
-  cell are merged away. The **Color contrast (delta E)** slider sets how
+  cell are merged into a neighbouring region; the merge keeps the
+  highest-contrast color boundary crisp — a thin strip between black and white
+  cedes to whichever side it least resembles rather than smearing the sharp edge
+  toward gray. The **Color contrast (delta E)** slider sets how
   different two surface colors must be before their boundary is cut into a cell
   edge — low (~5) cuts almost any edge, higher (~20–30) only crisp ones.
 - **Confine dither to color regions** (off by default) — stops dither error
