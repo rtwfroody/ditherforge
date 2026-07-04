@@ -30,13 +30,13 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -54,7 +54,7 @@ jobs:
       - name: Restore draco-c cache
         if: runner.os == 'macOS'
         id: draco-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: /tmp/draco-c-install
           key: draco-c-macos-arm64-v1
@@ -74,7 +74,7 @@ jobs:
 
       - name: Save draco-c cache
         if: runner.os == 'macOS' && steps.draco-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: /tmp/draco-c-install
           key: draco-c-macos-arm64-v1
@@ -101,7 +101,7 @@ jobs:
 
       - name: Restore Manifold cache
         id: manifold-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
           key: manifold-v3.4.1-${{ matrix.platform }}-r2
@@ -152,7 +152,7 @@ jobs:
 
       - name: Save Manifold cache
         if: steps.manifold-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ runner.os == 'Windows' && 'C:\manifold-install' || '/tmp/manifold-install' }}
           key: manifold-v3.4.1-${{ matrix.platform }}-r2
@@ -309,7 +309,7 @@ jobs:
           tar czf "ditherforge-cli-${VERSION}-macos-arm64.tar.gz" -C pkg .
           rm -rf pkg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -323,7 +323,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Extract version
         id: version
@@ -332,7 +332,7 @@ jobs:
           if [ -z "$VERSION" ]; then echo "::error::Failed to extract version"; exit 1; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
