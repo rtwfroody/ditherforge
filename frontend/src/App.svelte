@@ -1868,6 +1868,13 @@
         <Menubar.Item onSelect={() => { cellSelectMode = true; }} disabled={!outputMeshUrl || running}>
           Select Cell…
         </Menubar.Item>
+        <Menubar.Separator />
+        <Menubar.CheckboxItem bind:checked={stats} closeOnSelect={false}>
+          Stats
+        </Menubar.CheckboxItem>
+        <Menubar.CheckboxItem bind:checked={showSampledColors} closeOnSelect={false}>
+          Show sampled colors
+        </Menubar.CheckboxItem>
       </Menubar.Content>
     </Menubar.Menu>
     <div class="ml-auto flex items-center gap-2 pr-2">
@@ -1893,88 +1900,6 @@
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-6">
-        <SettingsSection title="Printer">
-          {#snippet tip()}
-            <HelpTip>
-              Target hardware. Sets the smallest detail the output can reproduce.
-            </HelpTip>
-          {/snippet}
-          <!-- Printer / Nozzle / Layer share one row. Three explicit
-               columns: printer flexes (minmax(0, 1fr) so it can shrink
-               below the longest printer name's intrinsic min-content),
-               nozzle is a fixed 6.5em (clears "0.4mm" + chevron),
-               layer is 7.5em so it ends up exactly 1em wider than
-               nozzle (clears "0.20mm" + chevron with a hair of
-               breathing room). Em-sized rather than fr-sized so the
-               layer-minus-nozzle delta stays at 1em regardless of
-               sidebar width, and so widening one doesn't steal from
-               the others. -->
-          <div class="grid grid-cols-[minmax(0,1fr)_6.5em_7.5em] gap-x-3 gap-y-2 items-end">
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium">Printer</span>
-              <HelpTip>
-                Target printer for the exported 3MF. Nozzle and layer height
-                options adapt to what the selected printer supports.
-              </HelpTip>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium">Nozzle</span>
-              <HelpTip>
-                Nozzle diameter variant for the selected printer. Also sets the
-                finest horizontal detail the output can represent.
-              </HelpTip>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium">Layer</span>
-              <HelpTip>
-                Layer height for the print. Must match the layer height used
-                when slicing.
-              </HelpTip>
-            </div>
-            <select
-              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-              bind:value={printerId}
-              onchange={() => reconcilePrinterSelection()}
-            >
-              {#each printers as p (p.id)}
-                <option value={p.id}>{p.displayName}</option>
-              {/each}
-              {#if printers.length === 0}
-                <option value={printerId}>{printerId}</option>
-              {/if}
-            </select>
-            <!-- Option labels carry the "mm" unit so the column header
-                 doesn't have to. value= stays the bare numeric string
-                 because nozzleDiameter/layerHeight in state are bare
-                 numbers (and round-trip through the settings JSON). -->
-            <select
-              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-              bind:value={nozzleDiameter}
-              onchange={() => reconcilePrinterSelection()}
-            >
-              {#if currentPrinter}
-                {#each currentPrinter.nozzles as n (n.diameter)}
-                  <option value={n.diameter}>{n.diameter}mm</option>
-                {/each}
-              {:else}
-                <option value={nozzleDiameter}>{nozzleDiameter}mm</option>
-              {/if}
-            </select>
-            <select
-              class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
-              bind:value={layerHeight}
-            >
-              {#if currentNozzle}
-                {#each currentNozzle.layerHeights as lh (lh)}
-                  <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}mm</option>
-                {/each}
-              {:else}
-                <option value={layerHeight}>{layerHeight}mm</option>
-              {/if}
-            </select>
-          </div>
-        </SettingsSection>
-
         <SettingsSection title="Model">
           {#snippet tip()}
             <HelpTip>
@@ -2195,384 +2120,466 @@
                 </div>
               {/if}
             </div>
+
+            <!-- Fine tuning: geometry-pipeline toggles moved from the old
+                 Advanced section. They affect mesh output, so they live at
+                 the bottom of Model. Default closed. -->
+            <SettingsSection title="Fine tuning" open={false}>
+              <div class="flex flex-wrap gap-x-6 gap-y-3">
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={noMerge} />
+                  No coplanar merge
+                  <HelpTip>
+                    Skip merging coplanar same-color triangles into larger polygons after clipping. Produces more triangles but keeps the raw clipped geometry.
+                  </HelpTip>
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={noSimplify} />
+                  No simplify
+                  <HelpTip>
+                    Skip mesh simplification. Keeps the raw per-voxel geometry, which is accurate but dramatically larger.
+                  </HelpTip>
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={noCellMerge} />
+                  No cell merge
+                  <HelpTip>
+                    Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
+                  </HelpTip>
+                </label>
+              </div>
+            </SettingsSection>
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Stickers" open={false}>
+        <SettingsSection title="Appearance">
           {#snippet tip()}
             <HelpTip>
-              Stamp logos, labels, or artwork onto the model surface.
-            </HelpTip>
-          {/snippet}
-          <StickerPanel
-            bind:stickers={stickers}
-            bind:placingIndex={placingStickerIndex}
-            extentMM={scaledMaxExtentMM ?? 0}
-            onAdd={addSticker}
-            onRemove={removeSticker}
-          />
-        </SettingsSection>
-
-        <SettingsSection title="Split" open={false}>
-          {#snippet tip()}
-            <HelpTip>
-              Cut the model into two halves that print side by side
-              and assemble back together with peg/pocket alignment.
-              Useful for build-volume limits, or to expose supports
-              that would otherwise be hard to remove.
-            </HelpTip>
-          {/snippet}
-          <SplitControls
-            bind:enabled={splitEnabled}
-            bind:axis={splitAxis}
-            bind:offset={splitOffset}
-            bind:tiltA={splitTiltA}
-            bind:tiltB={splitTiltB}
-            bind:connectorStyle={splitConnectorStyle}
-            bind:connectorCount={splitConnectorCount}
-            bind:connectorDiamMM={splitConnectorDiamMM}
-            bind:connectorDepthMM={splitConnectorDepthMM}
-            bind:clearanceMM={splitClearanceMM}
-            bind:orientationA={splitOrientationA}
-            bind:orientationB={splitOrientationB}
-            extentMM={scaledMaxExtentMM ?? 0}
-            minOffset={splitOffsetMin}
-            maxOffset={splitOffsetMax}
-            onAlphaWrapForced={() => { alphaWrap = true; }}
-          />
-        </SettingsSection>
-
-        <SettingsSection title="Color">
-          {#snippet tip()}
-            <HelpTip>
-              Adjust the input texture and tune color mapping before dithering.
+              Choose the filament colors, the dithering algorithm, and the color
+              adjustments applied before dithering.
             </HelpTip>
           {/snippet}
           <div class="space-y-6">
-            <div class="space-y-3">
-              <div class="space-y-1">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-1.5">
-                    <Label>Brightness</Label>
-                    <HelpTip>
-                      Shift the input texture lighter or darker before dithering.
-                    </HelpTip>
-                  </div>
-                  <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
-                </div>
-                <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} onValueCommit={(v: number) => committedBrightness = v} />
-              </div>
-              <div class="space-y-1">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-1.5">
-                    <Label>Contrast</Label>
-                    <HelpTip>
-                      Stretch or compress the tonal range of the input texture before dithering.
-                    </HelpTip>
-                  </div>
-                  <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
-                </div>
-                <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} onValueCommit={(v: number) => committedContrast = v} />
-              </div>
-              <div class="space-y-1">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-1.5">
-                    <Label>Saturation</Label>
-                    <HelpTip>
-                      Make colors more vivid or closer to gray before dithering.
-                    </HelpTip>
-                  </div>
-                  <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
-                </div>
-                <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} onValueCommit={(v: number) => committedSaturation = v} />
-              </div>
-            </div>
-
-            <ColorPinEditor
-              bind:pins={warpPins}
-              loadCollectionColors={GetCollectionColors}
-              bind:pickingIndex={pickingPinIndex}
-              onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
-            />
-
-            <!-- Color snap -->
-            <div class="space-y-1">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-1.5">
-                  <Label>Color snap (delta E)</Label>
-                  <HelpTip>
-                    CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
-                  </HelpTip>
-                </div>
-                <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
-              </div>
-              <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
-            </div>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection title="Filament">
-          {#snippet tip()}
-            <HelpTip>
-              Filament slots used in the output. Click a slot to lock it to a specific color; unlocked slots are filled automatically from the chosen collection. Use + to add more slots.
-            </HelpTip>
-          {/snippet}
-          <div class="space-y-4">
-            <!-- Color palette grid -->
-            <div class="space-y-2">
-              <div class="grid grid-cols-4 gap-2">
-                {#each colorSlots as slot, i}
-                  {@const resolved = resolvedBySlot[i]}
-                  <div class="group relative">
-                    <button
-                      type="button"
-                      class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                      title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
-                      onclick={() => openPicker(i)}
-                    >
-                      {#if slot || resolved}
-                        {@const info = (slot ?? resolved)!}
-                        <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
-                        <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
-                      {:else}
-                        <div class="w-full h-5 bg-muted"></div>
-                        <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
-                      {/if}
-                    </button>
-                    <!-- Lock toggle -->
-                    {#if slot || resolved}
+            <!-- Filament slots + collection picker -->
+            <div class="space-y-4">
+              <!-- Color palette grid -->
+              <div class="space-y-2">
+                <div class="grid grid-cols-4 gap-2">
+                  {#each colorSlots as slot, i}
+                    {@const resolved = resolvedBySlot[i]}
+                    <div class="group relative">
                       <button
-                        class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
-                        title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
-                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
+                        type="button"
+                        class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
+                        title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
+                        onclick={() => openPicker(i)}
                       >
-                        {#if slot}
-                          <LockIcon size={10} class="text-white" />
+                        {#if slot || resolved}
+                          {@const info = (slot ?? resolved)!}
+                          <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
+                          <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
                         {:else}
-                          <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
+                          <div class="w-full h-5 bg-muted"></div>
+                          <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
                         {/if}
                       </button>
-                    {/if}
-                    {#if colorSlots.length > 1}
-                      <button
-                        class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                        onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
-                      >&times;</button>
-                    {/if}
-                  </div>
-                {/each}
-                {#if colorSlots.length < 16}
-                  <button
-                    class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
-                    onclick={addColorSlot}
-                  >+</button>
+                      <!-- Lock toggle -->
+                      {#if slot || resolved}
+                        <button
+                          class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
+                          title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
+                          onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
+                        >
+                          {#if slot}
+                            <LockIcon size={10} class="text-white" />
+                          {:else}
+                            <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
+                          {/if}
+                        </button>
+                      {/if}
+                      {#if colorSlots.length > 1}
+                        <button
+                          class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                          onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
+                        >&times;</button>
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if colorSlots.length < 16}
+                    <button
+                      class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
+                      onclick={addColorSlot}
+                    >+</button>
+                  {/if}
+                </div>
+                {#if pickerIndex !== null}
+                  <CollectionPicker
+                    onselect={pickColor}
+                    onclose={closePicker}
+                  />
                 {/if}
               </div>
-              {#if pickerIndex !== null}
-                <CollectionPicker
-                  onselect={pickColor}
-                  onclose={closePicker}
+
+              <!-- Remaining color source -->
+              <div class="space-y-2">
+                <div class="flex items-center gap-1.5">
+                  <Label>Unlocked colors from</Label>
+                  <HelpTip>
+                    Filament collection the auto-picker draws from for unlocked palette slots. Manage collections from the Filaments menu.
+                  </HelpTip>
+                </div>
+                <CollectionSelect
+                  bind:selected={inventoryCollection}
+                  onchange={loadInventoryCollectionColors}
                 />
+              </div>
+            </div>
+
+            <!-- Dither mode + per-mode tuning -->
+            <div class="space-y-4">
+              <div class="space-y-2">
+                <div class="flex items-center gap-1.5">
+                  <Label for="dither">Mode</Label>
+                  <HelpTip>
+                    "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
+                  </HelpTip>
+                </div>
+                <Select.Root type="single" bind:value={dither}>
+                  <Select.Trigger class="w-full">
+                    {dither || 'Select...'}
+                  </Select.Trigger>
+                  <Select.Content>
+                    {#each DITHER_OPTIONS as opt}
+                      <Select.Item value={opt.value}>{opt.label}</Select.Item>
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
+              </div>
+
+              {#if dither === 'riemersma' || dither === 'riemersma-pair'}
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Alpha</Label>
+                      <HelpTip>
+                        Per-cell input-bias maximum (0..1). Pulls each cell's palette pick toward its nearest-input palette when the cell's input is close to a palette color. 0 = pure Riemersma (zero average drift but black/white oscillation around near-grey input). Higher values suppress that oscillation by preferring the close-input palette; too high (≥0.9) starts to posterize textured surfaces. 0.85 is the default. Applies to both Riemersma and Riemersma pair (they share the same input-bias formula).
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>
+                  </div>
+                  <Slider type="single" min={0} max={1} step={0.05} value={riemersmaBias} onValueChange={(v: number) => riemersmaBias = v} onValueCommit={(v: number) => committedRiemersmaBias = v} />
+                </div>
+              {/if}
+
+              {#if dither === 'blue-noise'}
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Tolerance</Label>
+                      <HelpTip>
+                        Per-cell projection-error tolerance in 8-bit RGB units. Smaller (≈5–10) forces the dither to bracket each input with more palette colors — keeps drift low but can show wider color spread on near-flat regions. Larger (≈20–40) sticks to 2-color pairs — bounds wander tightly (no white/black oscillation around near-grey) at the cost of small per-cell drift. Default 20 is a balance.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-10 text-right">{blueNoiseTol.toFixed(0)}</span>
+                  </div>
+                  <Slider type="single" min={1} max={50} step={1} value={blueNoiseTol} onValueChange={(v: number) => blueNoiseTol = v} onValueCommit={(v: number) => committedBlueNoiseTol = v} />
+                </div>
               {/if}
             </div>
 
-            <!-- Remaining color source -->
-            <div class="space-y-2">
-              <div class="flex items-center gap-1.5">
-                <Label>Unlocked colors from</Label>
-                <HelpTip>
-                  Filament collection the auto-picker draws from for unlocked palette slots. Manage collections from the Filaments menu.
-                </HelpTip>
+            <!-- Color adjustments -->
+            <div class="space-y-6">
+              <div class="space-y-3">
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Brightness</Label>
+                      <HelpTip>
+                        Shift the input texture lighter or darker before dithering.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-8 text-right">{brightness}</span>
+                  </div>
+                  <Slider type="single" min={-100} max={100} step={1} value={brightness} onValueChange={(v: number) => brightness = v} onValueCommit={(v: number) => committedBrightness = v} />
+                </div>
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Contrast</Label>
+                      <HelpTip>
+                        Stretch or compress the tonal range of the input texture before dithering.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-8 text-right">{contrast}</span>
+                  </div>
+                  <Slider type="single" min={-100} max={100} step={1} value={contrast} onValueChange={(v: number) => contrast = v} onValueCommit={(v: number) => committedContrast = v} />
+                </div>
+                <div class="space-y-1">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <Label>Saturation</Label>
+                      <HelpTip>
+                        Make colors more vivid or closer to gray before dithering.
+                      </HelpTip>
+                    </div>
+                    <span class="text-xs text-muted-foreground w-8 text-right">{saturation}</span>
+                  </div>
+                  <Slider type="single" min={-100} max={100} step={1} value={saturation} onValueChange={(v: number) => saturation = v} onValueCommit={(v: number) => committedSaturation = v} />
+                </div>
               </div>
-              <CollectionSelect
-                bind:selected={inventoryCollection}
-                onchange={loadInventoryCollectionColors}
+
+              <ColorPinEditor
+                bind:pins={warpPins}
+                loadCollectionColors={GetCollectionColors}
+                bind:pickingIndex={pickingPinIndex}
+                onStartPick={(i: number) => pickingPinIndex = pickingPinIndex === i ? -1 : i}
+              />
+
+              <!-- Color snap -->
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <Label>Color snap (delta E)</Label>
+                    <HelpTip>
+                      CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
+                    </HelpTip>
+                  </div>
+                  <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
+                </div>
+                <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
+              </div>
+            </div>
+
+            <!-- Fine tuning: color / dither quality knobs moved from the old
+                 Advanced section. Default closed. -->
+            <SettingsSection title="Fine tuning" open={false}>
+              <div class="flex flex-wrap gap-x-6 gap-y-3">
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={colorAwareCells} />
+                  Color-aware cells
+                  <HelpTip>
+                    Segment each layer by color and tile each monochrome region separately, so cell boundaries land on color boundaries. Sharp patterns (e.g. a checkerboard) stay pure black/white instead of averaging to gray at the edges. Color features smaller than one cell are merged away. On by default.
+                  </HelpTip>
+                </label>
+                {#if colorAwareCells}
+                  <div class="space-y-1 pl-6">
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center gap-1.5">
+                        <Label>Color contrast (delta E)</Label>
+                        <HelpTip>
+                          Cut a color boundary into a cell boundary only where neighboring surface colors differ by more than this CIELAB distance. Low (~5) cuts almost any edge; higher (~20-30) ignores soft shading and cuts only crisp edges.
+                        </HelpTip>
+                      </div>
+                      <span class="text-xs text-muted-foreground w-8 text-right">{colorRegionContrast}</span>
+                    </div>
+                    <Slider type="single" min={0} max={50} step={1} value={colorRegionContrast} onValueChange={(v: number) => colorRegionContrast = v} onValueCommit={(v: number) => committedColorRegionContrast = v} />
+                  </div>
+                {/if}
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={regionDither} />
+                  Confine dither to color regions
+                  <HelpTip>
+                    Advanced. Stop dither error from bleeding across color boundaries: the cell graph is split into color regions and each is dithered in isolation, so a gray area's error can't speckle an adjacent solid black or white area. Smooth gradients still diffuse normally; only sharp color jumps act as barriers. Independent of color-aware cells; works with every dither mode. Off by default.
+                  </HelpTip>
+                </label>
+                {#if regionDither}
+                  <div class="space-y-1 pl-6">
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center gap-1.5">
+                        <Label>Region barrier (delta E)</Label>
+                        <HelpTip>
+                          Treat neighboring cells as different color regions (a barrier to error) only where their colors differ by more than this CIELAB distance. Low (~5) confines almost everywhere; higher (~20-30) only blocks crisp edges while letting soft shading diffuse.
+                        </HelpTip>
+                      </div>
+                      <span class="text-xs text-muted-foreground w-8 text-right">{regionDitherDeltaE}</span>
+                    </div>
+                    <Slider type="single" min={0} max={50} step={1} value={regionDitherDeltaE} onValueChange={(v: number) => regionDitherDeltaE = v} onValueCommit={(v: number) => committedRegionDitherDeltaE = v} />
+                  </div>
+                {/if}
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={rejectColorOutliers} />
+                  Reject color outliers
+                  <HelpTip>
+                    When almost all of a cell's color samples agree (one color holds at least 75% of them), drop the stray 1-2 samples that strayed across a color boundary into the cell instead of letting them pull the cell's averaged color. Genuinely mixed cells (no clear majority) keep every sample, so dithering is unaffected. On by default.
+                  </HelpTip>
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <Checkbox bind:checked={honorTD} />
+                  Honor TD
+                  <HelpTip>
+                    Opacity-weight the dither by each filament's transmission distance (TD). Translucent filaments (high TD) cover more area to deliver the same perceived color, so e.g. a transparent yellow no longer disappears into an opaque red. On by default; untick to use the plain area-weighted mix (treat every filament as opaque).
+                  </HelpTip>
+                </label>
+              </div>
+            </SettingsSection>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection title="Modify" open={false}>
+          {#snippet tip()}
+            <HelpTip>
+              Stamp stickers onto the surface, or split the model into printable halves.
+            </HelpTip>
+          {/snippet}
+          <div class="space-y-6">
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Stickers</span>
+                <HelpTip>
+                  Stamp logos, labels, or artwork onto the model surface.
+                </HelpTip>
+                <div class="flex-1 h-px bg-border"></div>
+              </div>
+              <StickerPanel
+                bind:stickers={stickers}
+                bind:placingIndex={placingStickerIndex}
+                extentMM={scaledMaxExtentMM ?? 0}
+                onAdd={addSticker}
+                onRemove={removeSticker}
+              />
+            </div>
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Split</span>
+                <HelpTip>
+                  Cut the model into two halves that print side by side
+                  and assemble back together with peg/pocket alignment.
+                  Useful for build-volume limits, or to expose supports
+                  that would otherwise be hard to remove.
+                </HelpTip>
+                <div class="flex-1 h-px bg-border"></div>
+              </div>
+              <SplitControls
+                bind:enabled={splitEnabled}
+                bind:axis={splitAxis}
+                bind:offset={splitOffset}
+                bind:tiltA={splitTiltA}
+                bind:tiltB={splitTiltB}
+                bind:connectorStyle={splitConnectorStyle}
+                bind:connectorCount={splitConnectorCount}
+                bind:connectorDiamMM={splitConnectorDiamMM}
+                bind:connectorDepthMM={splitConnectorDepthMM}
+                bind:clearanceMM={splitClearanceMM}
+                bind:orientationA={splitOrientationA}
+                bind:orientationB={splitOrientationB}
+                extentMM={scaledMaxExtentMM ?? 0}
+                minOffset={splitOffsetMin}
+                maxOffset={splitOffsetMax}
+                onAlphaWrapForced={() => { alphaWrap = true; }}
               />
             </div>
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Dither">
+        <SettingsSection title="Print setup" open={false}>
           {#snippet tip()}
             <HelpTip>
-              Algorithm that blends palette colors across the surface, and per-algorithm tuning.
+              Target hardware. Sets the smallest detail the output can reproduce.
             </HelpTip>
           {/snippet}
-          <div class="space-y-4">
-            <div class="space-y-2">
+          <div class="space-y-6">
+            <!-- Printer / Nozzle / Layer share one row. Three explicit
+                 columns: printer flexes (minmax(0, 1fr) so it can shrink
+                 below the longest printer name's intrinsic min-content),
+                 nozzle is a fixed 6.5em (clears "0.4mm" + chevron),
+                 layer is 7.5em so it ends up exactly 1em wider than
+                 nozzle (clears "0.20mm" + chevron with a hair of
+                 breathing room). Em-sized rather than fr-sized so the
+                 layer-minus-nozzle delta stays at 1em regardless of
+                 sidebar width, and so widening one doesn't steal from
+                 the others. -->
+            <div class="grid grid-cols-[minmax(0,1fr)_6.5em_7.5em] gap-x-3 gap-y-2 items-end">
               <div class="flex items-center gap-1.5">
-                <Label for="dither">Mode</Label>
+                <span class="text-sm font-medium">Printer</span>
                 <HelpTip>
-                  "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
+                  Target printer for the exported 3MF. Nozzle and layer height
+                  options adapt to what the selected printer supports.
                 </HelpTip>
               </div>
-              <Select.Root type="single" bind:value={dither}>
-                <Select.Trigger class="w-full">
-                  {dither || 'Select...'}
-                </Select.Trigger>
-                <Select.Content>
-                  {#each DITHER_OPTIONS as opt}
-                    <Select.Item value={opt.value}>{opt.label}</Select.Item>
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-medium">Nozzle</span>
+                <HelpTip>
+                  Nozzle diameter variant for the selected printer. Also sets the
+                  finest horizontal detail the output can represent.
+                </HelpTip>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-medium">Layer</span>
+                <HelpTip>
+                  Layer height for the print. Must match the layer height used
+                  when slicing.
+                </HelpTip>
+              </div>
+              <select
+                class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+                bind:value={printerId}
+                onchange={() => reconcilePrinterSelection()}
+              >
+                {#each printers as p (p.id)}
+                  <option value={p.id}>{p.displayName}</option>
+                {/each}
+                {#if printers.length === 0}
+                  <option value={printerId}>{printerId}</option>
+                {/if}
+              </select>
+              <!-- Option labels carry the "mm" unit so the column header
+                   doesn't have to. value= stays the bare numeric string
+                   because nozzleDiameter/layerHeight in state are bare
+                   numbers (and round-trip through the settings JSON). -->
+              <select
+                class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+                bind:value={nozzleDiameter}
+                onchange={() => reconcilePrinterSelection()}
+              >
+                {#if currentPrinter}
+                  {#each currentPrinter.nozzles as n (n.diameter)}
+                    <option value={n.diameter}>{n.diameter}mm</option>
                   {/each}
-                </Select.Content>
-              </Select.Root>
+                {:else}
+                  <option value={nozzleDiameter}>{nozzleDiameter}mm</option>
+                {/if}
+              </select>
+              <select
+                class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm"
+                bind:value={layerHeight}
+              >
+                {#if currentNozzle}
+                  {#each currentNozzle.layerHeights as lh (lh)}
+                    <option value={fmtLayerHeight(lh)}>{fmtLayerHeight(lh)}mm</option>
+                  {/each}
+                {:else}
+                  <option value={layerHeight}>{layerHeight}mm</option>
+                {/if}
+              </select>
             </div>
 
-            {#if dither === 'riemersma' || dither === 'riemersma-pair'}
+            <!-- Layer XY scale sliders moved from the old Advanced section.
+                 Set-once print-tuning knobs, so they live in Print setup. -->
+            <div class="space-y-4">
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
-                    <Label>Alpha</Label>
+                    <Label>Layer-0 adhesion XY scale</Label>
                     <HelpTip>
-                      Per-cell input-bias maximum (0..1). Pulls each cell's palette pick toward its nearest-input palette when the cell's input is close to a palette color. 0 = pure Riemersma (zero average drift but black/white oscillation around near-grey input). Higher values suppress that oscillation by preferring the close-input palette; too high (≥0.9) starts to posterize textured surfaces. 0.85 is the default. Applies to both Riemersma and Riemersma pair (they share the same input-bias formula).
+                      Multiplier on layer-0 voxel cell XY size for bed adhesion. 1 = no enlargement; higher values produce bigger first-layer color blobs that stick to the bed but coarsen the first layer's color resolution.
                     </HelpTip>
                   </div>
-                  <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>
+                  <span class="text-xs text-muted-foreground w-10 text-right">{layer0AdhesionXYScale.toFixed(1)}</span>
                 </div>
-                <Slider type="single" min={0} max={1} step={0.05} value={riemersmaBias} onValueChange={(v: number) => riemersmaBias = v} onValueCommit={(v: number) => committedRiemersmaBias = v} />
+                <Slider type="single" min={1} max={15} step={0.5} value={layer0AdhesionXYScale} onValueChange={(v: number) => layer0AdhesionXYScale = v} onValueCommit={(v: number) => committedLayer0AdhesionXYScale = v} />
               </div>
-            {/if}
-
-            {#if dither === 'blue-noise'}
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
-                    <Label>Tolerance</Label>
+                    <Label>Upper-layer XY scale</Label>
                     <HelpTip>
-                      Per-cell projection-error tolerance in 8-bit RGB units. Smaller (≈5–10) forces the dither to bracket each input with more palette colors — keeps drift low but can show wider color spread on near-flat regions. Larger (≈20–40) sticks to 2-color pairs — bounds wander tightly (no white/black oscillation around near-grey) at the cost of small per-cell drift. Default 20 is a balance.
+                      Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. Lower values pack more color detail into each layer; higher values coarsen the grid in exchange for fewer primitives. Below ~1.20 the slicer visibly drops detail on vertical walls (and sometimes elsewhere), so values below that often don't make it onto the print.
                     </HelpTip>
                   </div>
-                  <span class="text-xs text-muted-foreground w-10 text-right">{blueNoiseTol.toFixed(0)}</span>
+                  <span class="text-xs text-muted-foreground w-10 text-right">{upperLayerXYScale.toFixed(2)}</span>
                 </div>
-                <Slider type="single" min={1} max={50} step={1} value={blueNoiseTol} onValueChange={(v: number) => blueNoiseTol = v} onValueCommit={(v: number) => committedBlueNoiseTol = v} />
+                <Slider type="single" min={1} max={4} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
               </div>
-            {/if}
-          </div>
-        </SettingsSection>
-
-        <SettingsSection title="Advanced" open={false}>
-          {#snippet tip()}
-            <HelpTip>
-              Diagnostic toggles. Most users can ignore these.
-            </HelpTip>
-          {/snippet}
-          <div class="space-y-4">
-            <div class="space-y-1">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-1.5">
-                  <Label>Layer-0 adhesion XY scale</Label>
-                  <HelpTip>
-                    Multiplier on layer-0 voxel cell XY size for bed adhesion. 1 = no enlargement; higher values produce bigger first-layer color blobs that stick to the bed but coarsen the first layer's color resolution.
-                  </HelpTip>
-                </div>
-                <span class="text-xs text-muted-foreground w-10 text-right">{layer0AdhesionXYScale.toFixed(1)}</span>
-              </div>
-              <Slider type="single" min={1} max={15} step={0.5} value={layer0AdhesionXYScale} onValueChange={(v: number) => layer0AdhesionXYScale = v} onValueCommit={(v: number) => committedLayer0AdhesionXYScale = v} />
-            </div>
-            <div class="space-y-1">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-1.5">
-                  <Label>Upper-layer XY scale</Label>
-                  <HelpTip>
-                    Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. Lower values pack more color detail into each layer; higher values coarsen the grid in exchange for fewer primitives. Below ~1.20 the slicer visibly drops detail on vertical walls (and sometimes elsewhere), so values below that often don't make it onto the print.
-                  </HelpTip>
-                </div>
-                <span class="text-xs text-muted-foreground w-10 text-right">{upperLayerXYScale.toFixed(2)}</span>
-              </div>
-              <Slider type="single" min={1} max={4} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
-            </div>
-            <div class="flex flex-wrap gap-x-6 gap-y-3">
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={noMerge} />
-                No coplanar merge
-                <HelpTip>
-                  Skip merging coplanar same-color triangles into larger polygons after clipping. Produces more triangles but keeps the raw clipped geometry.
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={noSimplify} />
-                No simplify
-                <HelpTip>
-                  Skip mesh simplification. Keeps the raw per-voxel geometry, which is accurate but dramatically larger.
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={noCellMerge} />
-                No cell merge
-                <HelpTip>
-                  Disable merging: clip every cell individually instead of pairing adjacent same-color cells within each layer and clipping them together. Merging (the default) is faster, with fewer output triangles and no internal seams between same-color cells, and does not change colors. Tick this only to force the per-cell clip.
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={colorAwareCells} />
-                Color-aware cells
-                <HelpTip>
-                  Segment each layer by color and tile each monochrome region separately, so cell boundaries land on color boundaries. Sharp patterns (e.g. a checkerboard) stay pure black/white instead of averaging to gray at the edges. Color features smaller than one cell are merged away. On by default.
-                </HelpTip>
-              </label>
-              {#if colorAwareCells}
-                <div class="space-y-1 pl-6">
-                  <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-1.5">
-                      <Label>Color contrast (delta E)</Label>
-                      <HelpTip>
-                        Cut a color boundary into a cell boundary only where neighboring surface colors differ by more than this CIELAB distance. Low (~5) cuts almost any edge; higher (~20-30) ignores soft shading and cuts only crisp edges.
-                      </HelpTip>
-                    </div>
-                    <span class="text-xs text-muted-foreground w-8 text-right">{colorRegionContrast}</span>
-                  </div>
-                  <Slider type="single" min={0} max={50} step={1} value={colorRegionContrast} onValueChange={(v: number) => colorRegionContrast = v} onValueCommit={(v: number) => committedColorRegionContrast = v} />
-                </div>
-              {/if}
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={regionDither} />
-                Confine dither to color regions
-                <HelpTip>
-                  Advanced. Stop dither error from bleeding across color boundaries: the cell graph is split into color regions and each is dithered in isolation, so a gray area's error can't speckle an adjacent solid black or white area. Smooth gradients still diffuse normally; only sharp color jumps act as barriers. Independent of color-aware cells; works with every dither mode. Off by default.
-                </HelpTip>
-              </label>
-              {#if regionDither}
-                <div class="space-y-1 pl-6">
-                  <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-1.5">
-                      <Label>Region barrier (delta E)</Label>
-                      <HelpTip>
-                        Treat neighboring cells as different color regions (a barrier to error) only where their colors differ by more than this CIELAB distance. Low (~5) confines almost everywhere; higher (~20-30) only blocks crisp edges while letting soft shading diffuse.
-                      </HelpTip>
-                    </div>
-                    <span class="text-xs text-muted-foreground w-8 text-right">{regionDitherDeltaE}</span>
-                  </div>
-                  <Slider type="single" min={0} max={50} step={1} value={regionDitherDeltaE} onValueChange={(v: number) => regionDitherDeltaE = v} onValueCommit={(v: number) => committedRegionDitherDeltaE = v} />
-                </div>
-              {/if}
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={rejectColorOutliers} />
-                Reject color outliers
-                <HelpTip>
-                  When almost all of a cell's color samples agree (one color holds at least 75% of them), drop the stray 1-2 samples that strayed across a color boundary into the cell instead of letting them pull the cell's averaged color. Genuinely mixed cells (no clear majority) keep every sample, so dithering is unaffected. On by default.
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={honorTD} />
-                Honor TD
-                <HelpTip>
-                  Opacity-weight the dither by each filament's transmission distance (TD). Translucent filaments (high TD) cover more area to deliver the same perceived color, so e.g. a transparent yellow no longer disappears into an opaque red. On by default; untick to use the plain area-weighted mix (treat every filament as opaque).
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={stats} />
-                Stats
-                <HelpTip>
-                  Log summary statistics (triangle counts, color usage, timings) to the terminal.
-                </HelpTip>
-              </label>
-              <label class="flex items-center gap-2 text-sm">
-                <Checkbox bind:checked={showSampledColors} />
-                Show sampled colors (debug)
-                <HelpTip>
-                  Color the output mesh by each face's raw pre-dither sampled RGB instead of its dithered palette index. Bypasses Merge so per-face provenance survives. Use to isolate sampling bugs from dither / palette / mesh-emission bugs: if an artifact is visible in this mode it's in section sampling (or upstream slicer geometry); if only visible with the box off it's in the dither stack.
-                </HelpTip>
-              </label>
             </div>
           </div>
         </SettingsSection>
