@@ -1,3 +1,11 @@
+//go:build tbbcontrol
+
+// This TBB-backed implementation is compiled only under the `tbbcontrol`
+// build tag, which requires the process to link a TBB that Manifold's
+// Boolean actually uses (i.e. Manifold built with MANIFOLD_PAR=ON). The
+// default build (and the CI/release binaries, whose Manifold is built with
+// MANIFOLD_PAR=OFF) uses the no-op in tbbctl_off.go, so no TBB headers or
+// library are required to build.
 package manifoldbool
 
 /*

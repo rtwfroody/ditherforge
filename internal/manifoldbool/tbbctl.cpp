@@ -1,3 +1,5 @@
+//go:build tbbcontrol
+
 // Process-wide TBB parallelism control. Manifold's Boolean uses TBB
 // internally; when many independent booleans run concurrently from a Go
 // worker pool, letting each one also fan out across TBB oversubscribes the
