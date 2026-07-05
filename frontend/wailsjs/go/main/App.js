@@ -18,8 +18,8 @@ export function DeleteCollection(arg1) {
   return window['go']['main']['App']['DeleteCollection'](arg1);
 }
 
-export function DitherModePreviews(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['DitherModePreviews'](arg1, arg2, arg3, arg4);
+export function DitherModePreviews(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['DitherModePreviews'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function EnumerateObjects(arg1) {

@@ -73,6 +73,37 @@ func TestDitherImageAllModes(t *testing.T) {
 	}
 }
 
+// TestDitherImageColorSnap verifies the ColorSnap tuning reaches the real
+// voxel.SnapColors transform: pulling cell colours toward the palette before
+// dithering changes an error-diffusion mode's output, while the default (snap
+// 0) matches an explicit zero. Guards the wiring the live preview depends on.
+func TestDitherImageColorSnap(t *testing.T) {
+	src := buildTestImage()
+	ctx := context.Background()
+
+	base, err := DitherImage(ctx, src, testPalette, ModeFloydSteinberg, Tuning{ColorSnap: 0})
+	if err != nil {
+		t.Fatalf("snap 0: %v", err)
+	}
+	snapped, err := DitherImage(ctx, src, testPalette, ModeFloydSteinberg, Tuning{ColorSnap: 30})
+	if err != nil {
+		t.Fatalf("snap 30: %v", err)
+	}
+	if slices.Equal(base.Pix, snapped.Pix) {
+		t.Fatal("color snap 30 produced identical output to snap 0; the ColorSnap knob is not wired through")
+	}
+
+	// DefaultTuning disables snap (ColorSnap 0), so the committed static
+	// thumbnails stay bit-identical.
+	def, err := DitherImage(ctx, src, testPalette, ModeFloydSteinberg, DefaultTuning())
+	if err != nil {
+		t.Fatalf("default tuning: %v", err)
+	}
+	if !slices.Equal(base.Pix, def.Pix) {
+		t.Fatal("DefaultTuning must apply no color snap (ColorSnap 0)")
+	}
+}
+
 // TestDitherImageDeterministic verifies a fixed (image, palette, mode, tuning)
 // yields byte-identical pixels across runs for every mode — the property the
 // static-thumbnail generator and cache-free previews both rely on.

@@ -779,9 +779,15 @@
       return;
     }
     try {
-      const src = await coverCropToPNG(full, 192, 128);
+      // Render at 288x192 (1.5x the card size, 3:2) so the same six mode
+      // images serve both the small picker cards (CSS-downscaled) and the
+      // larger ~256px "Approximate preview" below the grid — one backend
+      // render, no parallel channel. committedColorSnap feeds the real
+      // voxel.SnapColors transform; brightness/contrast/saturation and color
+      // pins are already baked into the snapshot by the viewer shader.
+      const src = await coverCropToPNG(full, 288, 192);
       if (seq !== ditherReqSeq) return; // superseded while cropping
-      const res = await DitherModePreviews(src, pal, committedRiemersmaBias, committedBlueNoiseTol);
+      const res = await DitherModePreviews(src, pal, committedRiemersmaBias, committedBlueNoiseTol, committedColorSnap);
       if (seq === ditherReqSeq) ditherThumbs = res;
     } catch (e) {
       if (seq === ditherReqSeq) ditherThumbs = null;
@@ -800,6 +806,7 @@
     void inputCapture;
     void committedRiemersmaBias;
     void committedBlueNoiseTol;
+    void committedColorSnap;
     for (const s of colorSlots) void s?.hex;
     for (const r of resolvedBySlot) void r?.hex;
 
@@ -2453,6 +2460,28 @@
                     </button>
                   {/each}
                 </div>
+              </div>
+
+              <!-- Larger inline preview of the currently selected mode. Reuses
+                   the six-mode images already fetched for the picker cards
+                   (ditherThumbs), so switching mode needs no backend call; it
+                   only re-renders on palette / tuning / color-snap changes via
+                   the same debounced, latest-wins machinery as the cards. -->
+              <div class="space-y-1">
+                <div class="flex items-center gap-1.5">
+                  <Label>Approximate preview</Label>
+                  <HelpTip>
+                    A fast preview of the current view dithered in image space with your palette, the selected mode, color snap, and the brightness/contrast/saturation adjustments. It runs the real dither algorithms but on a 2D snapshot, not on the model's surface cells — so it is a close guide while tuning, not an exact proof of the final print.
+                  </HelpTip>
+                </div>
+                <img
+                  src={ditherThumbs?.[dither] ?? DITHER_META[dither]?.thumb}
+                  alt="Approximate dither preview of the current view"
+                  class="w-64 max-w-full aspect-[3/2] rounded-md border object-cover bg-muted/30"
+                  style="image-rendering: pixelated;"
+                  draggable="false"
+                />
+                <p class="text-xs text-muted-foreground">Previews image-space dithering of the current view, not surface-cell dithering.</p>
               </div>
 
               {#if dither === 'riemersma' || dither === 'riemersma-pair'}

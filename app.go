@@ -766,11 +766,14 @@ func (a *App) SelectCellDiagnostics(x, y, z float64) (*pipeline.CellDiagInfo, er
 // dither implementations via internal/ditherpreview, and returns PNGs. It
 // touches no pipeline state, cache, or settings and never mutates a.* fields.
 //
-// srcPNGBase64 is a small (~192x128) PNG snapshot of the input viewer, either
-// bare base64 or a "data:image/png;base64,..." data URI. paletteHex is the
-// filament-slot palette as "#rrggbb" strings (malformed/empty entries are
-// skipped). riemersmaBias and blueNoiseTol are the live tuning-slider values.
-func (a *App) DitherModePreviews(srcPNGBase64 string, paletteHex []string, riemersmaBias, blueNoiseTol float64) (map[string]string, error) {
+// srcPNGBase64 is a small PNG snapshot of the input viewer, either bare base64
+// or a "data:image/png;base64,..." data URI. paletteHex is the filament-slot
+// palette as "#rrggbb" strings (malformed/empty entries are skipped).
+// riemersmaBias, blueNoiseTol and colorSnap are the live tuning-slider values;
+// colorSnap is the "Color similarity threshold" (ΔE) applied via the pipeline's
+// real voxel.SnapColors before dithering. Brightness/contrast/saturation and
+// colour pins are already baked into the snapshot by the viewer shader.
+func (a *App) DitherModePreviews(srcPNGBase64 string, paletteHex []string, riemersmaBias, blueNoiseTol, colorSnap float64) (map[string]string, error) {
 	payload := srcPNGBase64
 	if i := strings.Index(payload, "base64,"); i >= 0 {
 		payload = payload[i+len("base64,"):]
@@ -789,7 +792,7 @@ func (a *App) DitherModePreviews(srcPNGBase64 string, paletteHex []string, rieme
 		return nil, fmt.Errorf("need at least 2 palette colors, got %d", len(pal))
 	}
 
-	tuning := ditherpreview.Tuning{RiemersmaBias: riemersmaBias, BlueNoiseTol: blueNoiseTol}
+	tuning := ditherpreview.Tuning{RiemersmaBias: riemersmaBias, BlueNoiseTol: blueNoiseTol, ColorSnap: colorSnap}
 	out := make(map[string]string, len(ditherpreview.Modes))
 	for _, mode := range ditherpreview.Modes {
 		img, err := ditherpreview.DitherImage(context.Background(), src, pal, mode, tuning)

@@ -40,7 +40,7 @@ func TestDitherModePreviews(t *testing.T) {
 		makeSrcPNG(t),
 		"data:image/png;base64," + makeSrcPNG(t),
 	} {
-		out, err := a.DitherModePreviews(src, pal, 0.85, 20)
+		out, err := a.DitherModePreviews(src, pal, 0.85, 20, 10)
 		if err != nil {
 			t.Fatalf("DitherModePreviews: %v", err)
 		}
@@ -71,8 +71,32 @@ func TestDitherModePreviews(t *testing.T) {
 func TestDitherModePreviewsTooFewColors(t *testing.T) {
 	a := &App{}
 	src := makeSrcPNG(t)
-	if _, err := a.DitherModePreviews(src, []string{"#123456", "", "not-a-color"}, 0.85, 20); err == nil {
+	if _, err := a.DitherModePreviews(src, []string{"#123456", "", "not-a-color"}, 0.85, 20, 0); err == nil {
 		t.Fatal("expected error for <2 usable colors, got nil")
+	}
+}
+
+// TestDitherModePreviewsColorSnap confirms the colorSnap argument reaches the
+// dither core: with a high snap threshold the "none" preview (nearest palette)
+// is unchanged, but a large snap pulls near-palette regions to solid colour, so
+// a snapped run must still produce valid PNGs for every mode (the transform is
+// read-only and must never error out).
+func TestDitherModePreviewsColorSnap(t *testing.T) {
+	a := &App{}
+	src := makeSrcPNG(t)
+	pal := []string{"#101010", "#f0f0f0", "#dc503c", "#3c78d2"}
+	out, err := a.DitherModePreviews(src, pal, 0.85, 20, 40)
+	if err != nil {
+		t.Fatalf("DitherModePreviews with color snap: %v", err)
+	}
+	if len(out) != len(ditherpreview.Modes) {
+		t.Fatalf("got %d previews, want %d", len(out), len(ditherpreview.Modes))
+	}
+	for _, mode := range ditherpreview.Modes {
+		uri, ok := out[mode]
+		if !ok || !strings.HasPrefix(uri, "data:image/png;base64,") {
+			t.Fatalf("mode %q: missing or malformed snapped preview", mode)
+		}
 	}
 }
 

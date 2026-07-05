@@ -56,11 +56,17 @@ var Modes = []string{
 	ModeNone,
 }
 
-// Tuning carries the two adjustable knobs the GUI exposes as sliders. Use
+// Tuning carries the adjustable knobs the GUI exposes as sliders. Use
 // DefaultTuning() for the pipeline's canonical values and override as needed.
 type Tuning struct {
 	RiemersmaBias float64 // Riemersma / Riemersma-pair input bias (0..1)
 	BlueNoiseTol  float64 // Blue-noise bracket tolerance (ΔE)
+	// ColorSnap is the "Color similarity threshold" (standard CIE76 ΔE). When
+	// > 0, each cell's colour is pulled toward its nearest palette colour by up
+	// to this many ΔE units before dithering — the same transform the pipeline
+	// applies via voxel.SnapColors after palette resolution. Zero disables it,
+	// which keeps the static thumbnail generator's output bit-identical.
+	ColorSnap float64
 }
 
 // DefaultTuning returns the same per-mode tuning constants the pipeline uses.
@@ -89,6 +95,17 @@ func DitherImage(ctx context.Context, img image.Image, palette [][3]uint8, mode 
 		return nil, fmt.Errorf("ditherpreview: empty palette")
 	}
 	cells := buildCells(img)
+	// Color snap: pull each cell's colour toward the nearest palette colour by
+	// up to tuning.ColorSnap ΔE units, matching the pipeline's voxel.SnapColors
+	// step (run.go, gated on opts.ColorSnap > 0, applied after palette
+	// resolution and before dithering). Brightness/contrast/saturation and
+	// colour pins are already baked into the source image by the viewer shader,
+	// so they must NOT be applied again here — only the snap is missing.
+	if tuning.ColorSnap > 0 {
+		if err := voxel.SnapColors(ctx, cells, palette, tuning.ColorSnap); err != nil {
+			return nil, err
+		}
+	}
 	if len(cells) == 0 {
 		// Nothing opaque to dither (e.g. a snapshot taken before the model
 		// rendered): return a fully transparent image of the right size.
