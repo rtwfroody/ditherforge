@@ -13,6 +13,8 @@ export function DefaultSettingsPath(arg1:string):Promise<string>;
 
 export function DeleteCollection(arg1:string):Promise<void>;
 
+export function DitherModePreviews(arg1:string,arg2:Array<string>,arg3:number,arg4:number):Promise<Record<string, string>>;
+
 export function EnumerateObjects(arg1:string):Promise<Array<loader.ObjectInfo>>;
 
 export function Export3MF():Promise<string>;

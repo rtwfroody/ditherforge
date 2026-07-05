@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/image/draw"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
+	"github.com/rtwfroody/ditherforge/internal/ditherpreview"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
@@ -752,6 +754,73 @@ func (a *App) SelectCellDiagnostics(x, y, z float64) (*pipeline.CellDiagInfo, er
 		return nil, fmt.Errorf("no model loaded yet — run the pipeline first")
 	}
 	return pipeline.CellDiagnosticsAt(a.cache, *last, [3]float32{float32(x), float32(y), float32(z)})
+}
+
+// DitherModePreviews renders the six GUI dither modes over a caller-supplied
+// source image and returns one base64 PNG data URI per mode (keyed by the
+// DITHER_OPTIONS mode value). It feeds the Appearance section's visual
+// dither-mode picker with a live, image-space preview of the currently loaded
+// model.
+//
+// It is strictly read-only: it decodes an image, runs the real internal/voxel
+// dither implementations via internal/ditherpreview, and returns PNGs. It
+// touches no pipeline state, cache, or settings and never mutates a.* fields.
+//
+// srcPNGBase64 is a small (~192x128) PNG snapshot of the input viewer, either
+// bare base64 or a "data:image/png;base64,..." data URI. paletteHex is the
+// filament-slot palette as "#rrggbb" strings (malformed/empty entries are
+// skipped). riemersmaBias and blueNoiseTol are the live tuning-slider values.
+func (a *App) DitherModePreviews(srcPNGBase64 string, paletteHex []string, riemersmaBias, blueNoiseTol float64) (map[string]string, error) {
+	payload := srcPNGBase64
+	if i := strings.Index(payload, "base64,"); i >= 0 {
+		payload = payload[i+len("base64,"):]
+	}
+	raw, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode source image: %w", err)
+	}
+	src, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decode source PNG: %w", err)
+	}
+
+	pal := parseHexPalette(paletteHex)
+	if len(pal) < 2 {
+		return nil, fmt.Errorf("need at least 2 palette colors, got %d", len(pal))
+	}
+
+	tuning := ditherpreview.Tuning{RiemersmaBias: riemersmaBias, BlueNoiseTol: blueNoiseTol}
+	out := make(map[string]string, len(ditherpreview.Modes))
+	for _, mode := range ditherpreview.Modes {
+		img, err := ditherpreview.DitherImage(context.Background(), src, pal, mode, tuning)
+		if err != nil {
+			return nil, fmt.Errorf("dither %s: %w", mode, err)
+		}
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, img); err != nil {
+			return nil, fmt.Errorf("encode %s: %w", mode, err)
+		}
+		out[mode] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+	}
+	return out, nil
+}
+
+// parseHexPalette converts "#rrggbb" strings to RGB triples, silently skipping
+// empty or malformed entries (the caller enforces the minimum-count policy).
+func parseHexPalette(hexes []string) [][3]uint8 {
+	pal := make([][3]uint8, 0, len(hexes))
+	for _, h := range hexes {
+		h = strings.TrimPrefix(strings.TrimSpace(h), "#")
+		if len(h) != 6 {
+			continue
+		}
+		v, err := strconv.ParseUint(h, 16, 32)
+		if err != nil {
+			continue
+		}
+		pal = append(pal, [3]uint8{uint8(v >> 16), uint8(v >> 8), uint8(v)})
+	}
+	return pal
 }
 
 // Version returns the application version string.

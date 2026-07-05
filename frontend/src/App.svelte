@@ -45,7 +45,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, OpenModelDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, OpenModelDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, DitherModePreviews, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -712,6 +712,100 @@
     return colorSlots.map(slot =>
       slot !== null ? null : (resolvedUnlockedColors[idx++] ?? null)
     );
+  });
+
+  // ---- Dither-mode picker: live per-model preview thumbnails --------------
+  //
+  // The picker cards default to the committed static PNGs (DITHER_META). Once a
+  // model is loaded we snapshot the input viewer, send it to the read-only
+  // DitherModePreviews backend endpoint (which runs the real dither code in
+  // image space), and swap the six cards to the returned per-mode PNGs. This is
+  // purely presentational — it never touches settings, the pipeline, or the
+  // cache. Before a model loads (or on any error) ditherThumbs stays null and
+  // the static fallbacks show.
+
+  // Capture function handed up from the input ModelViewer's WebGL context.
+  let inputCapture = $state<(() => string | null) | null>(null);
+  // Per-mode preview PNGs (mode value -> data URL), or null to use fallbacks.
+  let ditherThumbs = $state<Record<string, string> | null>(null);
+  // Monotonic request token: latest wins, in-flight stragglers are discarded.
+  // Plain variable (not $state) so touching it never schedules reactivity.
+  let ditherReqSeq = 0;
+
+  // Draw a data-URL image onto a wxh canvas with a centered cover crop and
+  // return the result as a PNG data URL. ~2x the card size; CSS scales down.
+  function coverCropToPNG(dataUrl: string, w: number, h: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const cctx = canvas.getContext('2d');
+        if (!cctx) { reject(new Error('no 2d context')); return; }
+        const scale = Math.max(w / img.width, h / img.height);
+        const dw = img.width * scale, dh = img.height * scale;
+        cctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = () => reject(new Error('snapshot image failed to load'));
+      img.src = dataUrl;
+    });
+  }
+
+  // Build the palette to preview against: locked slot colors plus resolved
+  // auto colors, skipping empty/unresolved slots.
+  function previewPalette(): string[] {
+    return colorSlots
+      .map((slot, i) => slot?.hex ?? resolvedBySlot[i]?.hex)
+      .filter((h): h is string => !!h);
+  }
+
+  async function recomputeDitherThumbs(seq: number) {
+    const cap = inputCapture;
+    // No model / no live context -> fall back to static thumbnails.
+    if (!inputMeshUrl || !cap) {
+      if (seq === ditherReqSeq) ditherThumbs = null;
+      return;
+    }
+    const pal = previewPalette();
+    if (pal.length < 2) {
+      if (seq === ditherReqSeq) ditherThumbs = null;
+      return;
+    }
+    const full = cap();
+    if (!full) {
+      if (seq === ditherReqSeq) ditherThumbs = null;
+      return;
+    }
+    try {
+      const src = await coverCropToPNG(full, 192, 128);
+      if (seq !== ditherReqSeq) return; // superseded while cropping
+      const res = await DitherModePreviews(src, pal, committedRiemersmaBias, committedBlueNoiseTol);
+      if (seq === ditherReqSeq) ditherThumbs = res;
+    } catch (e) {
+      if (seq === ditherReqSeq) ditherThumbs = null;
+      LogMessage('info', `dither preview failed: ${e}`);
+    }
+  }
+
+  // Recompute on: model load, palette change, tuning-slider commit, or the
+  // capture function (re)mounting. Debounced ~300ms; NOT triggered by camera
+  // movement (we read no camera state here). The effect only reads reactive
+  // deps and writes ditherThumbs asynchronously (never reads it), so there is
+  // no self-referential $state read/write.
+  $effect(() => {
+    // Establish reactive dependencies.
+    void inputMeshUrl;
+    void inputCapture;
+    void committedRiemersmaBias;
+    void committedBlueNoiseTol;
+    for (const s of colorSlots) void s?.hex;
+    for (const r of resolvedBySlot) void r?.hex;
+
+    const seq = ++ditherReqSeq;
+    const handle = window.setTimeout(() => { void recomputeDitherThumbs(seq); }, 300);
+    return () => window.clearTimeout(handle);
   });
 
   // Shared camera state — single source of truth for both viewers.
@@ -2297,7 +2391,7 @@
                 <div class="flex items-center gap-1.5">
                   <Label for="dither">Mode</Label>
                   <HelpTip>
-                    "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
+                    "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color. Previews are approximate — they show image-space dithering of a snapshot of the loaded model, not the actual surface-cell dithering the pipeline applies.
                   </HelpTip>
                 </div>
                 <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -2309,7 +2403,7 @@
                       class="flex flex-col overflow-hidden rounded-md border bg-card text-left transition-colors hover:border-primary focus-visible:outline-none {dither === opt.value ? 'ring-2 ring-primary' : ''}"
                     >
                       <img
-                        src={DITHER_META[opt.value]?.thumb}
+                        src={ditherThumbs?.[opt.value] ?? DITHER_META[opt.value]?.thumb}
                         alt="{opt.label} dither preview"
                         class="aspect-[3/2] w-full object-cover"
                         style="image-rendering: pixelated;"
@@ -2698,6 +2792,7 @@
         errorMessage={inputError}
         cutPlane={cutPlanePreview}
         viewMode={inputViewStyle}
+        onCaptureReady={(fn) => inputCapture = fn}
       />
       <div
         bind:this={viewMenuRef}

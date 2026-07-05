@@ -8,6 +8,7 @@
   import StickerPlacer from './StickerPlacer.svelte';
   import TrianglePicker3D from './TrianglePicker3D.svelte';
   import CellPicker3D from './CellPicker3D.svelte';
+  import SnapshotCapture from './SnapshotCapture.svelte';
   import { OrbitControls as OrbitControlsImpl } from 'three/examples/jsm/controls/OrbitControls.js';
   import * as THREE from 'three';
   import { LogMessage } from '../../../wailsjs/go/main/App';
@@ -80,6 +81,7 @@
     cutPlane = null,
     pipelineError = '',
     viewMode = 'solid',
+    onCaptureReady,
   }: {
     meshUrl?: string;
     overlayMeshUrl?: string;
@@ -126,6 +128,11 @@
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
     viewMode?: 'solid' | 'hidden-line';
+    // Called with a capture function once the WebGL context is live (and null
+    // when it tears down). Invoke the function to grab the current render as a
+    // PNG data URL. Only wired for viewers that need snapshots (e.g. the input
+    // viewer feeding the dither-mode picker previews).
+    onCaptureReady?: (capture: (() => string | null) | null) => void;
   } = $props();
 
   // Non-solid view modes use dedicated materials rather than mutating the
@@ -1441,6 +1448,9 @@
         {/if}
 
         <Invalidator {brightness} {contrast} {saturation} extra={`${JSON.stringify(warpPins)}|cp${cutPlaneRev}|vm${viewMode}`} />
+        {#if onCaptureReady}
+          <SnapshotCapture onReady={onCaptureReady} />
+        {/if}
         <AxesGizmo />
         <ColorPicker3D {pickMode} onPick={onColorPick} {brightness} {contrast} {saturation} />
         <TrianglePicker3D pickMode={pickTriangleMode} onPick={(h) => onTrianglePick?.({ viewerId, viewerLabel: label, ...h })} />
