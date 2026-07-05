@@ -1935,7 +1935,7 @@
         <SettingsSection title="Model" summary={modelSummary}>
           {#snippet tip()}
             <HelpTip>
-              Size the model, set a fallback color, and optionally alpha-wrap to clean up bad geometry.
+              Size the model, set a fallback color, and optionally repair geometry to clean up bad meshes.
             </HelpTip>
           {/snippet}
           <div class="space-y-6">
@@ -2105,7 +2105,7 @@
                   <span class="text-xs text-muted-foreground">mm</span>
                 </div>
                 <div class="flex items-center gap-1.5">
-                  <span class="text-sm font-medium">Triplanar</span>
+                  <span class="text-sm font-medium">Projection sharpness</span>
                   <HelpTip>
                     Sharpness of the triplanar projection blend for image-backed MaterialX. 1 is a soft cosine blend; higher values approach a hard box map. Ignored by procedural .mtlx that don't read texture coordinates.
                   </HelpTip>
@@ -2114,20 +2114,21 @@
               </div>
             {/if}
 
-            <!-- Alpha-wrap -->
+            <!-- Repair geometry (alpha-wrap) -->
             <div class="space-y-2">
               <label class="flex items-center gap-2 text-sm font-medium">
                 <Checkbox bind:checked={alphaWrap} />
-                Alpha-wrap (clean geometry for 3D printing)
+                Repair geometry (recommended for damaged models)
                 <HelpTip>
                   Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
                 </HelpTip>
               </label>
+              <p class="text-xs text-muted-foreground">Wraps a watertight shell over the model; can be slow on large models.</p>
               {#if alphaWrap}
                 <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
                   <label class="flex flex-col gap-1">
                     <span class="text-muted-foreground flex items-center gap-1.5">
-                      Alpha (mm)
+                      Detail size (mm)
                       <HelpTip>
                         Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
                       </HelpTip>
@@ -2136,10 +2137,11 @@
                            placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
                            class="h-9 rounded border bg-background text-foreground px-2"
                            bind:value={alphaWrapAlpha} />
+                    <span class="text-xs text-muted-foreground">Larger bridges gaps; smaller keeps more detail.</span>
                   </label>
                   <label class="flex flex-col gap-1">
                     <span class="text-muted-foreground flex items-center gap-1.5">
-                      Offset (mm)
+                      Surface offset (mm)
                       <HelpTip>
                         How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
                       </HelpTip>
@@ -2148,6 +2150,7 @@
                            placeholder="auto (alpha / 30)"
                            class="h-9 rounded border bg-background text-foreground px-2"
                            bind:value={alphaWrapOffset} />
+                    <span class="text-xs text-muted-foreground">How far the shell sits above the surface; larger wraps less tightly.</span>
                   </label>
                 </div>
               {/if}
@@ -2300,6 +2303,7 @@
                     <span class="text-xs text-muted-foreground w-10 text-right">{riemersmaBias.toFixed(2)}</span>
                   </div>
                   <Slider type="single" min={0} max={1} step={0.05} value={riemersmaBias} onValueChange={(v: number) => riemersmaBias = v} onValueCommit={(v: number) => committedRiemersmaBias = v} />
+                  <p class="text-xs text-muted-foreground">Higher suppresses black/white flicker on flat areas; too high posterizes.</p>
                 </div>
               {/if}
 
@@ -2315,6 +2319,7 @@
                     <span class="text-xs text-muted-foreground w-10 text-right">{blueNoiseTol.toFixed(0)}</span>
                   </div>
                   <Slider type="single" min={1} max={50} step={1} value={blueNoiseTol} onValueChange={(v: number) => blueNoiseTol = v} onValueCommit={(v: number) => committedBlueNoiseTol = v} />
+                  <p class="text-xs text-muted-foreground">Lower spreads more colors per cell; higher sticks to tight 2-color pairs.</p>
                 </div>
               {/if}
             </div>
@@ -2371,7 +2376,7 @@
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
-                    <Label>Color snap (delta E)</Label>
+                    <Label>Color similarity threshold</Label>
                     <HelpTip>
                       CIELAB distance below which pixels snap to the nearest palette color instead of being dithered. Lower values preserve more color detail; higher values reduce dithering artifacts.
                     </HelpTip>
@@ -2379,6 +2384,7 @@
                   <span class="text-xs text-muted-foreground w-8 text-right">{colorSnap}</span>
                 </div>
                 <Slider type="single" min={0} max={50} step={1} value={colorSnap} onValueChange={(v: number) => colorSnap = v} onValueCommit={(v: number) => committedColorSnap = v} />
+                <p class="text-xs text-muted-foreground">Higher = fewer speckles, less color detail.</p>
               </div>
             </div>
 
@@ -2397,7 +2403,7 @@
                   <div class="space-y-1 pl-6">
                     <div class="flex items-center justify-between">
                       <div class="flex items-center gap-1.5">
-                        <Label>Color contrast (delta E)</Label>
+                        <Label>Edge sharpness threshold</Label>
                         <HelpTip>
                           Cut a color boundary into a cell boundary only where neighboring surface colors differ by more than this CIELAB distance. Low (~5) cuts almost any edge; higher (~20-30) ignores soft shading and cuts only crisp edges.
                         </HelpTip>
@@ -2405,6 +2411,7 @@
                       <span class="text-xs text-muted-foreground w-8 text-right">{colorRegionContrast}</span>
                     </div>
                     <Slider type="single" min={0} max={50} step={1} value={colorRegionContrast} onValueChange={(v: number) => colorRegionContrast = v} onValueCommit={(v: number) => committedColorRegionContrast = v} />
+                    <p class="text-xs text-muted-foreground">Higher cuts cell boundaries only on crisp edges; lower cuts almost any edge.</p>
                   </div>
                 {/if}
                 <label class="flex items-center gap-2 text-sm">
@@ -2418,7 +2425,7 @@
                   <div class="space-y-1 pl-6">
                     <div class="flex items-center justify-between">
                       <div class="flex items-center gap-1.5">
-                        <Label>Region barrier (delta E)</Label>
+                        <Label>Region barrier threshold</Label>
                         <HelpTip>
                           Treat neighboring cells as different color regions (a barrier to error) only where their colors differ by more than this CIELAB distance. Low (~5) confines almost everywhere; higher (~20-30) only blocks crisp edges while letting soft shading diffuse.
                         </HelpTip>
@@ -2426,6 +2433,7 @@
                       <span class="text-xs text-muted-foreground w-8 text-right">{regionDitherDeltaE}</span>
                     </div>
                     <Slider type="single" min={0} max={50} step={1} value={regionDitherDeltaE} onValueChange={(v: number) => regionDitherDeltaE = v} onValueCommit={(v: number) => committedRegionDitherDeltaE = v} />
+                    <p class="text-xs text-muted-foreground">Higher blocks dither bleed only at sharp color jumps; lower confines almost everywhere.</p>
                   </div>
                 {/if}
                 <label class="flex items-center gap-2 text-sm">
@@ -2437,11 +2445,12 @@
                 </label>
                 <label class="flex items-center gap-2 text-sm">
                   <Checkbox bind:checked={honorTD} />
-                  Honor TD
+                  Translucency-aware mixing
                   <HelpTip>
                     Opacity-weight the dither by each filament's transmission distance (TD). Translucent filaments (high TD) cover more area to deliver the same perceived color, so e.g. a transparent yellow no longer disappears into an opaque red. On by default; untick to use the plain area-weighted mix (treat every filament as opaque).
                   </HelpTip>
                 </label>
+                <p class="w-full text-xs text-muted-foreground">Gives translucent filaments more area so they aren't lost under opaque ones.</p>
               </div>
             </SettingsSection>
           </div>
@@ -2586,6 +2595,7 @@
                 {/if}
               </select>
             </div>
+            <p class="text-xs text-muted-foreground">Layer must match the layer height you slice with.</p>
 
             <!-- Layer XY scale sliders moved from the old Advanced section.
                  Set-once print-tuning knobs, so they live in Print setup. -->
@@ -2593,7 +2603,7 @@
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
-                    <Label>Layer-0 adhesion XY scale</Label>
+                    <Label>First-layer blob size</Label>
                     <HelpTip>
                       Multiplier on layer-0 voxel cell XY size for bed adhesion. 1 = no enlargement; higher values produce bigger first-layer color blobs that stick to the bed but coarsen the first layer's color resolution.
                     </HelpTip>
@@ -2601,11 +2611,12 @@
                   <span class="text-xs text-muted-foreground w-10 text-right">{layer0AdhesionXYScale.toFixed(1)}</span>
                 </div>
                 <Slider type="single" min={1} max={15} step={0.5} value={layer0AdhesionXYScale} onValueChange={(v: number) => layer0AdhesionXYScale = v} onValueCommit={(v: number) => committedLayer0AdhesionXYScale = v} />
+                <p class="text-xs text-muted-foreground">Higher = bigger first-layer blobs for bed adhesion, coarser first-layer color.</p>
               </div>
               <div class="space-y-1">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-1.5">
-                    <Label>Upper-layer XY scale</Label>
+                    <Label>Color grid coarseness</Label>
                     <HelpTip>
                       Multiplier on upper-layer voxel cell XY size relative to the slicer's line width. Lower values pack more color detail into each layer; higher values coarsen the grid in exchange for fewer primitives. Below ~1.20 the slicer visibly drops detail on vertical walls (and sometimes elsewhere), so values below that often don't make it onto the print.
                     </HelpTip>
@@ -2613,6 +2624,7 @@
                   <span class="text-xs text-muted-foreground w-10 text-right">{upperLayerXYScale.toFixed(2)}</span>
                 </div>
                 <Slider type="single" min={1} max={4} step={0.05} value={upperLayerXYScale} onValueChange={(v: number) => upperLayerXYScale = v} onValueCommit={(v: number) => committedUpperLayerXYScale = v} />
+                <p class="text-xs text-muted-foreground">Lower packs in finer color detail; below ~1.20 the slicer may drop detail.</p>
               </div>
             </div>
           </div>
@@ -2637,7 +2649,7 @@
       <ModelViewer
         meshUrl={inputViewMode === 'wrapped' && wrappedMeshUrl ? wrappedMeshUrl : inputMeshUrl}
         overlayMeshUrl={inputViewMode === 'wrapped' ? undefined : inputOverlayMeshUrl}
-        label={inputFile ? `${inputViewMode === 'wrapped' ? 'Alpha-wrapped Model: ' : 'Input Model: '}${shortenPath(inputFile)}` : 'Input Model'}
+        label={inputFile ? `${inputViewMode === 'wrapped' ? 'Repaired Model: ' : 'Input Model: '}${shortenPath(inputFile)}` : 'Input Model'}
         viewerId="input" camera={sharedCamera} {brightness} {contrast} {saturation}
         pickMode={inputViewMode === 'input' && pickingPinIndex >= 0}
         pickTriangleMode={triangleSelectMode}
@@ -2678,7 +2690,7 @@
                 type="button"
                 class="block w-full text-left px-3 py-1.5 hover:bg-muted {inputViewMode === 'wrapped' ? 'font-medium bg-muted/60' : ''}"
                 onclick={() => { inputViewMode = 'wrapped'; viewMenuOpen = false; }}
-              >Alpha-wrapped</button>
+              >Repaired</button>
               <div class="border-t border-border"></div>
             {/if}
             <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Style</div>

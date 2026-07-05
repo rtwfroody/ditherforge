@@ -159,12 +159,15 @@
       Cut the model in two pieces so each half fits the build volume,
       or so supports that would otherwise be hard to remove become
       easy to access. Alignment pegs help the halves register when
-      glued. Forces alpha-wrap on because the cut needs a watertight
+      glued. Forces Repair geometry on because the cut needs a watertight
       input.
     </HelpTip>
   </label>
 
   {#if enabled}
+    <p class="text-xs text-muted-foreground pl-6">
+      Repair geometry was turned on — split requires it.
+    </p>
     <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
       <label class="flex flex-col gap-1">
         <span class="text-muted-foreground">Cut plane</span>

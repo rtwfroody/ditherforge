@@ -138,7 +138,7 @@
               onchange={() => { stickers[i] = { ...sticker, mode: 'unfold' }; stickers = stickers; }} />
             Unfold
             <HelpTip>
-              Drapes the sticker over the surface, wrapping around curves. Best on developable patches like cylinders or gentle curves. If it looks wrong on a complex mesh, try enabling Alpha-wrap — it gives unfold a cleaner surface to work from.
+              Drapes the sticker over the surface, wrapping around curves. Best on developable patches like cylinders or gentle curves. If it looks wrong on a complex mesh, try enabling Repair geometry — it gives unfold a cleaner surface to work from.
             </HelpTip>
           </label>
         </div>
