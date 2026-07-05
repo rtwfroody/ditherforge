@@ -2330,56 +2330,68 @@
           <div class="space-y-6">
             <!-- Filament slots + collection picker -->
             <div class="space-y-4">
-              <!-- Color palette grid -->
-              <div class="space-y-2">
-                <div class="grid grid-cols-4 gap-2">
-                  {#each colorSlots as slot, i}
-                    {@const resolved = resolvedBySlot[i]}
-                    <div class="group relative">
-                      <button
-                        type="button"
-                        class="w-full rounded cursor-pointer flex flex-col select-none overflow-hidden {pickerIndex === i ? 'ring-2 ring-primary' : ''} {slot ? 'border' : resolved ? 'border border-dashed' : 'border'}"
-                        title={slot ? colorTooltip(slot) : resolved ? colorTooltip(resolved) : 'auto'}
-                        onclick={() => openPicker(i)}
-                      >
-                        {#if slot || resolved}
-                          {@const info = (slot ?? resolved)!}
-                          <div class="w-full h-5 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)]" style="background: {info.hex};"></div>
-                          <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-foreground break-words border-t border-border">{info.label || info.hex}</div>
-                        {:else}
-                          <div class="w-full h-5 bg-muted"></div>
-                          <div class="w-full px-1 py-0.5 text-[11px] leading-tight text-center text-muted-foreground border-t border-border">auto</div>
-                        {/if}
-                      </button>
-                      <!-- Lock toggle -->
-                      {#if slot || resolved}
-                        <button
-                          class="absolute top-0.5 left-0.5 flex items-center justify-center cursor-pointer rounded {slot ? 'w-4 h-4 bg-black/50' : 'w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity'}"
-                          title={slot ? 'Unlock (set to auto)' : 'Lock this color'}
-                          onmousedown={(e: MouseEvent) => { e.stopPropagation(); toggleLock(i); }}
-                        >
-                          {#if slot}
-                            <LockIcon size={10} class="text-white" />
-                          {:else}
-                            <LockOpenIcon size={10} class="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]" />
-                          {/if}
-                        </button>
-                      {/if}
-                      {#if colorSlots.length > 1}
-                        <button
-                          class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                          onmousedown={(e: MouseEvent) => { e.stopPropagation(); removeColorSlot(i); }}
-                        >&times;</button>
-                      {/if}
-                    </div>
-                  {/each}
-                  {#if colorSlots.length < 16}
+              <!-- Filament slot rows: [swatch] [name/hex] [TD] [Auto/Locked] [x] -->
+              <div class="space-y-1.5">
+                {#each colorSlots as slot, i}
+                  {@const resolved = resolvedBySlot[i]}
+                  {@const info = slot ?? resolved}
+                  <div class="flex items-center gap-2">
+                    <!-- Swatch + name/hex: click to open the collection picker -->
                     <button
-                      class="w-full rounded border-2 border-dashed border-muted-foreground/30 flex items-center justify-center text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer py-2"
-                      onclick={addColorSlot}
-                    >+</button>
-                  {/if}
-                </div>
+                      type="button"
+                      class="flex flex-1 min-w-0 items-center gap-2 rounded px-1 py-1 text-left cursor-pointer hover:bg-muted/50 transition-colors {pickerIndex === i ? 'ring-2 ring-primary' : ''}"
+                      title={info ? colorTooltip(info) : 'auto'}
+                      onclick={() => openPicker(i)}
+                    >
+                      <span
+                        class="shrink-0 w-6 h-6 rounded shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] {info ? '' : 'bg-muted'} {slot ? 'border border-border' : 'border border-dashed border-muted-foreground/60'}"
+                        style={info ? `background: ${info.hex};` : ''}
+                      ></span>
+                      <span class="flex min-w-0 flex-col leading-tight">
+                        <span class="truncate text-sm text-foreground">{info ? (info.label || info.hex) : 'auto'}</span>
+                        {#if slot}
+                          <span class="truncate text-[11px] text-muted-foreground">{info?.hex}</span>
+                        {:else if resolved}
+                          <span class="text-[11px] text-muted-foreground">auto</span>
+                        {/if}
+                      </span>
+                      {#if info?.td}
+                        <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground" title="Filament transmission distance">TD {info.td}</span>
+                      {/if}
+                    </button>
+                    <!-- Usage-bar gutter (reserved for step 6) -->
+                    <div class="shrink-0 w-14" aria-hidden="true"></div>
+                    <!-- Auto/Locked toggle: flips the slot's locked vs auto state -->
+                    <button
+                      type="button"
+                      class="shrink-0 flex items-center gap-1 rounded border px-2 py-1 text-[11px] cursor-pointer hover:bg-muted/50 transition-colors disabled:cursor-default disabled:opacity-50 {slot ? 'text-foreground' : 'text-muted-foreground'}"
+                      title={slot ? 'Locked — click to set to auto' : 'Auto — click to lock this resolved color'}
+                      disabled={!slot && !resolved}
+                      onclick={() => toggleLock(i)}
+                    >
+                      {#if slot}
+                        <LockIcon size={12} /> Locked
+                      {:else}
+                        <LockOpenIcon size={12} /> Auto
+                      {/if}
+                    </button>
+                    <!-- Remove slot -->
+                    <button
+                      type="button"
+                      class="shrink-0 w-6 h-6 rounded flex items-center justify-center text-lg leading-none text-muted-foreground hover:text-destructive hover:bg-muted/50 transition-colors {colorSlots.length > 1 ? '' : 'invisible'}"
+                      title="Remove this color"
+                      onclick={() => removeColorSlot(i)}
+                    >&times;</button>
+                  </div>
+                {/each}
+                <!-- Trailing add-color row (replaces the dashed + tile) -->
+                {#if colorSlots.length < 16}
+                  <button
+                    type="button"
+                    class="w-full rounded border border-dashed border-muted-foreground/30 flex items-center justify-center gap-1 py-1.5 text-sm text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground transition-colors cursor-pointer"
+                    onclick={addColorSlot}
+                  >+ Add color</button>
+                {/if}
                 {#if pickerIndex !== null}
                   <CollectionPicker
                     onselect={pickColor}
@@ -2388,8 +2400,8 @@
                 {/if}
               </div>
 
-              <!-- Remaining color source -->
-              <div class="space-y-2">
+              <!-- Auto-fill collection source -->
+              <div class="space-y-1">
                 <div class="flex items-center gap-1.5">
                   <Label>Unlocked colors from</Label>
                   <HelpTip>
@@ -2400,6 +2412,7 @@
                   bind:selected={inventoryCollection}
                   onchange={loadInventoryCollectionColors}
                 />
+                <p class="text-xs text-muted-foreground">Auto slots are filled from this collection.</p>
               </div>
             </div>
 
