@@ -5,7 +5,6 @@
   import { Label } from '$lib/components/ui/label';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Card from '$lib/components/ui/card';
-  import * as Select from '$lib/components/ui/select';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Slider } from '$lib/components/ui/slider';
@@ -51,6 +50,28 @@
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
   import type { loader, settings, pipeline } from '../wailsjs/go/models';
+
+  // Dither-mode preview thumbnails (rendered offline by cmd/dither-thumbs
+  // with the real internal/voxel dither implementations). Vite resolves each
+  // import to a hashed static-asset URL at build time.
+  import thumbRiemersma from './assets/dither/riemersma.png';
+  import thumbRiemersmaPair from './assets/dither/riemersma-pair.png';
+  import thumbBlueNoise from './assets/dither/blue-noise.png';
+  import thumbDizzy from './assets/dither/dizzy-corrected.png';
+  import thumbFloydSteinberg from './assets/dither/floyd-steinberg.png';
+  import thumbNone from './assets/dither/none.png';
+
+  // Per-mode thumbnail + ≤6-word tagline for the visual picker, keyed by the
+  // DITHER_OPTIONS value (the exact string persisted to settings JSON). Labels
+  // still come from DITHER_OPTIONS.
+  const DITHER_META: Record<string, { thumb: string; tagline: string }> = {
+    'riemersma':       { thumb: thumbRiemersma,      tagline: 'organic, no direction' },
+    'riemersma-pair':  { thumb: thumbRiemersmaPair,  tagline: 'smoother flats'        },
+    'blue-noise':      { thumb: thumbBlueNoise,      tagline: 'even grain, bounded'   },
+    'dizzy-corrected': { thumb: thumbDizzy,          tagline: 'random, textured'      },
+    'floyd-steinberg': { thumb: thumbFloydSteinberg, tagline: 'classic, slight banding' },
+    'none':            { thumb: thumbNone,           tagline: 'nearest color only'    },
+  };
 
   // Log to Go stdout so it appears in the wails dev terminal as plain text.
   function log(msg: string) {
@@ -2279,16 +2300,28 @@
                     "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Riemersma pair" looks at each cell jointly with its tour-neighbour and prefers picks whose residuals cancel (gray-input → pair of grays instead of black/white-then-back) — same drift as Riemersma, lower wander on flat/textured regions, slightly noisier on detailed near-palette images. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color.
                   </HelpTip>
                 </div>
-                <Select.Root type="single" bind:value={dither}>
-                  <Select.Trigger class="w-full">
-                    {dither || 'Select...'}
-                  </Select.Trigger>
-                  <Select.Content>
-                    {#each DITHER_OPTIONS as opt}
-                      <Select.Item value={opt.value}>{opt.label}</Select.Item>
-                    {/each}
-                  </Select.Content>
-                </Select.Root>
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {#each DITHER_OPTIONS as opt}
+                    <button
+                      type="button"
+                      onclick={() => (dither = opt.value)}
+                      aria-pressed={dither === opt.value}
+                      class="flex flex-col overflow-hidden rounded-md border bg-card text-left transition-colors hover:border-primary focus-visible:outline-none {dither === opt.value ? 'ring-2 ring-primary' : ''}"
+                    >
+                      <img
+                        src={DITHER_META[opt.value]?.thumb}
+                        alt="{opt.label} dither preview"
+                        class="aspect-[3/2] w-full object-cover"
+                        style="image-rendering: pixelated;"
+                        draggable="false"
+                      />
+                      <div class="px-2 py-1.5">
+                        <div class="text-xs font-medium leading-tight">{opt.label}</div>
+                        <div class="text-[11px] leading-tight text-muted-foreground">{DITHER_META[opt.value]?.tagline}</div>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
               </div>
 
               {#if dither === 'riemersma' || dither === 'riemersma-pair'}
