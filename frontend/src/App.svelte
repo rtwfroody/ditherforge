@@ -738,6 +738,12 @@
   // Monotonic request token: latest wins, in-flight stragglers are discarded.
   // Plain variable (not $state) so touching it never schedules reactivity.
   let ditherReqSeq = 0;
+  // Last palette a preview was rendered with. Auto slot colors are wiped at
+  // run start and only re-resolve after the palette stage (post-voxelize);
+  // falling back to this lets the preview refresh immediately on settings
+  // changes instead of waiting out voxelize. Plain variable: preview-only,
+  // nothing renders it.
+  let lastPreviewPalette: string[] = [];
 
   // Draw a data-URL image onto a wxh canvas with a centered cover crop and
   // return the result as a PNG data URL. ~2x the card size; CSS scales down.
@@ -775,11 +781,13 @@
       if (seq === ditherReqSeq) ditherThumbs = null;
       return;
     }
-    const pal = previewPalette();
+    let pal = previewPalette();
+    if (pal.length < 2) pal = lastPreviewPalette;
     if (pal.length < 2) {
       if (seq === ditherReqSeq) ditherThumbs = null;
       return;
     }
+    lastPreviewPalette = pal;
     const full = cap();
     if (!full) {
       if (seq === ditherReqSeq) ditherThumbs = null;
@@ -802,7 +810,8 @@
     }
   }
 
-  // Recompute on: model load, palette change, tuning-slider commit, or the
+  // Recompute on: model load, palette change, tuning-slider commit,
+  // color-correction change (brightness/contrast/saturation/pins), or the
   // capture function (re)mounting. Debounced ~300ms; NOT triggered by camera
   // movement (we read no camera state here). The effect only reads reactive
   // deps and writes ditherThumbs asynchronously (never reads it), so there is
@@ -816,6 +825,17 @@
     void committedColorSnap;
     for (const s of colorSlots) void s?.hex;
     for (const r of resolvedBySlot) void r?.hex;
+    // Color correction is baked into the snapshot by the input viewer's
+    // shader, so these must retrigger a capture even though none of the
+    // backend call's arguments change.
+    void brightness;
+    void contrast;
+    void saturation;
+    for (const p of warpPins) {
+      void p.sourceHex;
+      void p.targetHex;
+      void p.sigma;
+    }
 
     const seq = ++ditherReqSeq;
     const handle = window.setTimeout(() => { void recomputeDitherThumbs(seq); }, 300);
