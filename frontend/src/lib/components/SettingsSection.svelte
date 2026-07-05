@@ -6,12 +6,17 @@
     open = true,
     variant = 'top',
     tip,
+    summary,
     children,
   }: {
     title: string;
     open?: boolean;
     variant?: 'top' | 'sub';
     tip?: Snippet;
+    // Muted one-line state recap shown to the right of the title in the
+    // header, whether the section is open or closed. String or snippet;
+    // truncated with an ellipsis when it doesn't fit. Top variant only.
+    summary?: Snippet | string;
     children: Snippet;
   } = $props();
 </script>
@@ -31,6 +36,11 @@
       <span class="section-chevron inline-block transition-transform">▸</span>
       <span>{title}</span>
       {#if tip}{@render tip()}{/if}
+      {#if summary}
+        <span class="min-w-0 truncate text-xs font-normal normal-case tracking-normal text-muted-foreground">
+          {#if typeof summary === 'string'}{summary}{:else}{@render summary()}{/if}
+        </span>
+      {/if}
       <div class="flex-1 h-px bg-border"></div>
     </summary>
     <div class="mt-3">

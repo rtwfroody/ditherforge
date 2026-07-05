@@ -33,6 +33,7 @@
     SPLIT_ORIENTATION_VALUES,
     SPLIT_CONNECTOR_VALUES,
     SPLIT_AXIS_VALUES,
+    SPLIT_AXIS_OPTIONS,
     DITHER_OPTIONS,
     DITHER_VALUES,
     SIZE_MODE_VALUES,
@@ -1020,6 +1021,37 @@
     return isFinite(k) && k > 0 ? nativeExtentMM * k : null;
   });
 
+  // Collapsed-header state summaries. Each is a muted one-liner shown to the
+  // right of the section title (open or closed), derived purely from the
+  // controls' bound state — presentation only, never feeds the pipeline.
+  const modelSummary = $derived.by(() => {
+    const parts: string[] = [];
+    const name = inputFile ? inputFile.split(/[/\\]/).pop() : '';
+    if (name) parts.push(name);
+    if (scaledMaxExtentMM && scaledMaxExtentMM > 0) parts.push(`${Math.round(scaledMaxExtentMM)} mm`);
+    if (alphaWrap) parts.push('repaired');
+    return parts.length ? parts.join(' · ') : '—';
+  });
+  const appearanceSummary = $derived.by(() => {
+    const n = colorSlots.length; // total palette slots, auto-filled included
+    const label = DITHER_OPTIONS.find(o => o.value === dither)?.label ?? dither;
+    return `${n} ${n === 1 ? 'color' : 'colors'} · ${label}`;
+  });
+  const modifySummary = $derived.by(() => {
+    const parts: string[] = [];
+    const n = stickers.length;
+    if (n > 0) parts.push(`${n} ${n === 1 ? 'sticker' : 'stickers'}`);
+    if (splitEnabled) {
+      const axis = SPLIT_AXIS_OPTIONS.find(o => o.value === splitAxis)?.label ?? '';
+      parts.push(`split ${axis}`);
+    }
+    return parts.length ? parts.join(' · ') : '—';
+  });
+  const printSummary = $derived.by(() => {
+    const name = currentPrinter?.displayName ?? printerId;
+    return `${name} · ${nozzleDiameter} · ${layerHeight} mm`;
+  });
+
   // MaterialX tile size is stored as a fraction of the print extent; the
   // "Tile size" input shows/edits it in mm.
   const baseMaterialXTileDisplayMM = $derived(
@@ -1900,7 +1932,7 @@
 
     <Card.Root class="shrink-0">
       <Card.Content class="pt-6 space-y-6">
-        <SettingsSection title="Model">
+        <SettingsSection title="Model" summary={modelSummary}>
           {#snippet tip()}
             <HelpTip>
               Size the model, set a fallback color, and optionally alpha-wrap to clean up bad geometry.
@@ -2152,7 +2184,7 @@
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Appearance">
+        <SettingsSection title="Appearance" summary={appearanceSummary}>
           {#snippet tip()}
             <HelpTip>
               Choose the filament colors, the dithering algorithm, and the color
@@ -2415,7 +2447,7 @@
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Modify" open={false}>
+        <SettingsSection title="Modify" open={false} summary={modifySummary}>
           {#snippet tip()}
             <HelpTip>
               Stamp stickers onto the surface, or split the model into printable halves.
@@ -2473,7 +2505,7 @@
           </div>
         </SettingsSection>
 
-        <SettingsSection title="Print setup" open={false}>
+        <SettingsSection title="Print setup" open={false} summary={printSummary}>
           {#snippet tip()}
             <HelpTip>
               Target hardware. Sets the smallest detail the output can reproduce.
