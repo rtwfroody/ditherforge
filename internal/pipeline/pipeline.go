@@ -375,6 +375,39 @@ type ProcessResult struct {
 	// top-down back-faces against the output's (the white-holes probe).
 	DebugSourceMesh *MeshData `json:"-"`
 	Duration        time.Duration
+	// ColorUsage is a read-only per-palette-color summary of the finished
+	// output mesh (triangles assigned to each color). It is derived AFTER the
+	// mesh is built and never feeds back into the pipeline, so it cannot change
+	// output. Ordered by palette index (locked slots first, then auto), the
+	// same order the palette-resolved event uses.
+	ColorUsage []ColorUsage
+}
+
+// ColorUsage reports how much of the final output mesh a single palette color
+// accounts for. Purely observational run feedback for the GUI.
+type ColorUsage struct {
+	PaletteIndex int    `json:"paletteIndex"`
+	Hex          string `json:"hex"`       // "#RRGGBB"
+	Triangles    int    `json:"triangles"` // faces assigned to this color
+}
+
+// computeColorUsage histograms per-face palette assignments into per-color
+// triangle counts. Read-only: it reads the finished mesh's assignments and the
+// resolved palette, mutating nothing.
+func computeColorUsage(assignments []int32, paletteRGB [][3]uint8) []ColorUsage {
+	usage := make([]ColorUsage, len(paletteRGB))
+	for i, p := range paletteRGB {
+		usage[i] = ColorUsage{
+			PaletteIndex: i,
+			Hex:          fmt.Sprintf("#%02X%02X%02X", p[0], p[1], p[2]),
+		}
+	}
+	for _, a := range assignments {
+		if a >= 0 && int(a) < len(usage) {
+			usage[a].Triangles++
+		}
+	}
+	return usage
 }
 
 // PrepareResult summarizes the Prepare phase (kept for CLI backward compat).
@@ -650,6 +683,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		WrappedMesh:     wrappedMesh,
 		DebugSourceMesh: r.debugSourceMesh,
 		Duration:        time.Since(start),
+		ColorUsage:      computeColorUsage(mo.ShellAssignments, po.Palette),
 	}, nil
 }
 

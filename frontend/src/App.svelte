@@ -663,8 +663,15 @@
       // coloured mesh; the viewer prefers finalUrl and falls back to this.
       previewUrl?: string;
       finalUrl?: string;           // final coloured output mesh
+      // Per-palette-color usage from the finished mesh (read-only run
+      // feedback). Empty/undefined until this run's pipeline-done arrives;
+      // reset atomically with the record on the next run.
+      colorUsage?: ColorUsage[];
     };
   };
+  // Per-color output usage reported by the backend on pipeline-done. Palette
+  // order = locked slots first, then auto (same as the palette-resolved event).
+  type ColorUsage = { paletteIndex: number; hex: string; triangles: number };
   function idleRun(id: number): RunView {
     return { id, phase: 'idle', stages: [], error: '', input: {}, output: {} };
   }
@@ -911,14 +918,15 @@
   });
 
   // Listen for pipeline result events from the backend worker.
-  EventsOn('pipeline-done', (event: { gen: number; duration: number }) => {
+  EventsOn('pipeline-done', (event: { gen: number; duration: number; colorUsage?: ColorUsage[] }) => {
     if (event.gen !== run.id) return;
     run.phase = 'done';
-    // Preserve any warning emitted during the run; don't overwrite it
-    // with "Done!".
+    run.output.colorUsage = event.colorUsage ?? [];
+    // The action bar's "✓ Up to date" state conveys success now, so clear the
+    // transient status line — but preserve any warning emitted during the run.
     if (statusType !== 'warning') {
-      statusMessage = `Done! (${event.duration.toFixed(1)}s)`;
-      statusType = 'success';
+      statusMessage = '';
+      statusType = 'idle';
     }
   });
   EventsOn('pipeline-error', (event: { gen: number; message: string }) => {
@@ -1177,6 +1185,54 @@
     const label = DITHER_OPTIONS.find(o => o.value === dither)?.label ?? dither;
     return `${n} ${n === 1 ? 'color' : 'colors'} · ${label}`;
   });
+
+  // ---- Run feedback: per-color usage (step 6 Part B) ----------------------
+  // colorUsage arrives on pipeline-done, ordered by palette index. The
+  // pipeline builds the palette as [locked slots..., auto slots...], the same
+  // order the palette-resolved handler assumes — so map each slot to its
+  // palette index the same way to line usage up with the slot rows.
+  const colorUsage = $derived(run.output.colorUsage ?? []);
+  const totalUsageTriangles = $derived(colorUsage.reduce((s, u) => s + u.triangles, 0));
+  const slotUsage = $derived.by((): (ColorUsage | null)[] => {
+    if (colorUsage.length === 0) return colorSlots.map(() => null);
+    const numLocked = colorSlots.filter(s => s !== null).length;
+    let lockedIdx = 0;
+    let autoIdx = 0;
+    return colorSlots.map(slot => {
+      const pi = slot !== null ? lockedIdx++ : numLocked + autoIdx++;
+      return colorUsage[pi] ?? null;
+    });
+  });
+  // Locked colors that got zero triangles in the last run — the user pinned
+  // them but nothing used them. Auto slots are excluded (the picker chose
+  // them, so an unused auto color is not a user mistake).
+  const unusedLockedCount = $derived(
+    colorSlots.reduce((n, slot, i) =>
+      n + (slot !== null && slotUsage[i] !== null && slotUsage[i]!.triangles === 0 ? 1 : 0), 0)
+  );
+
+  // ---- Persistent action-bar run state (step 6 Part B) --------------------
+  // Derived from the run lifecycle record, so it inherits the exact-match
+  // staleness gating (only the current run's events mutate `run`). Replaces
+  // the bare statusMessage line; statusMessage now carries only transient
+  // save/export/warning detail shown beneath the state.
+  const runStateLabel = $derived(
+    run.phase === 'running' ? 'Recomputing…'
+    : run.phase === 'error' ? (run.error || 'Error')
+    : run.phase === 'done'  ? '✓ Up to date'
+    : ''
+  );
+  const runStateClass = $derived(
+    run.phase === 'error' ? 'text-red-500'
+    : run.phase === 'done' ? 'text-green-500'
+    : 'text-muted-foreground'
+  );
+  // Errors already show in the main label; keep other transient messages
+  // (Saved…, Exported…, warnings, "Please select an input file") as a detail
+  // line so nothing is lost. The color class is computed inline in the
+  // template — reading statusType there avoids TS narrowing it to its
+  // initializer literal, which happens in a script-level $derived.
+  const actionDetail = $derived(run.phase === 'error' ? '' : statusMessage);
   const modifySummary = $derived.by(() => {
     const parts: string[] = [];
     const n = stickers.length;
@@ -1935,7 +1991,8 @@
     const id = ++runId;
     run = { id, phase: 'running', stages: [], error: '', input: { ...run.input }, output: {} };
     inputError = '';
-    statusMessage = 'Processing...';
+    // The action bar shows "Recomputing…" from run.phase; no transient line.
+    statusMessage = '';
     statusType = 'idle';
     resolvedUnlockedColors = [] as ColorInfo[];
     if (stageTimerHandle) {
@@ -2342,7 +2399,9 @@
                 {#each colorSlots as slot, i}
                   {@const resolved = resolvedBySlot[i]}
                   {@const info = slot ?? resolved}
-                  <div class="flex items-center gap-2">
+                  {@const usage = slotUsage[i]}
+                  {@const unused = slot !== null && usage !== null && usage.triangles === 0}
+                  <div class="flex items-center gap-2 {unused ? 'opacity-60' : ''}">
                     <!-- Swatch + name/hex: click to open the collection picker -->
                     <button
                       type="button"
@@ -2365,9 +2424,21 @@
                       {#if info?.td}
                         <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground" title="Filament transmission distance">TD {info.td}</span>
                       {/if}
+                      {#if unused}
+                        <span class="shrink-0 rounded bg-yellow-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-yellow-600 dark:text-yellow-400" title="This locked color was unused in the last run">!</span>
+                      {/if}
                     </button>
-                    <!-- Usage-bar gutter (reserved for step 6) -->
-                    <div class="shrink-0 w-14" aria-hidden="true"></div>
+                    <!-- Usage bar: fraction of the last run's output triangles
+                         assigned to this color. Empty gutter before any run. -->
+                    <div class="shrink-0 w-14 flex flex-col items-end gap-0.5">
+                      {#if usage}
+                        {@const frac = totalUsageTriangles > 0 ? usage.triangles / totalUsageTriangles : 0}
+                        <div class="w-full h-1.5 rounded bg-muted overflow-hidden" title="{usage.triangles.toLocaleString()} triangles">
+                          <div class="h-full rounded bg-primary" style="width: {(frac * 100).toFixed(1)}%"></div>
+                        </div>
+                        <span class="text-[10px] leading-none text-muted-foreground tabular-nums">{Math.round(frac * 100)}%</span>
+                      {/if}
+                    </div>
                     <!-- Auto/Locked toggle: flips the slot's locked vs auto state -->
                     <button
                       type="button"
@@ -2404,6 +2475,11 @@
                     onselect={pickColor}
                     onclose={closePicker}
                   />
+                {/if}
+                {#if unusedLockedCount > 0}
+                  <p class="text-xs text-yellow-600 dark:text-yellow-400">
+                    {unusedLockedCount} {unusedLockedCount === 1 ? 'color' : 'colors'} unused in the last run — consider removing {unusedLockedCount === 1 ? 'it' : 'them'}.
+                  </p>
                 {/if}
               </div>
 
@@ -2825,14 +2901,30 @@
       </Card.Content>
     </Card.Root>
 
-    {#if statusMessage}
-    <div class="mt-4">
-      <p class="text-sm {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : statusType === 'warning' ? 'text-yellow-500' : 'text-muted-foreground'}">
-        {statusMessage}
-      </p>
     </div>
-    {/if}
 
+    <!-- Persistent action bar pinned to the bottom of the left panel: run
+         state (from the run lifecycle record, so it inherits stale-run
+         gating) plus a primary Export 3MF button duplicating the File menu
+         item. -->
+    <div class="shrink-0 border-t border-border bg-background px-6 py-3 space-y-1.5">
+      <div class="flex items-center gap-3">
+        <span class="flex-1 min-w-0 flex items-center gap-1.5 text-sm {runStateClass}">
+          {#if run.phase === 'running'}
+            <svg class="size-3.5 shrink-0 animate-spin text-muted-foreground" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          {/if}
+          <span class="truncate">{runStateLabel}</span>
+        </span>
+        <Button size="sm" onclick={exportTo3MF} disabled={!outputMeshUrl || running || saving}>
+          Export 3MF
+        </Button>
+      </div>
+      {#if actionDetail}
+        <p class="text-xs {statusType === 'success' ? 'text-green-500' : statusType === 'error' ? 'text-red-500' : statusType === 'warning' ? 'text-yellow-500' : 'text-muted-foreground'}">{actionDetail}</p>
+      {/if}
     </div>
   </div>
 

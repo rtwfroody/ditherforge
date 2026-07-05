@@ -74,10 +74,11 @@ type pipelineRequest struct {
 
 // pipelineEvent is emitted to the frontend via Wails events.
 type pipelineEvent struct {
-	Gen      int64   `json:"gen"`
-	Duration float64 `json:"duration,omitempty"` // seconds, for pipeline-done
-	Message  string  `json:"message,omitempty"`  // error text, for pipeline-error
-	ExtentMM float32 `json:"extentMM,omitempty"` // model extent, for pipeline-needs-force
+	Gen        int64                 `json:"gen"`
+	Duration   float64               `json:"duration,omitempty"`   // seconds, for pipeline-done
+	Message    string                `json:"message,omitempty"`    // error text, for pipeline-error
+	ExtentMM   float32               `json:"extentMM,omitempty"`   // model extent, for pipeline-needs-force
+	ColorUsage []pipeline.ColorUsage `json:"colorUsage,omitempty"` // per-color output usage, for pipeline-done
 }
 
 // meshEvent is the payload sent via Wails events for mesh data.
@@ -690,8 +691,9 @@ func (a *App) processOne(req pipelineRequest) {
 		})
 	} else {
 		wailsRuntime.EventsEmit(a.ctx, "pipeline-done", pipelineEvent{
-			Gen:      req.gen,
-			Duration: result.Duration.Seconds(),
+			Gen:        req.gen,
+			Duration:   result.Duration.Seconds(),
+			ColorUsage: result.ColorUsage,
 		})
 	}
 	// Pipeline completed successfully; the disk cache may have grown.
