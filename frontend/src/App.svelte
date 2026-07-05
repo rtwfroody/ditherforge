@@ -2124,7 +2124,7 @@
             <!-- Fine tuning: geometry-pipeline toggles moved from the old
                  Advanced section. They affect mesh output, so they live at
                  the bottom of Model. Default closed. -->
-            <SettingsSection title="Fine tuning" open={false}>
+            <SettingsSection title="Fine tuning" variant="sub" open={false}>
               <div class="flex flex-wrap gap-x-6 gap-y-3">
                 <label class="flex items-center gap-2 text-sm">
                   <Checkbox bind:checked={noMerge} />
@@ -2352,7 +2352,7 @@
 
             <!-- Fine tuning: color / dither quality knobs moved from the old
                  Advanced section. Default closed. -->
-            <SettingsSection title="Fine tuning" open={false}>
+            <SettingsSection title="Fine tuning" variant="sub" open={false}>
               <div class="flex flex-wrap gap-x-6 gap-y-3">
                 <label class="flex items-center gap-2 text-sm">
                   <Checkbox bind:checked={colorAwareCells} />
@@ -2423,50 +2423,52 @@
           {/snippet}
           <div class="space-y-6">
             <div>
-              <div class="flex items-center gap-2 mb-3">
-                <span class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Stickers</span>
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-xs font-medium text-muted-foreground">Stickers</span>
                 <HelpTip>
                   Stamp logos, labels, or artwork onto the model surface.
                 </HelpTip>
-                <div class="flex-1 h-px bg-border"></div>
               </div>
-              <StickerPanel
-                bind:stickers={stickers}
-                bind:placingIndex={placingStickerIndex}
-                extentMM={scaledMaxExtentMM ?? 0}
-                onAdd={addSticker}
-                onRemove={removeSticker}
-              />
+              <div class="ml-1 pl-3 border-l border-border">
+                <StickerPanel
+                  bind:stickers={stickers}
+                  bind:placingIndex={placingStickerIndex}
+                  extentMM={scaledMaxExtentMM ?? 0}
+                  onAdd={addSticker}
+                  onRemove={removeSticker}
+                />
+              </div>
             </div>
             <div>
-              <div class="flex items-center gap-2 mb-3">
-                <span class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Split</span>
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-xs font-medium text-muted-foreground">Split</span>
                 <HelpTip>
                   Cut the model into two halves that print side by side
                   and assemble back together with peg/pocket alignment.
                   Useful for build-volume limits, or to expose supports
                   that would otherwise be hard to remove.
                 </HelpTip>
-                <div class="flex-1 h-px bg-border"></div>
               </div>
-              <SplitControls
-                bind:enabled={splitEnabled}
-                bind:axis={splitAxis}
-                bind:offset={splitOffset}
-                bind:tiltA={splitTiltA}
-                bind:tiltB={splitTiltB}
-                bind:connectorStyle={splitConnectorStyle}
-                bind:connectorCount={splitConnectorCount}
-                bind:connectorDiamMM={splitConnectorDiamMM}
-                bind:connectorDepthMM={splitConnectorDepthMM}
-                bind:clearanceMM={splitClearanceMM}
-                bind:orientationA={splitOrientationA}
-                bind:orientationB={splitOrientationB}
-                extentMM={scaledMaxExtentMM ?? 0}
-                minOffset={splitOffsetMin}
-                maxOffset={splitOffsetMax}
-                onAlphaWrapForced={() => { alphaWrap = true; }}
-              />
+              <div class="ml-1 pl-3 border-l border-border">
+                <SplitControls
+                  bind:enabled={splitEnabled}
+                  bind:axis={splitAxis}
+                  bind:offset={splitOffset}
+                  bind:tiltA={splitTiltA}
+                  bind:tiltB={splitTiltB}
+                  bind:connectorStyle={splitConnectorStyle}
+                  bind:connectorCount={splitConnectorCount}
+                  bind:connectorDiamMM={splitConnectorDiamMM}
+                  bind:connectorDepthMM={splitConnectorDepthMM}
+                  bind:clearanceMM={splitClearanceMM}
+                  bind:orientationA={splitOrientationA}
+                  bind:orientationB={splitOrientationB}
+                  extentMM={scaledMaxExtentMM ?? 0}
+                  minOffset={splitOffsetMin}
+                  maxOffset={splitOffsetMax}
+                  onAlphaWrapForced={() => { alphaWrap = true; }}
+                />
+              </div>
             </div>
           </div>
         </SettingsSection>
