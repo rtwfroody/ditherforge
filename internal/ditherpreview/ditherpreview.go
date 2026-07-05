@@ -15,6 +15,12 @@
 // randomised modes seed math/rand with a fixed value inside internal/voxel —
 // so a given (image, palette, mode, tuning) always yields the same output.
 //
+// Dithering is alpha-masked: only opaque input pixels become cells (and neighbour-
+// graph nodes); transparent input pixels stay transparent in the output. This
+// lets the live preview dither just the model and leave the viewer background
+// flat and un-dithered. The static thumbnail generator feeds a fully opaque
+// image, so its output is unaffected.
+//
 // This package is read-only: it touches no pipeline state, cache, or settings.
 package ditherpreview
 
@@ -65,15 +71,33 @@ func DefaultTuning() Tuning {
 	}
 }
 
-// DitherImage dithers img against palette using the named mode and returns a
-// freshly rendered image the same size as img, with each pixel painted its
-// assigned palette colour. The returned image has origin (0,0) regardless of
-// img's bounds origin.
+// opaqueAlphaThreshold is the 8-bit alpha cutoff separating model pixels from
+// background. The GUI captures the input viewer against a transparent clear
+// colour, so background pixels arrive fully transparent; anti-aliased model
+// edges below this threshold are treated as background too.
+const opaqueAlphaThreshold = 128
+
+// DitherImage dithers the opaque region of img against palette using the named
+// mode and returns a freshly rendered image the same size as img: opaque input
+// pixels are painted their assigned palette colour, transparent input pixels
+// (alpha < opaqueAlphaThreshold) stay fully transparent so the caller's flat
+// background shows through un-dithered. The neighbour graph spans only the
+// opaque (model) pixels, so error never diffuses across the background. The
+// returned image has origin (0,0) regardless of img's bounds origin.
 func DitherImage(ctx context.Context, img image.Image, palette [][3]uint8, mode string, tuning Tuning) (*image.NRGBA, error) {
 	if len(palette) == 0 {
 		return nil, fmt.Errorf("ditherpreview: empty palette")
 	}
 	cells := buildCells(img)
+	if len(cells) == 0 {
+		// Nothing opaque to dither (e.g. a snapshot taken before the model
+		// rendered): return a fully transparent image of the right size.
+		// Still validate the mode so callers get a consistent error.
+		if _, err := runMode(ctx, mode, cells, palette, nil, tuning); err != nil {
+			return nil, err
+		}
+		return renderImage(img.Bounds(), cells, palette, nil), nil
+	}
 	nbrs := buildNeighbors2D(cells)
 	assignments, err := runMode(ctx, mode, cells, palette, nbrs, tuning)
 	if err != nil {
@@ -104,22 +128,28 @@ func runMode(ctx context.Context, mode string, cells []voxel.ActiveCell, pal [][
 	}
 }
 
-// buildCells lays out img as one ActiveCell per pixel in row-major order
-// (y outer, x inner), reading each pixel's colour as an 8-bit-per-channel RGB
-// triple. Alpha is ignored — the preview is fully opaque.
+// buildCells lays out the opaque pixels of img as one ActiveCell each, in
+// row-major order (y outer, x inner), reading each as a straight (non-
+// premultiplied) 8-bit-per-channel RGB triple. Pixels with alpha below
+// opaqueAlphaThreshold are skipped entirely, so they produce no cell and remain
+// transparent in the output — and the neighbour graph, built from these cells,
+// never links across the background.
 func buildCells(img image.Image) []voxel.ActiveCell {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	cells := make([]voxel.ActiveCell, 0, w*h)
 	for y := range h {
 		for x := range w {
-			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			c := color.NRGBAModel.Convert(img.At(b.Min.X+x, b.Min.Y+y)).(color.NRGBA)
+			if c.A < opaqueAlphaThreshold {
+				continue // background pixel — no cell, stays transparent
+			}
 			cells = append(cells, voxel.ActiveCell{
 				Col:   x,
 				Row:   y,
 				Cx:    float32(x),
 				Cy:    float32(y),
-				Color: [3]uint8{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8)},
+				Color: [3]uint8{c.R, c.G, c.B},
 			})
 		}
 	}
@@ -159,8 +189,9 @@ func buildNeighbors2D(cells []voxel.ActiveCell) [][]voxel.Neighbor {
 	return out
 }
 
-// renderImage paints each cell's assigned palette colour into an opaque NRGBA
-// image sized to bounds (with origin reset to 0,0).
+// renderImage paints each cell's assigned palette colour (fully opaque) into an
+// NRGBA image sized to bounds (with origin reset to 0,0). Pixels with no cell
+// keep the zero value — fully transparent — so the background shows through.
 func renderImage(bounds image.Rectangle, cells []voxel.ActiveCell, palette [][3]uint8, assignments []int32) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 	for i, c := range cells {

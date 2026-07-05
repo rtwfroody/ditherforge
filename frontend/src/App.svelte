@@ -811,6 +811,24 @@
   // Shared camera state — single source of truth for both viewers.
   const sharedCamera = new SharedCamera();
 
+  // View-change trigger: regenerate the previews once the camera has been
+  // stable for 2s. sharedCamera.generation bumps on every orbit/zoom/pan of
+  // either viewer (both drive the shared camera, so either changes the input
+  // viewer's rendered view). The cleanup clears the pending timer, so each
+  // camera change resets the 2s countdown — it only fires after motion stops.
+  // Separate from the 300ms effect above (which handles model/palette/tuning);
+  // both share ditherReqSeq so latest-wins still holds. Reads only
+  // sharedCamera.generation and writes no state synchronously (the timer's
+  // async write targets ditherThumbs, which this effect never reads), so the
+  // Svelte 5 read/write-same-state rule is respected. The effect-scoped timer
+  // is cleared on teardown, so nothing leaks.
+  $effect(() => {
+    void sharedCamera.generation;
+    const seq = ++ditherReqSeq;
+    const handle = window.setTimeout(() => { void recomputeDitherThumbs(seq); }, 2000);
+    return () => window.clearTimeout(handle);
+  });
+
   // Auto-processing state (plain variables, not reactive -- nothing in the template reads these).
   let processTimer: number | undefined;
 
@@ -2402,10 +2420,16 @@
                       aria-pressed={dither === opt.value}
                       class="flex flex-col overflow-hidden rounded-md border bg-card text-left transition-colors hover:border-primary focus-visible:outline-none {dither === opt.value ? 'ring-2 ring-primary' : ''}"
                     >
+                      <!-- bg-muted/30 matches the model viewers' background
+                           (same token, and --card === --background in both
+                           themes) so a transparent live preview reads as the
+                           viewer background with the dithered model on top; a
+                           theme switch needs no regeneration. The opaque static
+                           fallback PNGs fully cover it. -->
                       <img
                         src={ditherThumbs?.[opt.value] ?? DITHER_META[opt.value]?.thumb}
                         alt="{opt.label} dither preview"
-                        class="aspect-[3/2] w-full object-cover"
+                        class="aspect-[3/2] w-full object-cover bg-muted/30"
                         style="image-rendering: pixelated;"
                         draggable="false"
                       />

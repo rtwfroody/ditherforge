@@ -98,6 +98,76 @@ func TestDitherImageDeterministic(t *testing.T) {
 	}
 }
 
+// TestDitherImageAlphaMask verifies alpha masking: transparent input pixels
+// stay fully transparent in the output, while opaque input pixels get an
+// opaque palette colour. The image is a transparent border around an opaque
+// interior patch.
+func TestDitherImageAlphaMask(t *testing.T) {
+	const w, h = 16, 12
+	const border = 3
+	isOpaque := func(x, y int) bool {
+		return x >= border && x < w-border && y >= border && y < h-border
+	}
+
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			if isOpaque(x, y) {
+				// Mid grey, deliberately between palette entries.
+				src.SetNRGBA(x, y, color.NRGBA{R: 130, G: 120, B: 110, A: 255})
+			} else {
+				src.SetNRGBA(x, y, color.NRGBA{}) // fully transparent
+			}
+		}
+	}
+
+	inPalette := func(p [3]uint8) bool { return slices.Contains(testPalette, p) }
+
+	for _, mode := range Modes {
+		t.Run(mode, func(t *testing.T) {
+			out, err := DitherImage(context.Background(), src, testPalette, mode, DefaultTuning())
+			if err != nil {
+				t.Fatalf("DitherImage(%s): %v", mode, err)
+			}
+			for y := range h {
+				for x := range w {
+					px := out.NRGBAAt(x, y)
+					if isOpaque(x, y) {
+						if px.A != 255 {
+							t.Fatalf("mode %s: opaque pixel (%d,%d) alpha=%d, want 255", mode, x, y, px.A)
+						}
+						if !inPalette([3]uint8{px.R, px.G, px.B}) {
+							t.Fatalf("mode %s: opaque pixel (%d,%d) = %v not in palette", mode, x, y, px)
+						}
+					} else if px.A != 0 {
+						t.Fatalf("mode %s: background pixel (%d,%d) alpha=%d, want 0 (transparent)", mode, x, y, px.A)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDitherImageFullyTransparent handles a snapshot with no opaque pixels:
+// the result is a fully transparent image of the same size, not an error.
+func TestDitherImageFullyTransparent(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 8, 6))
+	for _, mode := range Modes {
+		out, err := DitherImage(context.Background(), src, testPalette, mode, DefaultTuning())
+		if err != nil {
+			t.Fatalf("mode %s: %v", mode, err)
+		}
+		if out.Bounds() != image.Rect(0, 0, 8, 6) {
+			t.Fatalf("mode %s: got bounds %v, want 8x6", mode, out.Bounds())
+		}
+		for _, v := range out.Pix {
+			if v != 0 {
+				t.Fatalf("mode %s: expected fully transparent output, found non-zero byte", mode)
+			}
+		}
+	}
+}
+
 // TestDitherImageUnknownMode rejects an unrecognised mode string.
 func TestDitherImageUnknownMode(t *testing.T) {
 	src := buildTestImage()
