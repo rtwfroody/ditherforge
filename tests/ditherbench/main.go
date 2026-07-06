@@ -109,6 +109,7 @@ func main() {
 		{"dizzy-corrected", wrapDizzyCorrected},
 		{"dizzy-2hop", wrapDizzy2Hop},
 		{"dizzy-recover", wrapDizzyRecover},
+		{"dizzy-local-corrected", wrapDizzyLocalCorrected},
 		{"floyd-steinberg", wrapFS},
 		{"riemersma", wrapRiemersma},
 		{"r-knearest-3", wrapRKNearest3},
@@ -529,6 +530,9 @@ func wrapDizzy2Hop(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8
 }
 func wrapDizzyRecover(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherWithRecover(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
+}
+func wrapDizzyLocalCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherLocalCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nil, nbrs, progress.NullTracker{})

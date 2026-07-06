@@ -13,6 +13,7 @@ import (
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 )
 
@@ -1628,6 +1629,40 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8, p
 // the fix for opaque-red swamping translucent-yellow. A nil or uniform
 // palAlpha cancels out and reproduces the historical area-weighted result.
 func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	assignments, _, err := ditherCore(ctx, cells, pal, palAlpha, neighbors, tracker, nil, false)
+	return assignments, err
+}
+
+// strandedDrop records the residual that a stranded cell dropped: when
+// all of a cell's neighbors have already been processed (totalWeight ==
+// 0), the diffusion has nowhere to send the residual and it is lost.
+// idx is the stranded cell; e is the dropped residual in linear light
+// (target - chosenPalette), NOT scaled by the sender's mass — the
+// spreading step (DitherLocalCorrected) applies the mass scaling itself.
+type strandedDrop struct {
+	idx int
+	e   [3]float32
+}
+
+// ditherCore is the shared dizzy-dithering pass behind DitherWithNeighbors
+// and DitherLocalCorrected. It performs one random-order, opacity-weighted
+// error-diffusion pass over the cells (see DitherWithNeighbors for the full
+// color-space rationale).
+//
+// Two hooks extend the plain pass for local correction:
+//
+//   - seedErr, if non-nil, pre-seeds the per-cell error buffer (linear
+//     light). This is mathematically identical to shifting each cell's
+//     input by that amount (target = input + errBuf) but keeps the shift
+//     in float linear light with no uint8 sRGB round-trip, so the small
+//     per-cell local corrections survive. seedErr is copied, never
+//     aliased — the core mutates errBuf during the pass.
+//   - recordDrops, if true, appends a strandedDrop for every cell whose
+//     residual is dropped in the totalWeight == 0 branch.
+//
+// With seedErr == nil and recordDrops == false this is bit-identical to
+// the historical DitherWithNeighbors body.
+func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, seedErr [][3]float32, recordDrops bool) ([]int32, []strandedDrop, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -1638,16 +1673,23 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 
 	assignments := make([]int32, n)
 	errBuf := make([][3]float32, n) // accumulated residual in linear light
+	if seedErr != nil {
+		// Copy, do not alias: the pass mutates errBuf and the caller
+		// reuses seedErr across the keep-best comparison.
+		copy(errBuf, seedErr)
+	}
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
 	palLin, palLab := paletteLinearLab(pal)
 
 	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
+	var drops []strandedDrop
+
 	for oi, idx := range order {
 		if oi%1000 == 0 {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
@@ -1697,6 +1739,11 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 					errBuf[nb.Idx][2] += eB * w
 				}
 			}
+		} else if recordDrops {
+			// The residual is dropped (see below). Record it so the
+			// local corrector can spread it over this cell's neighbors
+			// on the next pass.
+			drops = append(drops, strandedDrop{idx: idx, e: [3]float32{eR, eG, eB}})
 		}
 		// When totalWeight == 0, all neighbors are already processed
 		// and the residual error is dropped. ~9% of cells in the
@@ -1707,7 +1754,7 @@ func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8
 		// average without changing the no-neighbor branch.
 	}
 
-	return assignments, nil
+	return assignments, drops, nil
 }
 
 // regionObjective evaluates the local-solve objective for a candidate
@@ -2971,6 +3018,174 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 			shifted[i].Color[1] = linearToSrgbByte(float32(float64(srgbToLinearLUT[cells[i].Color[1]]) - cG))
 			shifted[i].Color[2] = linearToSrgbByte(float32(float64(srgbToLinearLUT[cells[i].Color[2]]) - cB))
 		}
+	}
+	return bestAssigns, nil
+}
+
+// LocalCorrectionPasses is the number of dizzy iterations
+// DitherLocalCorrected runs. Like DizzyCorrectionPasses, each pass
+// beyond the first re-runs dizzy with a correction derived from the
+// previous pass's dropped residuals. Unlike DitherCorrected's single
+// global mean shift, the correction is LOCALIZED: each stranded cell's
+// dropped residual is spread back over that cell's own neighbors, so
+// the compensation stays where the loss occurred instead of averaging
+// across color clusters that drift differently.
+//
+// Exported (mirroring DizzyCorrectionPasses) so the pipeline can size
+// its progress bar to cover all the passes.
+const LocalCorrectionPasses = 3
+
+// DitherLocalCorrected runs dizzy with a per-cell LOCALIZED input
+// correction instead of DitherCorrected's single global mean shift.
+//
+// The stranded-cell drop (see ditherCore / DitherWithNeighbors) is the
+// only source of dizzy's chroma drift. Crucially, whether a cell strands
+// depends only on the traversal permutation and the neighbor table —
+// both fixed across passes (seed 42, same cells) — so the stranded set
+// and the drop locations are stable pass to pass. That lets us treat the
+// drop as a fixed-point equation: find an input correction c such that
+// re-running dizzy with c seeded into the error buffer produces drops
+// whose spread reproduces c.
+//
+// Each pass:
+//  1. run ditherCore with the previous pass's correction seeded into
+//     errBuf (nil on pass 1), recording every dropped residual;
+//  2. spread each drop over its stranded cell's neighbors, using the
+//     exact opacity-weighted scaling the live diffusion uses, to build
+//     the NEXT pass's correction (rebuilt from scratch — the update rule
+//     is REPLACE, matching the c^{k+1} = d^k fixed-point iteration);
+//  3. measure global drift ΔE the same way DitherCorrected does and keep
+//     the best pass, returning early if a pass regresses.
+//
+// Seeding the correction into errBuf (float linear light) rather than
+// shifting the uint8 sRGB cell colors (as DitherCorrected does) avoids
+// quantizing the small per-cell corrections — a drop spread over ~5-25
+// neighbors would be swallowed by a uint8 round-trip. target = input +
+// errBuf makes this mathematically identical to an input shift. Because
+// the cells themselves never change, cellAlphaProxies stays valid across
+// passes.
+//
+// palAlpha is threaded through exactly as in DitherCorrected; nil/uniform
+// alpha leaves both the inner passes and the drift metric identical to
+// the historical area-weighted behavior.
+func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	// Empty input: no work, no division by zero downstream.
+	if len(cells) == 0 {
+		return nil, nil
+	}
+
+	if tracker == nil {
+		tracker = progress.NullTracker{}
+	}
+
+	n := len(cells)
+
+	// Deterministic helpers of (cells, pal, palAlpha) computed once and
+	// reused every pass — the same quantities ditherCore recomputes
+	// internally, needed here to spread drops with matching scaling and
+	// to compute the output mean.
+	areas := effectiveAreas(cells)
+	palLin, palLab := paletteLinearLab(pal)
+	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
+
+	// corr is the correction seeded into the next pass's error buffer.
+	// nil on pass 1 (plain dizzy) so pass 1 measures the natural drift.
+	var corr [][3]float32
+
+	// Keep-best-pass, copied structurally from DitherCorrected: if a
+	// pass regresses vs the best drift seen so far, return the previous
+	// best rather than shipping the worse result.
+	var assigns []int32
+	bestAssigns := make([]int32, n)
+	bestDriftDE := math.Inf(1)
+	for pass := 0; pass < LocalCorrectionPasses; pass++ {
+		passTracker := ditherPassTracker{real: tracker, offset: pass * n}
+		var drops []strandedDrop
+		var err error
+		assigns, drops, err = ditherCore(ctx, cells, pal, palAlpha, neighbors, passTracker, corr, true)
+		if err != nil {
+			return nil, err
+		}
+
+		// Measure drift relative to the ORIGINAL input (linear light),
+		// weighting both the output and the input reference by the same
+		// per-cell opacity α(assignment). See DitherCorrected for why the
+		// weights must match.
+		var oR, oG, oB, iR, iG, iB, wSum float64
+		for i, a := range assigns {
+			w := float64(alphaAt(palAlpha, int(a)))
+			oR += w * float64(palLin[a][0])
+			oG += w * float64(palLin[a][1])
+			oB += w * float64(palLin[a][2])
+			iR += w * float64(srgbToLinearLUT[cells[i].Color[0]])
+			iG += w * float64(srgbToLinearLUT[cells[i].Color[1]])
+			iB += w * float64(srgbToLinearLUT[cells[i].Color[2]])
+			wSum += w
+		}
+		oR /= wSum
+		oG /= wSum
+		oB /= wSum
+		iR /= wSum
+		iG /= wSum
+		iB /= wSum
+		driftDE := computeDriftDEFromAvg(iR, iG, iB, oR, oG, oB)
+
+		// Total dropped mass (linear-light magnitude, summed over the
+		// stranded set) — a coarse gauge of how much residual each pass
+		// is losing; useful for judging convergence.
+		var dropMass float64
+		for _, d := range drops {
+			dropMass += math.Sqrt(float64(d.e[0]*d.e[0] + d.e[1]*d.e[1] + d.e[2]*d.e[2]))
+		}
+		plog.Printf("  dizzy-local-corrected pass %d/%d: drift ΔE=%.3f, stranded=%d, dropMass=%.4f",
+			pass+1, LocalCorrectionPasses, driftDE, len(drops), dropMass)
+
+		if driftDE < bestDriftDE {
+			bestDriftDE = driftDE
+			copy(bestAssigns, assigns)
+		} else {
+			// This pass regressed. Stop and return the previous best.
+			return bestAssigns, nil
+		}
+
+		if pass == LocalCorrectionPasses-1 {
+			break
+		}
+
+		// Rebuild the correction from THIS pass's drops (replace, not
+		// accumulate): c^{k+1} = spread(d^k). Each stranded cell's
+		// dropped residual is distributed over ALL its neighbors — the
+		// processed/unprocessed distinction is irrelevant across passes —
+		// mirroring exactly the opacity-weighted scaling the live
+		// diffusion applies (see ditherCore's diffusion branch).
+		next := make([][3]float32, n)
+		for _, d := range drops {
+			i := d.idx
+			nbrs := neighbors[i]
+			if len(nbrs) == 0 {
+				// Isolated stranded cell: the drop is unrecoverable.
+				continue
+			}
+			var totalW float32
+			for _, nb := range nbrs {
+				totalW += nb.Weight
+			}
+			if totalW <= 0 {
+				continue
+			}
+			aSender := areas[i] * alphaAt(palAlpha, int(assigns[i]))
+			for _, nb := range nbrs {
+				aRecvEff := areas[nb.Idx]
+				if cellAlphaProxy != nil {
+					aRecvEff *= cellAlphaProxy[nb.Idx]
+				}
+				w := nb.Weight / totalW * (aSender / aRecvEff)
+				next[nb.Idx][0] += d.e[0] * w
+				next[nb.Idx][1] += d.e[1] * w
+				next[nb.Idx][2] += d.e[2] * w
+			}
+		}
+		corr = next
 	}
 	return bestAssigns, nil
 }
