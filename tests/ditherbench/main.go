@@ -4,28 +4,20 @@
 //
 // Four categories of metric per (fixture, mode):
 //
-//   - drift_ΔE / drift_lin_ΔE: avg(output_color) - avg(input_color),
-//     measured in Lab ΔE. Both are the cost dither pays to fix the
-//     unavoidable quantization bias, but they average in different
-//     spaces:
-//       * drift_ΔE averages the raw sRGB BYTES, then takes the ΔE of
-//         the byte means. This metric is now STALE. Since the
-//         linear-light refactor the error-diffusion modes conserve the
-//         LINEAR-light spatial mean, not the byte mean (mean of a
-//         nonlinear map ≠ map of the mean — see computeDriftDEFromAvg
-//         in internal/voxel/color.go). Because output palette colors
-//         span a much wider range than the input colors, exact linear
-//         conservation still leaves a large byte-space Jensen offset,
-//         so this column PENALIZES exactly the modes that conserve
-//         correctly. Kept only for historical comparison.
-//       * drift_lin_ΔE averages in LINEAR light (unweighted mean over
-//         cells), then converts the two linear means back to Lab for
-//         the ΔE. This is the physically meaningful drift number
-//         post-linear-refactor: a mode that conserves linear-light mass
-//         scores near 0 here. Prefer this column.
-//     Small = good; a well-behaved error-diffusion mode scores near 0
-//     on drift_lin_ΔE, dizzy ~7-8 on the stale byte metric, no-dither
-//     up to ~15.
+//   - drift_lin_ΔE: avg(output_color) - avg(input_color): both means
+//     taken in LINEAR light (unweighted over cells), then converted to
+//     Lab for the ΔE. Linear light is the space the error-diffusion
+//     modes conserve since the linear-light refactor (the eye
+//     integrates adjacent tiles as photons; see "Perceptual dithering
+//     color space" in internal/voxel/color.go), so a mode that
+//     conserves correctly scores near 0. Small = good.
+//
+//     A byte-space variant (averaging raw sRGB bytes) used to be
+//     reported alongside; it was removed as stale. Mean of a nonlinear
+//     map ≠ map of the mean, and because output palette colors span a
+//     much wider range than input colors, exact linear conservation
+//     still leaves a large byte-space Jensen offset — that column
+//     penalized exactly the modes that conserve correctly.
 //
 //   - wander_ΔE: mean Lab ΔE between the chosen palette entry and
 //     the nearest-input palette entry. Captures how often the
@@ -333,7 +325,7 @@ func loadAllFixtures() []fixture {
 		// Panchroma-derived 4-color palette can reach. Tests the
 		// "out-of-gamut input" failure mode: an algorithm that
 		// silently breaks energy conservation will look "blue-noise"
-		// here while drift_ΔE blows up.
+		// here while drift_lin_ΔE blows up.
 		makeUniformFixture("uniform_saturated_magenta", 512, 512, [3]uint8{0xFF, 0x00, 0xFF}),
 		// Checkerboard of two colors that aren't in the Panchroma
 		// palette: warm orange (#E08840) and cool teal (#40A0E0).
@@ -671,8 +663,7 @@ func wrapRLab100_15(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint
 // ----- metrics -----
 
 type metrics struct {
-	driftDE      float64         // Lab ΔE of the sRGB-BYTE means (stale post-linear-refactor)
-	driftLinDE   float64         // Lab ΔE of the LINEAR-light means (physically meaningful)
+	driftLinDE   float64         // Lab ΔE of the LINEAR-light means
 	pcell        []float64       // sorted per-cell ΔE
 	wanderDE     float64         // mean ΔE(chosen palette, nearest-input palette)
 	wanderClump  float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
@@ -681,37 +672,23 @@ type metrics struct {
 }
 
 func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
-	// Global drift in Lab ΔE, measured in two spaces (see the two
-	// drift metrics documented at the top of this file). The byte means
-	// (i*, o*) drive the stale drift_ΔE; the linear-light means
-	// (iLin*, oLin*) drive the physically meaningful drift_lin_ΔE.
-	var iR, iG, iB, oR, oG, oB float64
+	// Global drift in Lab ΔE (see the drift_lin_ΔE doc at the top of
+	// this file): average input and output in linear light, then map
+	// the two linear means back to sRGB float bytes so we can reuse
+	// toLab (which expects 0-255 sRGB) for the ΔE. Linear light is the
+	// space the inner error-diffusion conserves, so a correctly-
+	// conserving mode lands near 0.
 	var iLinR, iLinG, iLinB, oLinR, oLinG, oLinB float64
 	for i, c := range fx.cells {
-		iR += float64(c.Color[0])
-		iG += float64(c.Color[1])
-		iB += float64(c.Color[2])
 		iLinR += srgb8ToLinear(c.Color[0])
 		iLinG += srgb8ToLinear(c.Color[1])
 		iLinB += srgb8ToLinear(c.Color[2])
 		a := assigns[i]
-		oR += float64(pal[a][0])
-		oG += float64(pal[a][1])
-		oB += float64(pal[a][2])
 		oLinR += srgb8ToLinear(pal[a][0])
 		oLinG += srgb8ToLinear(pal[a][1])
 		oLinB += srgb8ToLinear(pal[a][2])
 	}
 	n := float64(len(fx.cells))
-	iL, iA, iBl := toLab(iR/n, iG/n, iB/n)
-	oL, oA, oBl := toLab(oR/n, oG/n, oB/n)
-	driftDE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
-
-	// Linear-light drift: average in linear light, then map the two
-	// linear means back to sRGB float bytes so we can reuse toLab (which
-	// expects 0-255 sRGB) for the ΔE. This is the space the inner
-	// error-diffusion conserves, so a correctly-conserving mode lands
-	// near 0 here even when its byte-space drift_ΔE is large.
 	ilL, ilA, ilBl := toLab(linearToSrgb255(iLinR/n), linearToSrgb255(iLinG/n), linearToSrgb255(iLinB/n))
 	olL, olA, olBl := toLab(linearToSrgb255(oLinR/n), linearToSrgb255(oLinG/n), linearToSrgb255(oLinB/n))
 	driftLinDE := math.Sqrt((ilL-olL)*(ilL-olL) + (ilA-olA)*(ilA-olA) + (ilBl-olBl)*(ilBl-olBl))
@@ -761,9 +738,9 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 
 	// Build the per-pixel error grid, then subtract the global mean
 	// error vector before measuring spatial structure. The drift
-	// metrics above already report the mean separately; leaving it
+	// metric above already reports the mean separately; leaving it
 	// in here would inflate both blockvar and maxdircorr by a
-	// constant proportional to drift_ΔE², making cross-mode
+	// constant proportional to the squared mean error, making cross-mode
 	// comparison unfair (a high-drift mode would look "bandy" even
 	// with perfectly white residuals because |μ|² leaks into both
 	// the autocorrelation numerator and the per-pixel-variance
@@ -774,7 +751,6 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 	mdc := computeMaxDirCorr(grid, fx.width, fx.height, []int{1, 4})
 
 	return metrics{
-		driftDE:     driftDE,
 		driftLinDE:  driftLinDE,
 		pcell:       pcell,
 		wanderDE:    wanderDE,
@@ -1107,8 +1083,8 @@ func printHeader(scales []int) {
 	for i, s := range scales {
 		parts[i] = fmt.Sprintf("%5d", s)
 	}
-	fmt.Printf("  %-16s %8s %10s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
-		"mode", "drift_ΔE", "drift_lin", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+	fmt.Printf("  %-16s %10s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_lin", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
 }
 
 func printRow(name string, m metrics, scales []int) {
@@ -1118,8 +1094,8 @@ func printRow(name string, m metrics, scales []int) {
 	for i, s := range scales {
 		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
 	}
-	fmt.Printf("  %-16s %8.2f %10.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
-		name, m.driftDE, m.driftLinDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
+	fmt.Printf("  %-16s %10.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftLinDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
 		m.maxDirCorr[1], m.maxDirCorr[4])
 }
 
@@ -1146,11 +1122,12 @@ func writeOutputPNG(path string, fx fixture, pal [][3]uint8, assigns []int32) er
 // printAssignmentDistribution emits a side-by-side comparison of the
 // fraction of cells each algorithm assigned to each palette entry,
 // alongside the OPTIMAL mix — the proportions that, if achievable,
-// would make output average exactly equal input average.
+// would make output average exactly equal input average in linear
+// light (the space drift_lin_ΔE measures).
 //
 // Output drift is determined entirely by the difference between
 // actual assignment proportions and the optimal proportions. So
-// gaps in this table directly explain each algorithm's drift_ΔE
+// gaps in this table directly explain each algorithm's drift_lin_ΔE
 // reported above. If FS's mix is close to optimal and dizzy's is
 // off, the gap pinpoints which palette entries dizzy over- or
 // under-uses to land at its drift number.
@@ -1164,12 +1141,15 @@ func printAssignmentDistribution(fx fixture, pal [][3]uint8, modes []dmode, mode
 		fmt.Printf("%-9s ", abbreviateModeName(m.name))
 	}
 	fmt.Println("optimal")
-	// Compute optimal mix from input avg.
+	// Compute optimal mix from the input average in LINEAR light — the
+	// space the error-diffusion modes conserve and drift_lin_ΔE
+	// measures. A byte-space solve would produce proportions that no
+	// correctly-conserving mode should match.
 	var iR, iG, iB float64
 	for _, c := range fx.cells {
-		iR += float64(c.Color[0])
-		iG += float64(c.Color[1])
-		iB += float64(c.Color[2])
+		iR += srgb8ToLinear(c.Color[0])
+		iG += srgb8ToLinear(c.Color[1])
+		iB += srgb8ToLinear(c.Color[2])
 	}
 	n := float64(len(fx.cells))
 	iR /= n
@@ -1232,16 +1212,16 @@ func optimalPaletteMix(pal [][3]uint8, target [3]float64) ([]float64, bool) {
 	if K != 4 {
 		return nil, false
 	}
-	// Build the 4×4 system:
+	// Build the 4×4 system in LINEAR light (target must also be linear):
 	//   [R0 R1 R2 R3] [p0]   [iR]
 	//   [G0 G1 G2 G3] [p1] = [iG]
 	//   [B0 B1 B2 B3] [p2]   [iB]
 	//   [ 1  1  1  1] [p3]   [ 1]
 	A := [4][5]float64{}
 	for k := 0; k < 4; k++ {
-		A[0][k] = float64(pal[k][0])
-		A[1][k] = float64(pal[k][1])
-		A[2][k] = float64(pal[k][2])
+		A[0][k] = srgb8ToLinear(pal[k][0])
+		A[1][k] = srgb8ToLinear(pal[k][1])
+		A[2][k] = srgb8ToLinear(pal[k][2])
 		A[3][k] = 1.0
 	}
 	A[0][4] = target[0]
