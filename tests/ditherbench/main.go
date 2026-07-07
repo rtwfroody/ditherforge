@@ -4,6 +4,19 @@
 //
 // Four categories of metric per (fixture, mode):
 //
+//   - pcp2_ΔE / pcp8_ΔE: the primary "what the eye sees" numbers.
+//     Both the input-color field and the assigned-palette field are
+//     rasterized at cell resolution (1 px = 1 cell), blurred in
+//     LINEAR light with a mask-normalized Gaussian at σ=2 px and
+//     σ=8 px, then compared as mean Lab ΔE (see the tests/percep
+//     package doc). Small = the dithered field is perceptually
+//     indistinguishable from the input when the eye integrates at
+//     that scale. This subsumes drift (a constant offset survives any
+//     blur) and banding (structure at or above σ survives the blur),
+//     and it is measured in a space with no byte-averaging Jensen gap
+//     — unlike a naive mean of sRGB bytes. σ=2 is close inspection,
+//     σ=8 is across-the-room integration.
+//
 //   - drift_lin_ΔE: avg(output_color) - avg(input_color): both means
 //     taken in LINEAR light (unweighted over cells), then converted to
 //     Lab for the ΔE. Linear light is the space the error-diffusion
@@ -70,6 +83,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 	"github.com/rtwfroody/ditherforge/tests/inventories"
+	"github.com/rtwfroody/ditherforge/tests/percep"
 )
 
 // fixture is a 2D set of cells laid out at integer (Col, Row), with
@@ -663,12 +677,14 @@ func wrapRLab100_15(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint
 // ----- metrics -----
 
 type metrics struct {
-	driftLinDE   float64         // Lab ΔE of the LINEAR-light means
-	pcell        []float64       // sorted per-cell ΔE
-	wanderDE     float64         // mean ΔE(chosen palette, nearest-input palette)
-	wanderClump  float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
-	blockVar     map[int]float64 // scale -> normalized block-mean variance
-	maxDirCorr   map[int]float64 // distance -> max |autocorrelation| over 8 directions
+	driftLinDE  float64         // Lab ΔE of the LINEAR-light means
+	percep2     float64         // mean Lab ΔE after mask-normalized linear-light blur, σ=2px
+	percep8     float64         // mean Lab ΔE after mask-normalized linear-light blur, σ=8px
+	pcell       []float64       // sorted per-cell ΔE
+	wanderDE    float64         // mean ΔE(chosen palette, nearest-input palette)
+	wanderClump float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
+	blockVar    map[int]float64 // scale -> normalized block-mean variance
+	maxDirCorr  map[int]float64 // distance -> max |autocorrelation| over 8 directions
 }
 
 func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
@@ -692,6 +708,27 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 	ilL, ilA, ilBl := toLab(linearToSrgb255(iLinR/n), linearToSrgb255(iLinG/n), linearToSrgb255(iLinB/n))
 	olL, olA, olBl := toLab(linearToSrgb255(oLinR/n), linearToSrgb255(oLinG/n), linearToSrgb255(oLinB/n))
 	driftLinDE := math.Sqrt((ilL-olL)*(ilL-olL) + (ilA-olA)*(ilA-olA) + (ilBl-olBl)*(ilBl-olBl))
+
+	// Perceptual blur-ΔE: rasterize the input-color field and the
+	// assigned-palette field at cell resolution (1 px = 1 cell), blur
+	// both in linear light with a mask-normalized Gaussian, and take
+	// the mean Lab ΔE at two integration scales. See the pcp*_ΔE doc
+	// at the top of this file and the tests/percep package doc.
+	inImg := percep.Image{W: fx.width, H: fx.height, Pix: make([][3]float64, fx.width*fx.height), Mask: make([]bool, fx.width*fx.height)}
+	outImg := percep.Image{W: fx.width, H: fx.height, Pix: make([][3]float64, fx.width*fx.height), Mask: make([]bool, fx.width*fx.height)}
+	for i, c := range fx.cells {
+		idx := c.Row*fx.width + c.Col
+		if idx < 0 || idx >= len(inImg.Mask) {
+			continue
+		}
+		p := pal[assigns[i]]
+		inImg.Mask[idx] = true
+		outImg.Mask[idx] = true
+		inImg.Pix[idx] = [3]float64{srgb8ToLinear(c.Color[0]), srgb8ToLinear(c.Color[1]), srgb8ToLinear(c.Color[2])}
+		outImg.Pix[idx] = [3]float64{srgb8ToLinear(p[0]), srgb8ToLinear(p[1]), srgb8ToLinear(p[2])}
+	}
+	percep2, _, _ := percep.MeanLabDE(inImg.Blur(2), outImg.Blur(2))
+	percep8, _, _ := percep.MeanLabDE(inImg.Blur(8), outImg.Blur(8))
 
 	// Per-cell ΔE distribution and wander_ΔE.
 	//
@@ -752,6 +789,8 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 
 	return metrics{
 		driftLinDE:  driftLinDE,
+		percep2:     percep2,
+		percep8:     percep8,
 		pcell:       pcell,
 		wanderDE:    wanderDE,
 		wanderClump: wanderClump,
@@ -1083,8 +1122,8 @@ func printHeader(scales []int) {
 	for i, s := range scales {
 		parts[i] = fmt.Sprintf("%5d", s)
 	}
-	fmt.Printf("  %-16s %10s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
-		"mode", "drift_lin", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+	fmt.Printf("  %-16s %10s %8s %8s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_lin", "pcp2_ΔE", "pcp8_ΔE", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
 }
 
 func printRow(name string, m metrics, scales []int) {
@@ -1094,8 +1133,8 @@ func printRow(name string, m metrics, scales []int) {
 	for i, s := range scales {
 		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
 	}
-	fmt.Printf("  %-16s %10.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
-		name, m.driftLinDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
+	fmt.Printf("  %-16s %10.2f %8.2f %8.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftLinDE, m.percep2, m.percep8, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
 		m.maxDirCorr[1], m.maxDirCorr[4])
 }
 
