@@ -29,6 +29,14 @@
 // the sanity anchor: its visible quantization patches survive the blur,
 // so it should score clearly worse than the error-diffusing modes at
 // the large scale.
+//
+// With -suite the tool sweeps a built-in table of models (cube, earth,
+// building, glyphid) at their known-good sizes and alpha-wrap settings,
+// emitting one ballot per (model, view, σ). A single model overfits its
+// own palette and geometry — a mode that wins on earth's smooth
+// gradients may lose on the cube's flat uniform faces or the glyphid's
+// fine detail — so ranking across several models is what makes the 3D
+// ballot pool representative rather than a verdict on one mesh.
 package main
 
 import (
@@ -49,6 +57,30 @@ import (
 	"github.com/rtwfroody/ditherforge/tests/percep"
 )
 
+// suiteModel is one entry in the built-in -suite table: a model path
+// plus the pipeline settings it needs to run cleanly (native scale vs
+// normalized size, alpha-wrap for open meshes). name is used as the
+// ballot modelBase so voter names stay stable and readable.
+type suiteModel struct {
+	name      string
+	path      string
+	sizeMM    float64 // normalized max-extent in mm; ignored when scaleOnly
+	scaleOnly bool    // run at native scale (Scale=1, no Size normalization)
+	alphaWrap bool    // watertight open meshes before the cellslicer
+}
+
+// suiteModels mirrors the known-good configs in
+// tests/sampled_match_input_test.go and tests/objects/*.json. Glyphid
+// runs at 50mm rather than its 100mm fixture size to keep the suite's
+// runtime bounded; alpha-wrap is required for it and the building
+// (both open meshes).
+var suiteModels = []suiteModel{
+	{name: "cube", path: filepath.Join("tests", "objects", "cube.stl"), scaleOnly: true},                              // 20mm native
+	{name: "earth", path: filepath.Join("tests", "objects", "earth.glb"), sizeMM: 50},                                 //
+	{name: "building", path: filepath.Join("tests", "objects", "low_poly_building.glb"), sizeMM: 35, alphaWrap: true}, //
+	{name: "glyphid", path: filepath.Join("tests", "objects", "glyphid_praetorian.glb"), sizeMM: 50, alphaWrap: true}, //
+}
+
 func main() {
 	model := flag.String("model", filepath.Join("tests", "objects", "earth.glb"), "input model path")
 	modesArg := flag.String("modes", "none,floyd-steinberg,riemersma,dizzy-corrected,dizzy-local-corrected,blue-noise", "comma-separated dither modes")
@@ -57,7 +89,10 @@ func main() {
 	numColors := flag.Int("num-colors", 6, "number of palette colors")
 	outDir := flag.String("out", "", "directory to dump rendered + blurred PNGs (default: none)")
 	sigmasArg := flag.String("sigmas-mm", "0.8,3.2", "comma-separated physical blur scales in mm")
-	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one per view/σ, using mean Lab ΔE, group \"3d\") to this JSON path for tests/ditherrank. Only modes that ran without error are included.")
+	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one per model/view/σ, using mean Lab ΔE, group \"3d\") to this JSON path for tests/ditherrank. Only modes that ran without error are included.")
+	alphaWrap := flag.Bool("alpha-wrap", false, "watertight the input mesh with alpha-wrap before the cellslicer (needed for open meshes)")
+	scaleOnly := flag.Bool("scale-only", false, "run the model at native scale (Scale=1, skip Size normalization); -size is ignored")
+	suite := flag.Bool("suite", false, "sweep the built-in model table (cube/earth/building/glyphid); -model/-size/-alpha-wrap/-scale-only are ignored")
 	flag.Parse()
 
 	modes := splitTrim(*modesArg)
@@ -87,41 +122,118 @@ func main() {
 		invLabels[i] = e.Label
 	}
 
-	size := float32(*sizeArg)
+	// The set of models to run: the built-in suite, or a single entry
+	// from the -model/-size/-alpha-wrap/-scale-only flags.
+	var models []suiteModel
+	if *suite {
+		models = suiteModels
+	} else {
+		models = []suiteModel{{
+			name:      strings.TrimSuffix(filepath.Base(*model), filepath.Ext(*model)),
+			path:      *model,
+			sizeMM:    *sizeArg,
+			scaleOnly: *scaleOnly,
+			alphaWrap: *alphaWrap,
+		}}
+	}
+
+	ctx := context.Background()
+	cfg := renderConfig{
+		modes:       modes,
+		sigmasMM:    sigmasMM,
+		res:         *res,
+		numColors:   *numColors,
+		outDir:      *outDir,
+		invColors:   invColors,
+		invLabels:   invLabels,
+		wantBallots: *ballotsPath != "",
+	}
+
+	printHeader(sigmasMM)
+
+	// Ballots accumulate ACROSS models into one slice (voter names carry
+	// the modelBase, so they stay distinct) and are written once at the
+	// end.
+	var allBallots []ballots.Ballot
+	for _, m := range models {
+		fmt.Printf("=== %s ===\n", m.name)
+		bs, err := runModel(ctx, cfg, m)
+		if err != nil {
+			// A model's reference-run failure shouldn't abort the whole
+			// suite: report it and move on to the remaining models.
+			fmt.Fprintf(os.Stderr, "model %q: %v\n", m.name, err)
+			fmt.Printf("  %s: %v\n", m.name, err)
+			continue
+		}
+		allBallots = append(allBallots, bs...)
+	}
+
+	if *ballotsPath != "" {
+		if err := ballots.WriteFile(*ballotsPath, allBallots); err != nil {
+			fail("writing ballots: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %d ballots to %s\n", len(allBallots), *ballotsPath)
+	}
+}
+
+// renderConfig holds the per-invocation settings shared by every model
+// in a run (they come from flags, not the per-model table).
+type renderConfig struct {
+	modes       []string
+	sigmasMM    []float64
+	res         int
+	numColors   int
+	outDir      string
+	invColors   [][3]uint8
+	invLabels   []string
+	wantBallots bool
+}
+
+// runModel runs the reference + per-mode pipeline for a single model,
+// prints its table (including the per-mode AVG rows), and returns the
+// ballots collected for it (empty when ballots weren't requested). It
+// returns an error only when the reference run itself fails; a per-mode
+// failure just skips that mode.
+func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ballot, error) {
+	// A fresh cache per model: everything upstream of the dither stage
+	// (load, voxelize, palette selection, clip) is identical across the
+	// modes of ONE model, so a shared cache makes the per-mode cost just
+	// dither + merge + render — but it must not leak between models.
+	cache := pipeline.NewStageCache()
+
 	baseOpts := pipeline.Options{
-		Input:           *model,
+		Input:           m.path,
 		ObjectIndex:     -1,
-		NumColors:       *numColors,
-		InventoryColors: invColors,
-		InventoryLabels: invLabels,
+		NumColors:       cfg.numColors,
+		InventoryColors: cfg.invColors,
+		InventoryLabels: cfg.invLabels,
 		NozzleDiameter:  0.4,
 		LayerHeight:     0.2,
 		ColorSnap:       5,
 		Force:           true,
 		Scale:           1,
-		Size:            &size,
+		AlphaWrap:       m.alphaWrap,
 	}
-
-	ctx := context.Background()
-	// One cache shared across all runs: everything upstream of the
-	// dither stage (load, voxelize, palette selection, clip) is
-	// identical for every mode, so the shared cache makes the per-mode
-	// cost just the dither + merge + render.
-	cache := pipeline.NewStageCache()
+	// scaleOnly leaves Size nil and runs at native scale (Scale=1),
+	// exactly like the scaleOnly cases in sampled_match_input_test.go.
+	if !m.scaleOnly {
+		size := float32(m.sizeMM)
+		baseOpts.Size = &size
+	}
 
 	// Reference: sampled continuous colors. The dither value is
 	// irrelevant here (ShowSampledColors bypasses dither) but must be a
 	// valid mode string.
-	fmt.Fprintln(os.Stderr, "running reference (ShowSampledColors)...")
+	fmt.Fprintf(os.Stderr, "[%s] running reference (ShowSampledColors)...\n", m.name)
 	refOpts := baseOpts
 	refOpts.ShowSampledColors = true
 	refOpts.Dither = "riemersma"
 	refPR, err := pipeline.RunCached(ctx, cache, refOpts, nil)
 	if err != nil {
-		fail("reference run: %v", err)
+		return nil, fmt.Errorf("reference run: %w", err)
 	}
 	if refPR.OutputMesh == nil {
-		fail("reference run produced no output mesh")
+		return nil, fmt.Errorf("reference run produced no output mesh")
 	}
 	refMesh := refPR.OutputMesh
 
@@ -132,19 +244,15 @@ func main() {
 		meanSum, p99Sum float64
 		n               int
 	}
-	summary := make(map[string][]acc, len(modes))
+	summary := make(map[string][]acc, len(cfg.modes))
 
 	// renderScores[viewName][sigmaIdx][mode] = mean Lab ΔE, collected
-	// only when -ballots is set. One ballot per (view, σ) is written at
-	// the end; only modes that ran without error contribute, so ballots
-	// are partial by construction.
-	modelBase := strings.TrimSuffix(filepath.Base(*model), filepath.Ext(*model))
+	// only when ballots are requested. Only modes that ran without error
+	// contribute, so ballots are partial by construction.
 	renderScores := map[string]map[int]map[string]float64{}
 
-	printHeader(sigmasMM)
-
-	for _, mode := range modes {
-		fmt.Fprintf(os.Stderr, "running mode %q...\n", mode)
+	for _, mode := range cfg.modes {
+		fmt.Fprintf(os.Stderr, "[%s] running mode %q...\n", m.name, mode)
 		opts := baseOpts
 		opts.ShowSampledColors = false
 		opts.Dither = mode
@@ -158,7 +266,7 @@ func main() {
 			continue
 		}
 		ditheredMesh := pr.OutputMesh
-		summary[mode] = make([]acc, len(sigmasMM))
+		summary[mode] = make([]acc, len(cfg.sigmasMM))
 
 		for _, v := range views {
 			sharedBounds := debugrender.UnionBounds(
@@ -168,20 +276,20 @@ func main() {
 			// The renderer maps max(xRange, yRange) across res*(1-2*0.05)
 			// pixels (margin 0.05 each side); see render.ProjectToPixels.
 			// So one pixel spans this many mm:
-			mmPerPx := math.Max(sharedBounds.XMax-sharedBounds.XMin, sharedBounds.YMax-sharedBounds.YMin) / (float64(*res) * 0.9)
+			mmPerPx := math.Max(sharedBounds.XMax-sharedBounds.XMin, sharedBounds.YMax-sharedBounds.YMin) / (float64(cfg.res) * 0.9)
 
-			refImg := debugrender.RenderPipelineMeshCulledWithBounds(refMesh, v, *res, sharedBounds).ToRGBA()
-			ditImg := debugrender.RenderPipelineMeshCulledWithBounds(ditheredMesh, v, *res, sharedBounds).ToRGBA()
+			refImg := debugrender.RenderPipelineMeshCulledWithBounds(refMesh, v, cfg.res, sharedBounds).ToRGBA()
+			ditImg := debugrender.RenderPipelineMeshCulledWithBounds(ditheredMesh, v, cfg.res, sharedBounds).ToRGBA()
 			refP := percep.FromRGBA(refImg)
 			ditP := percep.FromRGBA(ditImg)
 
-			if *outDir != "" {
-				dumpPNG(filepath.Join(*outDir, fmt.Sprintf("%s_%s_ref.png", mode, v.Name)), refImg)
-				dumpPNG(filepath.Join(*outDir, fmt.Sprintf("%s_%s_dithered.png", mode, v.Name)), ditImg)
+			if cfg.outDir != "" {
+				dumpPNG(filepath.Join(cfg.outDir, fmt.Sprintf("%s_%s_%s_ref.png", m.name, mode, v.Name)), refImg)
+				dumpPNG(filepath.Join(cfg.outDir, fmt.Sprintf("%s_%s_%s_dithered.png", m.name, mode, v.Name)), ditImg)
 			}
 
-			cols := make([]sigmaResult, len(sigmasMM))
-			for si, smm := range sigmasMM {
+			cols := make([]sigmaResult, len(cfg.sigmasMM))
+			for si, smm := range cfg.sigmasMM {
 				sigPx := 0.0
 				if mmPerPx > 0 {
 					sigPx = smm / mmPerPx
@@ -190,7 +298,7 @@ func main() {
 				ditBlur := ditP.Blur(sigPx)
 				mean, p99, _ := percep.MeanLabDE(refBlur, ditBlur)
 				cols[si] = sigmaResult{sigPx: sigPx, mean: mean, p99: p99}
-				if *ballotsPath != "" {
+				if cfg.wantBallots {
 					if renderScores[v.Name] == nil {
 						renderScores[v.Name] = map[int]map[string]float64{}
 					}
@@ -203,9 +311,9 @@ func main() {
 				a.meanSum += mean
 				a.p99Sum += p99
 				a.n++
-				if *outDir != "" {
-					dumpPNG(filepath.Join(*outDir, fmt.Sprintf("%s_%s_ref_blur%gmm.png", mode, v.Name, smm)), refBlur.ToRGBA())
-					dumpPNG(filepath.Join(*outDir, fmt.Sprintf("%s_%s_dithered_blur%gmm.png", mode, v.Name, smm)), ditBlur.ToRGBA())
+				if cfg.outDir != "" {
+					dumpPNG(filepath.Join(cfg.outDir, fmt.Sprintf("%s_%s_%s_ref_blur%gmm.png", m.name, mode, v.Name, smm)), refBlur.ToRGBA())
+					dumpPNG(filepath.Join(cfg.outDir, fmt.Sprintf("%s_%s_%s_dithered_blur%gmm.png", m.name, mode, v.Name, smm)), ditBlur.ToRGBA())
 				}
 			}
 			printRow(mode, v.Name, mmPerPx, cols)
@@ -213,8 +321,8 @@ func main() {
 
 		// Per-mode summary row: mean/p99 averaged over views. σpx blank
 		// (it varies per view with the framing).
-		sumCols := make([]sigmaResult, len(sigmasMM))
-		for si := range sigmasMM {
+		sumCols := make([]sigmaResult, len(cfg.sigmasMM))
+		for si := range cfg.sigmasMM {
 			a := summary[mode][si]
 			if a.n > 0 {
 				sumCols[si] = sigmaResult{sigPx: math.NaN(), mean: a.meanSum / float64(a.n), p99: a.p99Sum / float64(a.n)}
@@ -223,30 +331,28 @@ func main() {
 		printRow(mode, "AVG", math.NaN(), sumCols)
 	}
 
-	if *ballotsPath != "" {
-		var bs []ballots.Ballot
-		for _, v := range views {
-			byField, ok := renderScores[v.Name]
-			if !ok {
+	if !cfg.wantBallots {
+		return nil, nil
+	}
+	var bs []ballots.Ballot
+	for _, v := range views {
+		byField, ok := renderScores[v.Name]
+		if !ok {
+			continue
+		}
+		for si, smm := range cfg.sigmasMM {
+			scores, ok := byField[si]
+			if !ok || len(scores) == 0 {
 				continue
 			}
-			for si, smm := range sigmasMM {
-				scores, ok := byField[si]
-				if !ok || len(scores) == 0 {
-					continue
-				}
-				bs = append(bs, ballots.Ballot{
-					Voter:  fmt.Sprintf("render/%s/%s/%gmm", modelBase, v.Name, smm),
-					Group:  "3d",
-					Scores: scores,
-				})
-			}
+			bs = append(bs, ballots.Ballot{
+				Voter:  fmt.Sprintf("render/%s/%s/%gmm", m.name, v.Name, smm),
+				Group:  "3d",
+				Scores: scores,
+			})
 		}
-		if err := ballots.WriteFile(*ballotsPath, bs); err != nil {
-			fail("writing ballots: %v", err)
-		}
-		fmt.Fprintf(os.Stderr, "wrote %d ballots to %s\n", len(bs), *ballotsPath)
 	}
+	return bs, nil
 }
 
 // sigmaResult is one blur scale's measurement for a (mode, view) cell.
