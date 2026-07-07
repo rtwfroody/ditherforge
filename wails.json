@@ -5,7 +5,7 @@
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
-  "frontend:dev:serverUrl": "http://localhost:5173",
+  "frontend:dev:serverUrl": "http://localhost:5183",
   "author": {
     "name": "Tim Newsome",
     "email": "tim@casualhacker.net"
