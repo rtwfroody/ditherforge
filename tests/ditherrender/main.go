@@ -23,7 +23,10 @@
 // tests/percep package doc for why linear-light blur + Lab is the
 // correct perceptual comparison). Small ΔE = the dithered surface is
 // perceptually indistinguishable from the continuous-color surface at
-// that integration scale.
+// that integration scale. Alongside the per-σ blur columns we report a
+// single csf_ΔE: a CSF-weighted visible difference (percep.VisibleDE)
+// that rolls every scale into one number for a viewer at -view-mm, and
+// which is the sole ballot voter. The σ rows are stdout diagnostics.
 //
 // The "none" mode (nearest-color quantization, no error diffusion) is
 // the sanity anchor: its visible quantization patches survive the blur,
@@ -32,7 +35,7 @@
 //
 // With -suite the tool sweeps a built-in table of models (cube, earth,
 // building, glyphid) at their known-good sizes and alpha-wrap settings,
-// emitting one ballot per (model, view, σ). A single model overfits its
+// emitting one ballot per (model, view). A single model overfits its
 // own palette and geometry — a mode that wins on earth's smooth
 // gradients may lose on the cube's flat uniform faces or the glyphid's
 // fine detail — so ranking across several models is what makes the 3D
@@ -89,7 +92,8 @@ func main() {
 	numColors := flag.Int("num-colors", 6, "number of palette colors")
 	outDir := flag.String("out", "", "directory to dump rendered + blurred PNGs (default: none)")
 	sigmasArg := flag.String("sigmas-mm", "0.8,3.2", "comma-separated physical blur scales in mm")
-	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one per model/view/σ, using mean Lab ΔE, group \"3d\") to this JSON path for tests/ditherrank. Only modes that ran without error are included.")
+	viewMM := flag.Float64("view-mm", 4000, "viewing distance in mm for the CSF visible-difference voter")
+	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one CSF visible-difference score per model/view, group \"3d\") to this JSON path for tests/ditherrank. Only modes that ran without error are included.")
 	alphaWrap := flag.Bool("alpha-wrap", false, "watertight the input mesh with alpha-wrap before the cellslicer (needed for open meshes)")
 	scaleOnly := flag.Bool("scale-only", false, "run the model at native scale (Scale=1, skip Size normalization); -size is ignored")
 	suite := flag.Bool("suite", false, "sweep the built-in model table (cube/earth/building/glyphid); -model/-size/-alpha-wrap/-scale-only are ignored")
@@ -146,6 +150,7 @@ func main() {
 		outDir:      *outDir,
 		invColors:   invColors,
 		invLabels:   invLabels,
+		viewMM:      *viewMM,
 		wantBallots: *ballotsPath != "",
 	}
 
@@ -186,6 +191,7 @@ type renderConfig struct {
 	outDir      string
 	invColors   [][3]uint8
 	invLabels   []string
+	viewMM      float64
 	wantBallots bool
 }
 
@@ -245,11 +251,22 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 		n               int
 	}
 	summary := make(map[string][]acc, len(cfg.modes))
+	// csfSummary[mode] accumulates the CSF visible-difference over views.
+	type csfAcc struct {
+		sum float64
+		n   int
+	}
+	csfSummary := make(map[string]csfAcc, len(cfg.modes))
 
-	// renderScores[viewName][sigmaIdx][mode] = mean Lab ΔE, collected
-	// only when ballots are requested. Only modes that ran without error
-	// contribute, so ballots are partial by construction.
-	renderScores := map[string]map[int]map[string]float64{}
+	// csfScores[viewName][mode] = CSF visible-difference mean Lab ΔE,
+	// collected only when ballots are requested. Only modes that ran
+	// without error contribute, so ballots are partial by construction.
+	csfScores := map[string]map[string]float64{}
+
+	// The CSF voter's band frequencies depend on mmPerPx, which is only
+	// known once a view is framed; print the diagnostic once per model on
+	// the first computed pitch.
+	csfDiagPrinted := false
 
 	for _, mode := range cfg.modes {
 		fmt.Fprintf(os.Stderr, "[%s] running mode %q...\n", m.name, mode)
@@ -278,6 +295,22 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 			// So one pixel spans this many mm:
 			mmPerPx := math.Max(sharedBounds.XMax-sharedBounds.XMin, sharedBounds.YMax-sharedBounds.YMin) / (float64(cfg.res) * 0.9)
 
+			if !csfDiagPrinted {
+				freqs, weights := percep.CSFBandWeights(mmPerPx, cfg.viewMM)
+				fmt.Printf("  CSF voter geometry: mmPerPx=%.4f view-mm=%.0f\n", mmPerPx, cfg.viewMM)
+				fmt.Printf("    band center freq (cpd):")
+				for _, f := range freqs {
+					fmt.Printf(" %7.2f", f)
+				}
+				fmt.Println()
+				fmt.Printf("    band CSF weight       :")
+				for _, w := range weights {
+					fmt.Printf(" %7.4f", w)
+				}
+				fmt.Println()
+				csfDiagPrinted = true
+			}
+
 			refImg := debugrender.RenderPipelineMeshCulledWithBounds(refMesh, v, cfg.res, sharedBounds).ToRGBA()
 			ditImg := debugrender.RenderPipelineMeshCulledWithBounds(ditheredMesh, v, cfg.res, sharedBounds).ToRGBA()
 			refP := percep.FromRGBA(refImg)
@@ -298,15 +331,6 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 				ditBlur := ditP.Blur(sigPx)
 				mean, p99, _ := percep.MeanLabDE(refBlur, ditBlur)
 				cols[si] = sigmaResult{sigPx: sigPx, mean: mean, p99: p99}
-				if cfg.wantBallots {
-					if renderScores[v.Name] == nil {
-						renderScores[v.Name] = map[int]map[string]float64{}
-					}
-					if renderScores[v.Name][si] == nil {
-						renderScores[v.Name][si] = map[string]float64{}
-					}
-					renderScores[v.Name][si][mode] = mean
-				}
 				a := &summary[mode][si]
 				a.meanSum += mean
 				a.p99Sum += p99
@@ -316,7 +340,23 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 					dumpPNG(filepath.Join(cfg.outDir, fmt.Sprintf("%s_%s_%s_dithered_blur%gmm.png", m.name, mode, v.Name, smm)), ditBlur.ToRGBA())
 				}
 			}
-			printRow(mode, v.Name, mmPerPx, cols)
+
+			// CSF visible difference on the UNBLURRED pair: rolls the whole
+			// σ sweep into one CSF-weighted number and is the sole ballot
+			// voter. The σ blur rows above stay as stdout diagnostics only.
+			csfMean, _, _ := percep.VisibleDE(ditP, refP, mmPerPx, cfg.viewMM)
+			ca := csfSummary[mode]
+			ca.sum += csfMean
+			ca.n++
+			csfSummary[mode] = ca
+			if cfg.wantBallots {
+				if csfScores[v.Name] == nil {
+					csfScores[v.Name] = map[string]float64{}
+				}
+				csfScores[v.Name][mode] = csfMean
+			}
+
+			printRow(mode, v.Name, mmPerPx, cols, csfMean)
 		}
 
 		// Per-mode summary row: mean/p99 averaged over views. σpx blank
@@ -328,7 +368,11 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 				sumCols[si] = sigmaResult{sigPx: math.NaN(), mean: a.meanSum / float64(a.n), p99: a.p99Sum / float64(a.n)}
 			}
 		}
-		printRow(mode, "AVG", math.NaN(), sumCols)
+		csfAvg := math.NaN()
+		if ca := csfSummary[mode]; ca.n > 0 {
+			csfAvg = ca.sum / float64(ca.n)
+		}
+		printRow(mode, "AVG", math.NaN(), sumCols, csfAvg)
 	}
 
 	if !cfg.wantBallots {
@@ -336,21 +380,15 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 	}
 	var bs []ballots.Ballot
 	for _, v := range views {
-		byField, ok := renderScores[v.Name]
-		if !ok {
+		scores, ok := csfScores[v.Name]
+		if !ok || len(scores) == 0 {
 			continue
 		}
-		for si, smm := range cfg.sigmasMM {
-			scores, ok := byField[si]
-			if !ok || len(scores) == 0 {
-				continue
-			}
-			bs = append(bs, ballots.Ballot{
-				Voter:  fmt.Sprintf("render/%s/%s/%gmm", m.name, v.Name, smm),
-				Group:  "3d",
-				Scores: scores,
-			})
-		}
+		bs = append(bs, ballots.Ballot{
+			Voter:  fmt.Sprintf("render/%s/%s/csf", m.name, v.Name),
+			Group:  "3d",
+			Scores: scores,
+		})
 	}
 	return bs, nil
 }
@@ -365,14 +403,16 @@ func printHeader(sigmasMM []float64) {
 	for _, smm := range sigmasMM {
 		fmt.Printf("   | σ=%.2gmm  %6s %6s %6s", smm, "σpx", "mean", "p99")
 	}
+	fmt.Printf("   | %8s", "csf_ΔE")
 	fmt.Println()
 }
 
-func printRow(mode, view string, mmPerPx float64, cols []sigmaResult) {
+func printRow(mode, view string, mmPerPx float64, cols []sigmaResult, csf float64) {
 	fmt.Printf("%-22s %-6s %8s", mode, view, fmtOrBlank(mmPerPx, "%8.4f"))
 	for _, c := range cols {
 		fmt.Printf("   |          %6s %6.2f %6.2f", fmtOrBlank(c.sigPx, "%6.2f"), c.mean, c.p99)
 	}
+	fmt.Printf("   | %8s", fmtOrBlank(csf, "%8.2f"))
 	fmt.Println()
 }
 

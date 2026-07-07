@@ -17,6 +17,15 @@
 //     — unlike a naive mean of sRGB bytes. σ=2 is close inspection,
 //     σ=8 is across-the-room integration.
 //
+//   - csf_ΔE: a single CSF-weighted "visible difference" that rolls the
+//     whole σ sweep into one number. Rather than picking a fixed blur
+//     scale, it decomposes both fields into frequency bands, attenuates
+//     each band by the human contrast-sensitivity function at its
+//     physical frequency (for a viewer at -view-mm with cells -cell-mm
+//     wide), and takes the mean Lab ΔE of the reconstructions (see
+//     percep.VisibleDE). This is the sole ballot voter emitted by
+//     -ballots; pcp2/pcp8 remain informational columns.
+//
 //   - drift_lin_ΔE: avg(output_color) - avg(input_color): both means
 //     taken in LINEAR light (unweighted over cells), then converted to
 //     Lab for the ΔE. Linear light is the space the error-diffusion
@@ -108,8 +117,28 @@ func main() {
 	outDir := flag.String("out", "", "directory to write per-(fixture,mode) output PNGs (default: none)")
 	onlyFixture := flag.String("fixture", "", "run only this fixture (substring match); default: all")
 	onlyMode := flag.String("mode", "", "run only this mode (substring match); default: all")
-	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (pcp2/pcp8 per fixture, group \"2d\") to this JSON path for tests/ditherrank. Honors -fixture/-mode: only fixtures and modes that actually ran land in the ballots.")
+	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one CSF visible-difference score per fixture, group \"2d\") to this JSON path for tests/ditherrank. Honors -fixture/-mode: only fixtures and modes that actually ran land in the ballots.")
+	cellMM := flag.Float64("cell-mm", 0.5, "physical cell pitch in mm for the CSF voter")
+	viewMM := flag.Float64("view-mm", 4000, "viewing distance in mm for the CSF voter")
 	flag.Parse()
+
+	// The CSF visible-difference voter depends on the physical cell pitch and
+	// viewing distance; print the per-band frequencies/weights once so the
+	// bench output records which geometry produced the csf_ΔE column.
+	{
+		freqs, weights := percep.CSFBandWeights(*cellMM, *viewMM)
+		fmt.Printf("CSF voter geometry: cell-mm=%.3g view-mm=%.0f\n", *cellMM, *viewMM)
+		fmt.Printf("  band center freq (cpd):")
+		for _, f := range freqs {
+			fmt.Printf(" %7.2f", f)
+		}
+		fmt.Println()
+		fmt.Printf("  band CSF weight       :")
+		for _, w := range weights {
+			fmt.Printf(" %7.4f", w)
+		}
+		fmt.Println()
+	}
 
 	if *outDir != "" {
 		if err := os.MkdirAll(*outDir, 0o755); err != nil {
@@ -203,9 +232,10 @@ func main() {
 
 	inv := inventories.Panchroma()
 
-	// One ballot per (fixture, pcp-scale) when -ballots is set. Scores
-	// are lower-is-better mean Lab ΔE; only modes that ran without error
-	// are included, so a ballot is partial by construction.
+	// One ballot per fixture when -ballots is set, scored by the CSF
+	// visible-difference metric. Scores are lower-is-better mean Lab ΔE;
+	// only modes that ran without error are included, so a ballot is
+	// partial by construction.
 	var allBallots []ballots.Ballot
 
 	for _, fx := range fixtures {
@@ -263,14 +293,13 @@ func main() {
 					results[i] = modeResult{err: err}
 					return
 				}
-				met := computeMetrics(fx, pal, assigns, blockScales)
+				met := computeMetrics(fx, pal, assigns, blockScales, *cellMM, *viewMM)
 				results[i] = modeResult{assigns: assigns, met: met}
 			}(i, m)
 		}
 		wg.Wait()
 		modeAssigns := make(map[string][]int32, len(modes))
-		pcp2Scores := make(map[string]float64, len(modes))
-		pcp8Scores := make(map[string]float64, len(modes))
+		csfScores := make(map[string]float64, len(modes))
 		for i, m := range modes {
 			r := results[i]
 			if r.err != nil {
@@ -279,8 +308,7 @@ func main() {
 			}
 			printRow(m.name, r.met, blockScales)
 			modeAssigns[m.name] = r.assigns
-			pcp2Scores[m.name] = r.met.percep2
-			pcp8Scores[m.name] = r.met.percep8
+			csfScores[m.name] = r.met.csf
 			if *outDir != "" {
 				path := filepath.Join(*outDir, fmt.Sprintf("%s.%s.png", fx.name, m.name))
 				if werr := writeOutputPNG(path, fx, pal, r.assigns); werr != nil {
@@ -291,8 +319,7 @@ func main() {
 
 		if *ballotsPath != "" {
 			allBallots = append(allBallots,
-				ballots.Ballot{Voter: "bench/" + fx.name + "/pcp2", Group: "2d", Scores: pcp2Scores},
-				ballots.Ballot{Voter: "bench/" + fx.name + "/pcp8", Group: "2d", Scores: pcp8Scores},
+				ballots.Ballot{Voter: "bench/" + fx.name + "/csf", Group: "2d", Scores: csfScores},
 			)
 		}
 
@@ -709,6 +736,7 @@ type metrics struct {
 	driftLinDE  float64         // Lab ΔE of the LINEAR-light means
 	percep2     float64         // mean Lab ΔE after mask-normalized linear-light blur, σ=2px
 	percep8     float64         // mean Lab ΔE after mask-normalized linear-light blur, σ=8px
+	csf         float64         // mean Lab ΔE after CSF-weighted visible-difference filtering
 	pcell       []float64       // sorted per-cell ΔE
 	wanderDE    float64         // mean ΔE(chosen palette, nearest-input palette)
 	wanderClump float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
@@ -716,7 +744,7 @@ type metrics struct {
 	maxDirCorr  map[int]float64 // distance -> max |autocorrelation| over 8 directions
 }
 
-func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
+func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int, cellMM, viewMM float64) metrics {
 	// Global drift in Lab ΔE (see the drift_lin_ΔE doc at the top of
 	// this file): average input and output in linear light, then map
 	// the two linear means back to sRGB float bytes so we can reuse
@@ -758,6 +786,10 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 	}
 	percep2, _, _ := percep.MeanLabDE(inImg.Blur(2), outImg.Blur(2))
 	percep8, _, _ := percep.MeanLabDE(inImg.Blur(8), outImg.Blur(8))
+	// CSF-weighted visible difference over the same image pair. 1 px = 1
+	// cell, so the cell pitch is the pixel pitch (mmPerPx) for the CSF
+	// frequency mapping. This is the single ballot voter (see main()).
+	csf, _, _ := percep.VisibleDE(&inImg, &outImg, cellMM, viewMM)
 
 	// Per-cell ΔE distribution and wander_ΔE.
 	//
@@ -820,6 +852,7 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 		driftLinDE:  driftLinDE,
 		percep2:     percep2,
 		percep8:     percep8,
+		csf:         csf,
 		pcell:       pcell,
 		wanderDE:    wanderDE,
 		wanderClump: wanderClump,
@@ -1151,8 +1184,8 @@ func printHeader(scales []int) {
 	for i, s := range scales {
 		parts[i] = fmt.Sprintf("%5d", s)
 	}
-	fmt.Printf("  %-16s %10s %8s %8s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
-		"mode", "drift_lin", "pcp2_ΔE", "pcp8_ΔE", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+	fmt.Printf("  %-16s %10s %8s %8s %8s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_lin", "pcp2_ΔE", "pcp8_ΔE", "csf_ΔE", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
 }
 
 func printRow(name string, m metrics, scales []int) {
@@ -1162,8 +1195,8 @@ func printRow(name string, m metrics, scales []int) {
 	for i, s := range scales {
 		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
 	}
-	fmt.Printf("  %-16s %10.2f %8.2f %8.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
-		name, m.driftLinDE, m.percep2, m.percep8, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
+	fmt.Printf("  %-16s %10.2f %8.2f %8.2f %8.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftLinDE, m.percep2, m.percep8, m.csf, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
 		m.maxDirCorr[1], m.maxDirCorr[4])
 }
 
