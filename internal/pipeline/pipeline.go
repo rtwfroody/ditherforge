@@ -82,6 +82,9 @@ type Options struct {
 	TDModel string `json:"TDModel,omitempty"`
 	// ShellThicknessMM is the printed wall thickness (mm) the layered TD model
 	// integrates the infill leak over; ignored unless TDModel == "layered".
+	// Derived from the selected printer's process profile (wall_loops × wall
+	// line widths, via export3mf.ShellThicknessMM); not user-settable. Left
+	// zero when the layered model is inactive (neither hashed nor read then).
 	ShellThicknessMM float32 `json:"ShellThicknessMM,omitempty"`
 	// InfillColor is the sRGB color of the filament printing the infill/inner
 	// walls, which the layered TD model blends toward for translucent
@@ -870,6 +873,54 @@ type offGridWarnKey struct {
 
 var offGridWarned sync.Map
 
+// resolveProcessProfile resolves the OrcaSlicer printer/nozzle/process that a
+// pipeline run maps to, applying the same DefaultPrinterID substitution and
+// layer-height exactness guard the voxel grid uses so every consumer (voxel
+// sizing, derived shell thickness, the emitted 3MF) agrees on one profile.
+//
+// ok=false means no exact match exists — unknown printer, unknown nozzle, no
+// process profiles, or the closest process's layer height is off-grid by more
+// than 0.001mm; on that off-grid miss it emits the deduped warning. The
+// returned printerID is always the effective one (DefaultPrinterID substituted
+// for an empty opts.Printer), and n/proc are populated as far as resolution
+// got so callers can inspect partial results.
+func resolveProcessProfile(opts Options) (printerID string, n *export3mf.Nozzle, proc *export3mf.ProcessProfile, ok bool) {
+	printerID = opts.Printer
+	if printerID == "" {
+		printerID = export3mf.DefaultPrinterID
+	}
+	p := export3mf.FindPrinter(printerID)
+	if p == nil {
+		return printerID, nil, nil, false
+	}
+	n = p.FindNozzleByDiameter(opts.NozzleDiameter)
+	if n == nil {
+		return printerID, nil, nil, false
+	}
+	proc = n.ClosestProcess(opts.LayerHeight)
+	if proc == nil {
+		return printerID, n, nil, false
+	}
+	const layerHeightEpsilon = 0.001
+	if math.Abs(float64(proc.LayerHeight-opts.LayerHeight)) > layerHeightEpsilon {
+		// stageFnv derives cache keys many times per run; dedup the warning
+		// per (printer, nozzle, layer height) so one off-grid layer height
+		// doesn't spam the log.
+		warnKey := offGridWarnKey{
+			printerID:   printerID,
+			nozzle:      opts.NozzleDiameter,
+			layerHeight: opts.LayerHeight,
+		}
+		if _, alreadyWarned := offGridWarned.LoadOrStore(warnKey, struct{}{}); !alreadyWarned {
+			plog.Printf("resolveProcessProfile: %s nozzle %.2f has no exact process for layer height %.3f mm "+
+				"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
+				printerID, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
+		}
+		return printerID, n, proc, false
+	}
+	return printerID, n, proc, true
+}
+
 // voxelCellSizes resolves the voxel grid dimensions for a pipeline
 // run. Reads them from the matched OrcaSlicer process profile
 // (printer × nozzle × layer-height) so the voxel grid lines up with
@@ -933,39 +984,10 @@ func voxelCellSizesBase(opts Options) (cells voxelCells) {
 	// substitutes DefaultPrinterID for an empty PrinterID), so the
 	// voxel grid agrees with what the emitted 3MF claims to be.
 	// Without this, a CLI run without --printer voxelizes against
-	// nozzle×constant but exports as snapmaker_u1.
-	printerID := opts.Printer
-	if printerID == "" {
-		printerID = export3mf.DefaultPrinterID
-	}
-	p := export3mf.FindPrinter(printerID)
-	if p == nil {
-		return cells
-	}
-	n := p.FindNozzleByDiameter(opts.NozzleDiameter)
-	if n == nil {
-		return cells
-	}
-	proc := n.ClosestProcess(opts.LayerHeight)
-	if proc == nil {
-		return cells
-	}
-	const layerHeightEpsilon = 0.001
-	if math.Abs(float64(proc.LayerHeight-opts.LayerHeight)) > layerHeightEpsilon {
-		// stageFnv calls voxelCellSizes once per stage cache-key
-		// derivation, which can fire many times per pipeline run.
-		// Dedup the warning per (printer, nozzle, layer height) tuple
-		// so a single off-grid layer height doesn't spam the log.
-		warnKey := offGridWarnKey{
-			printerID:   printerID,
-			nozzle:      opts.NozzleDiameter,
-			layerHeight: opts.LayerHeight,
-		}
-		if _, alreadyWarned := offGridWarned.LoadOrStore(warnKey, struct{}{}); !alreadyWarned {
-			plog.Printf("voxelCellSizes: %s nozzle %.2f has no exact process for layer height %.3f mm "+
-				"(closest is %.3f mm); falling back to nozzle×scale voxel sizes",
-				printerID, opts.NozzleDiameter, opts.LayerHeight, proc.LayerHeight)
-		}
+	// nozzle×constant but exports as snapmaker_u1. resolveProcessProfile
+	// handles the substitution and the off-grid layer-height guard.
+	_, _, proc, ok := resolveProcessProfile(opts)
+	if !ok {
 		return cells
 	}
 	if proc.InitialLayerLineWidth > 0 {

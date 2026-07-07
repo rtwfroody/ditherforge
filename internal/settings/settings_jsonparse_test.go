@@ -78,7 +78,6 @@ func TestLoadJSONKitchenSink(t *testing.T) {
     "noSimplify": true,
     "honorTD": true,
     "tdModel": "layered",
-    "shellThickness": "0.96",
     "infillColor": "#010203",
     "colorAwareCells": true,
     "colorRegionContrast": 25,
@@ -197,9 +196,9 @@ func TestLoadJSONKitchenSink(t *testing.T) {
 	if opts.TDModel != "layered" {
 		t.Errorf("TDModel = %q, want layered", opts.TDModel)
 	}
-	if opts.ShellThicknessMM != 0.96 {
-		t.Errorf("ShellThicknessMM = %v, want 0.96", opts.ShellThicknessMM)
-	}
+	// ShellThicknessMM is derived from the printer profile (not from settings),
+	// so ToOptions leaves it zero here; the "shellThickness" JSON key above is
+	// an unknown key that Load must ignore harmlessly.
 	if opts.InfillColor != [3]uint8{1, 2, 3} {
 		t.Errorf("InfillColor = %v, want [1 2 3]", opts.InfillColor)
 	}

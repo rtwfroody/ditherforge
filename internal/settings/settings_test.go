@@ -163,7 +163,6 @@ func nonDefaultSettings() Settings {
 		NoCellMerge:           true,
 		HonorTD:               true,
 		TDModel:               "layered",
-		ShellThickness:        "0.96",
 		InfillColor:           "#010203",
 		ColorAwareCells:       true,
 		ColorRegionContrast:   33,

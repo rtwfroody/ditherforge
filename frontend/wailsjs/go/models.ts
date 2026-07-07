@@ -428,7 +428,6 @@ export namespace settings {
 	    noSimplify: boolean;
 	    honorTD: boolean;
 	    tdModel?: string;
-	    shellThickness?: string;
 	    infillColor?: string;
 	    colorAwareCells: boolean;
 	    colorRegionContrast: number;
@@ -490,7 +489,6 @@ export namespace settings {
 	        this.noSimplify = source["noSimplify"];
 	        this.honorTD = source["honorTD"];
 	        this.tdModel = source["tdModel"];
-	        this.shellThickness = source["shellThickness"];
 	        this.infillColor = source["infillColor"];
 	        this.colorAwareCells = source["colorAwareCells"];
 	        this.colorRegionContrast = source["colorRegionContrast"];

@@ -48,8 +48,9 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		Layer0AdhesionXYScale:                float32(s.Layer0AdhesionXYScale),
 		UpperLayerXYScale:                    float32(s.UpperLayerXYScale),
 		TDModel:                              s.TDModel,
-		ShellThicknessMM:                     parseF32(s.ShellThickness, 0.84),
-		InfillColor:                          parseHexRGB(s.InfillColor, [3]uint8{255, 255, 255}),
+		// ShellThicknessMM is left zero here: it is derived from the printer
+		// process profile in applyFractionalOptions, not carried from settings.
+		InfillColor: parseHexRGB(s.InfillColor, [3]uint8{255, 255, 255}),
 	}
 
 	// ObjectIndex: nil → -1 (all objects), matching the frontend.

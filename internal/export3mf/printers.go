@@ -188,6 +188,92 @@ func loadProcessProfile(printerID string, pp *ProcessProfile) (map[string]any, e
 	return out, nil
 }
 
+// ShellThicknessMM computes the total printed wall (shell) thickness in mm for
+// a resolved printer/nozzle/process, from the same OrcaSlicer process profile
+// ditherforge embeds into the exported 3MF. It is the ground truth for how
+// thick the print's walls will actually be:
+//
+//	shell = outer_wall_line_width + (wall_loops − 1) × inner_wall_line_width
+//
+// Line widths are read from the raw process JSON, where each is either an
+// absolute mm value ("0.42") or a percentage of the nozzle diameter ("105%" →
+// 1.05 × nozzle, matching OrcaSlicer's convention). A missing, zero, or
+// unparseable width falls back to the flattened ProcessProfile.LineWidth, then
+// to the nozzle diameter. wall_loops below 1 is treated as 1. Returns ok=false
+// if the raw profile can't be read/parsed, the nozzle diameter is unusable, or
+// the computed shell is non-positive.
+func ShellThicknessMM(printerID string, n *Nozzle, pp *ProcessProfile) (float32, bool) {
+	if n == nil || pp == nil {
+		return 0, false
+	}
+	raw, err := loadProcessProfile(printerID, pp)
+	if err != nil {
+		return 0, false
+	}
+	nozzleDia, err := strconv.ParseFloat(n.Diameter, 64)
+	if err != nil || nozzleDia <= 0 {
+		return 0, false
+	}
+
+	loops := 1
+	if v, ok := rawIntField(raw, "wall_loops"); ok && v > 1 {
+		loops = v
+	}
+
+	// Fallback width when a wall line-width field is missing/unparseable:
+	// the flattened default extrusion width, else the bare nozzle diameter.
+	fallback := float64(pp.LineWidth)
+	if fallback <= 0 {
+		fallback = nozzleDia
+	}
+
+	outer := rawLineWidthField(raw, "outer_wall_line_width", nozzleDia, fallback)
+	inner := rawLineWidthField(raw, "inner_wall_line_width", nozzleDia, fallback)
+
+	shell := outer + float64(loops-1)*inner
+	if shell <= 0 {
+		return 0, false
+	}
+	return float32(shell), true
+}
+
+// rawIntField reads a string-valued integer field from a raw OrcaSlicer
+// profile map (every value is a string).
+func rawIntField(raw map[string]any, key string) (int, bool) {
+	s, ok := raw[key].(string)
+	if !ok {
+		return 0, false
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// rawLineWidthField reads an OrcaSlicer line-width field, which is either an
+// absolute mm value ("0.42") or a percentage of the nozzle diameter ("105%").
+// Missing, empty, or non-positive values return the given fallback.
+func rawLineWidthField(raw map[string]any, key string, nozzleDia, fallback float64) float64 {
+	s, ok := raw[key].(string)
+	if !ok {
+		return fallback
+	}
+	s = strings.TrimSpace(s)
+	if pct, isPct := strings.CutSuffix(s, "%"); isPct {
+		v, err := strconv.ParseFloat(strings.TrimSpace(pct), 64)
+		if err != nil || v <= 0 {
+			return fallback
+		}
+		return v / 100 * nozzleDia
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
+}
+
 // loadFilamentProfile reads and parses this nozzle's flattened filament profile.
 // Only populated for Bambu printers (Snapmaker/Prusa exports don't need one).
 func (n *Nozzle) loadFilamentProfile(printerID string) (map[string]any, error) {
@@ -280,4 +366,3 @@ func DefaultLayerHeightForNozzle(n *Nozzle) float32 {
 	p := n.ClosestProcess(0.20)
 	return p.LayerHeight
 }
-

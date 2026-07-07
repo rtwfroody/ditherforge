@@ -829,17 +829,28 @@ func (r *pipelineRun) resolveFractionalOptions() error {
 	return nil
 }
 
-// applyFractionalOptions converts the size-relative option fields (stored as a
-// fraction of the scaled model's max extent) into absolute pipeline-mm, given
-// that extent. Returns opts unchanged for legacy (absolute-unit) settings or a
-// non-positive extent. The Stickers slice is cloned before mutation so the
-// caller's backing array is never corrupted.
+// layeredShellFallbackMM is the shell thickness the layered TD model falls
+// back to when the printer profile can't supply one (matches the historical
+// default and voxel.EffectivePalette's own s ≤ 0 fallback).
+const layeredShellFallbackMM = 0.84
+
+// applyFractionalOptions resolves the derived-only option fields into absolute
+// pipeline-mm. It (1) derives ShellThicknessMM from the printer process profile
+// when the layered TD model is active (see resolveShellThickness) and (2)
+// converts the size-relative fields (stored as a fraction of the scaled model's
+// max extent) into mm given that extent. The Stickers slice is cloned before
+// mutation so the caller's backing array is never corrupted.
+//
+// Shell thickness is resolved unconditionally (it doesn't depend on the model
+// extent); only the fractional conversion is skipped for legacy (absolute-unit)
+// settings or a non-positive extent.
 //
 // MUST stay in lockstep with what RunCached resolves: stage cache keys are
 // computed from the RESOLVED opts, so ExportFile (and any other post-run cache
 // reader) has to apply the identical conversion or its keys won't match the
 // blobs RunCached wrote. See the "pipeline has not been run yet" regression.
 func applyFractionalOptions(opts Options, ext float64) Options {
+	opts = resolveShellThickness(opts)
 	if opts.LegacyAbsoluteUnits || ext <= 0 {
 		return opts
 	}
@@ -856,6 +867,30 @@ func applyFractionalOptions(opts Options, ext float64) Options {
 		}
 		opts.Stickers = sts
 	}
+	return opts
+}
+
+// resolveShellThickness derives opts.ShellThicknessMM from the selected
+// printer's process profile — the same profile ditherforge embeds into the
+// exported 3MF, so it is the ground truth for the print's actual wall
+// thickness. It is a no-op unless the layered TD model is active
+// (HonorTD && TDModel == "layered"); when inactive, ShellThicknessMM is left
+// zero (neither hashed nor read then). On any resolution failure it falls back
+// to layeredShellFallbackMM and logs one warning.
+func resolveShellThickness(opts Options) Options {
+	if !opts.HonorTD || opts.TDModel != "layered" {
+		return opts
+	}
+	printerID, n, proc, ok := resolveProcessProfile(opts)
+	if ok {
+		if shell, sok := export3mf.ShellThicknessMM(printerID, n, proc); sok {
+			opts.ShellThicknessMM = shell
+			return opts
+		}
+	}
+	opts.ShellThicknessMM = layeredShellFallbackMM
+	plog.Printf("Layered TD: could not derive shell thickness from %s nozzle %.2f layer %.3f mm profile; "+
+		"using %.2f mm fallback", printerID, opts.NozzleDiameter, opts.LayerHeight, layeredShellFallbackMM)
 	return opts
 }
 
@@ -2288,6 +2323,8 @@ func (r *pipelineRun) runDither() (any, error) {
 	var palAlpha []float32
 	layeredTD := r.opts.HonorTD && r.opts.TDModel == "layered"
 	if layeredTD {
+		plog.Printf("  Layered TD: shell thickness %.3f mm (derived from printer process profile)",
+			r.opts.ShellThicknessMM)
 		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, r.opts.InfillColor)
 	} else if r.opts.HonorTD {
 		palAlpha = voxel.PaletteAlphas(po.PaletteTDs)

@@ -133,11 +133,10 @@ type Settings struct {
 	// infill-aware N-crossing model. Default "" (area). See
 	// docs/td-translucency-model.md.
 	TDModel string `json:"tdModel,omitempty"`
-	// ShellThickness is the printed wall thickness in mm (string-numeric like
-	// layerHeight), consumed only by the layered TD model. Default "0.84".
-	ShellThickness string `json:"shellThickness,omitempty"`
 	// InfillColor is the "#RRGGBB" color of the infill filament the layered TD
-	// model blends translucent colors toward. Default "#FFFFFF".
+	// model blends translucent colors toward. Default "#FFFFFF". The layered
+	// model's shell thickness is not a setting: it is derived from the selected
+	// printer's process profile (see pipeline.Options.ShellThicknessMM).
 	InfillColor         string  `json:"infillColor,omitempty"`
 	ColorAwareCells     bool    `json:"colorAwareCells"`
 	ColorRegionContrast float64 `json:"colorRegionContrast"`
@@ -212,7 +211,6 @@ func Default() Settings {
 		NoCellMerge:           false,
 		NoSimplify:            false,
 		HonorTD:               true,
-		ShellThickness:        "0.84",
 		InfillColor:           "#FFFFFF",
 		ColorAwareCells:       true,
 		ColorRegionContrast:   20,

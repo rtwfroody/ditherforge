@@ -214,7 +214,6 @@
   let honorTD = $state(true);
   // Translucency model: '' (area compensation, legacy) or 'layered' (infill-aware).
   let tdModel = $state('');
-  let shellThickness = $state('0.84');
   let infillColor = $state('#FFFFFF');
   let colorAwareCells = $state(true);
   let colorRegionContrast = $state(20);
@@ -1468,7 +1467,6 @@
       noSimplify,
       honorTD,
       tdModel,
-      shellThickness: String(shellThickness),
       infillColor,
       colorAwareCells,
       colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
@@ -1684,7 +1682,6 @@
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
     { key: 'tdModel',                         validate: pickString,                                        apply: (v) => { tdModel = v; } },
-    { key: 'shellThickness',                  validate: pickString,                                        apply: (v) => { shellThickness = v; } },
     { key: 'infillColor',                     validate: pickString,                                        apply: (v) => { infillColor = v; } },
     { key: 'colorAwareCells',                 validate: pickBool,                                          apply: (v) => { colorAwareCells = v; } },
     { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
@@ -2755,7 +2752,7 @@
                     <div class="flex items-center gap-2 text-sm">
                       <span>Translucency model</span>
                       <HelpTip>
-                        "Area compensation" is the legacy opacity-weighted mix (gives translucent filaments more area). "Layered (infill-aware)" instead estimates the color the eye actually sees once light leaks through the finite shell into the infill filament, and dithers against those effective colors. See docs/td-translucency-model.md.
+                        "Area compensation" is the legacy opacity-weighted mix (gives translucent filaments more area). "Layered (infill-aware)" instead estimates the color the eye actually sees once light leaks through the finite shell into the infill filament, and dithers against those effective colors. The shell thickness it integrates over is derived from the selected printer's wall settings (wall loops × line widths) — the same process profile written into the exported 3MF — so it always matches how the model will actually be sliced. See docs/td-translucency-model.md.
                       </HelpTip>
                       <select
                         class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm ml-auto"
@@ -2766,13 +2763,6 @@
                       </select>
                     </div>
                     {#if tdModel === 'layered'}
-                      <div class="flex items-center gap-2 text-sm">
-                        <span>Shell thickness (mm)</span>
-                        <HelpTip>
-                          Printed wall thickness the light travels through before reaching infill. Thicker shells leak less infill color. Should match the wall/shell thickness you slice with.
-                        </HelpTip>
-                        <Input class="ml-auto w-24" type="number" step={0.1} min={0} bind:value={shellThickness} />
-                      </div>
                       <div class="flex items-center gap-2 text-sm">
                         <span>Infill color</span>
                         <HelpTip>
