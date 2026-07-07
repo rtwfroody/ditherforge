@@ -38,20 +38,22 @@ import (
 // strings persisted to settings JSON), so a caller can map mode -> asset or
 // mode -> card directly.
 const (
-	ModeRiemersma      = "riemersma"
-	ModeRiemersmaPair  = "riemersma-pair"
-	ModeBlueNoise      = "blue-noise"
-	ModeDizzyCorrected = "dizzy-corrected"
-	ModeFloydSteinberg = "floyd-steinberg"
-	ModeNone           = "none"
+	ModeRiemersma           = "riemersma"
+	ModeRiemersmaPair       = "riemersma-pair"
+	ModeBlueNoise           = "blue-noise"
+	ModeDizzyCorrected      = "dizzy-corrected"
+	ModeDizzyLocalCorrected = "dizzy-local-corrected"
+	ModeFloydSteinberg      = "floyd-steinberg"
+	ModeNone                = "none"
 )
 
-// Modes lists the six GUI dither modes in the picker's display order.
+// Modes lists the GUI dither modes in the picker's display order.
 var Modes = []string{
 	ModeRiemersma,
 	ModeRiemersmaPair,
 	ModeBlueNoise,
 	ModeDizzyCorrected,
+	ModeDizzyLocalCorrected,
 	ModeFloydSteinberg,
 	ModeNone,
 }
@@ -136,6 +138,8 @@ func runMode(ctx context.Context, mode string, cells []voxel.ActiveCell, pal [][
 		return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, tuning.BlueNoiseTol, progress.NullTracker{})
 	case ModeDizzyCorrected:
 		return voxel.DitherCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
+	case ModeDizzyLocalCorrected:
+		return voxel.DitherLocalCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 	case ModeFloydSteinberg:
 		return voxel.FloydSteinberg(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 	case ModeNone:

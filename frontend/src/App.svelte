@@ -58,6 +58,7 @@
   import thumbRiemersmaPair from './assets/dither/riemersma-pair.png';
   import thumbBlueNoise from './assets/dither/blue-noise.png';
   import thumbDizzy from './assets/dither/dizzy-corrected.png';
+  import thumbDizzyLocal from './assets/dither/dizzy-local-corrected.png';
   import thumbFloydSteinberg from './assets/dither/floyd-steinberg.png';
   import thumbNone from './assets/dither/none.png';
 
@@ -69,7 +70,7 @@
     'riemersma-pair':  { thumb: thumbRiemersmaPair,  tagline: 'smoother flats'        },
     'blue-noise':      { thumb: thumbBlueNoise,      tagline: 'even grain, bounded'   },
     'dizzy-corrected': { thumb: thumbDizzy,          tagline: 'random, textured'      },
-    'dizzy-local-corrected': { thumb: thumbDizzy,    tagline: 'iterated, less drift'  },
+    'dizzy-local-corrected': { thumb: thumbDizzyLocal, tagline: 'iterated, less drift' },
     'floyd-steinberg': { thumb: thumbFloydSteinberg, tagline: 'classic, slight banding' },
     'none':            { thumb: thumbNone,           tagline: 'nearest color only'    },
   };
@@ -727,7 +728,7 @@
   // The picker cards default to the committed static PNGs (DITHER_META). Once a
   // model is loaded we snapshot the input viewer, send it to the read-only
   // DitherModePreviews backend endpoint (which runs the real dither code in
-  // image space), and swap the six cards to the returned per-mode PNGs. This is
+  // image space), and swap the mode cards to the returned per-mode PNGs. This is
   // purely presentational — it never touches settings, the pipeline, or the
   // cache. Before a model loads (or on any error) ditherThumbs stays null and
   // the static fallbacks show.
@@ -795,7 +796,7 @@
       return;
     }
     try {
-      // Render at 288x192 (1.5x the card size, 3:2) so the same six mode
+      // Render at 288x192 (1.5x the card size, 3:2) so the same per-mode
       // images serve both the small picker cards (CSS-downscaled) and the
       // larger ~256px "Approximate preview" below the grid — one backend
       // render, no parallel channel. committedColorSnap feeds the real
@@ -2560,7 +2561,7 @@
               </div>
 
               <!-- Larger inline preview of the currently selected mode. Reuses
-                   the six-mode images already fetched for the picker cards
+                   the per-mode images already fetched for the picker cards
                    (ditherThumbs), so switching mode needs no backend call; it
                    only re-renders on palette / tuning / color-snap changes via
                    the same debounced, latest-wins machinery as the cards. -->

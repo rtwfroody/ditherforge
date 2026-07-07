@@ -1,7 +1,7 @@
 // Command dither-thumbs renders the static preview thumbnails used by the
 // GUI's visual dither-mode picker (Appearance section, Step 4 of the settings
 // redesign). It builds one canned test image — a horizontal colour gradient
-// over a flat mid-grey patch — and dithers it with each of the six modes the
+// over a flat mid-grey patch — and dithers it with each of the modes the
 // GUI exposes via internal/ditherpreview, which drives the *actual* dither
 // implementations from internal/voxel (the same functions the pipeline calls).
 // The output is one ~96x64 PNG per mode, written to frontend/src/assets/dither/,

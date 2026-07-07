@@ -758,7 +758,7 @@ func (a *App) SelectCellDiagnostics(x, y, z float64) (*pipeline.CellDiagInfo, er
 	return pipeline.CellDiagnosticsAt(a.cache, *last, [3]float32{float32(x), float32(y), float32(z)})
 }
 
-// DitherModePreviews renders the six GUI dither modes over a caller-supplied
+// DitherModePreviews renders the GUI dither modes over a caller-supplied
 // source image and returns one base64 PNG data URI per mode (keyed by the
 // DITHER_OPTIONS mode value). It feeds the Appearance section's visual
 // dither-mode picker with a live, image-space preview of the currently loaded
