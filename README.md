@@ -261,25 +261,23 @@ average output color match the average input?) against local pattern
 
 The dropdown offers:
 
+- **Dizzy damped** (default) — randomized error-diffusion (Liam Appelbe's
+  blue-noise dizzy) iterated with a *localized*, damped drift correction:
+  each pass spreads the residuals that stranded cells would otherwise drop
+  onto their own neighbors, so the fix stays where the error arose. Matches
+  Dizzy's blue-noise texture while keeping each color region's average true.
+  Won the 2026-07 CSF perceptual election, which is why it is the default.
+- **Floyd-Steinberg** — deterministic scanline order. Preserves average
+  chroma exactly, but produces visible directional structure on flat areas.
 - **Riemersma** — walks voxels along a locally-coherent tour and
   diffuses each cell's quantization error into a sliding window of recent
   cells. Preserves average color exactly (zero drift) and avoids the
   scanline directionality of Floyd-Steinberg.
 - **Blue noise** — picks the smallest palette simplex (pair, triangle, or
-  full) that brackets each cell's input within a tolerance, then chooses
-  among its vertices via a low-discrepancy sequence. Bounds wander tightly
-  on uniform regions at the cost of a small global drift.
-- **Dizzy** — randomized error-diffusion (Liam Appelbe's blue-noise dizzy,
-  iterated three times with a global drift correction). Blue-noise look with
-  no directional structure on flat areas.
-- **Dizzy local** (default) — Dizzy iterated with a *localized* correction:
-  each pass spreads the residuals that stranded cells would otherwise drop
-  onto their own neighbors, so the fix stays where the error arose. Matches
-  Dizzy's texture while keeping each color region's average true (plain
-  Dizzy's global correction can shift one region to balance another).
-- **Floyd-Steinberg** — deterministic scanline order. Preserves average
-  chroma exactly, but produces visible directional structure on flat areas.
-- **none** — no dithering; each cell snaps to the nearest palette color.
+  full) that brackets each cell's input within a fixed tolerance, then
+  chooses among its vertices via a low-discrepancy sequence. Bounds wander
+  tightly on uniform regions at the cost of a small global drift.
+- **None** — no dithering; each cell snaps to the nearest palette color.
 
 When **Riemersma** is selected, an **Alpha** slider
 appears (0..1, default 0.85). It's the per-cell input-bias maximum: pulls
@@ -287,12 +285,6 @@ each cell's pick toward its nearest-input palette when the cell is close to
 a palette color. 0 = pure error-diffusion (zero drift but black/white
 oscillation around near-grey input). Higher values suppress that
 oscillation; ≥0.9 starts to posterize textured surfaces.
-
-When **Blue noise** is selected, a **Tolerance** slider appears (default 20,
-in 8-bit RGB units). Smaller (≈5–10) forces the dither to bracket each
-input with more palette colors (lower drift, wider color spread on near-
-flat regions). Larger (≈20–40) sticks to 2-color pairs (tighter wander
-bounds, small per-cell drift).
 
 ## How to Split a Model into Two Halves
 
@@ -410,12 +402,12 @@ compatible with OrcaSlicer and BambuStudio.
 7. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
 8. **Dither** — assigns a palette color to each cell to approximate the original
-   texture. The default `dizzy-local-corrected` mode is randomized
-   error-diffusion iterated with a localized drift correction, keeping each
-   color region's average true with no directional structure. Five other
-   modes are available — `riemersma`, `blue-noise`, `dizzy-corrected`,
-   `floyd-steinberg`, and `none` — each with different drift/wander/structure
-   trade-offs. See [How to Choose a Dither Mode](#how-to-choose-a-dither-mode).
+   texture. The default `dlc-d30-p7` mode ("Dizzy damped") is randomized
+   error-diffusion iterated with a localized, damped drift correction, keeping
+   each color region's average true with no directional structure. Four other
+   modes are available — `floyd-steinberg`, `riemersma`, `bn-adapt-5`, and
+   `none` — each with different drift/wander/structure trade-offs. See
+   [How to Choose a Dither Mode](#how-to-choose-a-dither-mode).
 9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
    each fragment a palette color.
 10. **Merge** — merges coplanar triangles to reduce face count.

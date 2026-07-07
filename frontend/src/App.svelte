@@ -54,22 +54,20 @@
   // Dither-mode preview thumbnails (rendered offline by cmd/dither-thumbs
   // with the real internal/voxel dither implementations). Vite resolves each
   // import to a hashed static-asset URL at build time.
-  import thumbRiemersma from './assets/dither/riemersma.png';
-  import thumbBlueNoise from './assets/dither/blue-noise.png';
-  import thumbDizzy from './assets/dither/dizzy-corrected.png';
-  import thumbDizzyLocal from './assets/dither/dizzy-local-corrected.png';
+  import thumbDLCd30p7 from './assets/dither/dlc-d30-p7.png';
   import thumbFloydSteinberg from './assets/dither/floyd-steinberg.png';
+  import thumbRiemersma from './assets/dither/riemersma.png';
+  import thumbBNAdapt5 from './assets/dither/bn-adapt-5.png';
   import thumbNone from './assets/dither/none.png';
 
   // Per-mode thumbnail + ≤6-word tagline for the visual picker, keyed by the
   // DITHER_OPTIONS value (the exact string persisted to settings JSON). Labels
   // still come from DITHER_OPTIONS.
   const DITHER_META: Record<string, { thumb: string; tagline: string }> = {
-    'riemersma':       { thumb: thumbRiemersma,      tagline: 'organic, no direction' },
-    'blue-noise':      { thumb: thumbBlueNoise,      tagline: 'even grain, bounded'   },
-    'dizzy-corrected': { thumb: thumbDizzy,          tagline: 'random, textured'      },
-    'dizzy-local-corrected': { thumb: thumbDizzyLocal, tagline: 'iterated, less drift' },
+    'dlc-d30-p7':      { thumb: thumbDLCd30p7,       tagline: 'iterated, less drift'  },
     'floyd-steinberg': { thumb: thumbFloydSteinberg, tagline: 'classic, slight banding' },
+    'riemersma':       { thumb: thumbRiemersma,      tagline: 'organic, no direction' },
+    'bn-adapt-5':      { thumb: thumbBNAdapt5,       tagline: 'even grain, bounded'   },
     'none':            { thumb: thumbNone,           tagline: 'nearest color only'    },
   };
 
@@ -201,7 +199,7 @@
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
-  let dither = $state('dizzy-local-corrected');
+  let dither = $state('dlc-d30-p7');
   let riemersmaBias = $state(0.85);
   let committedRiemersmaBias = $state(0.85);
   let blueNoiseTol = $state(20);
@@ -2532,7 +2530,7 @@
                 <div class="flex items-center gap-1.5">
                   <Label for="dither">Mode</Label>
                   <HelpTip>
-                    "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "Dizzy" is randomized error-diffusion (Liam Appelbe's blue-noise dizzy, iterated three times with drift correction) — blue-noise look with no directional structure on flat areas. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "none" disables dithering and snaps each cell to the nearest palette color. Previews are approximate — they show image-space dithering of a snapshot of the loaded model, not the actual surface-cell dithering the pipeline applies.
+                    "Dizzy damped" (default) is randomized error-diffusion (Liam Appelbe's blue-noise dizzy) iterated with a localized, damped drift correction — blue-noise look with no directional structure and each color region's average kept true. "Floyd-Steinberg" uses a deterministic scanline order that preserves average chroma exactly, at the cost of visible directional structure on flat areas. "Riemersma" walks cells along a locally-coherent tour through the surface and diffuses each cell's error into a sliding window of recent cells — preserves chroma without scanline directionality. "Blue noise" picks the smallest palette simplex (pair, triangle, or full) that brackets each cell's input within a fixed tolerance, then chooses among its vertices via a low-discrepancy sequence — bounds wander on uniform regions at the cost of a small global drift. "None" disables dithering and snaps each cell to the nearest palette color. Previews are approximate — they show image-space dithering of a snapshot of the loaded model, not the actual surface-cell dithering the pipeline applies.
                   </HelpTip>
                 </div>
                 <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -2603,21 +2601,10 @@
                 </div>
               {/if}
 
-              {#if dither === 'blue-noise'}
-                <div class="space-y-1">
-                  <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-1.5">
-                      <Label>Tolerance</Label>
-                      <HelpTip>
-                        Per-cell projection-error tolerance in 8-bit RGB units. Smaller (≈5–10) forces the dither to bracket each input with more palette colors — keeps drift low but can show wider color spread on near-flat regions. Larger (≈20–40) sticks to 2-color pairs — bounds wander tightly (no white/black oscillation around near-grey) at the cost of small per-cell drift. Default 20 is a balance.
-                      </HelpTip>
-                    </div>
-                    <span class="text-xs text-muted-foreground w-10 text-right">{blueNoiseTol.toFixed(0)}</span>
-                  </div>
-                  <Slider type="single" min={1} max={50} step={1} value={blueNoiseTol} onValueChange={(v: number) => blueNoiseTol = v} onValueCommit={(v: number) => committedBlueNoiseTol = v} />
-                  <p class="text-xs text-muted-foreground">Lower spreads more colors per cell; higher sticks to tight 2-color pairs.</p>
-                </div>
-              {/if}
+              <!-- The "Blue noise" mode (bn-adapt-5) pins its bracket
+                   tolerance to 5, so it exposes no tuning slider. The
+                   blueNoiseTol setting is retained for compatibility but
+                   no longer affects production output. -->
             </div>
 
             <!-- Color adjustments -->

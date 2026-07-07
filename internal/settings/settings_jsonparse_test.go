@@ -336,8 +336,11 @@ func TestLoadJSONScaleModeAndFallbacks(t *testing.T) {
 func TestLoadMigratesRemovedDitherModes(t *testing.T) {
 	cases := []struct{ from, want string }{
 		{"riemersma-pair", "riemersma"},
-		{"dizzy-2hop", "dizzy-local-corrected"},
-		{"dizzy-recover", "dizzy-local-corrected"},
+		{"dizzy-2hop", "dlc-d30-p7"},
+		{"dizzy-recover", "dlc-d30-p7"},
+		{"dizzy-corrected", "dlc-d30-p7"},
+		{"dizzy-local-corrected", "dlc-d30-p7"},
+		{"blue-noise", "bn-adapt-5"},
 	}
 	for _, tc := range cases {
 		body := `{

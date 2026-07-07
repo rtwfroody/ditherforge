@@ -46,17 +46,16 @@ export const SPLIT_AXIS_OPTIONS = [
 export type SplitAxis = typeof SPLIT_AXIS_OPTIONS[number]['value'];
 
 export const DITHER_OPTIONS = [
-  { value: 'riemersma',       label: 'Riemersma'       },
-  { value: 'blue-noise',      label: 'Blue noise'      },
-  { value: 'dizzy-corrected', label: 'Dizzy'           },
-  { value: 'dizzy-local-corrected', label: 'Dizzy local' },
+  { value: 'dlc-d30-p7',      label: 'Dizzy damped'    },
   { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
-  { value: 'none',            label: 'none'            },
+  { value: 'riemersma',       label: 'Riemersma'       },
+  { value: 'bn-adapt-5',      label: 'Blue noise'      },
+  { value: 'none',            label: 'None'            },
 ] as const;
 // Removed/legacy dither strings (e.g. riemersma-pair, dizzy-2hop,
-// dizzy-recover) are migrated to a surviving mode by the backend
-// settings loader (internal/settings.Load), so the frontend never
-// sees them.
+// dizzy-recover, dizzy-corrected, dizzy-local-corrected, blue-noise)
+// are migrated to a surviving mode by the backend settings loader
+// (internal/settings.Load), so the frontend never sees them.
 export type DitherMode = typeof DITHER_OPTIONS[number]['value'];
 
 export const SIZE_MODE_OPTIONS = [

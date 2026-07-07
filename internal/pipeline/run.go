@@ -2291,19 +2291,21 @@ func (r *pipelineRun) runDither() (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// dlcCorrectionPasses is the number of localized-correction passes
+	// the production "dlc-d30-p7" mode runs; it must stay in sync with
+	// the passes argument to voxel.DitherLocalCorrectedTuned in the
+	// dispatch below (both are 7).
+	const dlcCorrectionPasses = 7
 	// Budget: dither work units + flood-fill work units. Most modes
-	// do one dither pass over n cells, so dither = n. dizzy-
-	// corrected runs voxel.DizzyCorrectionPasses passes back-to-
-	// back, so its dither budget scales accordingly. The internal
-	// passes use a tracker wrapper that offsets per-pass progress
-	// onto a single continuous bar -- see ditherPassTracker.
+	// do one dither pass over n cells, so dither = n. dlc-d30-p7 runs
+	// dlcCorrectionPasses passes back-to-back, so its dither budget
+	// scales accordingly. The internal passes use a tracker wrapper
+	// that offsets per-pass progress onto a single continuous bar --
+	// see ditherPassTracker.
 	ditherMode := r.opts.Dither
 	ditherUnits := len(po.Cells)
-	if ditherMode == "dizzy-corrected" {
-		ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
-	}
-	if ditherMode == "dizzy-local-corrected" {
-		ditherUnits = voxel.LocalCorrectionPasses * len(po.Cells)
+	if ditherMode == "dlc-d30-p7" {
+		ditherUnits = dlcCorrectionPasses * len(po.Cells)
 	}
 	stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
 	defer stage.Done()
@@ -2362,16 +2364,16 @@ func (r *pipelineRun) runDither() (any, error) {
 		return nb
 	}
 	switch ditherMode {
-	case "dizzy-corrected":
-		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
-	case "dizzy-local-corrected":
+	case "dlc-d30-p7":
 		// Iterated dizzy dither with localized stranded-drop
-		// correction (damped γ=0.5). Shares the default 1-hop
-		// neighbor table with dizzy-corrected; beats it on
-		// multi-color models by roughly halving per-cluster drift.
+		// correction: each pass spreads the residuals a stranded
+		// cell would otherwise drop onto its own neighbors, so the
+		// fix stays where the error arose. Damped γ=0.3 over 7
+		// passes — won the 2026-07 CSF perceptual election (see
+		// tests/ditherrank). dlcCorrectionPasses above pins the
+		// budget to this pass count.
 		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.DitherLocalCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
+		assignments, derr = voxel.DitherLocalCorrectedTuned(r.ctx, cells, pal, palAlpha, neighbors, r.tracker, 0.3, dlcCorrectionPasses)
 	case "floyd-steinberg":
 		neighbors := cut(vo.Neighbors)
 		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
@@ -2386,20 +2388,19 @@ func (r *pipelineRun) runDither() (any, error) {
 		} else {
 			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, palAlpha, neighbors, bias, r.tracker)
 		}
-	case "blue-noise":
+	case "bn-adapt-5":
 		// Adaptive simplex blue-noise threshold dither: per-cell
 		// best-K simplex (1..palette_size) selected by per-cell
 		// projection-error tolerance, with LDS-driven choice
 		// among simplex vertices. Trades a small drift for big
 		// reductions in wander on uniform/near-flat regions
 		// (where Riemersma's window accumulator forces visible
-		// far-palette picks).
+		// far-palette picks). The tolerance is pinned to 5 by the
+		// mode name (opts.BlueNoiseTolerance is NOT consulted) so
+		// the product and the election ballots score the same
+		// algorithm.
 		neighbors := cut(vo.Neighbors)
-		tol := r.opts.BlueNoiseTolerance
-		if tol <= 0 {
-			tol = voxel.BlueNoiseAdaptiveTolDefault
-		}
-		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, palAlpha, neighbors, tol, r.tracker)
+		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, palAlpha, neighbors, 5, r.tracker)
 	default:
 		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 	}

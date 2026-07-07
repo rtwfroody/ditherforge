@@ -139,12 +139,14 @@ type Options struct {
 	// voxel.RiemersmaInputBiasDefault.
 	RiemersmaInputBias float64
 	// BlueNoiseTolerance is the per-cell projection-error tolerance
-	// (in 8-bit RGB Euclidean units) for the blue-noise / simplex-
-	// adaptive dither (only consulted when Dither == "blue-noise").
+	// (in 8-bit RGB Euclidean units) for the simplex-adaptive dither.
 	// Smaller = higher K (less wander shows up as visible far-palette
 	// picks but more drift); larger = lower K (closer-to-input picks
-	// but per-cell drift accumulates). Pipeline default is
-	// voxel.BlueNoiseAdaptiveTolDefault.
+	// but per-cell drift accumulates). Retained for compatibility and
+	// research tuning; the production "bn-adapt-5" mode pins tolerance
+	// to 5 (see internal/pipeline/run.go) and does NOT consult this
+	// field, so ballot elections and the product refer to the same
+	// algorithm. Pipeline default is voxel.BlueNoiseAdaptiveTolDefault.
 	BlueNoiseTolerance float64
 	NoMerge            bool
 	NoSimplify         bool
@@ -450,9 +452,9 @@ type Result struct {
 func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbacks) (*ProcessResult, error) {
 	// Validate inputs before any expensive work.
 	switch opts.Dither {
-	case "none", "dizzy-corrected", "dizzy-local-corrected", "floyd-steinberg", "riemersma", "blue-noise":
+	case "dlc-d30-p7", "floyd-steinberg", "riemersma", "bn-adapt-5", "none":
 	default:
-		return nil, fmt.Errorf("invalid --dither %q: must be none, dizzy-corrected, dizzy-local-corrected, floyd-steinberg, riemersma, or blue-noise", opts.Dither)
+		return nil, fmt.Errorf("invalid --dither %q: must be dlc-d30-p7, floyd-steinberg, riemersma, bn-adapt-5, or none", opts.Dither)
 	}
 
 	// Extract callbacks, using safe defaults for nil.

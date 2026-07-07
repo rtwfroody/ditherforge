@@ -86,7 +86,7 @@ var suiteModels = []suiteModel{
 
 func main() {
 	model := flag.String("model", filepath.Join("tests", "objects", "earth.glb"), "input model path")
-	modesArg := flag.String("modes", "none,floyd-steinberg,riemersma,dizzy-corrected,dizzy-local-corrected,blue-noise", "comma-separated dither modes")
+	modesArg := flag.String("modes", "none,floyd-steinberg,riemersma,dlc-d30-p7,bn-adapt-5", "comma-separated dither modes")
 	res := flag.Int("res", 512, "render resolution (pixels per side)")
 	sizeArg := flag.Float64("size", 50, "normalized max extent in mm")
 	numColors := flag.Int("num-colors", 6, "number of palette colors")

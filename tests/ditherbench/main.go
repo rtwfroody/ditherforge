@@ -196,11 +196,11 @@ func main() {
 		{"bn-adapt-2", wrapBNAdapt2},
 		{"bn-adapt-5", wrapBNAdapt5},
 		{"bn-adapt-10", wrapBNAdapt10},
-		// blue-noise is BlueNoiseAdaptive at the production default
-		// tolerance (20) — named to match pipeline.Options.Dither so
-		// ballot elections (tests/ditherrank) see the 2D bench and the
-		// 3D ditherrender scoring ONE candidate, not two.
-		{"blue-noise", wrapBNAdapt20},
+		// bn-adapt-20 is BlueNoiseAdaptive at tolerance 20, the old
+		// production default. The product's blue-noise is now
+		// bn-adapt-5 (tolerance 5, above), so this is a plain research
+		// candidate — no longer named to match pipeline.Options.Dither.
+		{"bn-adapt-20", wrapBNAdapt20},
 		{"bn-pair-d", wrapBNPairDiffused},
 		{"bn-tri-d", wrapBNTriDiffused},
 		{"dbs-3", wrapDBS3},

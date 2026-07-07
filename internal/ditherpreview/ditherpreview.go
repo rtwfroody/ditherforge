@@ -38,21 +38,20 @@ import (
 // strings persisted to settings JSON), so a caller can map mode -> asset or
 // mode -> card directly.
 const (
-	ModeRiemersma           = "riemersma"
-	ModeBlueNoise           = "blue-noise"
-	ModeDizzyCorrected      = "dizzy-corrected"
-	ModeDizzyLocalCorrected = "dizzy-local-corrected"
-	ModeFloydSteinberg      = "floyd-steinberg"
-	ModeNone                = "none"
+	ModeDLCd30p7       = "dlc-d30-p7"
+	ModeFloydSteinberg = "floyd-steinberg"
+	ModeRiemersma      = "riemersma"
+	ModeBNAdapt5       = "bn-adapt-5"
+	ModeNone           = "none"
 )
 
-// Modes lists the GUI dither modes in the picker's display order.
+// Modes lists the GUI dither modes in the picker's display order (default
+// first).
 var Modes = []string{
-	ModeRiemersma,
-	ModeBlueNoise,
-	ModeDizzyCorrected,
-	ModeDizzyLocalCorrected,
+	ModeDLCd30p7,
 	ModeFloydSteinberg,
+	ModeRiemersma,
+	ModeBNAdapt5,
 	ModeNone,
 }
 
@@ -127,16 +126,19 @@ func DitherImage(ctx context.Context, img image.Image, palette [][3]uint8, mode 
 // tuning knobs through.
 func runMode(ctx context.Context, mode string, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor, tuning Tuning) ([]int32, error) {
 	switch mode {
-	case ModeRiemersma:
-		return voxel.Riemersma(ctx, cells, pal, nil, nbrs, tuning.RiemersmaBias, progress.NullTracker{})
-	case ModeBlueNoise:
-		return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, tuning.BlueNoiseTol, progress.NullTracker{})
-	case ModeDizzyCorrected:
-		return voxel.DitherCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
-	case ModeDizzyLocalCorrected:
-		return voxel.DitherLocalCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
+	case ModeDLCd30p7:
+		// Must mirror internal/pipeline/run.go's "dlc-d30-p7" case
+		// exactly (damping 0.3, 7 passes) so the preview matches the
+		// pipeline output.
+		return voxel.DitherLocalCorrectedTuned(ctx, cells, pal, nil, nbrs, progress.NullTracker{}, 0.3, 7)
 	case ModeFloydSteinberg:
 		return voxel.FloydSteinberg(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
+	case ModeRiemersma:
+		return voxel.Riemersma(ctx, cells, pal, nil, nbrs, tuning.RiemersmaBias, progress.NullTracker{})
+	case ModeBNAdapt5:
+		// Tolerance is pinned to 5 (not tuning.BlueNoiseTol) to mirror
+		// the pipeline's "bn-adapt-5" case.
+		return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, 5, progress.NullTracker{})
 	case ModeNone:
 		return voxel.AssignColors(ctx, cells, pal)
 	default:

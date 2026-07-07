@@ -203,7 +203,7 @@ func Default() Settings {
 		Saturation:            0,
 		WarpPins:              []WarpPinSetting{},
 		Stickers:              []StickerSetting{},
-		Dither:                "dizzy-local-corrected",
+		Dither:                "dlc-d30-p7",
 		RiemersmaBias:         0.85,
 		BlueNoiseTol:          20,
 		ColorSnap:             5,
@@ -338,14 +338,19 @@ func Load(path string) (s Settings, legacyAbsoluteUnits bool, err error) {
 			sf.Settings.Stickers[i].Mode = "unfold"
 		}
 	}
-	// Migrate dither modes removed from the product (2026-07): their
-	// benchmark wins were artifacts/duplicates of surviving modes. Old
-	// files naming one silently load as the nearest surviving mode.
+	// Migrate dither modes removed from the product: their benchmark
+	// wins were artifacts/duplicates of surviving modes, or (in the
+	// 2026-07 second cut, driven by the CSF perceptual election) they
+	// were superseded by the promoted tuned variants dlc-d30-p7 and
+	// bn-adapt-5. Old files naming a removed mode silently load as the
+	// nearest surviving mode.
 	switch sf.Settings.Dither {
 	case "riemersma-pair":
 		sf.Settings.Dither = "riemersma"
-	case "dizzy-2hop", "dizzy-recover":
-		sf.Settings.Dither = "dizzy-local-corrected"
+	case "dizzy-2hop", "dizzy-recover", "dizzy-corrected", "dizzy-local-corrected":
+		sf.Settings.Dither = "dlc-d30-p7"
+	case "blue-noise":
+		sf.Settings.Dither = "bn-adapt-5"
 	}
 	transformPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
 	return sf.Settings, !sf.DitherForge.SizeRelativeUnits, nil
