@@ -265,25 +265,23 @@ The dropdown offers:
   diffuses each cell's quantization error into a sliding window of recent
   cells. Preserves average color exactly (zero drift) and avoids the
   scanline directionality of Floyd-Steinberg.
-- **Riemersma pair** — like Riemersma but scores each voxel jointly with its
-  tour-neighbour and prefers picks whose residuals cancel. On a flat-gray
-  area with a black/white palette this prefers `(black, white)` instead of
-  the long `(black, black, white, white, …)` kick the single-cell version
-  produces. Same drift as Riemersma; lower wander on flat/textured regions;
-  slightly noisier on detailed near-palette images.
 - **Blue noise** — picks the smallest palette simplex (pair, triangle, or
   full) that brackets each cell's input within a tolerance, then chooses
   among its vertices via a low-discrepancy sequence. Bounds wander tightly
   on uniform regions at the cost of a small global drift.
 - **Dizzy** — randomized error-diffusion (Liam Appelbe's blue-noise dizzy,
-  iterated three times with drift correction). Blue-noise look with no
-  directional structure on flat areas.
-- **Floyd-Steinberg** (default) — deterministic scanline order. Preserves
-  average chroma exactly, but produces visible directional structure on flat
-  areas.
+  iterated three times with a global drift correction). Blue-noise look with
+  no directional structure on flat areas.
+- **Dizzy local** (default) — Dizzy iterated with a *localized* correction:
+  each pass spreads the residuals that stranded cells would otherwise drop
+  onto their own neighbors, so the fix stays where the error arose. Matches
+  Dizzy's texture while keeping each color region's average true (plain
+  Dizzy's global correction can shift one region to balance another).
+- **Floyd-Steinberg** — deterministic scanline order. Preserves average
+  chroma exactly, but produces visible directional structure on flat areas.
 - **none** — no dithering; each cell snaps to the nearest palette color.
 
-When **Riemersma** or **Riemersma pair** is selected, an **Alpha** slider
+When **Riemersma** is selected, an **Alpha** slider
 appears (0..1, default 0.85). It's the per-cell input-bias maximum: pulls
 each cell's pick toward its nearest-input palette when the cell is close to
 a palette color. 0 = pure error-diffusion (zero drift but black/white
@@ -412,10 +410,11 @@ compatible with OrcaSlicer and BambuStudio.
 7. **Palette** — resolves locked colors, then selects auto colors from the
    active collection. Applies color snap to shift cell colors toward the palette.
 8. **Dither** — assigns a palette color to each cell to approximate the original
-   texture. The default `floyd-steinberg` mode assigns palette colors in a
-   deterministic scanline order, preserving average chroma exactly. Five other
-   modes are available — `riemersma`, `riemersma-pair`, `blue-noise`,
-   `dizzy-corrected`, and `none` — each with different drift/wander/structure
+   texture. The default `dizzy-local-corrected` mode is randomized
+   error-diffusion iterated with a localized drift correction, keeping each
+   color region's average true with no directional structure. Five other
+   modes are available — `riemersma`, `blue-noise`, `dizzy-corrected`,
+   `floyd-steinberg`, and `none` — each with different drift/wander/structure
    trade-offs. See [How to Choose a Dither Mode](#how-to-choose-a-dither-mode).
 9. **Clip** — cuts the decimated mesh along voxel color boundaries and assigns
    each fragment a palette color.

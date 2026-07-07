@@ -201,7 +201,7 @@
   type WarpPinUI = { sourceHex: string; targetHex: string; targetLabel: string; sigma: number };
   let warpPins = $state<WarpPinUI[]>([]);
   let pickingPinIndex = $state(-1); // -1 = not picking
-  let dither = $state('floyd-steinberg');
+  let dither = $state('dizzy-local-corrected');
   let riemersmaBias = $state(0.85);
   let committedRiemersmaBias = $state(0.85);
   let blueNoiseTol = $state(20);

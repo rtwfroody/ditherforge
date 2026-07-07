@@ -193,7 +193,7 @@ func Default() Settings {
 		Saturation:            0,
 		WarpPins:              []WarpPinSetting{},
 		Stickers:              []StickerSetting{},
-		Dither:                "floyd-steinberg",
+		Dither:                "dizzy-local-corrected",
 		RiemersmaBias:         0.85,
 		BlueNoiseTol:          20,
 		ColorSnap:             5,
