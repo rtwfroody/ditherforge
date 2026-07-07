@@ -4,10 +4,28 @@
 //
 // Four categories of metric per (fixture, mode):
 //
-//   - drift_ΔE: avg(output_color) - avg(input_color), measured in
-//     Lab ΔE. Small = good; FS-class scores ~0.3, dizzy ~7-8,
-//     no-dither up to ~15. The cost dither pays to fix the
-//     unavoidable quantization bias.
+//   - drift_ΔE / drift_lin_ΔE: avg(output_color) - avg(input_color),
+//     measured in Lab ΔE. Both are the cost dither pays to fix the
+//     unavoidable quantization bias, but they average in different
+//     spaces:
+//       * drift_ΔE averages the raw sRGB BYTES, then takes the ΔE of
+//         the byte means. This metric is now STALE. Since the
+//         linear-light refactor the error-diffusion modes conserve the
+//         LINEAR-light spatial mean, not the byte mean (mean of a
+//         nonlinear map ≠ map of the mean — see computeDriftDEFromAvg
+//         in internal/voxel/color.go). Because output palette colors
+//         span a much wider range than the input colors, exact linear
+//         conservation still leaves a large byte-space Jensen offset,
+//         so this column PENALIZES exactly the modes that conserve
+//         correctly. Kept only for historical comparison.
+//       * drift_lin_ΔE averages in LINEAR light (unweighted mean over
+//         cells), then converts the two linear means back to Lab for
+//         the ΔE. This is the physically meaningful drift number
+//         post-linear-refactor: a mode that conserves linear-light mass
+//         scores near 0 here. Prefer this column.
+//     Small = good; a well-behaved error-diffusion mode scores near 0
+//     on drift_lin_ΔE, dizzy ~7-8 on the stale byte metric, no-dither
+//     up to ~15.
 //
 //   - wander_ΔE: mean Lab ΔE between the chosen palette entry and
 //     the nearest-input palette entry. Captures how often the
@@ -110,6 +128,13 @@ func main() {
 		{"dizzy-2hop", wrapDizzy2Hop},
 		{"dizzy-recover", wrapDizzyRecover},
 		{"dizzy-local-corrected", wrapDizzyLocalCorrected},
+		// Damped-relaxation sweep of DitherLocalCorrected: the default
+		// above is γ=1.0 (plain replace) / 3 passes. These under-relax
+		// (γ<1) with more passes to test whether that tames the earth
+		// pass-2 overshoot without regressing the well-behaved fixtures.
+		{"dlc-d70-p5", wrapDLCd70p5},
+		{"dlc-d50-p5", wrapDLCd50p5},
+		{"dlc-d30-p7", wrapDLCd30p7},
 		{"floyd-steinberg", wrapFS},
 		{"riemersma", wrapRiemersma},
 		{"r-knearest-3", wrapRKNearest3},
@@ -267,6 +292,14 @@ func main() {
 		if dcAssigns, ok := modeAssigns["dizzy-corrected"]; ok {
 			fmt.Println("  per-cluster drift (dizzy-corrected output):")
 			printClusterDrifts(fx, pal, dcAssigns, cellCluster)
+		}
+		// And dizzy-local-corrected, the experimental localized corrector
+		// under sweep — its per-cluster drift shows whether the localized
+		// correction shifts specific clusters (e.g. pushing a uniform grey
+		// field toward chromatic palette entries).
+		if dlcAssigns, ok := modeAssigns["dizzy-local-corrected"]; ok {
+			fmt.Println("  per-cluster drift (dizzy-local-corrected output):")
+			printClusterDrifts(fx, pal, dlcAssigns, cellCluster)
 		}
 		fmt.Println()
 	}
@@ -534,6 +567,15 @@ func wrapDizzyRecover(ctx context.Context, cells []voxel.ActiveCell, pal [][3]ui
 func wrapDizzyLocalCorrected(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.DitherLocalCorrected(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
+func wrapDLCd70p5(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherLocalCorrectedTuned(ctx, cells, pal, nil, nbrs, progress.NullTracker{}, 0.7, 5)
+}
+func wrapDLCd50p5(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherLocalCorrectedTuned(ctx, cells, pal, nil, nbrs, progress.NullTracker{}, 0.5, 5)
+}
+func wrapDLCd30p7(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
+	return voxel.DitherLocalCorrectedTuned(ctx, cells, pal, nil, nbrs, progress.NullTracker{}, 0.3, 7)
+}
 func wrapFS(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor) ([]int32, error) {
 	return voxel.FloydSteinberg(ctx, cells, pal, nil, nbrs, progress.NullTracker{})
 }
@@ -629,7 +671,8 @@ func wrapRLab100_15(ctx context.Context, cells []voxel.ActiveCell, pal [][3]uint
 // ----- metrics -----
 
 type metrics struct {
-	driftDE      float64
+	driftDE      float64         // Lab ΔE of the sRGB-BYTE means (stale post-linear-refactor)
+	driftLinDE   float64         // Lab ΔE of the LINEAR-light means (physically meaningful)
 	pcell        []float64       // sorted per-cell ΔE
 	wanderDE     float64         // mean ΔE(chosen palette, nearest-input palette)
 	wanderClump  float64         // 8x8 block-mean variance of per-cell wander, normalized — captures clumping
@@ -638,21 +681,40 @@ type metrics struct {
 }
 
 func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []int) metrics {
-	// Global drift in Lab ΔE.
+	// Global drift in Lab ΔE, measured in two spaces (see the two
+	// drift metrics documented at the top of this file). The byte means
+	// (i*, o*) drive the stale drift_ΔE; the linear-light means
+	// (iLin*, oLin*) drive the physically meaningful drift_lin_ΔE.
 	var iR, iG, iB, oR, oG, oB float64
+	var iLinR, iLinG, iLinB, oLinR, oLinG, oLinB float64
 	for i, c := range fx.cells {
 		iR += float64(c.Color[0])
 		iG += float64(c.Color[1])
 		iB += float64(c.Color[2])
+		iLinR += srgb8ToLinear(c.Color[0])
+		iLinG += srgb8ToLinear(c.Color[1])
+		iLinB += srgb8ToLinear(c.Color[2])
 		a := assigns[i]
 		oR += float64(pal[a][0])
 		oG += float64(pal[a][1])
 		oB += float64(pal[a][2])
+		oLinR += srgb8ToLinear(pal[a][0])
+		oLinG += srgb8ToLinear(pal[a][1])
+		oLinB += srgb8ToLinear(pal[a][2])
 	}
 	n := float64(len(fx.cells))
 	iL, iA, iBl := toLab(iR/n, iG/n, iB/n)
 	oL, oA, oBl := toLab(oR/n, oG/n, oB/n)
 	driftDE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
+
+	// Linear-light drift: average in linear light, then map the two
+	// linear means back to sRGB float bytes so we can reuse toLab (which
+	// expects 0-255 sRGB) for the ΔE. This is the space the inner
+	// error-diffusion conserves, so a correctly-conserving mode lands
+	// near 0 here even when its byte-space drift_ΔE is large.
+	ilL, ilA, ilBl := toLab(linearToSrgb255(iLinR/n), linearToSrgb255(iLinG/n), linearToSrgb255(iLinB/n))
+	olL, olA, olBl := toLab(linearToSrgb255(oLinR/n), linearToSrgb255(oLinG/n), linearToSrgb255(oLinB/n))
+	driftLinDE := math.Sqrt((ilL-olL)*(ilL-olL) + (ilA-olA)*(ilA-olA) + (ilBl-olBl)*(ilBl-olBl))
 
 	// Per-cell ΔE distribution and wander_ΔE.
 	//
@@ -713,6 +775,7 @@ func computeMetrics(fx fixture, pal [][3]uint8, assigns []int32, blockScales []i
 
 	return metrics{
 		driftDE:     driftDE,
+		driftLinDE:  driftLinDE,
 		pcell:       pcell,
 		wanderDE:    wanderDE,
 		wanderClump: wanderClump,
@@ -1044,8 +1107,8 @@ func printHeader(scales []int) {
 	for i, s := range scales {
 		parts[i] = fmt.Sprintf("%5d", s)
 	}
-	fmt.Printf("  %-16s %8s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
-		"mode", "drift_ΔE", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
+	fmt.Printf("  %-16s %8s %10s %8s %8s %8s %8s   blockvar(S=%s)   maxdircorr(d=1,4)\n",
+		"mode", "drift_ΔE", "drift_lin", "wander_ΔE", "wclump", "p50_ΔE", "p99_ΔE", strings.Join(parts, ","))
 }
 
 func printRow(name string, m metrics, scales []int) {
@@ -1055,8 +1118,8 @@ func printRow(name string, m metrics, scales []int) {
 	for i, s := range scales {
 		bvParts[i] = fmt.Sprintf("%5.3f", m.blockVar[s])
 	}
-	fmt.Printf("  %-16s %8.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
-		name, m.driftDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
+	fmt.Printf("  %-16s %8.2f %10.2f %8.2f %8.3f %8.1f %8.1f   %s        %5.3f %5.3f\n",
+		name, m.driftDE, m.driftLinDE, m.wanderDE, m.wanderClump, pcellP50, pcellP99, strings.Join(bvParts, " "),
 		m.maxDirCorr[1], m.maxDirCorr[4])
 }
 
@@ -1319,6 +1382,31 @@ func toLab(r, g, b float64) (float64, float64, float64) {
 	c := colorful.Color{R: r / 255, G: g / 255, B: b / 255}
 	L, A, B := c.Lab()
 	return L * 100, A * 100, B * 100
+}
+
+// srgb8ToLinear converts an sRGB byte (0-255) to linear light in [0,1]
+// using the standard IEC 61966-2-1 transfer function. Reimplemented
+// locally because the voxel package's LUT (srgbToLinearLUT) is
+// unexported; this matches it exactly.
+func srgb8ToLinear(c uint8) float64 {
+	x := float64(c) / 255
+	if x <= 0.04045 {
+		return x / 12.92
+	}
+	return math.Pow((x+0.055)/1.055, 2.4)
+}
+
+// linearToSrgb255 is the inverse of srgb8ToLinear, returning an sRGB
+// value on the 0-255 float scale (not rounded to a byte) so the result
+// can be fed straight into toLab.
+func linearToSrgb255(x float64) float64 {
+	var s float64
+	if x <= 0.0031308 {
+		s = 12.92 * x
+	} else {
+		s = 1.055*math.Pow(x, 1/2.4) - 0.055
+	}
+	return s * 255
 }
 
 func fail(format string, args ...any) {

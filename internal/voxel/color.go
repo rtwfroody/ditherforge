@@ -3032,8 +3032,27 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 // across color clusters that drift differently.
 //
 // Exported (mirroring DizzyCorrectionPasses) so the pipeline can size
-// its progress bar to cover all the passes.
-const LocalCorrectionPasses = 3
+// its progress bar to cover all the passes. 5 passes pairs with the
+// damped γ=0.5 update (localCorrectionDamping), which converges more
+// slowly per pass than the γ=1.0 replace rule it superseded.
+const LocalCorrectionPasses = 5
+
+// localCorrectionDamping is the relaxation factor γ for the exported
+// DitherLocalCorrected. The correction update is a damped (relaxed)
+// fixed-point iteration c^{k+1} = (1-γ)·c^k + γ·spread(d^k). γ=1.0 is
+// the plain REPLACE rule (c^{k+1} = spread(d^k)); smaller γ under-relaxes
+// each step, trading more passes for stability on fixtures where a full
+// replace overshoots (e.g. bench's earth).
+//
+// γ=0.5 chosen by the tests/ditherbench sweep (γ ∈ {1.0, 0.7, 0.5, 0.3}):
+// the uniform_neutral_grey chromatic-speckle failure (correction seeds
+// pushing targets across palette-Voronoi boundaries into saturated
+// entries; p50 per-cell ΔE 8.1 → 37.6) persists at γ=1.0 and γ=0.7 but
+// vanishes at γ≤0.5, while linear-light drift stays competitive on the
+// well-behaved fixtures (bricks 0.50, pheasant 0.74, gradient 0.72).
+// γ=0.3 also fixes the speckle but needs 7 passes for slightly worse
+// drift.
+const localCorrectionDamping float32 = 0.5
 
 // DitherLocalCorrected runs dizzy with a per-cell LOCALIZED input
 // correction instead of DitherCorrected's single global mean shift.
@@ -3051,9 +3070,12 @@ const LocalCorrectionPasses = 3
 //  1. run ditherCore with the previous pass's correction seeded into
 //     errBuf (nil on pass 1), recording every dropped residual;
 //  2. spread each drop over its stranded cell's neighbors, using the
-//     exact opacity-weighted scaling the live diffusion uses, to build
-//     the NEXT pass's correction (rebuilt from scratch — the update rule
-//     is REPLACE, matching the c^{k+1} = d^k fixed-point iteration);
+//     exact opacity-weighted scaling the live diffusion uses, then apply
+//     the damped fixed-point update c^{k+1} = (1-γ)·c^k + γ·spread(d^k)
+//     to build the NEXT pass's correction. The exported entry point pins
+//     γ=1.0 (localCorrectionDamping), which collapses to the plain
+//     REPLACE rule c^{k+1} = spread(d^k); ditherLocalCorrected/
+//     DitherLocalCorrectedTuned expose γ<1 for the ditherbench sweep;
 //  3. measure global drift ΔE the same way DitherCorrected does and keep
 //     the best pass, returning early if a pass regresses.
 //
@@ -3069,6 +3091,23 @@ const LocalCorrectionPasses = 3
 // alpha leaves both the inner passes and the drift metric identical to
 // the historical area-weighted behavior.
 func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	return ditherLocalCorrected(ctx, cells, pal, palAlpha, neighbors, tracker, localCorrectionDamping, LocalCorrectionPasses)
+}
+
+// DitherLocalCorrectedTuned forwards to the unexported ditherLocalCorrected
+// with explicit damping γ and pass count. It exists solely for the
+// tests/ditherbench parameter sweep so the bench can compare relaxation
+// settings; production code should call DitherLocalCorrected, which pins
+// the tuned defaults (localCorrectionDamping, LocalCorrectionPasses).
+func DitherLocalCorrectedTuned(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
+	return ditherLocalCorrected(ctx, cells, pal, palAlpha, neighbors, tracker, damping, passes)
+}
+
+// ditherLocalCorrected is the implementation behind DitherLocalCorrected.
+// damping is the relaxation factor γ (see localCorrectionDamping) and
+// passes is the number of iterated dizzy passes. See DitherLocalCorrected's
+// doc comment for the algorithm; the only additions here are the two knobs.
+func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
 	// Empty input: no work, no division by zero downstream.
 	if len(cells) == 0 {
 		return nil, nil
@@ -3098,7 +3137,7 @@ func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 	var assigns []int32
 	bestAssigns := make([]int32, n)
 	bestDriftDE := math.Inf(1)
-	for pass := 0; pass < LocalCorrectionPasses; pass++ {
+	for pass := 0; pass < passes; pass++ {
 		passTracker := ditherPassTracker{real: tracker, offset: pass * n}
 		var drops []strandedDrop
 		var err error
@@ -3137,8 +3176,8 @@ func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 		for _, d := range drops {
 			dropMass += math.Sqrt(float64(d.e[0]*d.e[0] + d.e[1]*d.e[1] + d.e[2]*d.e[2]))
 		}
-		plog.Printf("  dizzy-local-corrected pass %d/%d: drift ΔE=%.3f, stranded=%d, dropMass=%.4f",
-			pass+1, LocalCorrectionPasses, driftDE, len(drops), dropMass)
+		plog.Printf("  dizzy-local-corrected pass %d/%d (γ=%.2f): drift ΔE=%.3f, stranded=%d, dropMass=%.4f",
+			pass+1, passes, damping, driftDE, len(drops), dropMass)
 
 		if driftDE < bestDriftDE {
 			bestDriftDE = driftDE
@@ -3148,12 +3187,11 @@ func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 			return bestAssigns, nil
 		}
 
-		if pass == LocalCorrectionPasses-1 {
+		if pass == passes-1 {
 			break
 		}
 
-		// Rebuild the correction from THIS pass's drops (replace, not
-		// accumulate): c^{k+1} = spread(d^k). Each stranded cell's
+		// Build spread(d^k) from THIS pass's drops. Each stranded cell's
 		// dropped residual is distributed over ALL its neighbors — the
 		// processed/unprocessed distinction is irrelevant across passes —
 		// mirroring exactly the opacity-weighted scaling the live
@@ -3185,7 +3223,30 @@ func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 				next[nb.Idx][2] += d.e[2] * w
 			}
 		}
-		corr = next
+
+		// Damped (relaxed) fixed-point update: c^{k+1} = (1-γ)·c^k +
+		// γ·spread(d^k). γ=1 collapses to the plain REPLACE rule
+		// (c^{k+1} = spread(d^k)) and is bit-identical to the original;
+		// γ<1 under-relaxes so a full drop no longer lands as one large
+		// per-cell seed (which could flip nearest-palette decisions and
+		// manufacture new drops), at the cost of needing more passes to
+		// reach the fixed point. On pass 1 corr is nil (c^k = 0), so the
+		// blend reduces to γ·spread — as it should for a zero prior.
+		if damping == 1.0 {
+			corr = next
+		} else {
+			inv := 1 - damping
+			for i := range next {
+				var prev [3]float32
+				if corr != nil {
+					prev = corr[i]
+				}
+				next[i][0] = inv*prev[0] + damping*next[i][0]
+				next[i][1] = inv*prev[1] + damping*next[i][1]
+				next[i][2] = inv*prev[2] + damping*next[i][2]
+			}
+			corr = next
+		}
 	}
 	return bestAssigns, nil
 }
