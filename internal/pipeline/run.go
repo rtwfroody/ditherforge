@@ -2267,6 +2267,9 @@ func (r *pipelineRun) runDither() (any, error) {
 	if ditherMode == "dizzy-corrected" {
 		ditherUnits = voxel.DizzyCorrectionPasses * len(po.Cells)
 	}
+	if ditherMode == "dizzy-local-corrected" {
+		ditherUnits = voxel.LocalCorrectionPasses * len(po.Cells)
+	}
 	stage := progress.BeginStage(r.tracker, stageNames[StageDither], true, ditherUnits+len(po.Cells))
 	defer stage.Done()
 	cells := po.Cells
@@ -2316,6 +2319,13 @@ func (r *pipelineRun) runDither() (any, error) {
 	case "dizzy-corrected":
 		neighbors := cut(vo.Neighbors)
 		assignments, derr = voxel.DitherCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
+	case "dizzy-local-corrected":
+		// Iterated dizzy dither with localized stranded-drop
+		// correction (damped γ=0.5). Shares the default 1-hop
+		// neighbor table with dizzy-corrected; beats it on
+		// multi-color models by roughly halving per-cluster drift.
+		neighbors := cut(vo.Neighbors)
+		assignments, derr = voxel.DitherLocalCorrected(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
 	case "dizzy-2hop":
 		// Single-pass dizzy with an expanded 2-hop neighbor
 		// stencil so stranded cells (no unprocessed 1-hop

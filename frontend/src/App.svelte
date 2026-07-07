@@ -69,6 +69,7 @@
     'riemersma-pair':  { thumb: thumbRiemersmaPair,  tagline: 'smoother flats'        },
     'blue-noise':      { thumb: thumbBlueNoise,      tagline: 'even grain, bounded'   },
     'dizzy-corrected': { thumb: thumbDizzy,          tagline: 'random, textured'      },
+    'dizzy-local-corrected': { thumb: thumbDizzy,    tagline: 'iterated, less drift'  },
     'floyd-steinberg': { thumb: thumbFloydSteinberg, tagline: 'classic, slight banding' },
     'none':            { thumb: thumbNone,           tagline: 'nearest color only'    },
   };

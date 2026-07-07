@@ -50,6 +50,7 @@ export const DITHER_OPTIONS = [
   { value: 'riemersma-pair',  label: 'Riemersma pair'  },
   { value: 'blue-noise',      label: 'Blue noise'      },
   { value: 'dizzy-corrected', label: 'Dizzy'           },
+  { value: 'dizzy-local-corrected', label: 'Dizzy local' },
   { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
   { value: 'none',            label: 'none'            },
 ] as const;
