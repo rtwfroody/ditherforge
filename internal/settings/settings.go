@@ -327,6 +327,15 @@ func Load(path string) (s Settings, legacyAbsoluteUnits bool, err error) {
 			sf.Settings.Stickers[i].Mode = "unfold"
 		}
 	}
+	// Migrate dither modes removed from the product (2026-07): their
+	// benchmark wins were artifacts/duplicates of surviving modes. Old
+	// files naming one silently load as the nearest surviving mode.
+	switch sf.Settings.Dither {
+	case "riemersma-pair":
+		sf.Settings.Dither = "riemersma"
+	case "dizzy-2hop", "dizzy-recover":
+		sf.Settings.Dither = "dizzy-local-corrected"
+	}
 	transformPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
 	return sf.Settings, !sf.DitherForge.SizeRelativeUnits, nil
 }

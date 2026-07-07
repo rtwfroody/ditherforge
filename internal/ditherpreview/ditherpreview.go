@@ -39,7 +39,6 @@ import (
 // mode -> card directly.
 const (
 	ModeRiemersma           = "riemersma"
-	ModeRiemersmaPair       = "riemersma-pair"
 	ModeBlueNoise           = "blue-noise"
 	ModeDizzyCorrected      = "dizzy-corrected"
 	ModeDizzyLocalCorrected = "dizzy-local-corrected"
@@ -50,7 +49,6 @@ const (
 // Modes lists the GUI dither modes in the picker's display order.
 var Modes = []string{
 	ModeRiemersma,
-	ModeRiemersmaPair,
 	ModeBlueNoise,
 	ModeDizzyCorrected,
 	ModeDizzyLocalCorrected,
@@ -61,7 +59,7 @@ var Modes = []string{
 // Tuning carries the adjustable knobs the GUI exposes as sliders. Use
 // DefaultTuning() for the pipeline's canonical values and override as needed.
 type Tuning struct {
-	RiemersmaBias float64 // Riemersma / Riemersma-pair input bias (0..1)
+	RiemersmaBias float64 // Riemersma input bias (0..1)
 	BlueNoiseTol  float64 // Blue-noise bracket tolerance (ΔE)
 	// ColorSnap is the "Color similarity threshold" (standard CIE76 ΔE). When
 	// > 0, each cell's colour is pulled toward its nearest palette colour by up
@@ -126,14 +124,11 @@ func DitherImage(ctx context.Context, img image.Image, palette [][3]uint8, mode 
 }
 
 // runMode invokes the real internal/voxel implementation for mode, wiring the
-// tuning knobs through and using the pipeline's fixed constants for the knobs
-// the GUI does not expose (RiemersmaPair cancellation lambda).
+// tuning knobs through.
 func runMode(ctx context.Context, mode string, cells []voxel.ActiveCell, pal [][3]uint8, nbrs [][]voxel.Neighbor, tuning Tuning) ([]int32, error) {
 	switch mode {
 	case ModeRiemersma:
 		return voxel.Riemersma(ctx, cells, pal, nil, nbrs, tuning.RiemersmaBias, progress.NullTracker{})
-	case ModeRiemersmaPair:
-		return voxel.RiemersmaPair(ctx, cells, pal, nil, nbrs, voxel.RiemersmaPairCancellationDefault, tuning.RiemersmaBias, progress.NullTracker{})
 	case ModeBlueNoise:
 		return voxel.BlueNoiseAdaptive(ctx, cells, pal, nil, nbrs, tuning.BlueNoiseTol, progress.NullTracker{})
 	case ModeDizzyCorrected:

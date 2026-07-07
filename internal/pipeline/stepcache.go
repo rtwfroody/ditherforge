@@ -975,10 +975,10 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// Salt: bump when the dither *algorithm* changes (settings are
 	// unchanged but cached outputs are stale). "perceptual-v1" =
-	// every dither mode (dizzy/dizzy-corrected/dizzy-2hop/dizzy-
-	// recover, floyd-steinberg, riemersma, riemersma-pair,
-	// blue-noise) moved to a CIELAB nearest-color decision with
-	// linear-light error/residual handling. "td-v1" = every mode now
+	// every dither mode (dizzy-corrected, dizzy-local-corrected,
+	// floyd-steinberg, riemersma, blue-noise) moved to a CIELAB
+	// nearest-color decision with linear-light error/residual
+	// handling. "td-v1" = every mode now
 	// opacity-weights the mix by filament TD, and DitherCorrected's
 	// drift measurement weights input and output consistently.
 	writeString(h, "td-v1")

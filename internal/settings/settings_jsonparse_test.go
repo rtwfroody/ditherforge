@@ -317,6 +317,37 @@ func TestLoadJSONScaleModeAndFallbacks(t *testing.T) {
 	}
 }
 
+// TestLoadMigratesRemovedDitherModes checks that dither modes removed from the
+// product (2026-07) silently migrate to their nearest surviving mode on load,
+// so old settings files never fail or fall back to the default.
+func TestLoadMigratesRemovedDitherModes(t *testing.T) {
+	cases := []struct{ from, want string }{
+		{"riemersma-pair", "riemersma"},
+		{"dizzy-2hop", "dizzy-local-corrected"},
+		{"dizzy-recover", "dizzy-local-corrected"},
+	}
+	for _, tc := range cases {
+		body := `{
+  "_ditherforge": {
+    "url": "https://github.com/rtwfroody/ditherforge",
+    "version": "ditherforge 0.9.8",
+    "sizeRelativeUnits": true
+  },
+  "settings": {
+    "inputFile": "/m/x.glb",
+    "dither": "` + tc.from + `"
+  }
+}`
+		s, _, err := Load(writeJSON(t, body))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", tc.from, err)
+		}
+		if s.Dither != tc.want {
+			t.Errorf("dither %q migrated to %q, want %q", tc.from, s.Dither, tc.want)
+		}
+	}
+}
+
 // TestParseCommittedSettingsFixtures guards the real settings JSON files
 // checked into tests/objects: each must Load and convert to Options without
 // error and resolve to a usable size. This catches a format drift that would

@@ -47,19 +47,17 @@ export type SplitAxis = typeof SPLIT_AXIS_OPTIONS[number]['value'];
 
 export const DITHER_OPTIONS = [
   { value: 'riemersma',       label: 'Riemersma'       },
-  { value: 'riemersma-pair',  label: 'Riemersma pair'  },
   { value: 'blue-noise',      label: 'Blue noise'      },
   { value: 'dizzy-corrected', label: 'Dizzy'           },
   { value: 'dizzy-local-corrected', label: 'Dizzy local' },
   { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
   { value: 'none',            label: 'none'            },
 ] as const;
-// Legacy mode strings still accepted by the backend (CLI / pipeline)
-// but no longer surfaced in the GUI dropdown. Keeping them in the
-// validator's value set means an old saved settings file round-trips
-// without silently falling back to the default.
-const DITHER_LEGACY_VALUES = ['dizzy-2hop', 'dizzy-recover'] as const;
-export type DitherMode = typeof DITHER_OPTIONS[number]['value'] | typeof DITHER_LEGACY_VALUES[number];
+// Removed/legacy dither strings (e.g. riemersma-pair, dizzy-2hop,
+// dizzy-recover) are migrated to a surviving mode by the backend
+// settings loader (internal/settings.Load), so the frontend never
+// sees them.
+export type DitherMode = typeof DITHER_OPTIONS[number]['value'];
 
 export const SIZE_MODE_OPTIONS = [
   { value: 'size',  label: 'Size'  },
@@ -84,7 +82,7 @@ export type StickerMode = typeof STICKER_MODE_OPTIONS[number]['value'];
 export const SPLIT_ORIENTATION_VALUES = SPLIT_ORIENTATION_OPTIONS.map(o => o.value);
 export const SPLIT_CONNECTOR_VALUES = SPLIT_CONNECTOR_OPTIONS.map(o => o.value);
 export const SPLIT_AXIS_VALUES = SPLIT_AXIS_OPTIONS.map(o => o.value);
-export const DITHER_VALUES = [...DITHER_OPTIONS.map(o => o.value), ...DITHER_LEGACY_VALUES];
+export const DITHER_VALUES = DITHER_OPTIONS.map(o => o.value);
 export const SIZE_MODE_VALUES = SIZE_MODE_OPTIONS.map(o => o.value);
 export const BASE_COLOR_MODE_VALUES = BASE_COLOR_MODE_OPTIONS.map(o => o.value);
 export const STICKER_MODE_VALUES = STICKER_MODE_OPTIONS.map(o => o.value);
