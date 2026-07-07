@@ -275,7 +275,7 @@ func main() {
 		// cluster against dizzy's output, which is the un-corrected
 		// baseline most likely to surface the multimodal-bias effect.
 		if dizzyAssigns, ok := modeAssigns["dizzy"]; ok {
-			fmt.Println("  per-cluster drift (cluster center = nearest palette in input space, dizzy output):")
+			fmt.Println("  per-cluster drift, linear-light means (cluster center = nearest palette in input space, dizzy output):")
 			printClusterDrifts(fx, pal, dizzyAssigns, cellCluster)
 		}
 		// Also dizzy-corrected, since that's what auto-mode picks on
@@ -1284,12 +1284,19 @@ func nearestPaletteIdx(color [3]uint8, pal [][3]uint8) int {
 
 // printClusterDrifts emits one row per cluster: the palette color
 // that defines the cluster, the cell count assigned to it, and the
-// drift (avg output - avg input) restricted to those cells, in
-// per-channel ΔRGB plus Lab ΔE. If clusters drift in the same
-// direction with similar magnitude, global correction is as good
-// as per-cluster could be. If they drift in different directions
-// or differ greatly in magnitude, segmented correction has room
-// to improve.
+// drift (avg output - avg input) restricted to those cells. If
+// clusters drift in the same direction with similar magnitude, global
+// correction is as good as per-cluster could be. If they drift in
+// different directions or differ greatly in magnitude, segmented
+// correction has room to improve.
+//
+// All averaging is in LINEAR light (the space the error-diffusion
+// modes conserve; see drift_lin_ΔE at the top of this file). For
+// display, the two linear means are re-encoded to sRGB: ΔsRGB is the
+// per-channel difference of the encoded means (0-255 scale) and ΔE is
+// their Lab distance — the drift the eye would see in that cluster.
+// The cluster partition itself (nearestPaletteIdx over input bytes) is
+// just a labeling and is unchanged.
 func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster []int) {
 	type bucket struct {
 		count            int
@@ -1301,13 +1308,13 @@ func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster
 		k := cellCluster[i]
 		b := &buckets[k]
 		b.count++
-		b.iR += float64(c.Color[0])
-		b.iG += float64(c.Color[1])
-		b.iB += float64(c.Color[2])
+		b.iR += srgb8ToLinear(c.Color[0])
+		b.iG += srgb8ToLinear(c.Color[1])
+		b.iB += srgb8ToLinear(c.Color[2])
 		a := assigns[i]
-		b.oR += float64(pal[a][0])
-		b.oG += float64(pal[a][1])
-		b.oB += float64(pal[a][2])
+		b.oR += srgb8ToLinear(pal[a][0])
+		b.oG += srgb8ToLinear(pal[a][1])
+		b.oB += srgb8ToLinear(pal[a][2])
 	}
 	totalCells := 0
 	for _, b := range buckets {
@@ -1320,16 +1327,20 @@ func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster
 			continue
 		}
 		n := float64(b.count)
-		avgIn := [3]uint8{
-			uint8(b.iR / n),
-			uint8(b.iG / n),
-			uint8(b.iB / n),
-		}
-		dR := (b.oR - b.iR) / n
-		dG := (b.oG - b.iG) / n
-		dB := (b.oB - b.iB) / n
-		iL, iA, iBl := toLab(b.iR/n, b.iG/n, b.iB/n)
-		oL, oA, oBl := toLab(b.oR/n, b.oG/n, b.oB/n)
+		// Re-encode the linear means to sRGB (0-255 floats) for display
+		// and for the Lab ΔE.
+		inR := linearToSrgb255(b.iR / n)
+		inG := linearToSrgb255(b.iG / n)
+		inB := linearToSrgb255(b.iB / n)
+		outR := linearToSrgb255(b.oR / n)
+		outG := linearToSrgb255(b.oG / n)
+		outB := linearToSrgb255(b.oB / n)
+		avgIn := [3]uint8{uint8(inR), uint8(inG), uint8(inB)}
+		dR := outR - inR
+		dG := outG - inG
+		dB := outB - inB
+		iL, iA, iBl := toLab(inR, inG, inB)
+		oL, oA, oBl := toLab(outR, outG, outB)
 		dE := math.Sqrt((iL-oL)*(iL-oL) + (iA-oA)*(iA-oA) + (iBl-oBl)*(iBl-oBl))
 		// Cell count alone is misleading — palette-Voronoi clustering
 		// in RGB Euclidean space biases mid-luminance pixels toward
@@ -1339,7 +1350,7 @@ func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster
 		// visually grey," it means "97% have palette Grey as their
 		// nearest RGB neighbor" — which can include warm-brown
 		// pixels that the eye reads as brick.
-		fmt.Printf("    cluster #%02X%02X%02X (%5.1f%% cells, avg in #%02X%02X%02X): ΔRGB=(%+6.2f,%+6.2f,%+6.2f)  ΔE=%5.2f\n",
+		fmt.Printf("    cluster #%02X%02X%02X (%5.1f%% cells, avg in #%02X%02X%02X): ΔsRGB=(%+6.2f,%+6.2f,%+6.2f)  ΔE=%5.2f\n",
 			pal[k][0], pal[k][1], pal[k][2],
 			100*n/float64(totalCells),
 			avgIn[0], avgIn[1], avgIn[2],
