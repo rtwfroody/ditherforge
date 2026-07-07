@@ -1,6 +1,13 @@
 # Filament translucency (TD): why the current compensation falls short, and the corrected model
 
-Status: analysis / design notes (2026-07-03). No code changes yet.
+Status: step 2 of "Suggested order of work" implemented (2026-07-06). The
+N-crossing + infill-terminator effective-color model ships as an opt-in
+alternative selected by the settings `tdModel="layered"` (with `shellThickness`
+and `infillColor`); `voxel.EffectivePalette` builds the effective palette and
+the dither quantizes/diffuses against it with plain area weighting. The legacy
+area-compensation model (`tdModel=""`/`"area"`) remains the default pending the
+two-swatch calibration/validation of steps 3-4. Steps 1, 3, and 4 are not yet
+done.
 
 ## Current implementation
 

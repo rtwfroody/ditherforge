@@ -47,6 +47,9 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		AlphaWrap:                            s.AlphaWrap,
 		Layer0AdhesionXYScale:                float32(s.Layer0AdhesionXYScale),
 		UpperLayerXYScale:                    float32(s.UpperLayerXYScale),
+		TDModel:                              s.TDModel,
+		ShellThicknessMM:                     parseF32(s.ShellThickness, 0.84),
+		InfillColor:                          parseHexRGB(s.InfillColor, [3]uint8{255, 255, 255}),
 	}
 
 	// ObjectIndex: nil → -1 (all objects), matching the frontend.
@@ -174,6 +177,20 @@ func tdOr(td float32) float32 {
 		return td
 	}
 	return palette.DefaultTD
+}
+
+// parseHexRGB parses a "#RRGGBB" string into an sRGB triple, returning def on
+// empty or malformed input (used for the layered TD model's infill color).
+func parseHexRGB(s string, def [3]uint8) [3]uint8 {
+	s = strings.TrimSpace(s)
+	if !validHex(s) {
+		return def
+	}
+	v, err := strconv.ParseUint(s[1:], 16, 32)
+	if err != nil {
+		return def
+	}
+	return [3]uint8{uint8(v >> 16), uint8(v >> 8), uint8(v)}
 }
 
 // validHex reports whether s is a "#RRGGBB" hex color.

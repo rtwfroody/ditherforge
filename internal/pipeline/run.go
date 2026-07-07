@@ -2279,8 +2279,17 @@ func (r *pipelineRun) runDither() (any, error) {
 	// unit area (see voxel.AlphaFromTD). Nil/uniform alpha is identity.
 	// HonorTD (default on) gates the whole effect: when off, palAlpha stays
 	// nil and every mode reverts to the plain area-weighted mix.
+	//
+	// The "layered" model instead pre-transforms the palette into effective
+	// (infill-aware) colors and dithers against those with plain area
+	// weighting (palAlpha nil); see voxel.EffectivePalette. It feeds ONLY the
+	// dither kernels below — assignments are palette indices either way, so
+	// counting, ditherOutput, and export colors keep using po.Palette.
 	var palAlpha []float32
-	if r.opts.HonorTD {
+	layeredTD := r.opts.HonorTD && r.opts.TDModel == "layered"
+	if layeredTD {
+		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, r.opts.InfillColor)
+	} else if r.opts.HonorTD {
 		palAlpha = voxel.PaletteAlphas(po.PaletteTDs)
 	}
 	tDither := time.Now()
@@ -2372,7 +2381,9 @@ func (r *pipelineRun) runDither() (any, error) {
 	}
 	sort.Slice(order, func(a, b int) bool { return counts[order[a]] > counts[order[b]] })
 	for _, i := range order {
-		c := pal[i]
+		// Log the nominal filament color (the assignment is a palette-slot
+		// index); pal may hold layered-model effective colors here.
+		c := po.Palette[i]
 		plog.Printf("    #%02X%02X%02X: %d cells (%.1f%%)", c[0], c[1], c[2], counts[i], 100*float64(counts[i])/float64(total))
 	}
 	// The minislicer pipeline doesn't need flood-fill patches:

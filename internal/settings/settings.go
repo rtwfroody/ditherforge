@@ -128,8 +128,19 @@ type Settings struct {
 	NoCellMerge         bool                `json:"noCellMerge"`
 	NoSimplify          bool                `json:"noSimplify"`
 	HonorTD             bool                `json:"honorTD"`
-	ColorAwareCells     bool                `json:"colorAwareCells"`
-	ColorRegionContrast float64             `json:"colorRegionContrast"`
+	// TDModel selects the translucency-compensation model used when HonorTD is
+	// on: "" (or "area") = legacy opacity-weighted area mix; "layered" = the
+	// infill-aware N-crossing model. Default "" (area). See
+	// docs/td-translucency-model.md.
+	TDModel string `json:"tdModel,omitempty"`
+	// ShellThickness is the printed wall thickness in mm (string-numeric like
+	// layerHeight), consumed only by the layered TD model. Default "0.84".
+	ShellThickness string `json:"shellThickness,omitempty"`
+	// InfillColor is the "#RRGGBB" color of the infill filament the layered TD
+	// model blends translucent colors toward. Default "#FFFFFF".
+	InfillColor         string  `json:"infillColor,omitempty"`
+	ColorAwareCells     bool    `json:"colorAwareCells"`
+	ColorRegionContrast float64 `json:"colorRegionContrast"`
 	// RegionDither (advanced) confines the dither to colour regions so a
 	// grey region's diffused error can't bleed into an adjacent solid
 	// black/white region. Independent of colorAwareCells; off by default.
@@ -201,6 +212,8 @@ func Default() Settings {
 		NoCellMerge:           false,
 		NoSimplify:            false,
 		HonorTD:               true,
+		ShellThickness:        "0.84",
+		InfillColor:           "#FFFFFF",
 		ColorAwareCells:       true,
 		ColorRegionContrast:   20,
 		RegionDither:          false,

@@ -998,6 +998,17 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// unconditionally (not only when true) so the false key can't alias a
 	// legacy entry computed when TD was always honored.
 	writeBool(h, opts.HonorTD)
+	// Layered TD model: fold its inputs into the key ONLY when it's active, so
+	// an inactive-model key is byte-identical to a pre-feature key (existing
+	// caches stay valid). LayerHeight matters here because layered dither
+	// decisions depend on it directly (elsewhere it only reaches voxelize via
+	// derived cell Z sizes).
+	if opts.HonorTD && opts.TDModel == "layered" {
+		writeString(h, "tdmodel-layered-v1")
+		writeFloat32(h, opts.LayerHeight)
+		writeFloat32(h, opts.ShellThicknessMM)
+		h.Write(opts.InfillColor[:])
+	}
 }
 
 // hashClipSettings fingerprints the clip-stage knobs. Beyond these the

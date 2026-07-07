@@ -74,6 +74,19 @@ type Options struct {
 	// --honor-td). When false, palette alphas are forced nil and every
 	// dither mode reverts to the plain area-weighted mix (TD ignored).
 	HonorTD bool `json:"HonorTD"`
+	// TDModel selects how HonorTD's translucency compensation works: "" (or
+	// "area") = the legacy opacity-weighted area mix (AlphaFromTD/PaletteAlphas);
+	// "layered" = the infill-aware N-crossing Beer–Lambert model that quantizes
+	// the dither against effective colors (voxel.EffectivePalette). Only
+	// consulted when HonorTD is true. See docs/td-translucency-model.md.
+	TDModel string `json:"TDModel,omitempty"`
+	// ShellThicknessMM is the printed wall thickness (mm) the layered TD model
+	// integrates the infill leak over; ignored unless TDModel == "layered".
+	ShellThicknessMM float32 `json:"ShellThicknessMM,omitempty"`
+	// InfillColor is the sRGB color of the filament printing the infill/inner
+	// walls, which the layered TD model blends toward for translucent
+	// filaments; ignored unless TDModel == "layered". Defaults to white.
+	InfillColor [3]uint8 `json:"InfillColor,omitempty"`
 	// ColorAwareCells segments each slab's surface shell by colour and
 	// tiles each monochrome region independently, so cell boundaries land
 	// on colour boundaries (a checkerboard tiles into pure black / white

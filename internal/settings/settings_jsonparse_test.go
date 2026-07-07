@@ -77,6 +77,9 @@ func TestLoadJSONKitchenSink(t *testing.T) {
     "noCellMerge": true,
     "noSimplify": true,
     "honorTD": true,
+    "tdModel": "layered",
+    "shellThickness": "0.96",
+    "infillColor": "#010203",
     "colorAwareCells": true,
     "colorRegionContrast": 25,
     "stats": true,
@@ -188,6 +191,17 @@ func TestLoadJSONKitchenSink(t *testing.T) {
 	}
 	if opts.ColorRegionContrast != 25 {
 		t.Errorf("ColorRegionContrast = %v, want 25", opts.ColorRegionContrast)
+	}
+
+	// Layered TD model fields.
+	if opts.TDModel != "layered" {
+		t.Errorf("TDModel = %q, want layered", opts.TDModel)
+	}
+	if opts.ShellThicknessMM != 0.96 {
+		t.Errorf("ShellThicknessMM = %v, want 0.96", opts.ShellThicknessMM)
+	}
+	if opts.InfillColor != [3]uint8{1, 2, 3} {
+		t.Errorf("InfillColor = %v, want [1 2 3]", opts.InfillColor)
 	}
 
 	// Alpha-wrap.

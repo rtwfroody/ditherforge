@@ -212,6 +212,10 @@
   let noCellMerge = $state(false);
   let noSimplify = $state(false);
   let honorTD = $state(true);
+  // Translucency model: '' (area compensation, legacy) or 'layered' (infill-aware).
+  let tdModel = $state('');
+  let shellThickness = $state('0.84');
+  let infillColor = $state('#FFFFFF');
   let colorAwareCells = $state(true);
   let colorRegionContrast = $state(20);
   let committedColorRegionContrast = $state(20);
@@ -1463,6 +1467,9 @@
       noCellMerge,
       noSimplify,
       honorTD,
+      tdModel,
+      shellThickness: String(shellThickness),
+      infillColor,
       colorAwareCells,
       colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
       regionDither,
@@ -1676,6 +1683,9 @@
     { key: 'noCellMerge',                       validate: pickBool,                                          apply: (v) => { noCellMerge = v; } },
     { key: 'noSimplify',                      validate: pickBool,                                          apply: (v) => { noSimplify = v; } },
     { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
+    { key: 'tdModel',                         validate: pickString,                                        apply: (v) => { tdModel = v; } },
+    { key: 'shellThickness',                  validate: pickString,                                        apply: (v) => { shellThickness = v; } },
+    { key: 'infillColor',                     validate: pickString,                                        apply: (v) => { infillColor = v; } },
     { key: 'colorAwareCells',                 validate: pickBool,                                          apply: (v) => { colorAwareCells = v; } },
     { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
     { key: 'regionDither',                    validate: pickBool,                                          apply: (v) => { regionDither = v; } },
@@ -2740,6 +2750,39 @@
                   </HelpTip>
                 </label>
                 <p class="w-full text-xs text-muted-foreground">Gives translucent filaments more area so they aren't lost under opaque ones.</p>
+                {#if honorTD}
+                  <div class="ml-1 pl-3 border-l border-border space-y-3">
+                    <div class="flex items-center gap-2 text-sm">
+                      <span>Translucency model</span>
+                      <HelpTip>
+                        "Area compensation" is the legacy opacity-weighted mix (gives translucent filaments more area). "Layered (infill-aware)" instead estimates the color the eye actually sees once light leaks through the finite shell into the infill filament, and dithers against those effective colors. See docs/td-translucency-model.md.
+                      </HelpTip>
+                      <select
+                        class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm ml-auto"
+                        bind:value={tdModel}
+                      >
+                        <option value="">Area compensation</option>
+                        <option value="layered">Layered (infill-aware)</option>
+                      </select>
+                    </div>
+                    {#if tdModel === 'layered'}
+                      <div class="flex items-center gap-2 text-sm">
+                        <span>Shell thickness (mm)</span>
+                        <HelpTip>
+                          Printed wall thickness the light travels through before reaching infill. Thicker shells leak less infill color. Should match the wall/shell thickness you slice with.
+                        </HelpTip>
+                        <Input class="ml-auto w-24" type="number" step={0.1} min={0} bind:value={shellThickness} />
+                      </div>
+                      <div class="flex items-center gap-2 text-sm">
+                        <span>Infill color</span>
+                        <HelpTip>
+                          The filament that prints the infill/inner walls. Translucent surface colors wash toward this. White maximizes chroma headroom.
+                        </HelpTip>
+                        <input type="color" class="ml-auto h-9 w-12 rounded-md border border-input bg-background" bind:value={infillColor} />
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
               </div>
             </SettingsSection>
           </div>
