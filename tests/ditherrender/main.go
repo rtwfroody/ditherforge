@@ -44,6 +44,7 @@ import (
 
 	"github.com/rtwfroody/ditherforge/internal/debugrender"
 	"github.com/rtwfroody/ditherforge/internal/pipeline"
+	"github.com/rtwfroody/ditherforge/tests/ballots"
 	"github.com/rtwfroody/ditherforge/tests/inventories"
 	"github.com/rtwfroody/ditherforge/tests/percep"
 )
@@ -56,6 +57,7 @@ func main() {
 	numColors := flag.Int("num-colors", 6, "number of palette colors")
 	outDir := flag.String("out", "", "directory to dump rendered + blurred PNGs (default: none)")
 	sigmasArg := flag.String("sigmas-mm", "0.8,3.2", "comma-separated physical blur scales in mm")
+	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (one per view/σ, using mean Lab ΔE, group \"3d\") to this JSON path for tests/ditherrank. Only modes that ran without error are included.")
 	flag.Parse()
 
 	modes := splitTrim(*modesArg)
@@ -132,6 +134,13 @@ func main() {
 	}
 	summary := make(map[string][]acc, len(modes))
 
+	// renderScores[viewName][sigmaIdx][mode] = mean Lab ΔE, collected
+	// only when -ballots is set. One ballot per (view, σ) is written at
+	// the end; only modes that ran without error contribute, so ballots
+	// are partial by construction.
+	modelBase := strings.TrimSuffix(filepath.Base(*model), filepath.Ext(*model))
+	renderScores := map[string]map[int]map[string]float64{}
+
 	printHeader(sigmasMM)
 
 	for _, mode := range modes {
@@ -181,6 +190,15 @@ func main() {
 				ditBlur := ditP.Blur(sigPx)
 				mean, p99, _ := percep.MeanLabDE(refBlur, ditBlur)
 				cols[si] = sigmaResult{sigPx: sigPx, mean: mean, p99: p99}
+				if *ballotsPath != "" {
+					if renderScores[v.Name] == nil {
+						renderScores[v.Name] = map[int]map[string]float64{}
+					}
+					if renderScores[v.Name][si] == nil {
+						renderScores[v.Name][si] = map[string]float64{}
+					}
+					renderScores[v.Name][si][mode] = mean
+				}
 				a := &summary[mode][si]
 				a.meanSum += mean
 				a.p99Sum += p99
@@ -203,6 +221,31 @@ func main() {
 			}
 		}
 		printRow(mode, "AVG", math.NaN(), sumCols)
+	}
+
+	if *ballotsPath != "" {
+		var bs []ballots.Ballot
+		for _, v := range views {
+			byField, ok := renderScores[v.Name]
+			if !ok {
+				continue
+			}
+			for si, smm := range sigmasMM {
+				scores, ok := byField[si]
+				if !ok || len(scores) == 0 {
+					continue
+				}
+				bs = append(bs, ballots.Ballot{
+					Voter:  fmt.Sprintf("render/%s/%s/%gmm", modelBase, v.Name, smm),
+					Group:  "3d",
+					Scores: scores,
+				})
+			}
+		}
+		if err := ballots.WriteFile(*ballotsPath, bs); err != nil {
+			fail("writing ballots: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %d ballots to %s\n", len(bs), *ballotsPath)
 	}
 }
 

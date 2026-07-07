@@ -82,6 +82,7 @@ import (
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
+	"github.com/rtwfroody/ditherforge/tests/ballots"
 	"github.com/rtwfroody/ditherforge/tests/inventories"
 	"github.com/rtwfroody/ditherforge/tests/percep"
 )
@@ -107,6 +108,7 @@ func main() {
 	outDir := flag.String("out", "", "directory to write per-(fixture,mode) output PNGs (default: none)")
 	onlyFixture := flag.String("fixture", "", "run only this fixture (substring match); default: all")
 	onlyMode := flag.String("mode", "", "run only this mode (substring match); default: all")
+	ballotsPath := flag.String("ballots", "", "write perceptual ranked ballots (pcp2/pcp8 per fixture, group \"2d\") to this JSON path for tests/ditherrank. Honors -fixture/-mode: only fixtures and modes that actually ran land in the ballots.")
 	flag.Parse()
 
 	if *outDir != "" {
@@ -197,6 +199,11 @@ func main() {
 
 	inv := inventories.Panchroma()
 
+	// One ballot per (fixture, pcp-scale) when -ballots is set. Scores
+	// are lower-is-better mean Lab ΔE; only modes that ran without error
+	// are included, so a ballot is partial by construction.
+	var allBallots []ballots.Ballot
+
 	for _, fx := range fixtures {
 		fmt.Printf("=== %s (%dx%d, %d opaque cells) ===\n", fx.name, fx.width, fx.height, len(fx.cells))
 		// Use the production scorer with chroma weighting for parity
@@ -258,6 +265,8 @@ func main() {
 		}
 		wg.Wait()
 		modeAssigns := make(map[string][]int32, len(modes))
+		pcp2Scores := make(map[string]float64, len(modes))
+		pcp8Scores := make(map[string]float64, len(modes))
 		for i, m := range modes {
 			r := results[i]
 			if r.err != nil {
@@ -266,12 +275,21 @@ func main() {
 			}
 			printRow(m.name, r.met, blockScales)
 			modeAssigns[m.name] = r.assigns
+			pcp2Scores[m.name] = r.met.percep2
+			pcp8Scores[m.name] = r.met.percep8
 			if *outDir != "" {
 				path := filepath.Join(*outDir, fmt.Sprintf("%s.%s.png", fx.name, m.name))
 				if werr := writeOutputPNG(path, fx, pal, r.assigns); werr != nil {
 					fmt.Printf("    write %s: %v\n", path, werr)
 				}
 			}
+		}
+
+		if *ballotsPath != "" {
+			allBallots = append(allBallots,
+				ballots.Ballot{Voter: "bench/" + fx.name + "/pcp2", Group: "2d", Scores: pcp2Scores},
+				ballots.Ballot{Voter: "bench/" + fx.name + "/pcp8", Group: "2d", Scores: pcp8Scores},
+			)
 		}
 
 		// Palette-assignment distribution: shows what proportion of
@@ -308,6 +326,13 @@ func main() {
 			printClusterDrifts(fx, pal, dlcAssigns, cellCluster)
 		}
 		fmt.Println()
+	}
+
+	if *ballotsPath != "" {
+		if err := ballots.WriteFile(*ballotsPath, allBallots); err != nil {
+			fail("writing ballots: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %d ballots to %s\n", len(allBallots), *ballotsPath)
 	}
 }
 
@@ -1338,9 +1363,9 @@ func nearestPaletteIdx(color [3]uint8, pal [][3]uint8) int {
 // just a labeling and is unchanged.
 func printClusterDrifts(fx fixture, pal [][3]uint8, assigns []int32, cellCluster []int) {
 	type bucket struct {
-		count            int
-		iR, iG, iB       float64
-		oR, oG, oB       float64
+		count      int
+		iR, iG, iB float64
+		oR, oG, oB float64
 	}
 	buckets := make([]bucket, len(pal))
 	for i, c := range fx.cells {
