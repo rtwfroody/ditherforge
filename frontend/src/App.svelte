@@ -2013,8 +2013,19 @@
     // scattered per-variable resets to forget. Input geometry is preserved
     // (run.input) so the input viewer keeps showing the current model while
     // it reprocesses; a new input-mesh event for this run overwrites it.
+    // The previous output is carried forward as this run's *preview* (never
+    // finalUrl — export/picking stay disabled): the backend only emits
+    // output-preview-mesh when a geometry stage recomputes (cache miss), so
+    // on a warm-geometry re-run (e.g. a colour-only change) it expects the
+    // old output to stay on screen instead of flashing back to blank. The
+    // progress overlay signals staleness while the run is in flight, and the
+    // old /mesh/ blob stays valid until the backend stores its replacement.
     const id = ++runId;
-    run = { id, phase: 'running', stages: [], error: '', input: { ...run.input }, output: {} };
+    run = {
+      id, phase: 'running', stages: [], error: '',
+      input: { ...run.input },
+      output: { previewUrl: run.output.finalUrl ?? run.output.previewUrl },
+    };
     inputError = '';
     // The action bar shows "Recomputing…" from run.phase; no transient line.
     statusMessage = '';
