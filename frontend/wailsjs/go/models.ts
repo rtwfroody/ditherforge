@@ -440,6 +440,8 @@ export namespace settings {
 	    alphaWrap?: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
+	    fwnDetailXY: string;
+	    fwnDetailZ: string;
 	    layer0AdhesionXYScale: number;
 	    upperLayerXYScale: number;
 	    splitEnabled: boolean;
@@ -502,6 +504,8 @@ export namespace settings {
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
+        this.fwnDetailXY = source["fwnDetailXY"];
+        this.fwnDetailZ = source["fwnDetailZ"];
 	        this.layer0AdhesionXYScale = source["layer0AdhesionXYScale"];
 	        this.upperLayerXYScale = source["upperLayerXYScale"];
 	        this.splitEnabled = source["splitEnabled"];

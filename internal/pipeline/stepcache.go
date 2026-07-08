@@ -674,6 +674,11 @@ type loadSettings struct {
 	// (XY comes from NozzleDiameter, Z from LayerHeight). Hashed only in
 	// fwn mode — see the cache-compat note in hashLoadSettings.
 	LayerHeight float32
+	// FWNDetailXY and FWNDetailZ are the fwn-only per-axis grid-pitch
+	// overrides (mm; 0 = auto). Hashed only in fwn mode — see the
+	// cache-compat note in hashLoadSettings.
+	FWNDetailXY float32
+	FWNDetailZ  float32
 }
 
 // effectiveMergeCells reports whether the Clip stage merges same-color
@@ -761,6 +766,8 @@ func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 		NozzleDiameter:  opts.NozzleDiameter,
 		NoSimplify:      opts.NoSimplify,
 		LayerHeight:     opts.LayerHeight,
+		FWNDetailXY:     opts.FWNDetailXY,
+		FWNDetailZ:      opts.FWNDetailZ,
 	}
 	// Cache-compat contract: the mode was once a bare AlphaWrap bool, so
 	// "none" must reproduce the old false byte and "alphawrap" the old true
@@ -773,10 +780,14 @@ func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeFloat32(h, v.NozzleDiameter)
 	writeBool(h, v.NoSimplify)
 	if v.MeshRepair == RepairFWN {
-		writeString(h, "repair-fwn-v1")
-		// LayerHeight entered the fwn auto-pitch after the v1 marker
-		// shipped; appending it here only changes fwn-mode keys.
+		writeString(h, "repair-fwn-v2")
+		// LayerHeight drives the auto Z pitch; FWNDetailXY/FWNDetailZ are
+		// the fwn-only per-axis overrides (v2 replaced the old isotropic
+		// AlphaWrapAlpha override). These writes are inside the fwn-only
+		// block, so none/alphawrap keys stay byte-identical.
 		writeFloat32(h, v.LayerHeight)
+		writeFloat32(h, v.FWNDetailXY)
+		writeFloat32(h, v.FWNDetailZ)
 	}
 }
 

@@ -86,6 +86,8 @@ func TestLoadJSONKitchenSink(t *testing.T) {
     "alphaWrap": true,
     "alphaWrapAlpha": "0.5",
     "alphaWrapOffset": "0.03",
+    "fwnDetailXY": "0.3",
+    "fwnDetailZ": "0.15",
     "layer0AdhesionXYScale": 3,
     "upperLayerXYScale": 1.5,
     "splitEnabled": true,
@@ -207,6 +209,10 @@ func TestLoadJSONKitchenSink(t *testing.T) {
 	// "alphawrap", and the alpha/offset knobs still parse.
 	if opts.MeshRepair != "alphawrap" || opts.AlphaWrapAlpha != 0.5 || opts.AlphaWrapOffset != 0.03 {
 		t.Errorf("mesh-repair = %v/%v/%v", opts.MeshRepair, opts.AlphaWrapAlpha, opts.AlphaWrapOffset)
+	}
+	// FWN per-axis detail overrides map through independently of repair mode.
+	if opts.FWNDetailXY != 0.3 || opts.FWNDetailZ != 0.15 {
+		t.Errorf("fwn detail = %v/%v, want 0.3/0.15", opts.FWNDetailXY, opts.FWNDetailZ)
 	}
 	if opts.Layer0AdhesionXYScale != 3 || opts.UpperLayerXYScale != 1.5 {
 		t.Errorf("XY scales = %v/%v", opts.Layer0AdhesionXYScale, opts.UpperLayerXYScale)

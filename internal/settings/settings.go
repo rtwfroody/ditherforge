@@ -163,6 +163,10 @@ type Settings struct {
 	AlphaWrap       bool   `json:"alphaWrap,omitempty"`
 	AlphaWrapAlpha  string `json:"alphaWrapAlpha"`
 	AlphaWrapOffset string `json:"alphaWrapOffset"`
+	// FWN remesh per-axis grid-pitch overrides (mm; "" = auto — XY from
+	// nozzle diameter, Z from layer height). Consulted only in "fwn" mode.
+	FWNDetailXY string `json:"fwnDetailXY"`
+	FWNDetailZ  string `json:"fwnDetailZ"`
 	// Voxel-grid XY multipliers. See Default for the values missing-from-JSON
 	// keys are filled with on load.
 	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
@@ -231,6 +235,8 @@ func Default() Settings {
 		AlphaWrap:             false,
 		AlphaWrapAlpha:        "",
 		AlphaWrapOffset:       "",
+		FWNDetailXY:           "",
+		FWNDetailZ:            "",
 		Layer0AdhesionXYScale: 2,
 		UpperLayerXYScale:     1.25,
 		SplitEnabled:          false,

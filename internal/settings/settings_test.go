@@ -177,6 +177,8 @@ func nonDefaultSettings() Settings {
 		MeshRepair:            "fwn",
 		AlphaWrapAlpha:        "0.8",
 		AlphaWrapOffset:       "0.04",
+		FWNDetailXY:           "0.3",
+		FWNDetailZ:            "0.15",
 		Layer0AdhesionXYScale: 3.5,
 		UpperLayerXYScale:     0.7,
 		SplitEnabled:          true,

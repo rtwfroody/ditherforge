@@ -171,12 +171,15 @@ type Options struct {
 	// RepairAlphaWrap (CGAL alpha wrap, internal/alphawrap). "" == none.
 	MeshRepair string
 	// AlphaWrapAlpha is the alpha-wrap probe radius in RepairAlphaWrap
-	// mode (mm; 0 = auto = NozzleDiameter). In RepairFWN mode it is the
-	// "Detail size" override for the winding-number grid pitch: when > 0
-	// it forces an isotropic pitch on all three axes, and when 0 the grid
-	// is anisotropic — XY from NozzleDiameter, Z from LayerHeight.
+	// mode (mm; 0 = auto = NozzleDiameter). Consulted only in alpha-wrap
+	// mode — the fwn path uses FWNDetailXY/FWNDetailZ instead.
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32 // mm; alpha-wrap surface offset, 0 = auto (alpha / 30). Unused by FWN.
+	// FWNDetailXY and FWNDetailZ override the RepairFWN grid pitch per axis
+	// (mm; 0 = auto — XY from NozzleDiameter, Z from LayerHeight). Each axis
+	// is independently overridable; they are ignored outside fwn mode.
+	FWNDetailXY float32
+	FWNDetailZ  float32
 	// Layer0AdhesionXYScale multiplies the layer-0 minimum feature
 	// size — the printer-profile InitialLayerLineWidth when a profile
 	// is resolved, else the bare nozzle diameter. >1 enlarges first-

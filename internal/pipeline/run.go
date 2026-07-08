@@ -1074,15 +1074,15 @@ func (r *pipelineRun) runLoad() (any, error) {
 		case RepairFWN:
 			// Anisotropic auto pitch: XY resolves to the nozzle diameter,
 			// Z to the layer height, so the remesh grid matches the
-			// printer's feature size on each axis. An explicit "Detail
-			// size" override (AlphaWrapAlpha) is isotropic — it forces the
-			// same pitch on all three axes.
-			var pitchXY, pitchZ float32
-			if r.opts.AlphaWrapAlpha > 0 {
-				pitchXY = r.opts.AlphaWrapAlpha
-				pitchZ = r.opts.AlphaWrapAlpha
-			} else {
+			// printer's feature size on each axis. FWNDetailXY/FWNDetailZ
+			// override each axis independently (mm; 0 = auto). LayerHeight
+			// falls back to the nozzle diameter when it is not positive.
+			pitchXY := r.opts.FWNDetailXY
+			if pitchXY <= 0 {
 				pitchXY = r.opts.NozzleDiameter
+			}
+			pitchZ := r.opts.FWNDetailZ
+			if pitchZ <= 0 {
 				pitchZ = r.opts.LayerHeight
 				if pitchZ <= 0 {
 					pitchZ = r.opts.NozzleDiameter

@@ -237,8 +237,12 @@
   // initializer literal 'none', which makes svelte-check flag the
   // `meshRepair !== 'none'` comparison as always-false. String sidesteps it.
   let meshRepair = $state('none');
-  let alphaWrapAlpha = $state('');   // mm; '' = auto. Detail size / grid pitch. For fwn, auto is anisotropic (nozzle XY / layer Z); a value forces one isotropic pitch. For alphawrap, auto = nozzle diameter.
+  let alphaWrapAlpha = $state('');   // mm; '' = auto (nozzle diameter). Alpha-wrap probe radius only.
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30). Alpha-wrap surface offset only.
+  // FWN remesh per-axis grid-pitch overrides (mm; '' = auto — XY from nozzle
+  // diameter, Z from layer height). Consulted only in fwn mode.
+  let fwnDetailXY = $state('');
+  let fwnDetailZ = $state('');
   // Layer-0 voxel-XY multiplier for bed adhesion. 1 = no enlargement;
   // higher = bigger first-layer color blobs that stick better.
   // Backend treats 0/negative as "use built-in default".
@@ -1484,6 +1488,8 @@
       meshRepair,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
+      fwnDetailXY: String(fwnDetailXY),
+      fwnDetailZ: String(fwnDetailZ),
       layer0AdhesionXYScale: useC ? committedLayer0AdhesionXYScale : layer0AdhesionXYScale,
       upperLayerXYScale: useC ? committedUpperLayerXYScale : upperLayerXYScale,
       splitEnabled,
@@ -1703,6 +1709,8 @@
     { key: 'meshRepair',                      validate: (v, d) => pickEnum(v, MESH_REPAIR_VALUES, d),      apply: (v) => { meshRepair = v; } },
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
+    { key: 'fwnDetailXY',                     validate: pickString,                                        apply: (v) => { fwnDetailXY = v; } },
+    { key: 'fwnDetailZ',                      validate: pickString,                                        apply: (v) => { fwnDetailZ = v; } },
     { key: 'layer0AdhesionXYScale',           validate: pickNumber,                                        apply: (v) => { layer0AdhesionXYScale = v; committedLayer0AdhesionXYScale = v; } },
     { key: 'upperLayerXYScale',               validate: pickNumber,                                        apply: (v) => { upperLayerXYScale = v; committedUpperLayerXYScale = v; } },
     { key: 'splitEnabled',                    validate: pickBool,                                          apply: (v) => { splitEnabled = v; } },
@@ -2384,38 +2392,63 @@
                   The model is used as-is. Pick a repair method for damaged or non-watertight meshes.
                 {/if}
               </p>
-              {#if meshRepair !== 'none'}
+              {#if meshRepair === 'fwn'}
+                <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Detail XY (mm)
+                      <HelpTip>
+                        Grid pitch in the horizontal plane; auto = nozzle diameter. Smaller keeps more detail, slower.
+                      </HelpTip>
+                    </span>
+                    <input type="number" step="0.1" min="0"
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                           class="h-9 rounded border bg-background text-foreground px-2"
+                           bind:value={fwnDetailXY} />
+                    <span class="text-xs text-muted-foreground">Smaller keeps more detail; larger is faster.</span>
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Detail Z (mm)
+                      <HelpTip>
+                        Vertical grid pitch; auto = layer height. Smaller keeps more detail, slower.
+                      </HelpTip>
+                    </span>
+                    <input type="number" step="0.1" min="0"
+                           placeholder={`auto (${(parseFloat(layerHeight) || 0.2).toFixed(2)})`}
+                           class="h-9 rounded border bg-background text-foreground px-2"
+                           bind:value={fwnDetailZ} />
+                    <span class="text-xs text-muted-foreground">Smaller keeps more detail; larger is faster.</span>
+                  </label>
+                </div>
+              {:else if meshRepair === 'alphawrap'}
                 <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
                   <label class="flex flex-col gap-1">
                     <span class="text-muted-foreground flex items-center gap-1.5">
                       Detail size (mm)
                       <HelpTip>
-                        For alpha wrap: the radius of the probing sphere. For the winding-number remesh: the grid pitch. Auto resolves XY with the nozzle diameter and Z with the layer height; entering a value forces that pitch on all axes. Larger = smoother/coarser result that bridges gaps but loses detail; smaller = hugs the surface more tightly (and is slower).
+                        The radius of the probing sphere. Larger = smoother/coarser result that bridges gaps but loses detail; smaller = hugs the surface more tightly (and is slower).
                       </HelpTip>
                     </span>
                     <input type="number" step="0.1" min="0"
-                           placeholder={meshRepair === 'fwn'
-                             ? `auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)} XY / ${(parseFloat(layerHeight) || 0.2).toFixed(2)} Z)`
-                             : `auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
                            class="h-9 rounded border bg-background text-foreground px-2"
                            bind:value={alphaWrapAlpha} />
                     <span class="text-xs text-muted-foreground">Larger bridges gaps; smaller keeps more detail.</span>
                   </label>
-                  {#if meshRepair === 'alphawrap'}
-                    <label class="flex flex-col gap-1">
-                      <span class="text-muted-foreground flex items-center gap-1.5">
-                        Surface offset (mm)
-                        <HelpTip>
-                          How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
-                        </HelpTip>
-                      </span>
-                      <input type="number" step="0.01" min="0"
-                             placeholder="auto (alpha / 30)"
-                             class="h-9 rounded border bg-background text-foreground px-2"
-                             bind:value={alphaWrapOffset} />
-                      <span class="text-xs text-muted-foreground">How far the shell sits above the surface; larger wraps less tightly.</span>
-                    </label>
-                  {/if}
+                  <label class="flex flex-col gap-1">
+                    <span class="text-muted-foreground flex items-center gap-1.5">
+                      Surface offset (mm)
+                      <HelpTip>
+                        How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
+                      </HelpTip>
+                    </span>
+                    <input type="number" step="0.01" min="0"
+                           placeholder="auto (alpha / 30)"
+                           class="h-9 rounded border bg-background text-foreground px-2"
+                           bind:value={alphaWrapOffset} />
+                    <span class="text-xs text-muted-foreground">How far the shell sits above the surface; larger wraps less tightly.</span>
+                  </label>
                 </div>
               {/if}
             </div>

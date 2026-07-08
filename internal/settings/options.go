@@ -75,13 +75,15 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 	}
 
 	// Nozzle / layer height / repair params are stored as strings in the
-	// UI; parse with the same fallbacks the frontend used. AlphaWrapAlpha
-	// doubles as the FWN grid pitch in "fwn" mode; AlphaWrapOffset is the
-	// alpha-wrap surface offset and is unused by the FWN remesh.
+	// UI; parse with the same fallbacks the frontend used. AlphaWrapAlpha /
+	// AlphaWrapOffset are alpha-wrap-only; FWNDetailXY/FWNDetailZ are the
+	// fwn per-axis grid-pitch overrides (0 = auto).
 	opts.NozzleDiameter = parseF32(s.NozzleDiameter, 0.4)
 	opts.LayerHeight = parseF32(s.LayerHeight, 0.2)
 	opts.AlphaWrapAlpha = parseF32(s.AlphaWrapAlpha, 0)
 	opts.AlphaWrapOffset = parseF32(s.AlphaWrapOffset, 0)
+	opts.FWNDetailXY = parseF32(s.FWNDetailXY, 0)
+	opts.FWNDetailZ = parseF32(s.FWNDetailZ, 0)
 
 	// Base color vs MaterialX texture. The frontend always sends the
 	// solid hex; the pipeline ignores it whenever MaterialX is set.
