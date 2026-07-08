@@ -237,7 +237,7 @@
   // initializer literal 'none', which makes svelte-check flag the
   // `meshRepair !== 'none'` comparison as always-false. String sidesteps it.
   let meshRepair = $state('none');
-  let alphaWrapAlpha = $state('');   // mm; '' = auto (nozzle diameter). Detail size / grid pitch.
+  let alphaWrapAlpha = $state('');   // mm; '' = auto. Detail size / grid pitch. For fwn, auto is anisotropic (nozzle XY / layer Z); a value forces one isotropic pitch. For alphawrap, auto = nozzle diameter.
   let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30). Alpha-wrap surface offset only.
   // Layer-0 voxel-XY multiplier for bed adhesion. 1 = no enlargement;
   // higher = bigger first-layer color blobs that stick better.
@@ -2390,11 +2390,13 @@
                     <span class="text-muted-foreground flex items-center gap-1.5">
                       Detail size (mm)
                       <HelpTip>
-                        For alpha wrap: the radius of the probing sphere. For the winding-number remesh: the grid pitch. Larger = smoother/coarser result that bridges gaps but loses detail; smaller = hugs the surface more tightly (and is slower).
+                        For alpha wrap: the radius of the probing sphere. For the winding-number remesh: the grid pitch. Auto resolves XY with the nozzle diameter and Z with the layer height; entering a value forces that pitch on all axes. Larger = smoother/coarser result that bridges gaps but loses detail; smaller = hugs the surface more tightly (and is slower).
                       </HelpTip>
                     </span>
                     <input type="number" step="0.1" min="0"
-                           placeholder={`auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
+                           placeholder={meshRepair === 'fwn'
+                             ? `auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)} XY / ${(parseFloat(layerHeight) || 0.2).toFixed(2)} Z)`
+                             : `auto (${(parseFloat(nozzleDiameter) || 0.4).toFixed(2)})`}
                            class="h-9 rounded border bg-background text-foreground px-2"
                            bind:value={alphaWrapAlpha} />
                     <span class="text-xs text-muted-foreground">Larger bridges gaps; smaller keeps more detail.</span>

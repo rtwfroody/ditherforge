@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/loader"
+	"github.com/rtwfroody/ditherforge/internal/manifoldbool"
 )
 
 // cubeMesh returns an axis-aligned cube of the given edge length,
@@ -112,12 +113,15 @@ func meshStats(t *testing.T, verts [][3]float32, faces [][3]uint32) (boundary, n
 
 func TestRepairClosedCube(t *testing.T) {
 	v, f := cubeMesh(10)
-	out, eff, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5)
+	out, effXY, effZ, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
-	if eff != 0.5 {
-		t.Errorf("effective pitch = %g, want 0.5 (no capping expected)", eff)
+	if effXY != 0.5 {
+		t.Errorf("effective XY pitch = %g, want 0.5 (no capping expected)", effXY)
+	}
+	if effZ != 0.5 {
+		t.Errorf("effective Z pitch = %g, want 0.5 (no capping expected)", effZ)
 	}
 	boundary, nonManifold, vol := meshStats(t, out.Vertices, out.Faces)
 	if boundary != 0 {
@@ -135,13 +139,89 @@ func TestRepairClosedCube(t *testing.T) {
 	}
 }
 
+// TestRepairAnisotropicCube repairs a closed cube with the Z pitch set
+// finer, then coarser, than the XY pitch. Each must stay watertight,
+// 2-manifold, positive-volume and close to the true cube volume — the
+// rectangular-box marching-cubes cells must interpolate correctly when
+// the axis deltas differ.
+func TestRepairAnisotropicCube(t *testing.T) {
+	cases := []struct{ pitchXY, pitchZ float32 }{
+		{0.5, 0.25}, // Z finer than XY
+		{0.5, 1.0},  // Z coarser than XY
+	}
+	for _, tc := range cases {
+		v, f := cubeMesh(10)
+		out, effXY, effZ, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, tc.pitchXY, tc.pitchZ)
+		if err != nil {
+			t.Fatalf("Repair(XY=%g,Z=%g): %v", tc.pitchXY, tc.pitchZ, err)
+		}
+		if effXY != tc.pitchXY {
+			t.Errorf("XY=%g,Z=%g: effective XY pitch = %g, want %g (no capping expected)", tc.pitchXY, tc.pitchZ, effXY, tc.pitchXY)
+		}
+		if effZ != tc.pitchZ {
+			t.Errorf("XY=%g,Z=%g: effective Z pitch = %g, want %g (no capping expected)", tc.pitchXY, tc.pitchZ, effZ, tc.pitchZ)
+		}
+		boundary, nonManifold, vol := meshStats(t, out.Vertices, out.Faces)
+		if boundary != 0 {
+			t.Errorf("XY=%g,Z=%g: output has %d boundary edges, want 0 (watertight)", tc.pitchXY, tc.pitchZ, boundary)
+		}
+		if nonManifold != 0 {
+			t.Errorf("XY=%g,Z=%g: output has %d non-manifold edges, want 0 (2-manifold)", tc.pitchXY, tc.pitchZ, nonManifold)
+		}
+		if vol <= 0 {
+			t.Errorf("XY=%g,Z=%g: signed volume = %g, want positive", tc.pitchXY, tc.pitchZ, vol)
+		}
+		// Same 10% tolerance the isotropic cube test uses.
+		if rel := math.Abs(vol-1000) / 1000; rel > 0.10 {
+			t.Errorf("XY=%g,Z=%g: volume = %g, want within 10%% of 1000 (rel err %.3f)", tc.pitchXY, tc.pitchZ, vol, rel)
+		}
+
+		mm, err := manifoldbool.FromMesh(out.Vertices, out.Faces)
+		if err != nil {
+			t.Fatalf("XY=%g,Z=%g: manifoldbool.FromMesh rejected anisotropic cube: %v", tc.pitchXY, tc.pitchZ, err)
+		}
+		if mm.IsEmpty() {
+			mm.Close()
+			t.Fatalf("XY=%g,Z=%g: anisotropic cube produced an empty Manifold", tc.pitchXY, tc.pitchZ)
+		}
+		mm.Close()
+	}
+}
+
+// TestRepairPerAxisCapZOnly trips the 384-cell cap on Z only: a tall,
+// thin box with a tiny Z pitch overflows maxDim on Z while X and Y stay
+// well under it. The effective Z pitch must be raised while the XY pitch
+// comes back exactly as requested (the per-axis cap must not couple).
+func TestRepairPerAxisCapZOnly(t *testing.T) {
+	// Box: 20mm in X and Y, 300mm tall in Z, centered at origin.
+	v := [][3]float32{
+		{-10, -10, -150}, {10, -10, -150}, {10, 10, -150}, {-10, 10, -150},
+		{-10, -10, 150}, {10, -10, 150}, {10, 10, 150}, {-10, 10, 150},
+	}
+	_, f := cubeMesh(1) // reuse the cube's face topology (same corner order)
+
+	// pitchXY=1.0 → ~24 XY samples (well under 384). pitchZ=0.5 → ~604 Z
+	// samples, tripping the cap so effZ is raised.
+	pitchXY, pitchZ := float32(1.0), float32(0.5)
+	_, effXY, effZ, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, pitchXY, pitchZ)
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if effXY != pitchXY {
+		t.Errorf("effective XY pitch = %g, want %g (X/Y must not be capped)", effXY, pitchXY)
+	}
+	if effZ <= pitchZ {
+		t.Errorf("effective Z pitch = %g, want > %g (Z should have been raised by the cap)", effZ, pitchZ)
+	}
+}
+
 func TestRepairOpenBox(t *testing.T) {
 	v, f := cubeMesh(10)
 	// Drop the +Z face (its two triangles are indices 2 and 3).
 	open := append([][3]uint32{}, f[:2]...)
 	open = append(open, f[4:]...)
 
-	out, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: open}, 0.5)
+	out, _, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: open}, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("Repair open box: %v", err)
 	}
@@ -168,7 +248,7 @@ func TestRepairInvertedCube(t *testing.T) {
 	for i, tri := range f {
 		inv[i] = [3]uint32{tri[0], tri[2], tri[1]}
 	}
-	out, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: inv}, 0.5)
+	out, _, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: inv}, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("Repair inverted cube: %v", err)
 	}
@@ -191,12 +271,15 @@ func TestRepairPitchCapRaisesPitch(t *testing.T) {
 	// A large cube at a fine pitch would blow past maxDim; the effective
 	// pitch must come back coarser and the grid must stay within bounds.
 	v, f := cubeMesh(1000)
-	out, eff, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5)
+	out, effXY, effZ, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
-	if eff <= 0.5 {
-		t.Errorf("effective pitch = %g, want > 0.5 (should have been raised)", eff)
+	if effXY <= 0.5 {
+		t.Errorf("effective XY pitch = %g, want > 0.5 (should have been raised)", effXY)
+	}
+	if effZ <= 0.5 {
+		t.Errorf("effective Z pitch = %g, want > 0.5 (should have been raised)", effZ)
 	}
 	if boundary, _, _ := meshStats(t, out.Vertices, out.Faces); boundary != 0 {
 		t.Errorf("capped-grid output has %d boundary edges, want 0", boundary)
@@ -210,7 +293,7 @@ func TestRepairCancellation(t *testing.T) {
 	// Cancelled before the call: must return ctx.Err() promptly.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := Repair(ctx, model, 0.5); err != context.Canceled {
+	if _, _, _, err := Repair(ctx, model, 0.5, 0.5); err != context.Canceled {
 		t.Errorf("pre-cancelled Repair returned %v, want context.Canceled", err)
 	}
 
@@ -219,7 +302,7 @@ func TestRepairCancellation(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	go cancel2()
 	big := &loader.LoadedModel{Vertices: mustCube(100), Faces: cubeFaces()}
-	_, _, err := Repair(ctx2, big, 0.4)
+	_, _, _, err := Repair(ctx2, big, 0.4, 0.4)
 	// Either it finished before the cancel landed (nil) or was cancelled.
 	if err != nil && err != context.Canceled {
 		t.Errorf("mid-cancel Repair returned %v, want nil or context.Canceled", err)

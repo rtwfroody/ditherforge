@@ -23,9 +23,10 @@ import (
 // the solid |w| ≈ 1, outside ≈ 0, so 0.5 sits on the boundary.
 const iso = 0.5
 
-// maxDim caps the grid resolution on every axis. 384³ samples is the
-// working ceiling; if the requested pitch would exceed it the pitch is
-// raised uniformly (see Repair's return of the effective pitch).
+// maxDim caps the grid resolution on every axis. 384 samples per axis is
+// the working ceiling; if a requested pitch would exceed it that axis's
+// pitch is raised (see Repair's return of the effective pitches). X and Y
+// share the XY pitch, so they are capped jointly; Z is capped on its own.
 const maxDim = 384
 
 // gridPad is the number of empty cells added on every side of the mesh
@@ -33,33 +34,40 @@ const maxDim = 384
 const gridPad = 2
 
 // Repair returns a geometry-only LoadedModel whose surface is the 0.5
-// iso-surface of the input mesh's generalized winding number field.
-// pitch is the grid cell size in model units (mm after pipeline
-// scaling); only Vertices and Faces are populated on the result.
+// iso-surface of the input mesh's generalized winding number field. The
+// grid is anisotropic: pitchXY is the cell size along X and Y, pitchZ
+// along Z (both in model units — mm after pipeline scaling), letting a
+// caller resolve XY with the nozzle diameter and Z with the layer
+// height. Only Vertices and Faces are populated on the result.
 //
-// The second return value is the *effective* pitch actually used: if
-// the requested pitch would have produced a grid larger than maxDim on
-// any axis it is raised uniformly and the coarser value reported here
-// (so a caller/log line can note the downscale). It equals the
-// requested pitch when no capping occurred.
+// The second and third return values are the *effective* XY and Z
+// pitches actually used: if a requested pitch would have produced a grid
+// larger than maxDim on its axis it is raised and the coarser value
+// reported here (so a caller/log line can note the downscale). X and Y
+// share pitchXY, so they are capped jointly (whichever of the two grids
+// is larger drives the raise); Z is capped independently. Each returned
+// pitch equals the requested one when its axis was not capped.
 //
 // The context is checked once per Z-slice; a cancelled context makes
 // Repair return promptly with ctx.Err().
-func Repair(ctx context.Context, model *loader.LoadedModel, pitch float32) (*loader.LoadedModel, float32, error) {
-	if pitch <= 0 {
-		return nil, 0, fmt.Errorf("fwnrepair: pitch must be positive (got %g)", pitch)
+func Repair(ctx context.Context, model *loader.LoadedModel, pitchXY, pitchZ float32) (*loader.LoadedModel, float32, float32, error) {
+	if pitchXY <= 0 {
+		return nil, 0, 0, fmt.Errorf("fwnrepair: pitchXY must be positive (got %g)", pitchXY)
+	}
+	if pitchZ <= 0 {
+		return nil, 0, 0, fmt.Errorf("fwnrepair: pitchZ must be positive (got %g)", pitchZ)
 	}
 	if model == nil || len(model.Faces) == 0 {
-		return nil, 0, fmt.Errorf("fwnrepair: input mesh has no faces")
+		return nil, 0, 0, fmt.Errorf("fwnrepair: input mesh has no faces")
 	}
 
 	tris := buildTris(model)
 	tree := buildBVH(tris)
 
-	g := newGrid(model.Vertices, float64(pitch))
+	g := newGrid(model.Vertices, float64(pitchXY), float64(pitchZ))
 	verts, faces, err := contour(ctx, tree, g)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	orientOutward(verts, faces)
@@ -67,7 +75,7 @@ func Repair(ctx context.Context, model *loader.LoadedModel, pitch float32) (*loa
 	return &loader.LoadedModel{
 		Vertices: verts,
 		Faces:    faces,
-	}, float32(g.pitch), nil
+	}, float32(g.dx), float32(g.dz), nil
 }
 
 // buildTris widens the model geometry to float64 and precomputes the
@@ -87,19 +95,22 @@ func buildTris(model *loader.LoadedModel) []tri {
 	return tris
 }
 
-// grid is the sampling lattice: nx×ny×nz sample points at spacing pitch
-// starting from origin. Cell (i,j,k) spans samples [i,i+1]×… so there
-// are (nx-1)×(ny-1)×(nz-1) marching-cubes cells.
+// grid is the sampling lattice: nx×ny×nz sample points at per-axis
+// spacing (dx,dy,dz) starting from origin. dx and dy are the XY pitch,
+// dz the Z pitch. Cell (i,j,k) spans samples [i,i+1]×… so there are
+// (nx-1)×(ny-1)×(nz-1) rectangular-box marching-cubes cells.
 type grid struct {
 	origin     vec3
-	pitch      float64
+	dx, dy, dz float64
 	nx, ny, nz int
 }
 
-// newGrid builds a grid covering the vertex bbox padded by gridPad
-// cells on every side, capping each dimension at maxDim by raising the
-// pitch if necessary.
-func newGrid(verts [][3]float32, pitch float64) grid {
+// newGrid builds a grid covering the vertex bbox padded by gridPad cells
+// on every side, capping each dimension at maxDim by raising the
+// relevant pitch if necessary. X and Y share pitchXY and are capped
+// jointly (whichever axis first exceeds maxDim raises the shared pitch);
+// Z uses pitchZ and is capped on its own.
+func newGrid(verts [][3]float32, pitchXY, pitchZ float64) grid {
 	var lo, hi vec3
 	for d := 0; d < 3; d++ {
 		lo[d] = math.Inf(1)
@@ -113,39 +124,42 @@ func newGrid(verts [][3]float32, pitch float64) grid {
 		}
 	}
 
-	dims := func(p float64) (int, int, int) {
-		d := [3]int{}
-		for a := 0; a < 3; a++ {
-			ext := hi[a] - lo[a]
-			cells := int(math.Ceil(ext/p)) + 2*gridPad
-			d[a] = cells + 1 // sample count = cells + 1
-		}
-		return d[0], d[1], d[2]
+	// samples returns the sample count along axis a at pitch p.
+	samples := func(a int, p float64) int {
+		ext := hi[a] - lo[a]
+		cells := int(math.Ceil(ext/p)) + 2*gridPad
+		return cells + 1 // sample count = cells + 1
 	}
 
-	nx, ny, nz := dims(pitch)
-	// Raise the pitch until every axis fits under maxDim. A direct
-	// closed-form solve is possible but the ceil() coupling makes the
-	// short multiplicative loop simpler and just as robust.
-	for nx > maxDim || ny > maxDim || nz > maxDim {
-		pitch *= 1.05
-		nx, ny, nz = dims(pitch)
+	// Raise pitchXY until both X and Y fit under maxDim, then pitchZ
+	// until Z fits. A direct closed-form solve is possible but the ceil()
+	// coupling makes the short multiplicative loop simpler and just as
+	// robust.
+	for samples(0, pitchXY) > maxDim || samples(1, pitchXY) > maxDim {
+		pitchXY *= 1.05
 	}
+	for samples(2, pitchZ) > maxDim {
+		pitchZ *= 1.05
+	}
+
+	nx := samples(0, pitchXY)
+	ny := samples(1, pitchXY)
+	nz := samples(2, pitchZ)
 
 	origin := vec3{
-		lo[0] - gridPad*pitch,
-		lo[1] - gridPad*pitch,
-		lo[2] - gridPad*pitch,
+		lo[0] - gridPad*pitchXY,
+		lo[1] - gridPad*pitchXY,
+		lo[2] - gridPad*pitchZ,
 	}
-	return grid{origin: origin, pitch: pitch, nx: nx, ny: ny, nz: nz}
+	return grid{origin: origin, dx: pitchXY, dy: pitchXY, dz: pitchZ, nx: nx, ny: ny, nz: nz}
 }
 
 // samplePos returns the world position of sample (i,j,k).
 func (g grid) samplePos(i, j, k int) vec3 {
 	return vec3{
-		g.origin[0] + float64(i)*g.pitch,
-		g.origin[1] + float64(j)*g.pitch,
-		g.origin[2] + float64(k)*g.pitch,
+		g.origin[0] + float64(i)*g.dx,
+		g.origin[1] + float64(j)*g.dy,
+		g.origin[2] + float64(k)*g.dz,
 	}
 }
 
@@ -165,7 +179,7 @@ func (g grid) samplePos(i, j, k int) vec3 {
 // happens for open-bottomed models whose interior field extends past the
 // padded bbox — gets clipped by the grid boundary and opens the mesh.
 func evalSlice(tree *bvh, g grid, k int, dst []float64) {
-	z := g.origin[2] + float64(k)*g.pitch
+	z := g.origin[2] + float64(k)*g.dz
 	zBoundary := k == 0 || k == g.nz-1
 	workers := runtime.NumCPU()
 	if workers > g.ny {
@@ -190,14 +204,14 @@ func evalSlice(tree *bvh, g grid, k int, dst []float64) {
 			defer wg.Done()
 			for j := j0; j < j1; j++ {
 				rowBoundary := zBoundary || j == 0 || j == g.ny-1
-				y := g.origin[1] + float64(j)*g.pitch
+				y := g.origin[1] + float64(j)*g.dy
 				base := j * g.nx
 				for i := 0; i < g.nx; i++ {
 					if rowBoundary || i == 0 || i == g.nx-1 {
 						dst[base+i] = 0 // outer shell: force outside so the surface closes inside the grid
 						continue
 					}
-					x := g.origin[0] + float64(i)*g.pitch
+					x := g.origin[0] + float64(i)*g.dx
 					f := math.Abs(tree.winding(vec3{x, y, z}))
 					if f == iso {
 						f = iso + 1e-6

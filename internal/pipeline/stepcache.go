@@ -670,6 +670,10 @@ type loadSettings struct {
 	// and any alpha-wrap output are passed through verbatim, so the
 	// cached loadOutput differs from the simplified case.
 	NoSimplify bool
+	// LayerHeight drives the Z pitch of the anisotropic fwn auto grid
+	// (XY comes from NozzleDiameter, Z from LayerHeight). Hashed only in
+	// fwn mode — see the cache-compat note in hashLoadSettings.
+	LayerHeight float32
 }
 
 // effectiveMergeCells reports whether the Clip stage merges same-color
@@ -756,6 +760,7 @@ func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 		AlphaWrapOffset: opts.AlphaWrapOffset,
 		NozzleDiameter:  opts.NozzleDiameter,
 		NoSimplify:      opts.NoSimplify,
+		LayerHeight:     opts.LayerHeight,
 	}
 	// Cache-compat contract: the mode was once a bare AlphaWrap bool, so
 	// "none" must reproduce the old false byte and "alphawrap" the old true
@@ -769,6 +774,9 @@ func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeBool(h, v.NoSimplify)
 	if v.MeshRepair == RepairFWN {
 		writeString(h, "repair-fwn-v1")
+		// LayerHeight entered the fwn auto-pitch after the v1 marker
+		// shipped; appending it here only changes fwn-mode keys.
+		writeFloat32(h, v.LayerHeight)
 	}
 }
 

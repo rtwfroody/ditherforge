@@ -1072,22 +1072,38 @@ func (r *pipelineRun) runLoad() (any, error) {
 			reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
 
 		case RepairFWN:
-			pitch := r.opts.AlphaWrapAlpha
-			if pitch <= 0 {
-				pitch = r.opts.NozzleDiameter
+			// Anisotropic auto pitch: XY resolves to the nozzle diameter,
+			// Z to the layer height, so the remesh grid matches the
+			// printer's feature size on each axis. An explicit "Detail
+			// size" override (AlphaWrapAlpha) is isotropic — it forces the
+			// same pitch on all three axes.
+			var pitchXY, pitchZ float32
+			if r.opts.AlphaWrapAlpha > 0 {
+				pitchXY = r.opts.AlphaWrapAlpha
+				pitchZ = r.opts.AlphaWrapAlpha
+			} else {
+				pitchXY = r.opts.NozzleDiameter
+				pitchZ = r.opts.LayerHeight
+				if pitchZ <= 0 {
+					pitchZ = r.opts.NozzleDiameter
+				}
 			}
 
-			plog.Printf("  Mesh repair (fwn): pitch=%.3f mm starting", pitch)
+			plog.Printf("  Mesh repair (fwn): pitchXY=%.3f mm pitchZ=%.3f mm starting", pitchXY, pitchZ)
 			tRepair := time.Now()
-			repaired, effPitch, rerr := fwnrepair.Repair(r.ctx, geomModel, pitch)
+			repaired, effXY, effZ, rerr := fwnrepair.Repair(r.ctx, geomModel, pitchXY, pitchZ)
 			if rerr != nil {
 				return nil, fmt.Errorf("fwn-repair: %w", rerr)
 			}
-			plog.Printf("  Mesh repair (fwn): %d vertices, %d faces at pitch=%.3f mm in %.1fs",
-				len(repaired.Vertices), len(repaired.Faces), effPitch, time.Since(tRepair).Seconds())
-			if effPitch > pitch {
-				plog.Printf("  Mesh repair (fwn): requested pitch %.3f mm raised to %.3f mm (384-cell axis cap)",
-					pitch, effPitch)
+			plog.Printf("  Mesh repair (fwn): %d vertices, %d faces at pitchXY=%.3f mm pitchZ=%.3f mm in %.1fs",
+				len(repaired.Vertices), len(repaired.Faces), effXY, effZ, time.Since(tRepair).Seconds())
+			if effXY > pitchXY {
+				plog.Printf("  Mesh repair (fwn): requested pitchXY %.3f mm raised to %.3f mm (384-cell axis cap)",
+					pitchXY, effXY)
+			}
+			if effZ > pitchZ {
+				plog.Printf("  Mesh repair (fwn): requested pitchZ %.3f mm raised to %.3f mm (384-cell axis cap)",
+					pitchZ, effZ)
 			}
 			geomModel = repaired
 			reportHolesIfEnabled("fwn-repair output", repaired.Faces)

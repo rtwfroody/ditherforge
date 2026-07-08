@@ -53,7 +53,7 @@ func TestRepairOpenBottomBuildingIsManifold(t *testing.T) {
 	}
 	scaleToMaxExtent(t, m, 50)
 
-	out, _, err := Repair(context.Background(), m, 1.0)
+	out, _, _, err := Repair(context.Background(), m, 1.0, 1.0)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestRepairOpenBottomBuildingIsManifold(t *testing.T) {
 // Manifold confirms the repair output is boolean-ready.
 func TestRepairedCubeIsValidManifold(t *testing.T) {
 	v, f := cubeMesh(10)
-	out, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5)
+	out, _, _, err := Repair(context.Background(), &loader.LoadedModel{Vertices: v, Faces: f}, 0.5, 0.5)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
