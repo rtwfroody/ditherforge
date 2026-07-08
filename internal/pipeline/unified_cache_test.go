@@ -139,11 +139,11 @@ func TestParseStageKeyDependsOnInputOnly(t *testing.T) {
 		t.Error("StageParse key changed when Scale changed; parse cache should survive")
 	}
 
-	// AlphaWrap changes should NOT change StageParse's key.
+	// Mesh-repair changes should NOT change StageParse's key.
 	wrapped := base
-	wrapped.AlphaWrap = true
+	wrapped.MeshRepair = RepairAlphaWrap
 	if c.stageKey(StageParse, base) != c.stageKey(StageParse, wrapped) {
-		t.Error("StageParse key changed when AlphaWrap changed; parse cache should survive")
+		t.Error("StageParse key changed when MeshRepair changed; parse cache should survive")
 	}
 
 	// ObjectIndex change SHOULD change StageParse's key (different mesh).
@@ -170,9 +170,21 @@ func TestLoadStageKeyInvalidatesOnAlphaWrap(t *testing.T) {
 	base := Options{Input: path, Scale: 1, NozzleDiameter: 0.4, LayerHeight: 0.2, Dither: "none"}
 
 	wrapped := base
-	wrapped.AlphaWrap = true
+	wrapped.MeshRepair = RepairAlphaWrap
 	if c.stageKey(StageLoad, base) == c.stageKey(StageLoad, wrapped) {
-		t.Fatal("StageLoad key did not change when AlphaWrap toggled")
+		t.Fatal("StageLoad key did not change when MeshRepair toggled to alphawrap")
+	}
+
+	// The FWN remesh is a distinct repair method: its Load key must differ
+	// from both "none" and "alphawrap" (see the fwn marker in
+	// hashLoadSettings) so a mode switch always re-runs Load.
+	fwn := base
+	fwn.MeshRepair = RepairFWN
+	if c.stageKey(StageLoad, base) == c.stageKey(StageLoad, fwn) {
+		t.Fatal("StageLoad key did not change when MeshRepair toggled to fwn")
+	}
+	if c.stageKey(StageLoad, fwn) == c.stageKey(StageLoad, wrapped) {
+		t.Fatal("StageLoad key identical for fwn and alphawrap; the fwn marker is missing")
 	}
 
 	wrappedTighter := wrapped
@@ -185,7 +197,7 @@ func TestLoadStageKeyInvalidatesOnAlphaWrap(t *testing.T) {
 	// from NozzleDiameter inside runLoad, and NozzleDiameter also drives
 	// the pre-wrap decimate tolerance. Both reads must invalidate Load.
 	wrappedAuto := base
-	wrappedAuto.AlphaWrap = true // AlphaWrapAlpha left at 0 (auto)
+	wrappedAuto.MeshRepair = RepairAlphaWrap // AlphaWrapAlpha left at 0 (auto)
 	wrappedAutoBigger := wrappedAuto
 	wrappedAutoBigger.NozzleDiameter = 0.6
 	if c.stageKey(StageLoad, wrappedAuto) == c.stageKey(StageLoad, wrappedAutoBigger) {

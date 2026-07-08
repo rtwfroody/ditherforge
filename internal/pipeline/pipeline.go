@@ -166,9 +166,15 @@ type Options struct {
 	WarpPins            []WarpPin `json:"WarpPins,omitempty"`
 	Stickers            []Sticker `json:"Stickers,omitempty"`
 	ObjectIndex         int       `json:"ObjectIndex"` // -1 = all objects, >=0 = specific object
-	AlphaWrap           bool      // enable CGAL Alpha_wrap_3 post-load mesh cleanup
-	AlphaWrapAlpha      float32   // mm; 0 = auto (5 × NozzleDiameter)
-	AlphaWrapOffset     float32   // mm; 0 = auto (alpha / 30)
+	// MeshRepair selects the pre-clip mesh-repair method: RepairNone,
+	// RepairFWN (winding-number remesh, internal/fwnrepair), or
+	// RepairAlphaWrap (CGAL alpha wrap, internal/alphawrap). "" == none.
+	MeshRepair string
+	// AlphaWrapAlpha is the alpha-wrap probe radius in RepairAlphaWrap
+	// mode (mm; 0 = auto = NozzleDiameter) and doubles as the FWN grid
+	// pitch in RepairFWN mode (mm; 0 = auto = NozzleDiameter).
+	AlphaWrapAlpha  float32
+	AlphaWrapOffset float32 // mm; alpha-wrap surface offset, 0 = auto (alpha / 30). Unused by FWN.
 	// Layer0AdhesionXYScale multiplies the layer-0 minimum feature
 	// size — the printer-profile InitialLayerLineWidth when a profile
 	// is resolved, else the bare nozzle diameter. >1 enlarges first-
@@ -214,6 +220,22 @@ type Options struct {
 	// SampleSectionColors (or upstream slicer geometry); if only in
 	// the normal view, it's in dither/palette/mesh-emission.
 	ShowSampledColors bool `json:"ShowSampledColors,omitempty"`
+}
+
+// Mesh-repair modes for Options.MeshRepair. RepairNone leaves the input
+// mesh untouched; the other two rebuild a watertight geometry skin that
+// is distinct from the color model.
+const (
+	RepairNone      = "none"
+	RepairFWN       = "fwn"
+	RepairAlphaWrap = "alphawrap"
+)
+
+// RepairEnabled reports whether a repair method is active (fwn or
+// alphawrap). "" counts as none. When true the geometry mesh is a
+// rebuilt skin distinct from the color model.
+func (o Options) RepairEnabled() bool {
+	return o.MeshRepair == RepairFWN || o.MeshRepair == RepairAlphaWrap
 }
 
 // SplitSettings controls the optional Split stage that cuts a model
@@ -275,12 +297,12 @@ type Callbacks struct {
 	// alpha-wrap is off (the overlay is already baked into the input
 	// mesh's StickerUVs in that case).
 	OnStickerOverlay func(*MeshData, float32)
-	// OnAlphaWrappedMesh fires after the load stage when alpha-wrap
-	// is enabled, carrying the wrapped geometry mesh (flat-shaded,
-	// no UVs or textures) so the frontend can offer a "show wrapped"
-	// toggle in the Input Model panel. Called with mesh=nil when
-	// alpha-wrap is off so the frontend can drop any stale wrapped
-	// mesh and force the toggle back to the input view.
+	// OnAlphaWrappedMesh fires after the load stage when mesh repair
+	// (fwn or alpha-wrap) is enabled, carrying the repaired geometry
+	// mesh (flat-shaded, no UVs or textures) so the frontend can offer
+	// a "show repaired" toggle in the Input Model panel. Called with
+	// mesh=nil when repair is off so the frontend can drop any stale
+	// repaired mesh and force the toggle back to the input view.
 	OnAlphaWrappedMesh func(*MeshData, float32)
 	// OnOutputPreviewMesh fires from inside the geometry stages
 	// (load-time decimation, alpha-wrap, split) with a flat-grey
@@ -378,9 +400,9 @@ type ProcessResult struct {
 	NeedsForce    bool
 	ModelExtentMM float32
 	OutputMesh    *MeshData `json:"-"` // sent async via events, not in JSON response
-	// WrappedMesh is the alpha-wrap output (post-decimate) in the same
-	// coord system as OutputMesh. Populated only when opts.AlphaWrap is
-	// true; nil otherwise. Used by tests that want to compare the
+	// WrappedMesh is the repaired-geometry output (post-decimate) in the
+	// same coord system as OutputMesh. Populated only when mesh repair is
+	// enabled (opts.RepairEnabled()); nil otherwise. Used by tests that want to compare the
 	// sampled mesh against the *actual* input to the cellslicer (the
 	// wrap) rather than the original model — wrap-induced divergence
 	// (e.g. sealing open windows with surfaces at unexpected depths)
@@ -611,7 +633,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		// disables alpha-wrap stickers or the wrapped-view toggle.
 		if onAlphaWrappedMesh != nil {
 			var wrapped *MeshData
-			if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+			if opts.RepairEnabled() && lo.Model != nil && lo.Model != lo.ColorModel {
 				wrapped = buildWrappedMeshData(lo.Model)
 				wrapped = ScalePreviewMesh(wrapped, lo.PreviewScale)
 			}
@@ -692,7 +714,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	}
 
 	var wrappedMesh *MeshData
-	if opts.AlphaWrap && lo.Model != nil && lo.Model != lo.ColorModel {
+	if opts.RepairEnabled() && lo.Model != nil && lo.Model != lo.ColorModel {
 		wrappedMesh = buildWrappedMeshData(lo.Model)
 	}
 

@@ -47,7 +47,7 @@ func TestSplitCellslicer_TwoHalves(t *testing.T) {
 		Size:           &size,
 		Force:          true,
 		Dither:         "none",
-		AlphaWrap:      true,
+		MeshRepair:     RepairAlphaWrap,
 	}
 
 	cache := NewStageCache()

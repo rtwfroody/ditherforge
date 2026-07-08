@@ -44,7 +44,7 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		ShowSampledColors:                    s.ShowSampledColors,
 		Stats:                                s.Stats,
 		ColorSnap:                            s.ColorSnap,
-		AlphaWrap:                            s.AlphaWrap,
+		MeshRepair:                           s.MeshRepair,
 		Layer0AdhesionXYScale:                float32(s.Layer0AdhesionXYScale),
 		UpperLayerXYScale:                    float32(s.UpperLayerXYScale),
 		TDModel:                              s.TDModel,
@@ -74,8 +74,10 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		}
 	}
 
-	// Nozzle / layer height / alpha-wrap params are stored as strings in
-	// the UI; parse with the same fallbacks the frontend used.
+	// Nozzle / layer height / repair params are stored as strings in the
+	// UI; parse with the same fallbacks the frontend used. AlphaWrapAlpha
+	// doubles as the FWN grid pitch in "fwn" mode; AlphaWrapOffset is the
+	// alpha-wrap surface offset and is unused by the FWN remesh.
 	opts.NozzleDiameter = parseF32(s.NozzleDiameter, 0.4)
 	opts.LayerHeight = parseF32(s.LayerHeight, 0.2)
 	opts.AlphaWrapAlpha = parseF32(s.AlphaWrapAlpha, 0)

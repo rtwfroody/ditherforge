@@ -242,7 +242,9 @@ func TestSampledMatchesInput(t *testing.T) {
 				Force:             true,
 				ShowSampledColors: tc.showSampledColors,
 				Scale:             1,
-				AlphaWrap:         tc.alphaWrap,
+			}
+			if tc.alphaWrap {
+				opts.MeshRepair = pipeline.RepairAlphaWrap
 			}
 			var sizeArg *float32
 			if !tc.scaleOnly {

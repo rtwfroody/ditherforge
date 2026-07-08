@@ -33,7 +33,7 @@
     // Model max extent at print size, in mm. offset is stored as a fraction
     // of this; the UI multiplies by it to show/edit mm. 0 when unknown.
     extentMM: number;
-    onAlphaWrapForced?: () => void; // called when toggling Split on
+    onRepairForced?: () => void; // called when toggling Split on
   };
 
   let {
@@ -52,7 +52,7 @@
     extentMM,
     minOffset,
     maxOffset,
-    onAlphaWrapForced,
+    onRepairForced,
   }: Props = $props();
 
   // offset is a fraction of the print extent; the inputs below work in mm.
@@ -61,15 +61,14 @@
     if (extentMM > 0 && isFinite(mm)) offset = mm / extentMM;
   }
 
-  // Toggling Split on cascades to enabling AlphaWrap (the cut needs a
-  // watertight input). The parent listens via onAlphaWrapForced and
-  // sets its alphaWrap state. The reverse cascade (turning AlphaWrap
-  // off auto-disables Split) lives in App.svelte where alphaWrap is
-  // owned.
+  // Toggling Split on cascades to enabling mesh repair (the cut needs a
+  // watertight input). The parent listens via onRepairForced and sets
+  // its meshRepair state. The reverse cascade (turning repair off
+  // auto-disables Split) lives in App.svelte where meshRepair is owned.
   function handleEnabledChange(v: boolean) {
     enabled = v;
-    if (v && onAlphaWrapForced) {
-      onAlphaWrapForced();
+    if (v && onRepairForced) {
+      onRepairForced();
     }
   }
 

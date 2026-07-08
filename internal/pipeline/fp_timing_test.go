@@ -30,7 +30,7 @@ func TestInteriorFaceFootprintTiming(t *testing.T) {
 		Force:          true,
 		Scale:          1,
 		Size:           &size,
-		AlphaWrap:      true,
+		MeshRepair:     RepairAlphaWrap,
 	}
 	cache := NewStageCache()
 

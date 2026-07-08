@@ -154,24 +154,27 @@ func nonDefaultSettings() Settings {
 				Scale: 2.0, Rotation: 0.5, MaxAngle: 45, Mode: "projection",
 			},
 		},
-		Dither:                "floyd-steinberg",
-		RiemersmaBias:         0.42,
-		BlueNoiseTol:          15,
-		ColorSnap:             3,
-		NoMerge:               true,
-		NoSimplify:            true,
-		NoCellMerge:           true,
-		HonorTD:               true,
-		TDModel:               "layered",
-		InfillColor:           "#010203",
-		ColorAwareCells:       true,
-		ColorRegionContrast:   33,
-		RegionDither:          true,
-		RegionDitherDeltaE:    27,
-		RejectColorOutliers:   true,
-		Stats:                 true,
-		ShowSampledColors:     true,
-		AlphaWrap:             true,
+		Dither:              "floyd-steinberg",
+		RiemersmaBias:       0.42,
+		BlueNoiseTol:        15,
+		ColorSnap:           3,
+		NoMerge:             true,
+		NoSimplify:          true,
+		NoCellMerge:         true,
+		HonorTD:             true,
+		TDModel:             "layered",
+		InfillColor:         "#010203",
+		ColorAwareCells:     true,
+		ColorRegionContrast: 33,
+		RegionDither:        true,
+		RegionDitherDeltaE:  27,
+		RejectColorOutliers: true,
+		Stats:               true,
+		ShowSampledColors:   true,
+		// AlphaWrap is intentionally left false: it is a legacy-load-only
+		// field that Load clears (migrating it into MeshRepair), so it
+		// cannot round-trip. The round-trip test skips it in the preflight.
+		MeshRepair:            "fwn",
 		AlphaWrapAlpha:        "0.8",
 		AlphaWrapOffset:       "0.04",
 		Layer0AdhesionXYScale: 3.5,
@@ -209,6 +212,12 @@ func TestSaveLoadRoundTripPreservesAllFields(t *testing.T) {
 	for i := 0; i < rv.NumField(); i++ {
 		field := rv.Type().Field(i)
 		if !field.IsExported() {
+			continue
+		}
+		// AlphaWrap is a legacy-load-only field: Load migrates it into
+		// MeshRepair and always clears it, so it is intentionally left
+		// zero in nonDefaultSettings and cannot round-trip. Skip it.
+		if field.Name == "AlphaWrap" {
 			continue
 		}
 		if rv.Field(i).IsZero() {

@@ -86,8 +86,11 @@ func describePreload(opts Options) string {
 
 func describeLoad(opts Options) string {
 	s := fmt.Sprintf("Load: %s", filepath.Base(opts.Input))
-	if opts.AlphaWrap {
+	switch opts.MeshRepair {
+	case RepairAlphaWrap:
 		s += " (alpha-wrap)"
+	case RepairFWN:
+		s += " (fwn repair)"
 	}
 	return s
 }
@@ -504,14 +507,15 @@ type voxelizeOutput struct {
 type stickerOutput struct {
 	Decals []*voxel.StickerDecal
 	// Model is the sticker substrate (scratch clone of either ColorModel or
-	// the alpha-wrapped Model, depending on opts.AlphaWrap). The BFS may
+	// the repaired Model, depending on opts.RepairEnabled()). The BFS may
 	// have subdivided pathologically-large triangles in place. Decal TriUVs
 	// index into THIS model's Faces, so downstream sampling and preview
 	// rendering must use Model. nil when no stickers were built.
 	Model *loader.LoadedModel
-	// FromAlphaWrap is true when Model is a clone of the wrap mesh rather
-	// than ColorModel. Voxelize uses this to decide whether to do a single
-	// nearest-tri lookup (Model == sample model) or two separate lookups.
+	// FromAlphaWrap is true when Model is a clone of a repaired mesh (the
+	// alpha-wrap shell or the FWN remesh) rather than ColorModel. Voxelize
+	// uses this to decide whether to do a single nearest-tri lookup
+	// (Model == sample model) or two separate lookups.
 	FromAlphaWrap bool
 
 	// si is the spatial index over Model. Seeded inside the Sticker stage body on a
@@ -648,12 +652,12 @@ type preloadSettings struct {
 }
 
 // loadSettings is what affects the heavy post-preload loadOutput:
-// decimation and alpha-wrap. Scale/Size live in preloadSettings now
+// decimation and mesh repair. Scale/Size live in preloadSettings now
 // (and cascade in via stageFnv(StagePreload)); the cumulative cascade
 // key for StageLoad includes parseSettings via stageFnv(StageParse), so
 // changing Input also invalidates StageLoad.
 type loadSettings struct {
-	AlphaWrap       bool
+	MeshRepair      string
 	AlphaWrapAlpha  float32
 	AlphaWrapOffset float32
 	// NozzleDiameter is the auto-fallback for AlphaWrapAlpha when it's 0,
@@ -747,17 +751,25 @@ func hashPreloadSettings(c *StageCache, h hash.Hash64, opts Options) {
 
 func hashLoadSettings(c *StageCache, h hash.Hash64, opts Options) {
 	v := loadSettings{
-		AlphaWrap:       opts.AlphaWrap,
+		MeshRepair:      opts.MeshRepair,
 		AlphaWrapAlpha:  opts.AlphaWrapAlpha,
 		AlphaWrapOffset: opts.AlphaWrapOffset,
 		NozzleDiameter:  opts.NozzleDiameter,
 		NoSimplify:      opts.NoSimplify,
 	}
-	writeBool(h, v.AlphaWrap)
+	// Cache-compat contract: the mode was once a bare AlphaWrap bool, so
+	// "none" must reproduce the old false byte and "alphawrap" the old true
+	// byte — this keeps existing warm caches valid across the enum
+	// migration. "fwn" is new (no legacy key to preserve), so it writes the
+	// same false byte here plus a distinct "repair-fwn-v1" marker below.
+	writeBool(h, v.MeshRepair == RepairAlphaWrap)
 	writeFloat32(h, v.AlphaWrapAlpha)
 	writeFloat32(h, v.AlphaWrapOffset)
 	writeFloat32(h, v.NozzleDiameter)
 	writeBool(h, v.NoSimplify)
+	if v.MeshRepair == RepairFWN {
+		writeString(h, "repair-fwn-v1")
+	}
 }
 
 // hashSplitSettings fingerprints what affects StageSplit's output.
@@ -797,11 +809,11 @@ func hashSplitSettings(c *StageCache, h hash.Hash64, opts Options) {
 // included so any base-color change invalidates the sticker stage (the
 // stage body deep-clones ColorModel into so.Model and the per-run
 // base-color reapply does not patch that scratch copy — see
-// hashVoxelizeSettings). AlphaWrap toggling changes the sticker
-// substrate (wrap mesh vs. original mesh), so decals built for one
-// substrate are invalid when the toggle changes; AlphaWrapAlpha and
-// AlphaWrapOffset live in the Load fingerprint, picked up via the
-// cumulative stage-key cascade.
+// hashVoxelizeSettings). Mesh repair changes the sticker substrate
+// (repaired mesh vs. original mesh), so decals built for one substrate
+// are invalid when the mode changes; AlphaWrapAlpha and AlphaWrapOffset
+// live in the Load fingerprint, picked up via the cumulative stage-key
+// cascade.
 func hashStickerSettings(c *StageCache, h hash.Hash64, opts Options) {
 	mtime, size := materialXFileStamp(opts.BaseColorMaterialX)
 	writeString(h, opts.BaseColor)
@@ -810,7 +822,12 @@ func hashStickerSettings(c *StageCache, h hash.Hash64, opts Options) {
 	binary.Write(h, binary.LittleEndian, size)
 	writeFloat64(h, opts.BaseColorMaterialXTileMM)
 	writeFloat64(h, opts.BaseColorMaterialXTriplanarSharpness)
-	writeBool(h, opts.AlphaWrap)
+	// Cache-compat contract (same as hashLoadSettings): none→old false
+	// byte, alphawrap→old true byte, fwn→false byte + distinct marker.
+	writeBool(h, opts.MeshRepair == RepairAlphaWrap)
+	if opts.MeshRepair == RepairFWN {
+		writeString(h, "repair-fwn-v1")
+	}
 	writeInt(h, len(opts.Stickers))
 	for _, s := range opts.Stickers {
 		writeString(h, s.ImagePath)

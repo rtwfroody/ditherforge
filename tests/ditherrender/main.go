@@ -218,7 +218,9 @@ func runModel(ctx context.Context, cfg renderConfig, m suiteModel) ([]ballots.Ba
 		ColorSnap:       5,
 		Force:           true,
 		Scale:           1,
-		AlphaWrap:       m.alphaWrap,
+	}
+	if m.alphaWrap {
+		baseOpts.MeshRepair = pipeline.RepairAlphaWrap
 	}
 	// scaleOnly leaves Size nil and runs at native scale (Scale=1),
 	// exactly like the scaleOnly cases in sampled_match_input_test.go.

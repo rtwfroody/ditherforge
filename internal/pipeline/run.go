@@ -16,6 +16,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/alphawrap"
 	"github.com/rtwfroody/ditherforge/internal/cellslicer"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
+	"github.com/rtwfroody/ditherforge/internal/fwnrepair"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
@@ -996,8 +997,11 @@ func (r *pipelineRun) runLoad() (any, error) {
 		return nil, err
 	}
 	label := stageNames[StageLoad]
-	if r.opts.AlphaWrap {
+	switch r.opts.MeshRepair {
+	case RepairAlphaWrap:
 		label += " (including alpha-wrap)"
+	case RepairFWN:
+		label += " (including mesh repair)"
 	}
 	stage := progress.BeginStage(r.tracker, label, false, 0)
 	defer stage.Done()
@@ -1044,54 +1048,83 @@ func (r *pipelineRun) runLoad() (any, error) {
 		r.previewOutputGeometry(buildWrappedMeshData(geomModel), pl.PreviewScale)
 	}
 
-	if r.opts.AlphaWrap {
-		alpha := r.opts.AlphaWrapAlpha
-		if alpha <= 0 {
-			alpha = r.opts.NozzleDiameter
-		}
-		offset := r.opts.AlphaWrapOffset
-		if offset <= 0 {
-			offset = alpha / 30
+	if r.opts.RepairEnabled() {
+		switch r.opts.MeshRepair {
+		case RepairAlphaWrap:
+			alpha := r.opts.AlphaWrapAlpha
+			if alpha <= 0 {
+				alpha = r.opts.NozzleDiameter
+			}
+			offset := r.opts.AlphaWrapOffset
+			if offset <= 0 {
+				offset = alpha / 30
+			}
+
+			plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
+			tWrap := time.Now()
+			wrapped, werr := alphawrap.Wrap(geomModel, alpha, offset)
+			if werr != nil {
+				return nil, fmt.Errorf("alpha-wrap: %w", werr)
+			}
+			plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
+				len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
+			geomModel = wrapped
+			reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
+
+		case RepairFWN:
+			pitch := r.opts.AlphaWrapAlpha
+			if pitch <= 0 {
+				pitch = r.opts.NozzleDiameter
+			}
+
+			plog.Printf("  Mesh repair (fwn): pitch=%.3f mm starting", pitch)
+			tRepair := time.Now()
+			repaired, effPitch, rerr := fwnrepair.Repair(r.ctx, geomModel, pitch)
+			if rerr != nil {
+				return nil, fmt.Errorf("fwn-repair: %w", rerr)
+			}
+			plog.Printf("  Mesh repair (fwn): %d vertices, %d faces at pitch=%.3f mm in %.1fs",
+				len(repaired.Vertices), len(repaired.Faces), effPitch, time.Since(tRepair).Seconds())
+			if effPitch > pitch {
+				plog.Printf("  Mesh repair (fwn): requested pitch %.3f mm raised to %.3f mm (384-cell axis cap)",
+					pitch, effPitch)
+			}
+			geomModel = repaired
+			reportHolesIfEnabled("fwn-repair output", repaired.Faces)
 		}
 
-		plog.Printf("  Alpha-wrap: alpha=%.3f mm, offset=%.3f mm starting", alpha, offset)
-		tWrap := time.Now()
-		wrapped, werr := alphawrap.Wrap(geomModel, alpha, offset)
-		if werr != nil {
-			return nil, fmt.Errorf("alpha-wrap: %w", werr)
+		if err := r.checkCancel(); err != nil {
+			return nil, err
 		}
-		plog.Printf("  Alpha-wrap: %d vertices, %d faces in %.1fs",
-			len(wrapped.Vertices), len(wrapped.Faces), time.Since(tWrap).Seconds())
-		geomModel = wrapped
-		reportHolesIfEnabled("alpha-wrap output", wrapped.Faces)
 
-		// Post-wrap decimation: alpha-wrap output is dense (~one face
-		// per α² of surface area), but downstream stages (Sticker,
-		// Voxelize) only need detail at voxel cell resolution.
-		// errorBudget caps drift at ½ a cell, so flat regions
+		// Post-repair decimation: the repaired skin is dense (alpha-wrap
+		// emits ~one face per α² of surface area; the FWN remesh emits
+		// marching-cubes triangles at grid resolution), but downstream
+		// stages (Sticker, Voxelize) only need detail at voxel cell
+		// resolution. errorBudget caps drift at ½ a cell, so flat regions
 		// collapse aggressively while curved silhouettes stop being
-		// thinned once cumulative drift would exceed what
-		// voxelization can resolve.
+		// thinned once cumulative drift would exceed what voxelization
+		// can resolve.
 		if !r.opts.NoSimplify {
 			cellSize := voxelCellSizes(r.opts).UpperXY
 			budget := decimateErrorBudget(cellSize)
 			postDec, derr := voxel.DecimateMesh(r.ctx, geomModel, 1, cellSize, budget, false, progress.NullTracker{})
 			if derr != nil {
-				return nil, fmt.Errorf("post-wrap decimate: %w", derr)
+				return nil, fmt.Errorf("post-repair decimate: %w", derr)
 			}
 			if len(postDec.Faces) < len(geomModel.Faces) {
-				plog.Printf("  Post-wrap decimate: %d faces -> %d faces (cellSize=%.3f mm)",
+				plog.Printf("  Post-repair decimate: %d faces -> %d faces (cellSize=%.3f mm)",
 					len(geomModel.Faces), len(postDec.Faces), cellSize)
 				geomModel = postDec
 			}
-			reportHolesIfEnabled("post-wrap decimate output", geomModel.Faces)
+			reportHolesIfEnabled("post-repair decimate output", geomModel.Faces)
 			if err := r.checkCancel(); err != nil {
 				return nil, err
 			}
 		}
 
-		// Updated grey preview once the wrapped skin is built, replacing
-		// the post-decimation silhouette with the watertight wrap shape.
+		// Updated grey preview once the repaired skin is built, replacing
+		// the post-decimation silhouette with the watertight repair shape.
 		if r.onOutputPreview != nil {
 			r.previewOutputGeometry(buildWrappedMeshData(geomModel), pl.PreviewScale)
 		}
@@ -1126,12 +1159,12 @@ func (r *pipelineRun) runSplit() (any, error) {
 	}
 
 	// Split requires a watertight input; the design doc says the
-	// frontend forces AlphaWrap=true when Split is enabled.
+	// frontend forces a mesh-repair mode on when Split is enabled.
 	// Surface the precondition violation here so the user sees a
 	// clear error rather than a downstream "non-manifold cut
 	// polygon" message from split.Cut.
-	if !r.opts.AlphaWrap {
-		return nil, fmt.Errorf("split: requires AlphaWrap=true (split.Cut needs a watertight input mesh; see docs/SPLIT.md)")
+	if !r.opts.RepairEnabled() {
+		return nil, fmt.Errorf("split: requires mesh repair (fwn or alphawrap); split.Cut needs a watertight input mesh, see docs/SPLIT.md")
 	}
 
 	tSplit := time.Now()
@@ -1162,8 +1195,8 @@ func (r *pipelineRun) runSplit() (any, error) {
 		DepthMM:     r.opts.Split.ConnectorDepthMM,
 		ClearanceMM: r.opts.Split.ClearanceMM,
 	}
-	// Cut runs on lo.Model. The frontend forces AlphaWrap=true
-	// when Split is enabled (see docs/SPLIT.md "Watertight
+	// Cut runs on lo.Model. The frontend forces a mesh-repair mode
+	// on when Split is enabled (see docs/SPLIT.md "Watertight
 	// requirement"), so lo.Model is watertight under correct
 	// frontend wiring. If a caller bypasses that guard,
 	// split.Cut surfaces a clear error.
@@ -1258,7 +1291,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 		return &stickerOutput{}, nil
 	}
 	var sourceModel *loader.LoadedModel
-	if r.opts.AlphaWrap {
+	if r.opts.RepairEnabled() {
 		sourceModel = lo.Model
 	} else {
 		sourceModel = lo.ColorModel
@@ -1346,7 +1379,7 @@ func (r *pipelineRun) computeSticker(lo *loadOutput) (*stickerOutput, error) {
 	so := &stickerOutput{
 		Decals:        decals,
 		Model:         model,
-		FromAlphaWrap: r.opts.AlphaWrap,
+		FromAlphaWrap: r.opts.RepairEnabled(),
 	}
 	so.si = si
 	return so, nil
@@ -2440,8 +2473,8 @@ func (r *pipelineRun) runDither() (any, error) {
 // the dithered palette index of its source cell; faces from cells
 // with no dither assignment fall back to the mesh's most-common
 // palette index. The geometry mesh must be closed and orientable —
-// the alpha-wrap path produces this directly; for raw meshes the
-// pipeline relies on opts.AlphaWrap.
+// the mesh-repair paths (fwn / alpha-wrap) produce this directly; for
+// raw meshes the pipeline relies on opts.RepairEnabled().
 // cutFaceSeamBandCells is the width, in cell hops, of the dithered rim
 // kept around a VISIBLE cut face's perimeter (the part of the join you
 // see when the halves are reassembled). Cells deeper than this — and all

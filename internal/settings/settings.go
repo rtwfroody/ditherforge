@@ -149,12 +149,20 @@ type Settings struct {
 	// cell's interior samples are dominated (≥75% by ΔE cluster) by one
 	// colour, so a lone sample straying across a colour boundary doesn't
 	// pull the cell's averaged colour. On by default.
-	RejectColorOutliers bool   `json:"rejectColorOutliers"`
-	Stats               bool   `json:"stats"`
-	ShowSampledColors   bool   `json:"showSampledColors"`
-	AlphaWrap           bool   `json:"alphaWrap"`
-	AlphaWrapAlpha      string `json:"alphaWrapAlpha"`
-	AlphaWrapOffset     string `json:"alphaWrapOffset"`
+	RejectColorOutliers bool `json:"rejectColorOutliers"`
+	Stats               bool `json:"stats"`
+	ShowSampledColors   bool `json:"showSampledColors"`
+	// MeshRepair selects the pre-clip mesh-repair method: "none" (use the
+	// model as-is), "fwn" (winding-number remesh, see internal/fwnrepair),
+	// or "alphawrap" (CGAL alpha wrap, see internal/alphawrap). Load
+	// normalizes any other value to "none".
+	MeshRepair string `json:"meshRepair"`
+	// AlphaWrap is legacy-load-only: pre-MeshRepair files carry this bool.
+	// Load migrates a true value to MeshRepair=="alphawrap" and clears it,
+	// and Save omits it (omitempty) so re-saves drop the legacy key.
+	AlphaWrap       bool   `json:"alphaWrap,omitempty"`
+	AlphaWrapAlpha  string `json:"alphaWrapAlpha"`
+	AlphaWrapOffset string `json:"alphaWrapOffset"`
 	// Voxel-grid XY multipliers. See Default for the values missing-from-JSON
 	// keys are filled with on load.
 	Layer0AdhesionXYScale float64 `json:"layer0AdhesionXYScale"`
@@ -219,6 +227,7 @@ func Default() Settings {
 		RejectColorOutliers:   true,
 		Stats:                 false,
 		ShowSampledColors:     false,
+		MeshRepair:            "none",
 		AlphaWrap:             false,
 		AlphaWrapAlpha:        "",
 		AlphaWrapOffset:       "",
@@ -352,6 +361,21 @@ func Load(path string) (s Settings, legacyAbsoluteUnits bool, err error) {
 	case "blue-noise":
 		sf.Settings.Dither = "bn-adapt-5"
 	}
+	// Migrate the legacy AlphaWrap bool to the three-way MeshRepair enum.
+	// A pre-MeshRepair file has no meshRepair key (decodes as the Default()
+	// "none") but may carry alphaWrap:true — map that to "alphawrap". Then
+	// normalize any unrecognized value to "none", and always clear the
+	// legacy bool so a re-save (which omits it via omitempty) drops the key.
+	if (sf.Settings.MeshRepair == "" || sf.Settings.MeshRepair == "none") && sf.Settings.AlphaWrap {
+		sf.Settings.MeshRepair = "alphawrap"
+	}
+	switch sf.Settings.MeshRepair {
+	case "none", "fwn", "alphawrap":
+		// allowed
+	default:
+		sf.Settings.MeshRepair = "none"
+	}
+	sf.Settings.AlphaWrap = false
 	transformPaths(&sf.Settings, func(p string) string { return pathForLoading(path, p) })
 	return sf.Settings, !sf.DitherForge.SizeRelativeUnits, nil
 }

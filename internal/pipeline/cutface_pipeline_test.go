@@ -38,7 +38,7 @@ func TestSplitCutFaceFlatFill(t *testing.T) {
 		Size:           &size,
 		Force:          true,
 		Dither:         "floyd-steinberg",
-		AlphaWrap:      true,
+		MeshRepair:     RepairAlphaWrap,
 	}
 
 	cache := NewStageCache()

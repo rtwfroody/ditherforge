@@ -2,10 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
-	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -40,7 +40,7 @@ func TestAnnexProbe(t *testing.T) {
 		Force:          true,
 		Scale:          1,
 		Size:           &size,
-		AlphaWrap:      true,
+		MeshRepair:     RepairAlphaWrap,
 	}
 	r := &pipelineRun{ctx: context.Background(), cache: NewStageCache(), opts: opts, tracker: progress.NullTracker{}}
 	lo, err := r.Load()
@@ -364,9 +364,9 @@ func TestAnnexProbe(t *testing.T) {
 		topZ, rgba, _ := topHit(siColor, nil, bufC, px, py, true)
 		t.Logf("--- hex caps within 1.0mm of (%.2f,%.2f) roofZ=%.2f want=(%d,%d,%d) ---", px, py, topZ, rgba[0], rgba[1], rgba[2])
 		type hit struct {
-			slab          int
-			z, d          float32
-			col           [3]uint8
+			slab int
+			z, d float32
+			col  [3]uint8
 		}
 		var hits []hit
 		for gi := range vo.CellSamples {

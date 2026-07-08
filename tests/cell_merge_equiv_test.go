@@ -132,9 +132,11 @@ func TestCellMergeMatchesPerCell(t *testing.T) {
 				Force:           true,
 				Scale:           1,
 				Size:            &size,
-				AlphaWrap:       tc.alphaWrap,
 				// ShowSampledColors stays false: we want the real
 				// palette-coloured output, with merging actually active.
+			}
+			if tc.alphaWrap {
+				base.MeshRepair = pipeline.RepairAlphaWrap
 			}
 
 			// NewStageCache has no disk tier, so nothing is actually

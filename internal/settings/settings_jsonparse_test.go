@@ -203,9 +203,10 @@ func TestLoadJSONKitchenSink(t *testing.T) {
 		t.Errorf("InfillColor = %v, want [1 2 3]", opts.InfillColor)
 	}
 
-	// Alpha-wrap.
-	if !opts.AlphaWrap || opts.AlphaWrapAlpha != 0.5 || opts.AlphaWrapOffset != 0.03 {
-		t.Errorf("alpha-wrap = %v/%v/%v", opts.AlphaWrap, opts.AlphaWrapAlpha, opts.AlphaWrapOffset)
+	// Mesh repair: the legacy "alphaWrap": true migrates to MeshRepair
+	// "alphawrap", and the alpha/offset knobs still parse.
+	if opts.MeshRepair != "alphawrap" || opts.AlphaWrapAlpha != 0.5 || opts.AlphaWrapOffset != 0.03 {
+		t.Errorf("mesh-repair = %v/%v/%v", opts.MeshRepair, opts.AlphaWrapAlpha, opts.AlphaWrapOffset)
 	}
 	if opts.Layer0AdhesionXYScale != 3 || opts.UpperLayerXYScale != 1.5 {
 		t.Errorf("XY scales = %v/%v", opts.Layer0AdhesionXYScale, opts.UpperLayerXYScale)
@@ -361,6 +362,79 @@ func TestLoadMigratesRemovedDitherModes(t *testing.T) {
 		if s.Dither != tc.want {
 			t.Errorf("dither %q migrated to %q, want %q", tc.from, s.Dither, tc.want)
 		}
+	}
+}
+
+// TestLoadMigratesLegacyAlphaWrap checks the AlphaWrap bool → MeshRepair
+// enum migration: a legacy file carrying "alphaWrap": true (and no
+// meshRepair key) loads as MeshRepair=="alphawrap" with the legacy bool
+// cleared so a re-save drops it.
+func TestLoadMigratesLegacyAlphaWrap(t *testing.T) {
+	body := `{
+  "_ditherforge": {
+    "url": "https://github.com/rtwfroody/ditherforge",
+    "version": "ditherforge 0.9.8",
+    "sizeRelativeUnits": true
+  },
+  "settings": {
+    "inputFile": "/m/x.glb",
+    "alphaWrap": true
+  }
+}`
+	s, _, err := Load(writeJSON(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.MeshRepair != "alphawrap" {
+		t.Errorf("MeshRepair = %q, want alphawrap from legacy alphaWrap:true", s.MeshRepair)
+	}
+	if s.AlphaWrap {
+		t.Error("legacy AlphaWrap bool should be cleared after migration")
+	}
+}
+
+// TestMeshRepairRoundTrips checks that an explicit meshRepair value
+// survives Save/Load unchanged (the new field is the source of truth).
+func TestMeshRepairRoundTrips(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX-rooted paths")
+	}
+	orig := Default()
+	orig.MeshRepair = "fwn"
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "s.json")
+	if err := Save(path, orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.MeshRepair != "fwn" {
+		t.Errorf("MeshRepair = %q, want fwn after round-trip", loaded.MeshRepair)
+	}
+}
+
+// TestLoadNormalizesUnknownMeshRepair checks that an unrecognized
+// meshRepair value falls back to "none" rather than reaching the pipeline.
+func TestLoadNormalizesUnknownMeshRepair(t *testing.T) {
+	body := `{
+  "_ditherforge": {
+    "url": "https://github.com/rtwfroody/ditherforge",
+    "version": "ditherforge 0.9.8",
+    "sizeRelativeUnits": true
+  },
+  "settings": {
+    "inputFile": "/m/x.glb",
+    "meshRepair": "bogus-method"
+  }
+}`
+	s, _, err := Load(writeJSON(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.MeshRepair != "none" {
+		t.Errorf("MeshRepair = %q, want none for unknown value", s.MeshRepair)
 	}
 }
 

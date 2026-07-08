@@ -436,7 +436,8 @@ export namespace settings {
 	    rejectColorOutliers: boolean;
 	    stats: boolean;
 	    showSampledColors: boolean;
-	    alphaWrap: boolean;
+	    meshRepair: string;
+	    alphaWrap?: boolean;
 	    alphaWrapAlpha: string;
 	    alphaWrapOffset: string;
 	    layer0AdhesionXYScale: number;
@@ -497,6 +498,7 @@ export namespace settings {
 	        this.rejectColorOutliers = source["rejectColorOutliers"];
 	        this.stats = source["stats"];
 	        this.showSampledColors = source["showSampledColors"];
+	        this.meshRepair = source["meshRepair"];
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];

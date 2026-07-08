@@ -228,9 +228,17 @@
   // palette. Lets us visually distinguish sampling bugs from
   // dither / mesh-emission bugs in the GUI viewer.
   let showSampledColors = $state(false);
-  let alphaWrap = $state(false);
-  let alphaWrapAlpha = $state('');   // mm; '' = auto (5 × nozzle diameter)
-  let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30)
+  // Mesh-repair method: 'none' | 'fwn' (winding-number remesh) |
+  // 'alphawrap' (CGAL alpha wrap). Persisted as meshRepair; the Go
+  // backend migrates legacy alphaWrap:true files to 'alphawrap'.
+  const MESH_REPAIR_VALUES = ['none', 'fwn', 'alphawrap'] as const;
+  // Typed as plain string (not the union) on purpose: a union-typed $state
+  // read in a script-level $derived (modelSummary) narrows to its
+  // initializer literal 'none', which makes svelte-check flag the
+  // `meshRepair !== 'none'` comparison as always-false. String sidesteps it.
+  let meshRepair = $state('none');
+  let alphaWrapAlpha = $state('');   // mm; '' = auto (nozzle diameter). Detail size / grid pitch.
+  let alphaWrapOffset = $state('');  // mm; '' = auto (alpha / 30). Alpha-wrap surface offset only.
   // Layer-0 voxel-XY multiplier for bed adhesion. 1 = no enlargement;
   // higher = bigger first-layer color blobs that stick better.
   // Backend treats 0/negative as "use built-in default".
@@ -409,12 +417,12 @@
     };
   });
 
-  // Cascade: turning AlphaWrap off while Split is on auto-disables
+  // Cascade: turning mesh repair off while Split is on auto-disables
   // Split (the cut needs a watertight input). The reverse cascade
-  // (turning Split on auto-enables AlphaWrap) lives in
-  // SplitControls.svelte's onAlphaWrapForced callback.
+  // (turning Split on auto-enables a repair mode) lives in
+  // SplitControls.svelte's onRepairForced callback.
   $effect(() => {
-    if (!alphaWrap && splitEnabled) {
+    if (meshRepair === 'none' && splitEnabled) {
       splitEnabled = false;
     }
   });
@@ -1198,7 +1206,7 @@
     const name = inputFile ? inputFile.split(/[/\\]/).pop() : '';
     if (name) parts.push(name);
     if (scaledMaxExtentMM && scaledMaxExtentMM > 0) parts.push(`${Math.round(scaledMaxExtentMM)} mm`);
-    if (alphaWrap) parts.push('repaired');
+    if (meshRepair !== 'none') parts.push('repaired');
     return parts.length ? parts.join(' · ') : '—';
   });
   const appearanceSummary = $derived.by(() => {
@@ -1473,7 +1481,7 @@
       rejectColorOutliers,
       stats,
       showSampledColors,
-      alphaWrap,
+      meshRepair,
       alphaWrapAlpha: String(alphaWrapAlpha),
       alphaWrapOffset: String(alphaWrapOffset),
       layer0AdhesionXYScale: useC ? committedLayer0AdhesionXYScale : layer0AdhesionXYScale,
@@ -1524,7 +1532,11 @@
   // generator quirks around []*T (drops null) and [N]T (widens to
   // T[]). When this guard fires it resolves the type to `never`,
   // and `const _: never = true` fails compilation.
-  type _GoSettingsKeys = keyof Omit<settings.Settings, 'convertValues'>;
+  // 'alphaWrap' is excluded: it is a legacy-load-only Go field (json
+  // omitempty) that the frontend intentionally no longer serializes —
+  // settings.Load migrates it into meshRepair and Save drops it. It has
+  // no matching serializeSettings key by design, so exclude it here.
+  type _GoSettingsKeys = keyof Omit<settings.Settings, 'convertValues' | 'alphaWrap'>;
   type _FrontendSettingsKeys = keyof ReturnType<typeof serializeSettings>;
   type _SettingsKeysMatchGo =
     _FrontendSettingsKeys extends _GoSettingsKeys
@@ -1688,7 +1700,7 @@
     { key: 'rejectColorOutliers',             validate: pickBool,                                          apply: (v) => { rejectColorOutliers = v; } },
     { key: 'stats',                           validate: pickBool,                                          apply: (v) => { stats = v; } },
     { key: 'showSampledColors',               validate: pickBool,                                          apply: (v) => { showSampledColors = v; } },
-    { key: 'alphaWrap',                       validate: pickBool,                                          apply: (v) => { alphaWrap = v; } },
+    { key: 'meshRepair',                      validate: (v, d) => pickEnum(v, MESH_REPAIR_VALUES, d),      apply: (v) => { meshRepair = v; } },
     { key: 'alphaWrapAlpha',                  validate: pickString,                                        apply: (v) => { alphaWrapAlpha = v; } },
     { key: 'alphaWrapOffset',                 validate: pickString,                                        apply: (v) => { alphaWrapOffset = v; } },
     { key: 'layer0AdhesionXYScale',           validate: pickNumber,                                        apply: (v) => { layer0AdhesionXYScale = v; committedLayer0AdhesionXYScale = v; } },
@@ -2347,23 +2359,38 @@
               </div>
             {/if}
 
-            <!-- Repair geometry (alpha-wrap) -->
+            <!-- Repair geometry -->
             <div class="space-y-2">
-              <label class="flex items-center gap-2 text-sm font-medium">
-                <Checkbox bind:checked={alphaWrap} />
-                Repair geometry (recommended for damaged models)
+              <div class="flex items-center gap-2 text-sm font-medium">
+                <span>Repair geometry</span>
                 <HelpTip>
-                  Wrap the model with a watertight shell to fix self-intersections, thin walls, and other geometry that slicers choke on. Runs after the output is generated and can be slow on large models.
+                  Rebuild a watertight mesh before slicing to fix models with holes, self-intersections, thin walls, or inverted normals. "None" uses the model as-is. "Winding-number remesh" is medium speed and fixes most broken meshes, though very fine detail may be resampled away. "Alpha wrap" is slow but most robust — it shrink-wraps a watertight shell and bridges small gaps and pockets.
                 </HelpTip>
-              </label>
-              <p class="text-xs text-muted-foreground">Wraps a watertight shell over the model; can be slow on large models.</p>
-              {#if alphaWrap}
+                <select
+                  class="h-9 rounded-md border border-input bg-background text-foreground px-2 text-sm ml-auto"
+                  bind:value={meshRepair}
+                >
+                  <option value="none">None</option>
+                  <option value="fwn">Winding-number remesh</option>
+                  <option value="alphawrap">Alpha wrap</option>
+                </select>
+              </div>
+              <p class="text-xs text-muted-foreground">
+                {#if meshRepair === 'fwn'}
+                  Rebuilds the surface on a fine grid — medium speed; fixes most broken meshes but may lose very fine detail.
+                {:else if meshRepair === 'alphawrap'}
+                  Shrink-wraps a watertight shell — slow but most robust; bridges small gaps and pockets.
+                {:else}
+                  The model is used as-is. Pick a repair method for damaged or non-watertight meshes.
+                {/if}
+              </p>
+              {#if meshRepair !== 'none'}
                 <div class="grid grid-cols-2 gap-3 pl-6 text-sm">
                   <label class="flex flex-col gap-1">
                     <span class="text-muted-foreground flex items-center gap-1.5">
                       Detail size (mm)
                       <HelpTip>
-                        Radius of the probing sphere. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly.
+                        For alpha wrap: the radius of the probing sphere. For the winding-number remesh: the grid pitch. Larger = smoother/coarser result that bridges gaps but loses detail; smaller = hugs the surface more tightly (and is slower).
                       </HelpTip>
                     </span>
                     <input type="number" step="0.1" min="0"
@@ -2372,19 +2399,21 @@
                            bind:value={alphaWrapAlpha} />
                     <span class="text-xs text-muted-foreground">Larger bridges gaps; smaller keeps more detail.</span>
                   </label>
-                  <label class="flex flex-col gap-1">
-                    <span class="text-muted-foreground flex items-center gap-1.5">
-                      Surface offset (mm)
-                      <HelpTip>
-                        How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
-                      </HelpTip>
-                    </span>
-                    <input type="number" step="0.01" min="0"
-                           placeholder="auto (alpha / 30)"
-                           class="h-9 rounded border bg-background text-foreground px-2"
-                           bind:value={alphaWrapOffset} />
-                    <span class="text-xs text-muted-foreground">How far the shell sits above the surface; larger wraps less tightly.</span>
-                  </label>
+                  {#if meshRepair === 'alphawrap'}
+                    <label class="flex flex-col gap-1">
+                      <span class="text-muted-foreground flex items-center gap-1.5">
+                        Surface offset (mm)
+                        <HelpTip>
+                          How far the wrap sits above the input surface. Larger values shrink-wrap less tightly.
+                        </HelpTip>
+                      </span>
+                      <input type="number" step="0.01" min="0"
+                             placeholder="auto (alpha / 30)"
+                             class="h-9 rounded border bg-background text-foreground px-2"
+                             bind:value={alphaWrapOffset} />
+                      <span class="text-xs text-muted-foreground">How far the shell sits above the surface; larger wraps less tightly.</span>
+                    </label>
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -2827,7 +2856,7 @@
                   extentMM={scaledMaxExtentMM ?? 0}
                   minOffset={splitOffsetMin}
                   maxOffset={splitOffsetMax}
-                  onAlphaWrapForced={() => { alphaWrap = true; }}
+                  onRepairForced={() => { if (meshRepair === 'none') meshRepair = 'alphawrap'; }}
                 />
               </div>
             </div>
