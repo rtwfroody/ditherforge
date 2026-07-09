@@ -2520,6 +2520,38 @@ func (r *pipelineRun) runClip() (any, error) {
 		return nil, err
 	}
 
+	// Instant approximate preview: a colored "splat cloud" of one small quad
+	// per visible cell, using the dither assignments that already exist before
+	// this (slow, cold) clip runs. Because stage bodies execute only on a
+	// cache miss, this fires exactly when the user is about to wait minutes for
+	// Clip + Merge — so they see the dithered colors within seconds instead.
+	// Skip the build entirely when headless (CLI / tests): no preview sink.
+	if r.onOutputPreview != nil {
+		var normalXform func(halfIdx byte, normal [3]float32) [3]float32
+		if so.Enabled {
+			// Centroids are already in bed coords, but CellSample.Normal is in
+			// the color-model frame. Rotate the direction into bed coords via
+			// the half's forward rigid transform: Apply is affine, so
+			// Apply(n) - Apply(0) is exactly the rotation applied to n.
+			spl := so
+			normalXform = func(halfIdx byte, n [3]float32) [3]float32 {
+				if int(halfIdx) >= len(spl.Xform) {
+					return n
+				}
+				t := spl.Xform[int(halfIdx)]
+				o := t.Apply([3]float32{0, 0, 0})
+				p := t.Apply(n)
+				return [3]float32{p[0] - o[0], p[1] - o[1], p[2] - o[2]}
+			}
+		}
+		po, perr := r.Palette()
+		if perr != nil {
+			return nil, perr
+		}
+		splat := buildCellSplatPreview(vo, do.Assignments, po.Palette, normalXform)
+		r.previewOutputGeometry(splat, lo.PreviewScale)
+	}
+
 	// The clip job count (cells, or merged groups) is only known
 	// mid-stage, so the bar is normalized to ScaleTotal. Each
 	// half/window gives its first ~15% to the sequential per-slab

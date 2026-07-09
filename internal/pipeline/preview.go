@@ -8,6 +8,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -580,6 +581,128 @@ func attachStickerOverlay(mesh *MeshData, decals []*voxel.StickerDecal) *MeshDat
 	out.StickerBounds = stickerBounds
 	out.StickerAtlas = info.atlasStr
 	return &out
+}
+
+// buildCellSplatPreview builds an approximate colored "splat cloud" preview of
+// the dithered output: one small colored quad per visible cell, centered at the
+// cell centroid and lying in the cell's tangent plane. The dither color
+// assignments already exist before the slow Clip + Merge stages, so this lets
+// the Output viewer show the dithered result within seconds of a settings
+// change rather than minutes.
+//
+// assignments is indexed by visible-cell index (parallel to vo.VisibleToCell)
+// and holds palette indices into palette. normalXform rotates a cell's
+// color-model-frame normal into the bed/output frame (pass nil when unsplit;
+// centroids are already in the output frame either way).
+func buildCellSplatPreview(vo *voxelizeOutput, assignments []int32, paletteRGB [][3]uint8, normalXform func(halfIdx byte, normal [3]float32) [3]float32) *MeshData {
+	nVis := len(vo.VisibleToCell)
+	vertices := make([]float32, 0, nVis*4*3)
+	faces := make([]uint32, 0, nVis*2*3)
+	faceColors := make([]uint16, 0, nVis*2*3)
+
+	var vbase uint32
+	for vi, gi := range vo.VisibleToCell {
+		if gi < 0 || gi >= len(vo.CellSamples) {
+			continue
+		}
+		cs := vo.CellSamples[gi]
+
+		// Palette color for this cell; fall back to grey when the cell has no
+		// valid dither assignment (should not happen for visible cells).
+		r, g, b := uint16(defaultGray), uint16(defaultGray), uint16(defaultGray)
+		if vi < len(assignments) {
+			if ai := assignments[vi]; ai >= 0 && int(ai) < len(paletteRGB) {
+				c := paletteRGB[ai]
+				r, g, b = uint16(c[0]), uint16(c[1]), uint16(c[2])
+			}
+		}
+
+		// Cell normal in the output/bed frame. Centroids already live there,
+		// but normals are stored in the color-model frame, so split halves
+		// need their forward rigid rotation applied.
+		n := cs.Normal
+		if normalXform != nil {
+			n = normalXform(cs.HalfIdx, n)
+		}
+		n = splatNormalize(n)
+
+		// Orthonormal tangent basis (u, v) spanning the plane perpendicular
+		// to n. Cross n with the world axis it is least aligned with so the
+		// cross product never degenerates.
+		u := splatCross(n, splatLeastAlignedAxis(n))
+		u = splatNormalize(u)
+		v := splatCross(n, u)
+
+		// Half-extent from the cell's XY area, inflated 25% linearly to close
+		// gaps between neighbouring splats. Fall back to a small fixed extent
+		// for cells with no recorded area.
+		h := float32(0.25)
+		if cs.Area > 0 {
+			h = 0.625 * float32(math.Sqrt(float64(cs.Area)))
+		}
+
+		// Deterministic per-cell jitter along the normal to defeat z-fighting
+		// between coplanar neighbours. No RNG — keyed on the global cell index.
+		jitter := (float32((uint32(gi)*2654435761)>>16&0xFF)/255 - 0.5) * 0.04
+		cx := cs.Centroid[0] + n[0]*jitter
+		cy := cs.Centroid[1] + n[1]*jitter
+		cz := cs.Centroid[2] + n[2]*jitter
+
+		// Four quad corners: c ± h·u ± h·v, ordered CCW about +n.
+		for _, s := range [4][2]float32{{-1, -1}, {1, -1}, {1, 1}, {-1, 1}} {
+			du, dv := s[0]*h, s[1]*h
+			vertices = append(vertices,
+				cx+u[0]*du+v[0]*dv,
+				cy+u[1]*du+v[1]*dv,
+				cz+u[2]*du+v[2]*dv)
+		}
+		// Two triangles: (0,1,2) and (0,2,3), wound CCW about +n. Both carry
+		// the same face color. The viewer renders double-sided, so winding is
+		// cosmetic, but keeping it consistent means normals recover cleanly.
+		faces = append(faces, vbase, vbase+1, vbase+2, vbase, vbase+2, vbase+3)
+		faceColors = append(faceColors, r, g, b, r, g, b)
+		vbase += 4
+	}
+
+	return &MeshData{Vertices: vertices, Faces: faces, FaceColors: faceColors}
+}
+
+// splatNormalize returns n scaled to unit length, or +Z when n is degenerate.
+func splatNormalize(n [3]float32) [3]float32 {
+	l := float32(math.Sqrt(float64(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])))
+	if l < 1e-9 {
+		return [3]float32{0, 0, 1}
+	}
+	return [3]float32{n[0] / l, n[1] / l, n[2] / l}
+}
+
+// splatCross returns a × b.
+func splatCross(a, b [3]float32) [3]float32 {
+	return [3]float32{
+		a[1]*b[2] - a[2]*b[1],
+		a[2]*b[0] - a[0]*b[2],
+		a[0]*b[1] - a[1]*b[0],
+	}
+}
+
+// splatLeastAlignedAxis returns the world axis (unit vector) least parallel to
+// n, so crossing it with n yields a well-conditioned tangent.
+func splatLeastAlignedAxis(n [3]float32) [3]float32 {
+	ax, ay, az := abs32(n[0]), abs32(n[1]), abs32(n[2])
+	if ax <= ay && ax <= az {
+		return [3]float32{1, 0, 0}
+	}
+	if ay <= az {
+		return [3]float32{0, 1, 0}
+	}
+	return [3]float32{0, 0, 1}
+}
+
+func abs32(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // buildMeshData creates a MeshData from remesh output (model + palette assignments).
