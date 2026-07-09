@@ -929,9 +929,13 @@ func (r *pipelineRun) runParse() (any, error) {
 // override on top of the (possibly cached) load output on EVERY
 // resolve. Cheap and idempotent. On a fresh disk hit
 // (lo.appliedBaseColor=="") this skips the parse cache lookup.
+//
+// r.Parse is threaded in so applyBaseColor can recompute the pristine
+// parse output if the disk sweep evicted its blob (a re-entrant resolve
+// of the upstream Parse stage, memoized so it's cheap on repeat calls —
+// runPreload's body already calls r.Parse the same way).
 func afterLoad(r *pipelineRun, out any) error {
-	applyBaseColor(r.ctx, r.cache, out.(*loadOutput), r.opts, r.tracker)
-	return nil
+	return applyBaseColor(r.ctx, r.cache, out.(*loadOutput), r.opts, r.tracker, r.Parse)
 }
 
 // runPreload is StagePreload's body (see stageDefs): the cheap half of

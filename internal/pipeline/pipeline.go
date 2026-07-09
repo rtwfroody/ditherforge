@@ -1078,12 +1078,16 @@ func applyBaseColorOverride(model *loader.LoadedModel, hexColor string) {
 // base-color settings are excluded from loadSettings, so multiple cached
 // loadOutput entries don't exist for the same load key with different colors.
 //
-// Invariant: whenever lo is present, parse output is reachable via
-// cache.getParse. We fetch it whenever FaceBaseColor might not be pristine:
-// either an override was previously applied this run, or lo was decoded from
-// disk (markersValid false), where a baked FaceBaseColor can hide behind
-// pristine-looking markers. A fresh, never-overridden load skips the lookup.
-func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker) {
+// Restoring pristine FaceBaseColor: we fetch the parse output whenever
+// FaceBaseColor might not be pristine — either an override was previously
+// applied this run, or lo was decoded from disk (markersValid false), where a
+// baked FaceBaseColor can hide behind pristine-looking markers. A fresh,
+// never-overridden load skips the lookup. The parse blob is normally served
+// from the disk cache, but the disk sweep can evict it independently of the
+// load blob (cost/size-scored eviction targets big, cheap-to-recompute blobs,
+// and parse is exactly that), so when getParse misses we recompute it on
+// demand via parse() rather than assuming it must still be on disk.
+func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts Options, tracker progress.Tracker, parse func() (*loader.LoadedModel, error)) error {
 	// markersValid is false for any disk-decoded loadOutput (the markers
 	// are unexported, so gob can't persist them — they always decode to the
 	// zero/pristine value even when FaceBaseColor was baked by an override
@@ -1102,13 +1106,18 @@ func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts
 	// we'd silently keep serving a nil atlas.
 	bakeMissing := opts.BaseColorMaterialX != "" && lo.BaseColorAtlas == nil
 	if tupleMatches && !bakeMissing {
-		return
+		return nil
 	}
 	pristine := lo.markersValid && lo.appliedBaseColor == "" && lo.appliedBaseColorMaterialX == ""
 	if !pristine {
 		raw := cache.getParse(opts)
 		if raw == nil {
-			panic("applyBaseColor: parse output missing but load cache mutated")
+			// The parse blob was evicted by the disk sweep. Re-resolve
+			// Parse to recompute (and re-store) it rather than panic.
+			var err error
+			if raw, err = parse(); err != nil {
+				return fmt.Errorf("restoring pristine base color: %w", err)
+			}
 		}
 		copy(lo.ColorModel.FaceBaseColor, raw.FaceBaseColor)
 	}
@@ -1164,6 +1173,7 @@ func applyBaseColor(ctx context.Context, cache *StageCache, lo *loadOutput, opts
 	// FaceBaseColor and the markers above now agree (this in-memory object
 	// won't be re-encoded), so later same-run calls can trust the fast path.
 	lo.markersValid = true
+	return nil
 }
 
 // bakeMaterialXBaseColor evaluates the procedural at every untextured
