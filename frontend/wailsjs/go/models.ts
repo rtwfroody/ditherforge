@@ -504,8 +504,8 @@ export namespace settings {
 	        this.alphaWrap = source["alphaWrap"];
 	        this.alphaWrapAlpha = source["alphaWrapAlpha"];
 	        this.alphaWrapOffset = source["alphaWrapOffset"];
-        this.fwnDetailXY = source["fwnDetailXY"];
-        this.fwnDetailZ = source["fwnDetailZ"];
+	        this.fwnDetailXY = source["fwnDetailXY"];
+	        this.fwnDetailZ = source["fwnDetailZ"];
 	        this.layer0AdhesionXYScale = source["layer0AdhesionXYScale"];
 	        this.upperLayerXYScale = source["upperLayerXYScale"];
 	        this.splitEnabled = source["splitEnabled"];
