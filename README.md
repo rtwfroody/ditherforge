@@ -229,6 +229,30 @@ regions that are nearly a single solid color.
 Set the value with the **Color snap (delta E)** slider (0 to 50, default 5).
 Set to 0 to disable.
 
+## How to Repair a Broken Mesh
+
+Many downloaded models have holes, self-intersections, thin walls, or inverted
+normals that break the boolean operations DitherForge (and slicers) rely on.
+The **Repair geometry** selector in the **Advanced** section rebuilds a
+watertight mesh before processing:
+
+- **None** (default) — the model is used as-is. Fine for clean, watertight
+  meshes.
+- **Winding-number remesh** — samples the mesh's fast winding number on a
+  grid and rebuilds the surface from it. Medium speed; fixes most broken
+  meshes, though detail finer than the grid is resampled away. Two knobs
+  control the grid pitch: **Detail XY (mm)** (auto = nozzle diameter) and
+  **Detail Z (mm)** (auto = layer height) — matching the printer's real
+  resolution in each axis, so vertical fidelity comes cheap.
+- **Alpha wrap** — shrink-wraps a watertight shell around the input (CGAL
+  Alpha-wrap). Slow but most robust; bridges small gaps and pockets. Two
+  knobs: **Detail size (mm)** (the probe radius; auto = nozzle diameter) and
+  **Surface offset (mm)** (how far the shell sits above the surface; auto =
+  detail / 30).
+
+Repair runs inside the Load stage and its result is cached, so switching
+downstream settings doesn't repeat it.
+
 ## How to Keep Color Edges Crisp
 
 Two options in the **Advanced** section keep sharp color boundaries from
@@ -297,8 +321,9 @@ half before assembly.
 
 To split a model:
 
-1. Open the **Split** panel and check **Split into two parts**. Alpha-wrap is
-   forced on automatically — a clean cut needs a watertight input mesh.
+1. Open the **Split** panel and check **Split into two parts**. A mesh-repair
+   mode is enabled automatically (Alpha wrap, unless a repair mode is already
+   selected) — a clean cut needs a watertight input mesh.
 2. Choose the **Cut plane** (XY, XZ, or YZ) and the **Offset** along that
    axis. The 3D viewer overlays a translucent quad showing the live cut
    position.
@@ -335,8 +360,8 @@ Stickers, color pins, and base color are applied to the original (unsplit)
 mesh, so they survive the cut and appear on whichever half they land on.
 Split panel state is saved and restored with the JSON settings file.
 
-If you turn off **Alpha-wrap** while Split is enabled, Split is automatically
-disabled as well. A toast explains the dependency.
+If you set **Repair geometry** back to **None** while Split is enabled, Split
+is automatically disabled as well. A toast explains the dependency.
 
 ## How to Save and Load Settings
 
@@ -415,20 +440,31 @@ compatible with OrcaSlicer and BambuStudio.
     Split is enabled, two `<object>` entries are emitted (one per half) so
     slicers see them as independent build items.
 
-If **Alpha-wrap** is enabled (Advanced section), it runs inside the Load stage
-to produce a watertight shell of the input mesh — the load-time decimation
-feeds it a mesh already pruned to voxel resolution. Split also forces
-alpha-wrap on, since the cut needs a watertight input.
+If **Repair geometry** is set (Advanced section), the repair runs inside the
+Load stage to produce a watertight mesh — either a fast-winding-number remesh
+sampled on a nozzle-by-layer-height grid, or a CGAL alpha-wrap shell (the
+load-time decimation feeds the wrap a mesh already pruned to voxel
+resolution). Split also forces a repair mode on, since the cut needs a
+watertight input.
 
 Each stage is cached by its settings hash. Changing a downstream parameter
 (e.g., dithering mode) skips all upstream stages on the next run. The stage
 caches persist across app restarts on disk (zstd-compressed), so re-opening a
 recent model is much faster than the first time — in particular the Load cache,
-which now subsumes both decimation and alpha-wrap, the slowest upstream work.
+which subsumes both decimation and mesh repair, the slowest upstream work.
 
 While the pipeline runs, the output stage list shows live progress for each
-stage along with cache hit/miss status. If a stage fails, the error message
-appears as a final line in the list.
+stage along with cache hit/miss status; stages replayed from the disk cache
+show a **(cache)** badge with their load time. If a stage fails, the error
+message appears as a final line in the list.
+
+The Output viewer doesn't wait for the pipeline to finish. When you change a
+setting, the previous output stays visible under the progress overlay until
+its replacement is ready (export stays disabled until the new result lands).
+And as soon as dithering completes — before the slow Clip and Merge stages —
+the viewer swaps in an instant approximate preview built from one small
+colored quad per cell, so you see the dithered colors in seconds instead of
+minutes; the exact clipped mesh replaces it when Clip and Merge finish.
 
 ---
 
@@ -516,7 +552,7 @@ These models work well with DitherForge and are free to download:
 | Model | Author | Source | License | Notes |
 |-------|--------|--------|---------|-------|
 | Golden Pheasant | iRahulRajput | [Sketchfab](https://sketchfab.com/3d-models/golden-pheasant-f9b3decb485c4a7c9d97cf70b17cbd29) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) | |
-| Colorful Fish | Kamilla Kraus | [Fab](https://www.fab.com/listings/e8431f81-ca7f-43bb-a28d-d5589037491c) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) | Enable alpha wrap to clean up the model's mesh. |
+| Colorful Fish | Kamilla Kraus | [Fab](https://www.fab.com/listings/e8431f81-ca7f-43bb-a28d-d5589037491c) | [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/) | Pick a **Repair geometry** mode to clean up the model's mesh. |
 
 ---
 
@@ -583,7 +619,7 @@ glue-up.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Split into two parts | off | Master toggle. When off, the rest of the section is hidden and the pipeline behaves as if Split didn't exist. Forces Alpha-wrap on; turning Alpha-wrap off auto-disables Split. |
+| Split into two parts | off | Master toggle. When off, the rest of the section is hidden and the pipeline behaves as if Split didn't exist. Forces a mesh-repair mode on (Alpha wrap, unless one is already selected); setting Repair geometry to None auto-disables Split. |
 | Cut plane | XY | Axis-aligned plane: XY (cut along Z), XZ (cut along Y), or YZ (cut along X). |
 | Offset (mm) | bbox mid | Position of the cut plane along the chosen axis, measured from the model's local origin. Adjustable via number field or slider. |
 | Tilt about … (°) | 0 | Two angles (±85° each) that tilt the cut off the chosen axis. Both 0° = flat axis-aligned cut; combine for a fully oblique plane. |
@@ -663,9 +699,11 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 | Color contrast (delta E) | 20 | (Color-aware cells.) Minimum CIELAB color difference for a boundary to be cut into a cell edge. |
 | Confine dither to color regions | off | Dithers each color region in isolation so error can't bleed across sharp color boundaries. See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
 | Region barrier (delta E) | 20 | (Confine dither.) Minimum CIELAB color difference for a cell boundary to act as a dither-error barrier. |
-| Alpha-wrap | off | Wraps the input mesh with a watertight shell (CGAL Alpha-wrap) to fix self-intersections, thin walls, and other geometry that slicers choke on. Can be slow on large models. |
-| Alpha (mm) | nozzle diameter | Alpha-wrap probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
-| Offset (mm) | alpha / 30 | How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
+| Repair geometry | None | Rebuilds a watertight mesh before processing: `None` (model as-is), `Winding-number remesh` (medium speed, fixes most broken meshes), or `Alpha wrap` (slow but most robust). See [How to Repair a Broken Mesh](#how-to-repair-a-broken-mesh). |
+| Detail XY (mm) | nozzle diameter | (Winding-number remesh.) Horizontal grid pitch. Smaller keeps more detail; larger is faster. |
+| Detail Z (mm) | layer height | (Winding-number remesh.) Vertical grid pitch. Smaller keeps more detail; larger is faster. |
+| Detail size (mm) | nozzle diameter | (Alpha wrap.) Probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
+| Surface offset (mm) | detail / 30 | (Alpha wrap.) How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
 | Stats | off | Logs face counts per material to the status bar |
 
 ---
