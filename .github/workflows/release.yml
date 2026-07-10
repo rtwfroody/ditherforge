@@ -41,7 +41,10 @@ jobs:
           node-version: 20
 
       - name: Install Wails
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+        # Pin the CLI to the library version from go.mod: @latest can demand a
+        # newer Go than setup-go's go.mod pin (wails v2.13.0 needs go >= 1.25).
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@"$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
