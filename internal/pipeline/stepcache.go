@@ -243,14 +243,29 @@ func runStageCached(
 	name := stageNames[stage]
 	key := cache.stageKey(stage, opts)
 	getStart := time.Now()
+	// Probe existence first (cheap stat) so the GUI shows the stage as a
+	// running cache load during the blob read + decode, which can take
+	// seconds for big stages. On a miss nothing is emitted here — the
+	// stage body begins its own markers after its deps resolve.
+	var st *progress.Stage
+	if cache.has(stage, opts) {
+		st = progress.BeginStageCached(tracker, name)
+	}
 	v, src := cache.getWithSource(stage, opts)
 	if v != nil {
 		plog.Printf("%s: cache hit (%s, %s) key=%s", name,
 			hitSourceLabel(src), time.Since(getStart).Round(time.Microsecond),
 			shortKey(key))
-		progress.BeginStage(tracker, name, false, 0).Done()
+		if st == nil {
+			st = progress.BeginStageCached(tracker, name)
+		}
+		st.Done()
 		return v, nil
 	}
+	// Probe said yes but the get missed (sweep raced us, or a corrupt
+	// blob was deleted by getWithSource). Close the row; the body will
+	// restart the stage's markers and the frontend reuses the row.
+	st.Done()
 	plog.Printf("%s: starting (cache miss key=%s)", name, shortKey(key))
 	start := time.Now()
 	// Panic containment: a panicking stage body becomes a stage error
@@ -1157,6 +1172,17 @@ const (
 func (c *StageCache) get(stage StageID, opts Options) any {
 	v, _ := c.getWithSource(stage, opts)
 	return v
+}
+
+// has reports whether a disk blob exists for this stage+opts, without
+// reading it. Cheap (one stat) — used to begin UI progress before the
+// slow read+decode in getWithSource.
+func (c *StageCache) has(stage StageID, opts Options) bool {
+	key := c.stageKey(stage, opts)
+	if key == "" || c.disk == nil {
+		return false
+	}
+	return c.disk.Has(stageSubdir(stage), key)
 }
 
 // getWithSource is get plus an indicator of where the hit came from.

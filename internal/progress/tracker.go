@@ -90,6 +90,25 @@ func BeginStage(t Tracker, name string, hasProgress bool, total int) *Stage {
 	return &Stage{tracker: t, name: name}
 }
 
+// CacheAware is an optional Tracker extension. StageCached marks an
+// already-started stage as a cache replay (blob decode in progress /
+// completed) so a UI can label it distinctly from a recompute.
+// Trackers that don't implement it just never see the marker.
+type CacheAware interface {
+	StageCached(stage string)
+}
+
+// BeginStageCached is BeginStage for a stage being replayed from the
+// disk cache: spinner-only (no determinate progress), plus the
+// CacheAware marker when the tracker supports it.
+func BeginStageCached(t Tracker, name string) *Stage {
+	s := BeginStage(t, name, false, 0)
+	if ca, ok := t.(CacheAware); ok {
+		ca.StageCached(name)
+	}
+	return s
+}
+
 // Done ends the stage. Idempotent.
 func (s *Stage) Done() {
 	if s == nil || s.done {

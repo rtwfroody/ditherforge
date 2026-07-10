@@ -104,6 +104,15 @@ func (m *Monitor) Warn(kind, message string) {
 	m.inner.Warn(kind, message)
 }
 
+// StageCached forwards the cache-replay marker to the wrapped tracker
+// when it is CacheAware. Monitor implements CacheAware unconditionally
+// so the marker survives the wrapping.
+func (m *Monitor) StageCached(stage string) {
+	if ca, ok := m.inner.(CacheAware); ok {
+		ca.StageCached(stage)
+	}
+}
+
 // watch scans active stages at half the heartbeat interval and emits
 // a heartbeat for any that have been silent for a full interval.
 // Heartbeats refresh lastSeen so a stage beats at most once per

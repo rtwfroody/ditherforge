@@ -428,7 +428,7 @@ type guiTracker struct {
 type stageEvent struct {
 	Gen         int64  `json:"gen"`
 	Stage       string `json:"stage"`
-	Status      string `json:"status"` // "running" or "done"
+	Status      string `json:"status"` // "running", "done", or "cached"
 	HasProgress bool   `json:"hasProgress"`
 	Total       int    `json:"total"`
 }
@@ -463,6 +463,14 @@ func (t *guiTracker) StageProgress(stage string, current int) {
 func (t *guiTracker) StageDone(stage string) {
 	wailsRuntime.EventsEmit(t.appCtx, "pipeline-stage", stageEvent{
 		Gen: t.gen, Stage: stage, Status: "done",
+	})
+}
+
+// StageCached implements progress.CacheAware: marks the named running
+// stage as a disk-cache replay so the frontend labels it "cache".
+func (t *guiTracker) StageCached(stage string) {
+	wailsRuntime.EventsEmit(t.appCtx, "pipeline-stage", stageEvent{
+		Gen: t.gen, Stage: stage, Status: "cached",
 	})
 }
 
@@ -510,6 +518,7 @@ func (t *guiTracker) Warn(kind, message string) {
 var (
 	_ progress.Tracker     = (*guiTracker)(nil)
 	_ progress.Heartbeater = (*guiTracker)(nil)
+	_ progress.CacheAware  = (*guiTracker)(nil)
 )
 
 // processOne runs a single pipeline request under the mutex.

@@ -130,6 +130,15 @@ func (c *Cache) pathFor(stage, key string) string {
 	return filepath.Join(c.Dir, stage, key+dataExt)
 }
 
+// Has reports whether a blob exists for (stage, key) without reading
+// it. Used to start UI progress before the (potentially slow) read
+// and decode. Does not bump mtime — the GetBlob that follows on the
+// hit path does.
+func (c *Cache) Has(stage, key string) bool {
+	_, err := os.Stat(c.pathFor(stage, key))
+	return err == nil
+}
+
 // GetBlob reads the raw cacheblob bytes for (stage, key). Returns nil
 // on miss. On success the file's mtime is bumped so the sweep treats
 // this as a recent access. Decode errors are not detected here — the

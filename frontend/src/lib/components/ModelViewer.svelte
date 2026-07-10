@@ -37,6 +37,8 @@
     hasProgress: boolean;
     current: number;
     total: number;
+    // Stage was replayed from the disk cache; label persists through 'done'.
+    cached: boolean;
     startedAt: number;
     elapsed: number;
     lastBeatAt: number;
@@ -1492,7 +1494,7 @@
                 <LoaderCircleIcon class="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
               {/if}
               <span class={stage.status === 'done' ? 'text-muted-foreground' : ''}>
-                {stage.name}{#if isStalled(stage, stageTick)}<span class="text-amber-500 text-xs ml-1">(not responding)</span>{/if}
+                {stage.name}{#if stage.cached}<span class="text-xs ml-1 text-muted-foreground">(cache)</span>{/if}{#if isStalled(stage, stageTick)}<span class="text-amber-500 text-xs ml-1">(not responding)</span>{/if}
               </span>
               <span class="ml-auto text-xs text-muted-foreground tabular-nums">
                 {#if stage.status === 'done' && stage.elapsed >= 0.1}

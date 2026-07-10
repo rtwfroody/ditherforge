@@ -636,6 +636,10 @@
     hasProgress: boolean;
     current: number;
     total: number;
+    // Stage was replayed from the disk cache (blob decode rather than a
+    // recompute). Set true when a 'cached' event arrives; the "(cache)"
+    // label persists through 'done'.
+    cached: boolean;
     startedAt: number;  // Date.now() when stage started
     elapsed: number;    // final elapsed seconds (set on done)
     // Date.now() of the last backend signal for this stage (start,
@@ -1018,6 +1022,7 @@
         existing.hasProgress = event.hasProgress;
         existing.total = event.total;
         existing.current = 0;
+        existing.cached = false;
         existing.startedAt = now;
         existing.elapsed = 0;
         existing.lastBeatAt = now;
@@ -1028,12 +1033,36 @@
           hasProgress: event.hasProgress,
           current: 0,
           total: event.total,
+          cached: false,
           startedAt: now,
           elapsed: 0,
           lastBeatAt: now,
         });
       }
       startStageTimer();
+    } else if (event.status === 'cached') {
+      // Cache-replay marker: the stage started (a 'running' event
+      // preceded this) and its blob is being decoded from disk. Label
+      // the row "(cache)"; it persists through 'done'.
+      const existing = run.stages.find(s => s.name === event.stage);
+      if (existing) {
+        existing.cached = true;
+        existing.lastBeatAt = now;
+      } else {
+        // Shouldn't happen — StageStart precedes the cache marker — but
+        // stay defensive so a lone marker still shows a row.
+        run.stages.push({
+          name: event.stage,
+          status: 'running',
+          hasProgress: false,
+          current: 0,
+          total: 0,
+          cached: true,
+          startedAt: now,
+          elapsed: 0,
+          lastBeatAt: now,
+        });
+      }
     } else if (event.status === 'done') {
       const existing = run.stages.find(s => s.name === event.stage);
       if (existing) {
@@ -1046,6 +1075,7 @@
           hasProgress: false,
           current: 0,
           total: 0,
+          cached: false,
           startedAt: now,
           elapsed: 0,
           lastBeatAt: now,
