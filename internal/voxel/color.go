@@ -1980,8 +1980,10 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 //
 // Like DitherWithNeighbors, the (cell + accumulated error) target is
 // fed unclamped to the nearest-palette search.
-// palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion
-// identically; only the traversal order differs from dizzy. nil/uniform = identity.
+// palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion,
+// but unlike dizzy the diffusion runs in the mass domain (see the comment
+// inside): dizzy's proxy-ratio formula is unstable under FS's deterministic
+// traversal order. nil/uniform = identity (bit-identical historical path).
 func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -2020,6 +2022,27 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 	palLin, palLab := paletteLinearLab(pal)
 	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
+	// Opacity-weighted diffusion (palAlpha non-nil) keeps the error buffer
+	// in the MASS domain (linear-light color × area × alpha) instead of the
+	// color domain dizzy uses. The dizzy-style formula — receiver converts
+	// incoming mass to a color shift by dividing by its PROXY alpha, then
+	// re-emits its residual scaled by its actual CHOSEN color's alpha — has
+	// a per-hop gain of alphaChosen/alphaProxy on inherited error, up to
+	// ~2x when a translucent-proxied cell picks an opaque color. Dizzy's
+	// random traversal breaks those chains up (and its random tail strands
+	// runaway mass), but FS's deterministic forward frontier compounds the
+	// gain geometrically: on a brick-textured benchy the residual reached
+	// ~1e8 and whole walls collapsed to a single saturating color.
+	//
+	// In the mass formulation inherited error passes through at gain
+	// exactly 1: outgoing mass = ownResidual·area·alphaChosen + massIn.
+	// The proxy is used only to convert a cell's accumulated mass into a
+	// color-domain shift for the nearest-palette DECISION, where a proxy
+	// mis-estimate can bias one pick but cannot amplify anything. With
+	// uniform alpha this is algebraically identical to the historical
+	// area-weighted diffusion; the nil path below stays bit-identical.
+	massDomain := palAlpha != nil
+
 	for oi, idx := range order {
 		if oi%1000 == 0 {
 			if ctx.Err() != nil {
@@ -2029,25 +2052,31 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 		}
 		// Perceptual decision (CIELAB), linear-light residual — see
 		// "Perceptual dithering color space" and DitherWithNeighbors.
-		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
-		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
-		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
+		inR := srgbToLinearLUT[cells[idx].Color[0]]
+		inG := srgbToLinearLUT[cells[idx].Color[1]]
+		inB := srgbToLinearLUT[cells[idx].Color[2]]
+		var shiftR, shiftG, shiftB float32
+		if massDomain {
+			// Convert accumulated mass to this cell's color shift via
+			// its proxy opacity (decision only; see block comment).
+			inv := 1 / (areas[idx] * cellAlphaProxy[idx])
+			shiftR, shiftG, shiftB = errBuf[idx][0]*inv, errBuf[idx][1]*inv, errBuf[idx][2]*inv
+		} else {
+			shiftR, shiftG, shiftB = errBuf[idx][0], errBuf[idx][1], errBuf[idx][2]
+		}
+		r := inR + shiftR
+		g := inG + shiftG
+		b := inB + shiftB
 
 		tL, tA, tB := linearToLab(r, g, b)
 		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		eR := r - palLin[bestIdx][0]
-		eG := g - palLin[bestIdx][1]
-		eB := b - palLin[bestIdx][2]
-
-		// Forward neighbors: same predicate as dizzy. The only
-		// algorithmic difference between the two functions is the
-		// traversal order — random vs. (Grid, Layer, Row, Col).
-		// Opacity-weighted area diffusion is identical to
-		// DitherWithNeighbors — see that function for the rationale.
-		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
+		// Forward neighbors: same predicate as dizzy. FS differs from
+		// dizzy in traversal order — (Grid, Layer, Row, Col) vs random —
+		// and, when opacity weighting is on, in diffusing mass-domain
+		// error (see block comment above the loop).
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -2056,16 +2085,33 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 		}
 		if totalWeight > 0 {
 			scale := 1.0 / totalWeight
-			for _, nb := range neighbors[idx] {
-				if !processed[nb.Idx] {
-					aRecvEff := areas[nb.Idx]
-					if cellAlphaProxy != nil {
-						aRecvEff *= cellAlphaProxy[nb.Idx]
+			if massDomain {
+				// Outgoing mass = own residual at the chosen color's
+				// actual opacity + inherited mass passed through.
+				aSelf := areas[idx] * alphaAt(palAlpha, bestIdx)
+				mR := (inR-palLin[bestIdx][0])*aSelf + errBuf[idx][0]
+				mG := (inG-palLin[bestIdx][1])*aSelf + errBuf[idx][1]
+				mB := (inB-palLin[bestIdx][2])*aSelf + errBuf[idx][2]
+				for _, nb := range neighbors[idx] {
+					if !processed[nb.Idx] {
+						w := nb.Weight * scale
+						errBuf[nb.Idx][0] += mR * w
+						errBuf[nb.Idx][1] += mG * w
+						errBuf[nb.Idx][2] += mB * w
 					}
-					w := nb.Weight * scale * (aSender / aRecvEff)
-					errBuf[nb.Idx][0] += eR * w
-					errBuf[nb.Idx][1] += eG * w
-					errBuf[nb.Idx][2] += eB * w
+				}
+			} else {
+				eR := r - palLin[bestIdx][0]
+				eG := g - palLin[bestIdx][1]
+				eB := b - palLin[bestIdx][2]
+				aSender := areas[idx]
+				for _, nb := range neighbors[idx] {
+					if !processed[nb.Idx] {
+						w := nb.Weight * scale * (aSender / areas[nb.Idx])
+						errBuf[nb.Idx][0] += eR * w
+						errBuf[nb.Idx][1] += eG * w
+						errBuf[nb.Idx][2] += eB * w
+					}
 				}
 			}
 		}

@@ -183,8 +183,8 @@ func TestAllModesRespondToTD(t *testing.T) {
 // with a translucent yellow must keep the deep-red region essentially red.
 func TestDitherCorrectedNoTranslucentBleed(t *testing.T) {
 	w, h := 64, 64
-	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (0), yellow (1)
-	palAlpha := PaletteAlphas([]float32{1.0, 4.3})  // yellow translucent
+	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}}  // red (0), yellow (1)
+	palAlpha := PaletteAlphas([]float32{1.0, 4.3}) // yellow translucent
 	cells, neighbors := gridCells(w, h, [3]uint8{255, 0, 0})
 	for y := 0; y < h; y++ {
 		for x := w / 2; x < w; x++ {
@@ -256,6 +256,81 @@ func TestDitherCorrectedUniformAlphaIsIdentity(t *testing.T) {
 	for i := range nilA {
 		if nilA[i] != uniA[i] {
 			t.Fatalf("uniform alpha changed corrected assignment at cell %d: nil=%d uniform=%d", i, nilA[i], uniA[i])
+		}
+	}
+}
+
+// TestFloydSteinbergTDStable is the regression guard for the FS × TD
+// wall-collapse bug (brick benchy, 2026-07-09): the dizzy-style
+// opacity-weighted diffusion re-emitted inherited error scaled by
+// alphaChosen/alphaProxy (up to ~2x), and FS's deterministic forward
+// frontier compounded that gain geometrically — the residual exploded
+// to ~1e8 and 75% of the surface collapsed to a single saturating
+// color. The fix diffuses mass-domain error (pass-through gain exactly
+// 1; see FloydSteinberg).
+//
+// Uses the real palette + TDs from the failing model (Panchroma Basic:
+// Orange TD 3.3, Wine Red 1.0, Steel Grey 0.4, Cream 1.5) on a uniform
+// brick-orange field. Two properties the broken code violated:
+//
+//  1. No collapse: the dominant color stayed under ~50% healthy,
+//     hit 75% broken. Assert < 65%.
+//  2. Conservation: the opacity-weighted output average must match the
+//     plain average of the no-TD FS output (both approximate the same
+//     target under different weights). Broken drift was ~22/13/10
+//     sRGB steps; healthy is ~0. Assert within 8 per channel.
+func TestFloydSteinbergTDStable(t *testing.T) {
+	pal := [][3]uint8{
+		{0xF6, 0x74, 0x05}, // Orange
+		{0xD6, 0x02, 0x12}, // Wine Red
+		{0x61, 0x64, 0x69}, // Steel Grey
+		{0xEE, 0xD1, 0xA8}, // Cream
+	}
+	alphas := PaletteAlphas([]float32{3.3, 1.0, 0.4, 1.5})
+	cells, neighbors := gridCells(64, 64, [3]uint8{180, 90, 60})
+	ctx := context.Background()
+
+	withTD, err := FloydSteinberg(ctx, cells, pal, alphas, neighbors, nil)
+	if err != nil {
+		t.Fatalf("FS+TD: %v", err)
+	}
+	noTD, err := FloydSteinberg(ctx, cells, pal, nil, neighbors, nil)
+	if err != nil {
+		t.Fatalf("FS: %v", err)
+	}
+
+	for i := range pal {
+		f := fracAssignedTo(withTD, int32(i))
+		t.Logf("FS+TD palette[%d] fraction: %.3f", i, f)
+		if f > 0.65 {
+			t.Errorf("FS+TD collapsed: palette[%d] got %.1f%% of cells", i, 100*f)
+		}
+	}
+
+	// Opacity-weighted average of the TD output vs plain average of the
+	// no-TD output, both in linear light, compared in sRGB bytes.
+	avg := func(assigns []int32, alphas []float32) [3]uint8 {
+		var num [3]float64
+		var den float64
+		for _, a := range assigns {
+			al := float64(alphaAt(alphas, int(a)))
+			for c := 0; c < 3; c++ {
+				num[c] += al * float64(srgbToLinearLUT[pal[a][c]])
+			}
+			den += al
+		}
+		var out [3]uint8
+		for c := 0; c < 3; c++ {
+			out[c] = linearToSrgbByte(float32(num[c] / den))
+		}
+		return out
+	}
+	got, want := avg(withTD, alphas), avg(noTD, nil)
+	t.Logf("FS+TD weighted avg=%v  FS plain avg=%v", got, want)
+	for c := 0; c < 3; c++ {
+		d := int(got[c]) - int(want[c])
+		if d < -8 || d > 8 {
+			t.Errorf("FS+TD perceived average drifted: got %v, want ~%v (channel %d off by %d)", got, want, c, d)
 		}
 	}
 }
