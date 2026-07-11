@@ -138,6 +138,12 @@
     "0.6"
   ],
   "nozzle_type": "stainless_steel",
+  "printable_area": [
+    "0.5x1",
+    "270.5x1",
+    "270.5x271",
+    "0.5x271"
+  ],
   "printable_height": "250",
   "printer_agent": "snapmaker",
   "printer_model": "Snapmaker U1",
