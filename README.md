@@ -712,7 +712,9 @@ These options are in the **Advanced** section of the settings panel (collapsed b
 
 Ready for use. The output 3MF includes embedded printer/process profiles
 for the Snapmaker U1, Snapmaker J1, Prusa XL (2 tools), Prusa XL (5 tools),
-Bambu Lab H2D, and Bambu Lab H2D Pro across their supported nozzle and
-layer-height combinations. Only the Snapmaker U1 path has been tested
-end-to-end on real hardware; the other profiles are wired up but unverified,
-and may need manual adjustment in the slicer.
+Bambu Lab H2D, Bambu Lab H2D Pro, Flashforge AD5X, Flashforge Creator 5,
+Flashforge Creator 5 Pro, Flashforge Guider4, and Flashforge Guider4 Pro
+across their supported nozzle and layer-height combinations. Only the
+Snapmaker U1 path has been tested end-to-end on real hardware; the other
+profiles are wired up but unverified, and may need manual adjustment in
+the slicer.

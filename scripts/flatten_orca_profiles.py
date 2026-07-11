@@ -69,6 +69,11 @@ class PrinterSpec:
     # on the <metadata name="Application"> prefix; the exporter uses this flag
     # to pick which flavour of 3MF to emit.
     is_bambu: bool = False
+    # Case-insensitive substrings that disqualify a process profile name.
+    # Needed where the marker prefix-match would pull in specialty variants
+    # (e.g. Flashforge's "@FF G4 HF" high-flow profiles match marker "FF G4",
+    # and their HF-nozzle names don't parse, so they'd land on the 0.4 nozzle).
+    process_exclude: tuple[str, ...] = ()
 
 
 # Printers that can handle multi-material efficiently without a big AMS tax.
@@ -116,6 +121,45 @@ PRINTERS: list[PrinterSpec] = [
         machine_prefix="Bambu Lab H2D Pro",
         process_marker="BBL H2DP",
         is_bambu=True,
+    ),
+    PrinterSpec(
+        id="flashforge_ad5x",
+        display_name="Flashforge AD5X",
+        vendor_dir="Flashforge",
+        machine_prefix="Flashforge AD5X",
+        process_marker="FF AD5X",
+    ),
+    PrinterSpec(
+        id="flashforge_creator_5",
+        display_name="Flashforge Creator 5",
+        vendor_dir="Flashforge",
+        machine_prefix="Flashforge Creator 5",
+        # Creator 5 and Creator 5 Pro share the "@FF C5" process profiles
+        # (each lists both printers in compatible_printers).
+        process_marker="FF C5",
+    ),
+    PrinterSpec(
+        id="flashforge_creator_5_pro",
+        display_name="Flashforge Creator 5 Pro",
+        vendor_dir="Flashforge",
+        machine_prefix="Flashforge Creator 5 Pro",
+        process_marker="FF C5",
+    ),
+    PrinterSpec(
+        id="flashforge_guider4",
+        display_name="Flashforge Guider4",
+        vendor_dir="Flashforge",
+        machine_prefix="Flashforge Guider4",
+        process_marker="FF G4",
+        process_exclude=(" hf", "pla600", "pla 600"),
+    ),
+    PrinterSpec(
+        id="flashforge_guider4_pro",
+        display_name="Flashforge Guider4 Pro",
+        vendor_dir="Flashforge",
+        machine_prefix="Flashforge Guider4 Pro",
+        process_marker="FF G4P",
+        process_exclude=(" hf", "pla600", "pla 600"),
     ),
 ]
 
@@ -318,6 +362,8 @@ def flatten_printer(spec: PrinterSpec, orca_root: Path) -> dict:
         # Skip specialty/benchmark profiles that aren't general-purpose.
         lname = name.lower()
         if "benchy" in lname:
+            continue
+        if any(tok in lname for tok in spec.process_exclude):
             continue
         raw = load_profile(process_idx[name])
         if raw.get("instantiation") != "true":

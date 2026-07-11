@@ -1041,6 +1041,548 @@
         }
       ],
       "is_bambu": true
+    },
+    {
+      "id": "flashforge_ad5x",
+      "display_name": "Flashforge AD5X",
+      "nozzles": [
+        {
+          "diameter": "0.25",
+          "printer_settings_id": "Flashforge AD5X 0.25 nozzle",
+          "machine_file": "machine_0.25.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Standard @FF AD5X 0.25 nozzle",
+              "file": "process_0.25_0.10.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Standard @FF AD5X 0.25 nozzle",
+              "file": "process_0.25_0.12.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.14,
+              "name": "0.14mm Standard @FF AD5X 0.25 nozzle",
+              "file": "process_0.25_0.14.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Flashforge AD5X 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Standard @FF AD5X",
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @FF AD5X",
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Draft @FF AD5X",
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Flashforge AD5X 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18mm Fine @FF AD5X 0.6 nozzle",
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.65,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @FF AD5X 0.6 nozzle",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42mm Draft @FF AD5X 0.6 nozzle",
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.7,
+              "initial_layer_print_height": 0.45
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Flashforge AD5X 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Fine @FF AD5X 0.8 nozzle",
+              "file": "process_0.8_0.24.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.85,
+              "initial_layer_print_height": 0.45
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.40mm Standard @FF AD5X 0.8 nozzle",
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.85,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.56,
+              "name": "0.56mm Draft @FF AD5X 0.8 nozzle",
+              "file": "process_0.8_0.56.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.85,
+              "initial_layer_print_height": 0.45
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flashforge_creator_5",
+      "display_name": "Flashforge Creator 5",
+      "nozzles": [
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Flashforge Creator 5 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Standard @FF C5",
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @FF C5",
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @FF C5",
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Flashforge Creator 5 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Flashforge Creator 5 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.32.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.4mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            },
+            {
+              "layer_height": 0.48,
+              "name": "0.48mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.48.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flashforge_creator_5_pro",
+      "display_name": "Flashforge Creator 5 Pro",
+      "nozzles": [
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Flashforge Creator 5 Pro 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Standard @FF C5",
+              "file": "process_0.4_0.12.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @FF C5",
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @FF C5",
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Flashforge Creator 5 Pro 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.18,
+              "name": "0.18mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.18.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42mm Standard @FF C5 0.6 nozzle",
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            }
+          ]
+        },
+        {
+          "diameter": "0.8",
+          "printer_settings_id": "Flashforge Creator 5 Pro 0.8 nozzle",
+          "machine_file": "machine_0.8.json",
+          "processes": [
+            {
+              "layer_height": 0.32,
+              "name": "0.32mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.32.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            },
+            {
+              "layer_height": 0.4,
+              "name": "0.4mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.40.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            },
+            {
+              "layer_height": 0.48,
+              "name": "0.48mm Standard @FF C5 0.8 nozzle",
+              "file": "process_0.8_0.48.json",
+              "line_width": 0.82,
+              "initial_layer_line_width": 0.82,
+              "initial_layer_print_height": 0.4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flashforge_guider4",
+      "display_name": "Flashforge Guider4",
+      "nozzles": [
+        {
+          "diameter": "0.25",
+          "printer_settings_id": "Flashforge Guider4 0.25 nozzle",
+          "machine_file": "machine_0.25.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Standard @FF G4 0.25 nozzle",
+              "file": "process_0.25_0.10.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Standard @FF G4 0.25 nozzle",
+              "file": "process_0.25_0.12.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.14,
+              "name": "0.14mm Standard @FF G4 0.25 nozzle",
+              "file": "process_0.25_0.14.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Flashforge Guider4 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Standard @FF G4",
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @FF G4",
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @FF G4",
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Flashforge Guider4 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Standard @FF G4 0.6 nozzle",
+              "file": "process_0.6_0.25.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @FF G4 0.6 nozzle",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.36,
+              "name": "0.36mm Standard @FF G4 0.6 nozzle",
+              "file": "process_0.6_0.36.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42mm Standard @FF G4 0.6 nozzle",
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flashforge_guider4_pro",
+      "display_name": "Flashforge Guider4 Pro",
+      "nozzles": [
+        {
+          "diameter": "0.25",
+          "printer_settings_id": "Flashforge Guider4 Pro 0.25 nozzle",
+          "machine_file": "machine_0.25.json",
+          "processes": [
+            {
+              "layer_height": 0.1,
+              "name": "0.10mm Standard @FF G4P 0.25 nozzle",
+              "file": "process_0.25_0.10.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.12,
+              "name": "0.12mm Standard @FF G4P 0.25 nozzle",
+              "file": "process_0.25_0.12.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            },
+            {
+              "layer_height": 0.14,
+              "name": "0.14mm Standard @FF G4P 0.25 nozzle",
+              "file": "process_0.25_0.14.json",
+              "line_width": 0.25,
+              "initial_layer_line_width": 0.3,
+              "initial_layer_print_height": 0.15
+            }
+          ]
+        },
+        {
+          "diameter": "0.4",
+          "printer_settings_id": "Flashforge Guider4 Pro 0.4 nozzle",
+          "machine_file": "machine_0.4.json",
+          "processes": [
+            {
+              "layer_height": 0.16,
+              "name": "0.16mm Standard @FF G4P",
+              "file": "process_0.4_0.16.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.2
+            },
+            {
+              "layer_height": 0.2,
+              "name": "0.20mm Standard @FF G4P",
+              "file": "process_0.4_0.20.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            },
+            {
+              "layer_height": 0.24,
+              "name": "0.24mm Standard @FF G4P",
+              "file": "process_0.4_0.24.json",
+              "line_width": 0.42,
+              "initial_layer_line_width": 0.5,
+              "initial_layer_print_height": 0.25
+            }
+          ]
+        },
+        {
+          "diameter": "0.6",
+          "printer_settings_id": "Flashforge Guider4 Pro 0.6 nozzle",
+          "machine_file": "machine_0.6.json",
+          "processes": [
+            {
+              "layer_height": 0.25,
+              "name": "0.25mm Standard @FF G4P 0.6 nozzle",
+              "file": "process_0.6_0.25.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.3,
+              "name": "0.30mm Standard @FF G4P 0.6 nozzle",
+              "file": "process_0.6_0.30.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.36,
+              "name": "0.36mm Standard @FF G4P 0.6 nozzle",
+              "file": "process_0.6_0.36.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            },
+            {
+              "layer_height": 0.42,
+              "name": "0.42mm Standard @FF G4P 0.6 nozzle",
+              "file": "process_0.6_0.42.json",
+              "line_width": 0.62,
+              "initial_layer_line_width": 0.62,
+              "initial_layer_print_height": 0.3
+            }
+          ]
+        }
+      ]
     }
   ]
 }
