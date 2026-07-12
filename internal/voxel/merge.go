@@ -35,7 +35,11 @@ const weldScale = 1000.0
 // among the faces' own vertices, so callers that merge disjoint submeshes
 // (e.g. per split half) stay isolated: two submeshes welded separately
 // never share an index even where their positions coincide.
-func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]float32, [][3]uint32, []int32) {
+//
+// It also returns srcFace, parallel to the output faces: srcFace[k] is the
+// index into the INPUT faces slice of the k-th surviving welded face, so
+// callers can carry per-face provenance (e.g. cell index) across the weld.
+func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []int32) ([][3]float32, [][3]uint32, []int32, []int32) {
 	type bucket struct{ x, y, z int64 }
 	quant := func(v [3]float32) bucket {
 		return bucket{
@@ -67,6 +71,7 @@ func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []in
 	}
 	outF := make([][3]uint32, 0, len(faces))
 	outA := make([]int32, 0, len(faces))
+	outSrc := make([]int32, 0, len(faces))
 	for fi, f := range faces {
 		a, b, c := canon(f[0]), canon(f[1]), canon(f[2])
 		if a == b || b == c || a == c {
@@ -74,8 +79,9 @@ func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []in
 		}
 		outF = append(outF, [3]uint32{a, b, c})
 		outA = append(outA, assignments[fi])
+		outSrc = append(outSrc, int32(fi))
 	}
-	return outV, outF, outA
+	return outV, outF, outA, outSrc
 }
 
 // MergeCoplanarTriangles reduces triangle count by finding connected groups of
@@ -92,10 +98,24 @@ func weldVertsByPosition(verts [][3]float32, faces [][3]uint32, assignments []in
 // ear clipping). The caller should not also emit StageStart/StageDone for
 // these stages.
 func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32, tracker progress.Tracker) ([][3]float32, [][3]uint32, []int32, error) {
+	v, f, a, _, err := MergeCoplanarTrianglesProvenance(ctx, verts, faces, assignments, tracker)
+	return v, f, a, err
+}
+
+// MergeCoplanarTrianglesProvenance is MergeCoplanarTriangles plus a
+// per-output-face source index into the INPUT faces slice (srcFace). A merged
+// (re-triangulated) output face reports the FIRST source face of its coplanar
+// same-color group; since every face in a group shares a color and lies in one
+// plane, any group member is an acceptable provenance for per-cell recoloring,
+// and the first is the cheapest to track. Faces dropped by welding (degenerate
+// slivers) never appear in the output, so srcFace stays parallel to the
+// returned faces.
+func MergeCoplanarTrianglesProvenance(ctx context.Context, verts [][3]float32, faces [][3]uint32, assignments []int32, tracker progress.Tracker) ([][3]float32, [][3]uint32, []int32, []int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
-	verts, faces, assignments = weldVertsByPosition(verts, faces, assignments)
+	var weldSrc []int32
+	verts, faces, assignments, weldSrc = weldVertsByPosition(verts, faces, assignments)
 	nFaces := len(faces)
 
 	type edgeKey struct{ a, b uint32 }
@@ -131,7 +151,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 	for fi := 0; fi < nFaces; fi++ {
 		if fi%1000 == 0 {
 			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
+				return nil, nil, nil, nil, ctx.Err()
 			}
 			grouping.Progress(fi)
 		}
@@ -173,6 +193,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 
 	newFaces := make([][3]uint32, 0, nFaces)
 	newAssignments := make([]int32, 0, nFaces)
+	newSource := make([]int32, 0, nFaces)
 	replaced := make([]bool, nFaces)
 
 	merging := progress.BeginStage(tracker, "Merging", true, len(groups))
@@ -181,7 +202,7 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 	for gi, group := range groups {
 		if gi%1000 == 0 {
 			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
+				return nil, nil, nil, nil, ctx.Err()
 			}
 			merging.Progress(gi)
 		}
@@ -293,6 +314,9 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 			}
 			newFaces = append(newFaces, [3]uint32{v0, v1, v2})
 			newAssignments = append(newAssignments, assignments[group[0]])
+			// Re-triangulated group face: attribute it to the group's
+			// first source face (all group members share color and plane).
+			newSource = append(newSource, weldSrc[group[0]])
 		}
 	}
 
@@ -300,10 +324,11 @@ func MergeCoplanarTriangles(ctx context.Context, verts [][3]float32, faces [][3]
 		if !replaced[fi] {
 			newFaces = append(newFaces, f)
 			newAssignments = append(newAssignments, assignments[fi])
+			newSource = append(newSource, weldSrc[fi])
 		}
 	}
 
-	return verts, newFaces, newAssignments, nil
+	return verts, newFaces, newAssignments, newSource, nil
 }
 
 func earClip(pts [][2]float64) [][3]int {

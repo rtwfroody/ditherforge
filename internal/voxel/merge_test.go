@@ -77,6 +77,57 @@ func TestMergeCoplanar_MergesAcrossDuplicatedCellBoundary(t *testing.T) {
 	}
 }
 
+// TestMergeCoplanarProvenance_SameColorInvariant checks the per-output-face
+// source index MergeCoplanarTrianglesProvenance returns. Each cell of the grid
+// gets a UNIQUE color (= cell index), so cross-cell merging never fires and a
+// synthetic per-face cell index, remapped through srcFace, must land back on a
+// cell whose color equals the merged face's own color — the same-color merge
+// invariant that lets the pipeline recolor merged faces per cell.
+func TestMergeCoplanarProvenance_SameColorInvariant(t *testing.T) {
+	const n = 3
+	var verts [][3]float32
+	var faces [][3]uint32
+	var assign []int32
+	var sectionIdx []int32 // per input face: which cell it came from
+	cell := int32(0)
+	for j := 0; j < n; j++ {
+		for i := 0; i < n; i++ {
+			base := uint32(len(verts))
+			x0, y0 := float32(i), float32(j)
+			x1, y1 := float32(i+1), float32(j+1)
+			verts = append(verts,
+				[3]float32{x0, y0, 0}, [3]float32{x1, y0, 0},
+				[3]float32{x1, y1, 0}, [3]float32{x0, y1, 0})
+			faces = append(faces,
+				[3]uint32{base, base + 1, base + 2},
+				[3]uint32{base, base + 2, base + 3})
+			// Color == cell index makes the invariant check trivial.
+			assign = append(assign, cell, cell)
+			sectionIdx = append(sectionIdx, cell, cell)
+			cell++
+		}
+	}
+
+	_, mf, ma, srcFace, err := MergeCoplanarTrianglesProvenance(
+		context.Background(), verts, faces, assign, progress.NullTracker{})
+	if err != nil {
+		t.Fatalf("MergeCoplanarTrianglesProvenance: %v", err)
+	}
+	if len(srcFace) != len(mf) {
+		t.Fatalf("srcFace not parallel to faces: %d vs %d", len(srcFace), len(mf))
+	}
+	for f := range mf {
+		s := srcFace[f]
+		if s < 0 || int(s) >= len(sectionIdx) {
+			t.Fatalf("face %d source index %d out of range", f, s)
+		}
+		if sectionIdx[s] != ma[f] {
+			t.Errorf("face %d: provenance cell %d has color %d but face color is %d",
+				f, s, sectionIdx[s], ma[f])
+		}
+	}
+}
+
 // appendFaceGrid appends an n×n grid of unit-cell quads spanning the
 // square at origin O with in-plane step vectors u and v (each length 1),
 // each cell its own duplicated quad. Winding is CCW so the outward normal

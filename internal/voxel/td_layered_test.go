@@ -143,3 +143,140 @@ func TestEffectivePaletteMissingTDOpaque(t *testing.T) {
 		t.Errorf("entry 1 (no TD) should be identity, got %v", out[1])
 	}
 }
+
+// --- EffectiveCellColors ---
+
+// Palette shared by the per-cell tests: opaque black (TD 0.1) and translucent
+// orange (TD 3.3), mirroring a printed orange speckle in a grey/black field.
+var (
+	cellBlack   = [3]uint8{0, 0, 0}
+	cellOrange  = [3]uint8{230, 120, 20}
+	cellPalette = [][3]uint8{cellBlack, cellOrange}
+	cellTDs     = []float32{0.1, 3.3}
+)
+
+const (
+	idxBlack  int32 = 0
+	idxOrange int32 = 1
+)
+
+func lum(c [3]uint8) int {
+	return int(c[0]) + int(c[1]) + int(c[2])
+}
+
+// unitCells builds n ActiveCells, all unit area (equal neighbor weights).
+func unitCells(n int) []ActiveCell {
+	cells := make([]ActiveCell, n)
+	for i := range cells {
+		cells[i].Area = 1
+	}
+	return cells
+}
+
+// TestEffectiveCellColorsLineBlend: an orange (translucent) cell between two
+// black (opaque) cells darkens toward black, while the black cells — being
+// opaque — come back byte-identical.
+func TestEffectiveCellColorsLineBlend(t *testing.T) {
+	cells := unitCells(3)
+	assign := []int32{idxBlack, idxOrange, idxBlack}
+	neigh := [][]Neighbor{
+		{{Idx: 1, Weight: 1}},
+		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
+		{{Idx: 1, Weight: 1}},
+	}
+	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+
+	if out[0] != cellBlack || out[2] != cellBlack {
+		t.Errorf("opaque black cells changed: %v %v", out[0], out[2])
+	}
+	if lum(out[1]) >= lum(cellOrange) {
+		t.Errorf("translucent center did not darken toward black neighbors: %v (lum %d) vs orange lum %d",
+			out[1], lum(out[1]), lum(cellOrange))
+	}
+	// Every channel moves toward the black (0) neighbors: none brighter.
+	for ch := 0; ch < 3; ch++ {
+		if out[1][ch] > cellOrange[ch] {
+			t.Errorf("ch %d brightened toward black neighbors: %d > %d", ch, out[1][ch], cellOrange[ch])
+		}
+	}
+}
+
+// TestEffectiveCellColorsAllOpaqueIdentity: an all-opaque palette returns the
+// nominal cell colors byte-for-byte (fast path).
+func TestEffectiveCellColorsAllOpaqueIdentity(t *testing.T) {
+	cells := unitCells(3)
+	assign := []int32{idxBlack, idxBlack, idxBlack}
+	pal := [][3]uint8{{10, 20, 30}}
+	tds := []float32{0.1} // opaque
+	assignOpaque := []int32{0, 0, 0}
+	neigh := [][]Neighbor{
+		{{Idx: 1, Weight: 1}},
+		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
+		{{Idx: 1, Weight: 1}},
+	}
+	_ = assign
+	out := EffectiveCellColors(cells, assignOpaque, pal, tds, neigh, 1.0, 2)
+	for i := range out {
+		if out[i] != pal[0] {
+			t.Errorf("opaque cell %d changed: %v want %v", i, out[i], pal[0])
+		}
+	}
+}
+
+// TestEffectiveCellColorsOutOfRangeAssignment: an out-of-range or negative
+// assignment yields a gray placeholder and never panics, and neither poisons a
+// translucent neighbor's blend (it's excluded as a source).
+func TestEffectiveCellColorsOutOfRangeAssignment(t *testing.T) {
+	cells := unitCells(3)
+	assign := []int32{99, idxOrange, -1} // both ends invalid
+	neigh := [][]Neighbor{
+		{{Idx: 1, Weight: 1}},
+		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
+		{{Idx: 1, Weight: 1}},
+	}
+	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+	gray := [3]uint8{128, 128, 128}
+	if out[0] != gray || out[2] != gray {
+		t.Errorf("invalid cells not gray: %v %v", out[0], out[2])
+	}
+	// Center has no valid neighbors, so it keeps orange (round-trip through
+	// linear-light must not drift more than a byte on any channel).
+	for ch := 0; ch < 3; ch++ {
+		d := int(out[1][ch]) - int(cellOrange[ch])
+		if d < -1 || d > 1 {
+			t.Errorf("center cell drifted with only-invalid neighbors: ch %d %d vs %d", ch, out[1][ch], cellOrange[ch])
+		}
+	}
+}
+
+// TestEffectiveCellColorsIterationsPropagate: on a 5-cell chain black-orange-
+// orange-orange-black, a second Jacobi pass lets black reach the middle cell
+// through the intervening orange cells (which darkened on pass 1), so the
+// middle cell is strictly darker with 2 iterations than with 1.
+func TestEffectiveCellColorsIterationsPropagate(t *testing.T) {
+	cells := unitCells(5)
+	assign := []int32{idxBlack, idxOrange, idxOrange, idxOrange, idxBlack}
+	neigh := [][]Neighbor{
+		{{Idx: 1, Weight: 1}},
+		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
+		{{Idx: 1, Weight: 1}, {Idx: 3, Weight: 1}},
+		{{Idx: 2, Weight: 1}, {Idx: 4, Weight: 1}},
+		{{Idx: 3, Weight: 1}},
+	}
+	out1 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 1)
+	out2 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+
+	// The middle cell (index 2) only "sees" black on the second pass.
+	if lum(out2[2]) >= lum(out1[2]) {
+		t.Errorf("second iteration did not darken the middle cell: iter1 lum %d, iter2 lum %d",
+			lum(out1[2]), lum(out2[2]))
+	}
+}
+
+// TestEffectiveCellColorsEmpty: no cells returns an empty (non-nil) slice.
+func TestEffectiveCellColorsEmpty(t *testing.T) {
+	out := EffectiveCellColors(nil, nil, cellPalette, cellTDs, nil, 1.0, 2)
+	if out == nil || len(out) != 0 {
+		t.Errorf("empty input should return empty slice, got %v", out)
+	}
+}

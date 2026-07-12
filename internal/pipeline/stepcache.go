@@ -1112,6 +1112,10 @@ func hashClipSettings(c *StageCache, h hash.Hash64, opts Options) {
 
 func hashMergeSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeBool(h, opts.NoMerge)
+	// Invalidate mergeOutputs cached before the merging path preserved
+	// per-face cell provenance (ShellSectionIdx). Stale blobs carry nil
+	// there, silently disabling the per-cell print simulation.
+	writeString(h, "merge-cellidx-v1")
 }
 
 // materialXFileStamp returns the mtime (ns) and size (bytes) of the

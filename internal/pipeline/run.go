@@ -3135,6 +3135,12 @@ func (r *pipelineRun) runMerge() (any, error) {
 		tMerge := time.Now()
 		before := len(shellFaces)
 		var merr error
+		// preMergeSectionIdx is the clip's per-face cell index, parallel to
+		// the pre-merge faces. Merge re-triangulates coplanar same-color
+		// groups, so we carry provenance forward by remapping through the
+		// per-output-face source index the merge returns (srcFace). Nil when
+		// the clip carried no provenance (e.g. a stale cache).
+		preMergeSectionIdx := shellSectionIdx
 		if shellHalfIdx != nil {
 			// Per-half merge: halves don't share vertices (clipPerHalf
 			// offsets each half's vertex indices), so
@@ -3145,18 +3151,17 @@ func (r *pipelineRun) runMerge() (any, error) {
 			// concatenate. Faces in clipPerHalf's output are already
 			// grouped by half (h=0 then h=1), so the slice ranges
 			// are contiguous.
-			shellVerts, shellFaces, shellAssignments, shellHalfIdx, merr =
-				mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, r.tracker)
+			shellVerts, shellFaces, shellAssignments, shellHalfIdx, shellSectionIdx, merr =
+				mergeSplitFaces(r.ctx, shellVerts, shellFaces, shellAssignments, shellHalfIdx, preMergeSectionIdx, r.tracker)
 		} else {
-			shellVerts, shellFaces, shellAssignments, merr = voxel.MergeCoplanarTriangles(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
+			var srcFace []int32
+			shellVerts, shellFaces, shellAssignments, srcFace, merr = voxel.MergeCoplanarTrianglesProvenance(r.ctx, shellVerts, shellFaces, shellAssignments, r.tracker)
+			shellSectionIdx = remapSectionIdx(preMergeSectionIdx, srcFace)
 		}
 		if merr != nil {
 			return nil, fmt.Errorf("merge: %w", merr)
 		}
 		plog.Printf("  Merged shell: %d -> %d faces in %.1fs", before, len(shellFaces), time.Since(tMerge).Seconds())
-		// Merge groups faces by color and re-triangulates;
-		// section provenance is no longer per-face.
-		shellSectionIdx = nil
 	} else {
 		progress.BeginStage(r.tracker, stageNames[StageMerge], false, 0).Done()
 	}
@@ -3179,14 +3184,19 @@ func (r *pipelineRun) runMerge() (any, error) {
 // (representatives chosen among that half's own faces, so the two halves
 // never share an index even where positions coincide). We concatenate the
 // two welded vertex tables and offset half 1's face indices past half 0.
+// sectionIdx (may be nil) is the pre-merge per-face cell index; when non-nil
+// mergeSplitFaces returns the merged mesh's per-face cell index, remapped
+// through each half's merge provenance and concatenated in half order. Nil in,
+// nil out.
 func mergeSplitFaces(
 	ctx context.Context,
 	verts [][3]float32,
 	faces [][3]uint32,
 	assignments []int32,
 	halfIdx []byte,
+	sectionIdx []int32,
 	tracker progress.Tracker,
-) ([][3]float32, [][3]uint32, []int32, []byte, error) {
+) ([][3]float32, [][3]uint32, []int32, []byte, []int32, error) {
 	// Find the boundary between half 0 and half 1.
 	boundary := len(faces)
 	for i, h := range halfIdx {
@@ -3199,14 +3209,19 @@ func mergeSplitFaces(
 	h1Faces := faces[boundary:]
 	h0Assign := assignments[:boundary]
 	h1Assign := assignments[boundary:]
-
-	mergedH0Verts, mergedH0Faces, mergedH0Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h0Faces, h0Assign, tracker)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("merge half 0: %w", err)
+	var h0Sect, h1Sect []int32
+	if sectionIdx != nil {
+		h0Sect = sectionIdx[:boundary]
+		h1Sect = sectionIdx[boundary:]
 	}
-	mergedH1Verts, mergedH1Faces, mergedH1Assign, err := voxel.MergeCoplanarTriangles(ctx, verts, h1Faces, h1Assign, tracker)
+
+	mergedH0Verts, mergedH0Faces, mergedH0Assign, h0Src, err := voxel.MergeCoplanarTrianglesProvenance(ctx, verts, h0Faces, h0Assign, tracker)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("merge half 1: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("merge half 0: %w", err)
+	}
+	mergedH1Verts, mergedH1Faces, mergedH1Assign, h1Src, err := voxel.MergeCoplanarTrianglesProvenance(ctx, verts, h1Faces, h1Assign, tracker)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("merge half 1: %w", err)
 	}
 
 	combinedVerts := make([][3]float32, 0, len(mergedH0Verts)+len(mergedH1Verts))
@@ -3228,5 +3243,31 @@ func mergeSplitFaces(
 	for range mergedH1Faces {
 		combinedHalfIdx = append(combinedHalfIdx, 1)
 	}
-	return combinedVerts, combinedFaces, combinedAssign, combinedHalfIdx, nil
+	var combinedSect []int32
+	if sectionIdx != nil {
+		combinedSect = make([]int32, 0, len(combinedFaces))
+		combinedSect = append(combinedSect, remapSectionIdx(h0Sect, h0Src)...)
+		combinedSect = append(combinedSect, remapSectionIdx(h1Sect, h1Src)...)
+	}
+	return combinedVerts, combinedFaces, combinedAssign, combinedHalfIdx, combinedSect, nil
+}
+
+// remapSectionIdx projects a pre-merge per-face cell index (sectionIdx,
+// parallel to the merge's input faces) onto the merged output faces via
+// srcFace, the per-output-face source index the merge returns. Returns nil
+// when sectionIdx is nil (no provenance to carry), and -1 for any output face
+// whose source index falls outside sectionIdx.
+func remapSectionIdx(sectionIdx, srcFace []int32) []int32 {
+	if sectionIdx == nil {
+		return nil
+	}
+	out := make([]int32, len(srcFace))
+	for i, s := range srcFace {
+		if s >= 0 && int(s) < len(sectionIdx) {
+			out[i] = sectionIdx[s]
+		} else {
+			out[i] = -1
+		}
+	}
+	return out
 }

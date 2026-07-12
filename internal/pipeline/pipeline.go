@@ -346,6 +346,14 @@ type MeshData struct {
 	Vertices       []float32 `json:"Vertices"`                 // flat [x,y,z, x,y,z, ...]
 	Faces          []uint32  `json:"Faces"`                    // flat [i,j,k, i,j,k, ...]
 	FaceColors     []uint16  `json:"FaceColors"`               // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
+	// SimFaceColors is the per-face print-simulation color (same flat rgb
+	// shape as FaceColors, 0-255). Each output face takes its cell's
+	// neighbor-blended effective color (voxel.EffectiveCellColors), so the
+	// print-sim preview reads per-cell rather than as a global 4-color
+	// remap. Nil when no filament is translucent or the merge dropped cell
+	// provenance (the frontend/CLI then fall back to the global effective
+	// palette). Delivered binary alongside FaceColors, never JSON-encoded.
+	SimFaceColors []uint16 `json:"-"`
 	UVs            []float32 `json:"UVs,omitempty"`            // flat [u,v, u,v, ...] per vertex, optional
 	Textures       []string  `json:"Textures,omitempty"`       // base64 JPEG images, optional
 	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
@@ -746,6 +754,19 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	// Build output preview mesh from merge result + palette.
 	outModel := buildOutputModel(lo.ColorModel, mo)
 	outputMesh := buildMeshData(outModel, mo.ShellAssignments, po.Palette)
+	// Per-cell print-simulation colors. Only worthwhile when some filament is
+	// translucent AND the merge preserved per-face cell provenance
+	// (ShellSectionIdx); otherwise the frontend/CLI fall back to the global
+	// effective-palette remap. Voxelize/Dither are warm in the stage cache
+	// here (the run just finished), so these accessors don't re-run anything.
+	if mo.ShellSectionIdx != nil && len(po.Palette) > 0 &&
+		anyTranslucentTD(po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM) {
+		if vo, verr := r.Voxelize(); verr == nil {
+			if do, derr := r.Dither(); derr == nil {
+				outputMesh.SimFaceColors = buildSimFaceColors(vo, do, po, mo, r.opts)
+			}
+		}
+	}
 	if opts.ShowSampledColors && mo.ShellSectionIdx != nil {
 		vo, err := r.Voxelize()
 		if err != nil {
@@ -893,6 +914,88 @@ func overrideFaceColorsFromSamples(mesh *MeshData, faceSection []int32, sectionC
 		mesh.FaceColors[3*fi+1] = uint16(c[1])
 		mesh.FaceColors[3*fi+2] = uint16(c[2])
 	}
+}
+
+// simNeighborPathMM is the representative in-plane path length (mm) a
+// translucent cell's own filament imposes before a neighbor's color shows
+// through, used by the per-cell print simulation (voxel.EffectiveCellColors).
+// It is the calibration knob against physical test prints; override it with
+// DITHERFORGE_SIM_NEIGHBOR_PATH_MM (a positive float; garbage is ignored).
+var simNeighborPathMM = func() float32 {
+	if s := os.Getenv("DITHERFORGE_SIM_NEIGHBOR_PATH_MM"); s != "" {
+		if v, err := strconv.ParseFloat(s, 32); err == nil && v > 0 {
+			return float32(v)
+		}
+	}
+	return 1.0
+}()
+
+// anyTranslucentTD reports whether any palette entry leaks light through the
+// shell (palette.TDLeak > 0) at the given geometry — i.e. whether the per-cell
+// print simulation would differ from the plain dither at all.
+func anyTranslucentTD(tds []float32, layerHeightMM, shellThicknessMM float32) bool {
+	for _, td := range tds {
+		if palette.TDLeak(float64(td), float64(layerHeightMM), float64(shellThicknessMM)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// buildSimFaceColors computes the per-output-face print-simulation color
+// buffer (flat rgb per face, 0-255) for outputMesh. Each face is colored by
+// its cell's neighbor-blended effective color; faces with no usable per-cell
+// provenance fall back to the global effective palette, and finally to gray.
+func buildSimFaceColors(vo *voxelizeOutput, do *ditherOutput, po *paletteOutput, mo *mergeOutput, opts Options) []uint16 {
+	cellEff := voxel.EffectiveCellColors(vo.Cells, do.Assignments, po.Palette,
+		po.PaletteTDs, vo.Neighbors, simNeighborPathMM, 2)
+
+	// Global cell index (into CellSamples) -> visible-cell index.
+	globalToVisible := make([]int, len(vo.CellSamples))
+	for i := range globalToVisible {
+		globalToVisible[i] = -1
+	}
+	for v, g := range vo.VisibleToCell {
+		if g >= 0 && g < len(globalToVisible) {
+			globalToVisible[g] = v
+		}
+	}
+
+	// Export-order effective palette (parallel to ShellAssignments) for the
+	// fallback when a face has no per-cell provenance.
+	var globalEff [][3]uint8
+	if len(po.Palette) > 0 {
+		globalEff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
+			opts.LayerHeight, opts.ShellThicknessMM, po.Palette[0])
+	}
+
+	nFaces := len(mo.ShellFaces)
+	sim := make([]uint16, nFaces*3)
+	for f := 0; f < nFaces; f++ {
+		var c [3]uint8
+		resolved := false
+		if f < len(mo.ShellSectionIdx) {
+			if g := mo.ShellSectionIdx[f]; g >= 0 && int(g) < len(globalToVisible) {
+				if v := globalToVisible[int(g)]; v >= 0 && v < len(cellEff) {
+					c = cellEff[v]
+					resolved = true
+				}
+			}
+		}
+		if !resolved && f < len(mo.ShellAssignments) {
+			if a := int(mo.ShellAssignments[f]); a >= 0 && a < len(globalEff) {
+				c = globalEff[a]
+				resolved = true
+			}
+		}
+		if !resolved {
+			c = [3]uint8{defaultGray, defaultGray, defaultGray}
+		}
+		sim[f*3] = uint16(c[0])
+		sim[f*3+1] = uint16(c[1])
+		sim[f*3+2] = uint16(c[2])
+	}
+	return sim
 }
 
 func buildOutputModel(srcModel *loader.LoadedModel, mo *mergeOutput) *loader.LoadedModel {

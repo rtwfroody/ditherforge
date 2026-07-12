@@ -131,14 +131,28 @@ func TestMergeSplitFaces_PerHalfMergeAndConcat(t *testing.T) {
 	}
 	assignments := []int32{0, 0, 0, 0, 1, 1, 1, 1}
 	halfIdx := []byte{0, 0, 0, 0, 1, 1, 1, 1}
-	outVerts, outFaces, outAssign, outHalf, err := mergeSplitFaces(
-		context.Background(), verts, faces, assignments, halfIdx, progress.NullTracker{},
+	// Per-face cell index parallel to faces; mergeSplitFaces must remap it
+	// onto the merged output and keep it parallel.
+	sectionIdx := []int32{10, 10, 11, 11, 20, 20, 21, 21}
+	outVerts, outFaces, outAssign, outHalf, outSect, err := mergeSplitFaces(
+		context.Background(), verts, faces, assignments, halfIdx, sectionIdx, progress.NullTracker{},
 	)
 	if err != nil {
 		t.Fatalf("mergeSplitFaces: %v", err)
 	}
 	if len(outFaces) != len(outAssign) || len(outFaces) != len(outHalf) {
 		t.Errorf("output array lengths differ: faces=%d assign=%d half=%d", len(outFaces), len(outAssign), len(outHalf))
+	}
+	if len(outSect) != len(outFaces) {
+		t.Errorf("section idx not parallel to faces: sect=%d faces=%d", len(outSect), len(outFaces))
+	}
+	// Every carried cell index must be one of the originals (never garbage).
+	for i, s := range outSect {
+		switch s {
+		case 10, 11, 20, 21:
+		default:
+			t.Errorf("face %d carries unexpected cell index %d", i, s)
+		}
 	}
 	// Every face must index into the concatenated welded vertex table.
 	for fi, f := range outFaces {

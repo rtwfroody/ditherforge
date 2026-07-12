@@ -319,14 +319,23 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 		}
 	}
 
-	// printsim_<view>.png: the dithered output recolored with the TD-effective
-	// palette — what the physical print looks like once each translucent
-	// filament washes toward the infill filament (palette index 0). Skipped
-	// when every filament is opaque (effective == nominal), since the render
-	// would be identical to dithered_*.png.
-	if ditheredMesh != nil && len(palRGB) > 0 && len(palEff) == len(palRGB) {
-		if paletteDiffers(palRGB, palEff) {
-			printsimMesh := remapMeshColors(ditheredMesh, palRGB, palEff)
+	// printsim_<view>.png: what the physical print looks like once translucent
+	// filaments pick up surrounding color. Preferred source is the pipeline's
+	// per-cell sim buffer (ditheredMesh.SimFaceColors), where each face already
+	// carries its cell's neighbor-blended effective color. When that's absent
+	// (opaque palette, or a stale merge without cell provenance) we fall back to
+	// the global TD-effective palette remap; skipped entirely when both are
+	// unavailable and every filament is opaque.
+	if ditheredMesh != nil {
+		var printsimMesh *pipeline.MeshData
+		if len(ditheredMesh.SimFaceColors) == len(ditheredMesh.FaceColors) && len(ditheredMesh.SimFaceColors) > 0 {
+			shallow := *ditheredMesh
+			shallow.FaceColors = ditheredMesh.SimFaceColors
+			printsimMesh = &shallow
+		} else if len(palRGB) > 0 && len(palEff) == len(palRGB) && paletteDiffers(palRGB, palEff) {
+			printsimMesh = remapMeshColors(ditheredMesh, palRGB, palEff)
+		}
+		if printsimMesh != nil {
 			for _, v := range debugrender.DefaultViews {
 				p := filepath.Join(dir, fmt.Sprintf("printsim_%s.png", v.Name))
 				if err := debugrender.WritePNG(p, debugrender.RenderPipelineMesh(printsimMesh, v, res)); err != nil {
@@ -334,7 +343,7 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 				}
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "printsim: palettes identical (all filaments opaque), skipping")
+			fmt.Fprintln(os.Stderr, "printsim: no translucent filaments, skipping")
 		}
 	}
 	return nil

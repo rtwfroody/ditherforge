@@ -520,6 +520,13 @@
     // the texture's per-pixel alpha is resolved per-fragment at draw
     // time. Null when every face is plain opaque.
     faceRenderClass: Uint8Array | null;
+    // simColors: per-face print-simulation color (flat [r,g,b] per face,
+    // uint16 0..255, same shape as faceColors). Each face carries its
+    // cell's neighbor-blended effective color, so the print-sim preview
+    // reads per-cell rather than as a global palette remap. Null when no
+    // filament is translucent or the merge dropped cell provenance — the
+    // renderer then falls back to the printSimColors LUT remap.
+    simColors: Uint16Array | null;
   }
 
   interface BaseColorAtlas {
@@ -640,7 +647,18 @@
       }
     }
 
-    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas, faceAlpha, faceRenderClass };
+    // Per-face print-simulation colors (optional): uint16 [r,g,b] per face.
+    // slice-copy to sidestep any 2-byte misalignment left by prior sections.
+    let simColors: Uint16Array | null = null;
+    if (offset < buf.byteLength) {
+      const hasSim = view.getUint32(offset, true); offset += 4;
+      if (hasSim === 1) {
+        const nSim = view.getUint32(offset, true); offset += 4;
+        simColors = new Uint16Array(buf.slice(offset, offset + nSim * 2)); offset += nSim * 2;
+      }
+    }
+
+    return { vertices, faces, faceColors, uvs, textures, faceTextureIdx, stickerUVs, stickerFaceMask, stickerBounds, stickerAtlas, baseColorAtlas, faceAlpha, faceRenderClass, simColors };
   }
 
   function hasTextures(td: TypedMeshData): boolean {
@@ -721,7 +739,14 @@
   // remap applies, so the common path stays allocation-free.
   function resolveFaceColors(td: TypedMeshData): Uint16Array {
     const fc = td.faceColors;
-    if (!printSim || !printSimColors || printSimColors.size === 0) return fc;
+    if (!printSim) return fc;
+    // Prefer the per-cell sim buffer that rode along with the mesh: each
+    // face already carries its neighbor-blended effective color, so no LUT
+    // remap is needed. Falls back to the global printSimColors remap when
+    // the buffer is absent (opaque palette or stale merge without cell
+    // provenance).
+    if (td.simColors && td.simColors.length === fc.length) return td.simColors;
+    if (!printSimColors || printSimColors.size === 0) return fc;
     const out = new Uint16Array(fc.length);
     for (let i = 0; i + 2 < fc.length; i += 3) {
       const key = (fc[i] << 16) | (fc[i + 1] << 8) | fc[i + 2];

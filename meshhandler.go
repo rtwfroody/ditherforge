@@ -63,6 +63,11 @@ import (
 //	  If 1:
 //	    uint32 nFaceRenderClass    (= face count, one byte per face, 0..2)
 //	    uint8[nFaceRenderClass]    (0=opaque, 1=cutout, 2=blend)
+//	Sim face colors (optional, appended after face render class):
+//	  uint32 hasSimColors          (0 or 1)
+//	  If 1:
+//	    uint32 nSimColors          (= face count * 3, uint16 [r,g,b] per face)
+//	    uint16[nSimColors]         (per-cell print-simulation colors, 0..255)
 func float32SliceToBytes(s []float32) []byte {
 	if len(s) == 0 {
 		return nil
@@ -251,6 +256,19 @@ func (h *meshHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(mesh.FaceRenderClass)
 	} else {
 		binary.LittleEndian.PutUint32(tmp[:], 0) // no render class
+		w.Write(tmp[:])
+	}
+
+	// Per-cell print-simulation colors (optional): flat uint16 [r,g,b] per
+	// face, the neighbor-blended effective color for the print-sim preview.
+	if len(mesh.SimFaceColors) > 0 {
+		binary.LittleEndian.PutUint32(tmp[:], 1) // hasSimColors
+		w.Write(tmp[:])
+		binary.LittleEndian.PutUint32(tmp[:], uint32(len(mesh.SimFaceColors)))
+		w.Write(tmp[:])
+		w.Write(uint16SliceToBytes(mesh.SimFaceColors))
+	} else {
+		binary.LittleEndian.PutUint32(tmp[:], 0) // no sim colors
 		w.Write(tmp[:])
 	}
 }

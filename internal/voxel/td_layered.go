@@ -1,6 +1,10 @@
 package voxel
 
-import "github.com/rtwfroody/ditherforge/internal/palette"
+import (
+	"math"
+
+	"github.com/rtwfroody/ditherforge/internal/palette"
+)
 
 // EffectivePalette applies the "layered" filament-translucency model: it
 // returns, per palette entry, the color a viewer actually perceives once the
@@ -66,6 +70,147 @@ func EffectivePalette(pal [][3]uint8, tds []float32, layerHeightMM, shellThickne
 			linC := float64(srgbToLinearLUT[c[ch]])
 			eff := (1-leak)*linC + leak*linI[ch]
 			out[i][ch] = linearToSrgbByte(float32(eff))
+		}
+	}
+	return out
+}
+
+// EffectiveCellColors returns one perceived "print-simulation" color per
+// visible cell. Where EffectivePalette composites every cell of a given
+// filament toward the single infill color, this models the dominant effect
+// physical test prints actually showed: a translucent cell picks up the
+// colors of the cells touching it (above, below, beside), NOT the infill. A
+// translucent orange speckle surrounded by grey/black reads as a dark,
+// muddied orange rather than a burnt-orange-over-infill.
+//
+// For cell i assigned filament k = assignments[i], the lateral leak
+//
+//	β_i = 10^(−neighborPathMM / TD_k)
+//
+// is the fraction of a neighbor's color that shows through cell i's own
+// filament over a representative in-plane path. β_i is 0 for an opaque or
+// garbage-TD filament (β below 1/1024, TD ≤ 0, NaN, or ±Inf), so opaque cells
+// come back byte-identical to their nominal color; it is clamped to [0, 0.95]
+// so a cell never fully dissolves into its neighbors.
+//
+// The blend is a few Jacobi passes in linear-light RGB:
+//
+//	C_{t+1}(i) = (1−β_i)·C0(i) + β_i · (Σ_j w_ij·C_t(j)) / (Σ_j w_ij)
+//
+// where C0(i) is cell i's nominal filament color and w_ij = Neighbor.Weight ×
+// max(area_j, ε). The self term always references C0 (not C_t(i)), keeping the
+// cell's own filament dominant and the iteration gently convergent. A cell
+// with no (valid) neighbors keeps C0, and an all-opaque palette returns the
+// nominal colors unchanged.
+//
+// cells, assignments, neighbors and the returned slice are all parallel and
+// indexed by visible-cell position. An out-of-range assignment yields a gray
+// placeholder for that cell and is excluded as a blend source and target.
+//
+// Runs serially: two Jacobi passes over a few hundred thousand cells is cheap,
+// and correctness is easier to reason about without a worker pool.
+func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8, tds []float32, neighbors [][]Neighbor, neighborPathMM float32, iterations int) [][3]uint8 {
+	n := len(cells)
+	out := make([][3]uint8, n)
+	if n == 0 {
+		return out
+	}
+
+	c0 := make([][3]float64, n)      // nominal color, linear-light
+	nominal := make([][3]uint8, n)   // nominal color bytes (identity fast paths)
+	beta := make([]float64, n)       // lateral leak per cell
+	valid := make([]bool, n)         // false = out-of-range assignment (gray)
+	const grayByte uint8 = 128
+
+	anyTranslucent := false
+	for i := range cells {
+		k := -1
+		if i < len(assignments) {
+			k = int(assignments[i])
+		}
+		if k < 0 || k >= len(pal) {
+			nominal[i] = [3]uint8{grayByte, grayByte, grayByte}
+			out[i] = nominal[i]
+			continue
+		}
+		valid[i] = true
+		c := pal[k]
+		nominal[i] = c
+		out[i] = c
+		c0[i] = [3]float64{
+			float64(srgbToLinearLUT[c[0]]),
+			float64(srgbToLinearLUT[c[1]]),
+			float64(srgbToLinearLUT[c[2]]),
+		}
+		var td float64
+		if k < len(tds) {
+			td = float64(tds[k])
+		}
+		b := 0.0
+		if td > 0 && !math.IsInf(td, 0) {
+			b = math.Pow(10, -float64(neighborPathMM)/td)
+			if b < 1.0/1024.0 {
+				b = 0
+			} else if b > 0.95 {
+				b = 0.95
+			}
+		}
+		beta[i] = b
+		if b > 0 {
+			anyTranslucent = true
+		}
+	}
+
+	if !anyTranslucent {
+		// Every cell opaque (or invalid): nominal colors, byte-identical.
+		return out
+	}
+
+	const areaEps = 1e-6
+	cur := make([][3]float64, n)
+	copy(cur, c0)
+	next := make([][3]float64, n)
+	for iter := 0; iter < iterations; iter++ {
+		for i := 0; i < n; i++ {
+			if !valid[i] || beta[i] == 0 || i >= len(neighbors) || len(neighbors[i]) == 0 {
+				next[i] = c0[i]
+				continue
+			}
+			var sum [3]float64
+			var wsum float64
+			for _, nb := range neighbors[i] {
+				j := nb.Idx
+				if j < 0 || j >= n || !valid[j] {
+					continue
+				}
+				w := float64(nb.Weight) * math.Max(float64(cells[j].Area), areaEps)
+				wsum += w
+				sum[0] += w * cur[j][0]
+				sum[1] += w * cur[j][1]
+				sum[2] += w * cur[j][2]
+			}
+			if wsum == 0 {
+				next[i] = c0[i]
+				continue
+			}
+			b := beta[i]
+			for ch := 0; ch < 3; ch++ {
+				next[i][ch] = (1-b)*c0[i][ch] + b*sum[ch]/wsum
+			}
+		}
+		cur, next = next, cur
+	}
+
+	for i := 0; i < n; i++ {
+		if !valid[i] || beta[i] == 0 {
+			// Invalid → gray placeholder (already set); opaque → nominal
+			// bytes, byte-identical to the plain dither.
+			continue
+		}
+		out[i] = [3]uint8{
+			linearToSrgbByte(float32(cur[i][0])),
+			linearToSrgbByte(float32(cur[i][1])),
+			linearToSrgbByte(float32(cur[i][2])),
 		}
 	}
 	return out
