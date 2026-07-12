@@ -292,9 +292,21 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 		}
 	}
 
+	// Capture the resolved palette + TD-effective colors off the sampled
+	// re-run so we can also render a "print simulation" view (below).
+	// RunCached fires OnPalette once the palette is resolved; it's the same
+	// palette the main run used, and the effective colors are computed by the
+	// pipeline against the true infill filament and resolved shell thickness.
+	var palRGB, palEff [][3]uint8
 	sampledOpts := opts
 	sampledOpts.ShowSampledColors = true
-	sampledPr, err := pipeline.RunCached(ctx, cache, sampledOpts, &pipeline.Callbacks{Progress: progress.NewCLITracker()})
+	sampledPr, err := pipeline.RunCached(ctx, cache, sampledOpts, &pipeline.Callbacks{
+		Progress: progress.NewCLITracker(),
+		OnPalette: func(pal [][3]uint8, _ []float32, _ []string, eff [][3]uint8) {
+			palRGB = pal
+			palEff = eff
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("sampled re-run: %w", err)
 	}
@@ -306,5 +318,63 @@ func writeDebugRenders(ctx context.Context, cache *pipeline.StageCache, opts pip
 			}
 		}
 	}
+
+	// printsim_<view>.png: the dithered output recolored with the TD-effective
+	// palette — what the physical print looks like once each translucent
+	// filament washes toward the infill filament (palette index 0). Skipped
+	// when every filament is opaque (effective == nominal), since the render
+	// would be identical to dithered_*.png.
+	if ditheredMesh != nil && len(palRGB) > 0 && len(palEff) == len(palRGB) {
+		if paletteDiffers(palRGB, palEff) {
+			printsimMesh := remapMeshColors(ditheredMesh, palRGB, palEff)
+			for _, v := range debugrender.DefaultViews {
+				p := filepath.Join(dir, fmt.Sprintf("printsim_%s.png", v.Name))
+				if err := debugrender.WritePNG(p, debugrender.RenderPipelineMesh(printsimMesh, v, res)); err != nil {
+					return err
+				}
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "printsim: palettes identical (all filaments opaque), skipping")
+		}
+	}
 	return nil
+}
+
+// paletteDiffers reports whether any entry's effective color differs from its
+// nominal color, i.e. whether a print-simulation render would look any
+// different from the plain dithered render.
+func paletteDiffers(nominal, effective [][3]uint8) bool {
+	for i := range nominal {
+		if i < len(effective) && nominal[i] != effective[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// remapMeshColors returns a shallow copy of mesh whose per-face colors are
+// remapped from the nominal palette to the effective palette. The dithered
+// output mesh bakes each face color straight from a nominal palette entry
+// (buildMeshData), so an exact byte match against nominal recovers the entry.
+// Faces that match no palette entry (e.g. fallback grey) keep their color.
+func remapMeshColors(mesh *pipeline.MeshData, nominal, effective [][3]uint8) *pipeline.MeshData {
+	lut := make(map[uint32][3]uint8, len(nominal))
+	for i, c := range nominal {
+		if i < len(effective) {
+			lut[uint32(c[0])<<16|uint32(c[1])<<8|uint32(c[2])] = effective[i]
+		}
+	}
+	fc := make([]uint16, len(mesh.FaceColors))
+	copy(fc, mesh.FaceColors)
+	for i := 0; i+2 < len(fc); i += 3 {
+		key := uint32(fc[i])<<16 | uint32(fc[i+1])<<8 | uint32(fc[i+2])
+		if e, ok := lut[key]; ok {
+			fc[i] = uint16(e[0])
+			fc[i+1] = uint16(e[1])
+			fc[i+2] = uint16(e[2])
+		}
+	}
+	out := *mesh
+	out.FaceColors = fc
+	return &out
 }

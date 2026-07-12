@@ -470,7 +470,17 @@ func ParseInventoryFile(path string) ([]InventoryEntry, error) {
 // cellWeights, if non-nil, must be parallel to cellColors and gives each
 // cell's voting weight (typically the cell's clipped triangle surface
 // area). When nil, every cell votes equally.
-func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights []float32, inventory []InventoryEntry, n int, locked [][3]uint8, dithering bool, tracker progress.Tracker) ([]InventoryEntry, error) {
+//
+// tdp carries the transmission-distance context. When tdp.Enabled and the
+// palette's TDs are non-uniform, candidate subsets are scored on their
+// TD-effective colors (each filament composited toward the subset's infill
+// through the printed shell) rather than nominal filament colors — otherwise a
+// translucent filament gets picked as a chroma carrier it can't deliver. When
+// tdp is not Enabled, or the effective TDs turn out uniform / all-opaque,
+// scoring is bit-identical to the nominal path. Locked entries carry their own
+// TDs so they participate in both the infill designation and the effective
+// mix.
+func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights []float32, inventory []InventoryEntry, n int, locked []InventoryEntry, dithering bool, tdp TDParams, tracker progress.Tracker) ([]InventoryEntry, error) {
 	if n >= len(inventory) {
 		return inventory, nil
 	}
@@ -492,11 +502,11 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 
 	// Convert locked colors to Lab so scoring includes them.
 	lockedLab := make([][3]float64, len(locked))
-	for i, c := range locked {
+	for i, e := range locked {
 		cf := colorful.Color{
-			R: float64(c[0]) / 255.0,
-			G: float64(c[1]) / 255.0,
-			B: float64(c[2]) / 255.0,
+			R: float64(e.Color[0]) / 255.0,
+			G: float64(e.Color[1]) / 255.0,
+			B: float64(e.Color[2]) / 255.0,
 		}
 		lockedLab[i][0], lockedLab[i][1], lockedLab[i][2] = cf.Lab()
 	}
@@ -506,6 +516,67 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		scorer = weightedHullScore
 	} else {
 		scorer = weightedNearestScore
+	}
+
+	// TD-aware scoring: only when requested AND the palette's normalized TDs
+	// are non-uniform with at least one filament genuinely translucent. A
+	// uniform shift toward infill (or no shift at all, when every filament is
+	// effectively opaque) can't change which subset scores best, so those
+	// cases keep the bit-identical nominal path above.
+	if tdp.Enabled {
+		layer := float64(tdp.LayerHeightMM)
+		shell := float64(tdp.ShellThicknessMM)
+		uniform := true
+		anyLeak := false
+		var first float64
+		seen := false
+		checkTD := func(td float32) {
+			nt := normSelTD(td)
+			if !seen {
+				first = nt
+				seen = true
+			} else if nt != first {
+				uniform = false
+			}
+			if TDLeak(nt, layer, shell) > 0 {
+				anyLeak = true
+			}
+		}
+		for _, e := range inventory {
+			checkTD(e.TD)
+		}
+		for _, e := range locked {
+			checkTD(e.TD)
+		}
+		if !uniform && anyLeak {
+			invLin := make([][3]float64, len(inventory))
+			invNorm := make([]float64, len(inventory))
+			for i, e := range inventory {
+				invLin[i] = linearOf(e.Color)
+				invNorm[i] = normSelTD(e.TD)
+			}
+			lockedLin := make([][3]float64, len(locked))
+			lockedNorm := make([]float64, len(locked))
+			for i, e := range locked {
+				lockedLin[i] = linearOf(e.Color)
+				lockedNorm[i] = normSelTD(e.TD)
+			}
+			vs := hullScoreVerts
+			if !dithering {
+				vs = nearestScoreVerts
+			}
+			sc := &tdScorer{
+				invLin:     invLin,
+				invNorm:    invNorm,
+				lockedLin:  lockedLin,
+				lockedNorm: lockedNorm,
+				layer:      layer,
+				shell:      shell,
+				vertScore:  vs,
+			}
+			scorer = sc.score
+			fmt.Printf("  TD-aware selection: shell %.2f mm, layer %.2f mm\n", shell, layer)
+		}
 	}
 
 	combos := combinationsCount(len(inventory), n)
@@ -561,6 +632,12 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 // scoreFunc is the signature for palette subset scoring functions.
 // fixedLab contains locked colors that are always part of the palette.
 type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64
+
+// vertScoreFunc scores a fully assembled palette (locked + candidate) given as
+// Lab vertices. It is the geometric core shared by the nominal scorers (which
+// build verts from precomputed Lab) and the TD-aware scorer (which composites
+// effective-color verts per subset — see tdScorer).
+type vertScoreFunc func(verts [][3]float64, samples []WeightedLabSample) float64
 
 // ditherSpreadFactor controls how much the nearest-vertex distance penalizes
 // colors that are inside the hull but far from any palette color. This
@@ -649,7 +726,12 @@ func buildVerts(indices []int, invLab [][3]float64, fixedLab [][3]float64) [][3]
 // mixing distant palette entries are penalized even when geometrically
 // inside the hull.
 func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
-	verts := buildVerts(indices, invLab, fixedLab)
+	return hullScoreVerts(buildVerts(indices, invLab, fixedLab), samples)
+}
+
+// hullScoreVerts is weightedHullScore's geometric core over already-assembled
+// Lab vertices (see vertScoreFunc).
+func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
 	total := 0.0
 	for _, s := range samples {
 		hullDist := distToConvexHull(s.Lab, verts)
@@ -675,7 +757,12 @@ func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64
 // sample to the nearest color in the full palette (locked + candidate).
 // Used when dithering is disabled, since each cell gets exactly one color.
 func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
-	verts := buildVerts(indices, invLab, fixedLab)
+	return nearestScoreVerts(buildVerts(indices, invLab, fixedLab), samples)
+}
+
+// nearestScoreVerts is weightedNearestScore's geometric core over
+// already-assembled Lab vertices (see vertScoreFunc).
+func nearestScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
 	total := 0.0
 	for _, s := range samples {
 		d := nearestVertexDist(s.Lab, verts)

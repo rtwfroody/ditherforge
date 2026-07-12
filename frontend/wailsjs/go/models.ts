@@ -429,6 +429,7 @@ export namespace settings {
 	    honorTD: boolean;
 	    tdModel?: string;
 	    infillColor?: string;
+	    infillFilament?: string;
 	    colorAwareCells: boolean;
 	    colorRegionContrast: number;
 	    regionDither: boolean;
@@ -493,6 +494,7 @@ export namespace settings {
 	        this.honorTD = source["honorTD"];
 	        this.tdModel = source["tdModel"];
 	        this.infillColor = source["infillColor"];
+	        this.infillFilament = source["infillFilament"];
 	        this.colorAwareCells = source["colorAwareCells"];
 	        this.colorRegionContrast = source["colorRegionContrast"];
 	        this.regionDither = source["regionDither"];

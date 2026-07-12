@@ -68,6 +68,11 @@ type Options struct {
 	InventoryLabels []string   `json:"InventoryLabels,omitempty"` // parallel to InventoryColors
 	InventoryTDs    []float32  `json:"InventoryTDs,omitempty"`    // parallel to InventoryColors; transmission distance (mm), 0 = default opaque
 	LockedTDs       []float32  `json:"LockedTDs,omitempty"`       // parallel to LockedColors; transmission distance (mm), 0 = default opaque
+	// InfillFilamentHex optionally forces which resolved palette entry becomes
+	// the infill filament (palette index 0). "#RRGGBB" (case-insensitive); ""
+	// = auto-designate (see designateInfill). When it names no palette entry
+	// the pipeline falls through to auto.
+	InfillFilamentHex string `json:"InfillFilamentHex,omitempty"`
 	// HonorTD enables the opacity-weighted dither: each filament's TD
 	// scales how much it contributes per cell (translucent colors get more
 	// area). Default true at every real entry point (GUI checkbox / CLI
@@ -86,9 +91,10 @@ type Options struct {
 	// line widths, via export3mf.ShellThicknessMM); not user-settable. Left
 	// zero when the layered model is inactive (neither hashed nor read then).
 	ShellThicknessMM float32 `json:"ShellThicknessMM,omitempty"`
-	// InfillColor is the sRGB color of the filament printing the infill/inner
-	// walls, which the layered TD model blends toward for translucent
-	// filaments; ignored unless TDModel == "layered". Defaults to white.
+	// InfillColor is DEPRECATED and no longer read by the pipeline: the layered
+	// TD model now blends toward the designated infill filament (palette index
+	// 0, see designateInfill / InfillFilamentHex) instead of a free-floating
+	// color. The field is retained so old settings JSON still decodes.
 	InfillColor [3]uint8 `json:"InfillColor,omitempty"`
 	// ColorAwareCells segments each slab's surface shell by colour and
 	// tiles each monochrome region independently, so cell boundaries land
@@ -318,7 +324,14 @@ type Callbacks struct {
 	// a colour-only change) skips these stages, leaving the previous
 	// output in place rather than flashing back to grey.
 	OnOutputPreviewMesh func(*MeshData, float32)
-	OnPalette           func([][3]uint8, []float32, []string)
+	// OnPalette receives the resolved palette in GUI order ([locked...,
+	// auto...]) plus the TD-effective colors (parallel, same order): what each
+	// filament looks like once the translucent shell washes it toward the
+	// infill filament. The effective colors are computed centrally here
+	// because only the pipeline knows the true infill (export-ordered
+	// palette[0]) and the resolved shell thickness — callers must NOT treat
+	// their slice's index 0 as the infill.
+	OnPalette           func(pal [][3]uint8, tds []float32, labels []string, effective [][3]uint8)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -489,7 +502,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 	var onStickerOverlay func(*MeshData, float32)
 	var onAlphaWrappedMesh func(*MeshData, float32)
 	var onOutputPreview func(*MeshData, float32)
-	var onPalette func([][3]uint8, []float32, []string)
+	var onPalette func([][3]uint8, []float32, []string, [][3]uint8)
 	var onWarning func(kind, message string)
 	var tracker progress.Tracker = progress.NullTracker{}
 	if cb != nil {
@@ -668,7 +681,37 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		return nil, ctx.Err()
 	}
 	if onPalette != nil {
-		onPalette(po.Palette, po.PaletteTDs, po.PaletteLabels)
+		// po.Palette is in export order (infill at index 0). The GUI expects the
+		// resolved palette in [locked..., auto...] order, so undo the infill
+		// swap on copies before firing the event (leaving po untouched for the
+		// export-ordered downstream stages).
+		//
+		// The TD-effective colors are computed HERE, on the export-ordered
+		// palette, because the true infill is po.Palette[0] and r.opts carries
+		// the resolved shell thickness — after the un-swap below, index 0 is
+		// no longer the infill, so callers can't compute this correctly
+		// themselves. The effective slice gets the same un-swap so it stays
+		// parallel to what the callback receives.
+		var eff [][3]uint8
+		if len(po.Palette) > 0 {
+			eff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
+				r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
+		}
+		dp, dt, dl := po.Palette, po.PaletteTDs, po.PaletteLabels
+		if po.InfillIndex != 0 && po.InfillIndex < len(dp) {
+			dp = append([][3]uint8(nil), po.Palette...)
+			dt = append([]float32(nil), po.PaletteTDs...)
+			dl = append([]string(nil), po.PaletteLabels...)
+			dp[0], dp[po.InfillIndex] = dp[po.InfillIndex], dp[0]
+			if po.InfillIndex < len(dt) {
+				dt[0], dt[po.InfillIndex] = dt[po.InfillIndex], dt[0]
+			}
+			if po.InfillIndex < len(dl) {
+				dl[0], dl[po.InfillIndex] = dl[po.InfillIndex], dl[0]
+			}
+			eff[0], eff[po.InfillIndex] = eff[po.InfillIndex], eff[0]
+		}
+		onPalette(dp, dt, dl, eff)
 	}
 
 	// Merge — the final output mesh. On a warm cache this is the
@@ -1224,6 +1267,16 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 	}
 	if len(pcfg.Locked) > pcfg.NumColors {
 		return pcfg, fmt.Errorf("locked %d colors but only %d total requested", len(pcfg.Locked), pcfg.NumColors)
+	}
+
+	// TD context for effective-color inventory selection. SelectFromInventory
+	// downgrades to nominal scoring when TDs are uniform or all-opaque, so
+	// passing it unconditionally (Enabled = HonorTD) is safe. ShellThicknessMM
+	// is resolved for any HonorTD run in resolveShellThickness.
+	pcfg.TD = palette.TDParams{
+		Enabled:          opts.HonorTD,
+		LayerHeightMM:    opts.LayerHeight,
+		ShellThicknessMM: opts.ShellThicknessMM,
 	}
 
 	if opts.InventoryFile != "" {

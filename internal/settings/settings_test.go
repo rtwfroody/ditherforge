@@ -164,6 +164,7 @@ func nonDefaultSettings() Settings {
 		HonorTD:             true,
 		TDModel:             "layered",
 		InfillColor:         "#010203",
+		InfillFilament:      "#040506",
 		ColorAwareCells:     true,
 		ColorRegionContrast: 33,
 		RegionDither:        true,

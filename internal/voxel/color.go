@@ -73,7 +73,7 @@ func ResolvePalette(ctx context.Context, cells []ActiveCell, pcfg PaletteConfig,
 		if len(filtered) == 0 {
 			return nil, nil, nil, "", fmt.Errorf("inventory has no colors left after excluding locked colors")
 		}
-		selected, err := palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, remaining, lockedColors, dithering, tracker)
+		selected, err := palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, remaining, pcfg.Locked, dithering, pcfg.TD, tracker)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}

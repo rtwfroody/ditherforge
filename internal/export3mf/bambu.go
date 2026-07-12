@@ -401,6 +401,14 @@ func buildBambuProjectSettings(
 	data["printer_technology"] = "FFF"
 	data["printer_model"] = printer.DisplayName
 
+	// Route infill, solid infill and walls to filament 1 (1-based). By the
+	// "palette[0] = infill" invariant the designated infill filament is palette
+	// index 0, so the interior/walls print with the deliberately chosen color.
+	// Strings match the sibling filament-index keys in the process profiles.
+	data["sparse_infill_filament"] = "1"
+	data["solid_infill_filament"] = "1"
+	data["wall_filament"] = "1"
+
 	// Per-filament overrides.
 	hexColors := make([]any, N)
 	filamentSettingsIDs := make([]any, N)

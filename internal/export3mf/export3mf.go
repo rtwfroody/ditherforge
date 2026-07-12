@@ -425,6 +425,16 @@ func buildProjectSettings(printer *Printer, nozzle *Nozzle, machineProfile map[s
 		}
 	}
 
+	// Route infill, solid infill and walls to filament 1 (1-based). By the
+	// "palette[0] = infill" invariant the designated infill filament is palette
+	// index 0, so the interior/walls print with the deliberately chosen color
+	// instead of whatever the profile defaulted to. Written after the profile
+	// merge so these override any profile value; strings match sibling keys
+	// (e.g. support_filament / wipe_tower_filament) in the process profiles.
+	data["sparse_infill_filament"] = "1"
+	data["solid_infill_filament"] = "1"
+	data["wall_filament"] = "1"
+
 	data["name"] = "project_settings"
 	if processName != "" {
 		data["print_settings_id"] = processName

@@ -212,7 +212,11 @@
   let honorTD = $state(true);
   // Translucency model: '' (area compensation, legacy) or 'layered' (infill-aware).
   let tdModel = $state('');
+  // infillColor is deprecated (kept only for settings backward-compat); the
+  // infill filament is now designated by infillFilament (a palette-entry hex,
+  // or '' = auto = most opaque).
   let infillColor = $state('#FFFFFF');
+  let infillFilament = $state('');
   let colorAwareCells = $state(true);
   let colorRegionContrast = $state(20);
   let committedColorRegionContrast = $state(20);
@@ -628,6 +632,13 @@
 
   // Resolved unlocked colors from the backend (the non-locked portion of the palette).
   let resolvedUnlockedColors = $state<ColorInfo[]>([]);
+  // Full resolved palette (locked + auto) from the last palette-resolved event,
+  // used to populate the "Infill filament" selector.
+  let resolvedPalette = $state<{ hex: string; label: string; td: number; effectiveHex: string }[]>([]);
+  // Output-viewer view state (not persisted in settings): show each filament's
+  // TD-effective color (what the translucent print actually looks like) instead
+  // of its nominal color.
+  let simulatePrintTD = $state(false);
 
   // Pipeline progress stages for the output viewer.
   type StageInfo = {
@@ -708,6 +719,31 @@
   const outputMesh = $derived(run.output.finalUrl ?? run.output.previewUrl); // what the viewer shows
   const pipelineStages = $derived(run.stages);
   const pipelineError = $derived(run.error);
+
+  // Parse "#RRGGBB" (case-insensitive) into [r,g,b] bytes; null if malformed.
+  function hexToRgb(hex: string): [number, number, number] | null {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+  }
+
+  // Print-simulation color map: packed nominal RGB (r<<16|g<<8|b) -> effective
+  // [r,g,b] bytes, built only for filaments whose effective color actually
+  // differs from nominal (translucent ones). Empty when every filament is
+  // opaque, which disables the output viewer's "Simulate print translucency"
+  // toggle. Keyed on the palette so it rebuilds each run.
+  const printSimColors = $derived.by(() => {
+    const map = new Map<number, [number, number, number]>();
+    for (const c of resolvedPalette) {
+      if (!c.effectiveHex || c.effectiveHex.toUpperCase() === c.hex.toUpperCase()) continue;
+      const nom = hexToRgb(c.hex);
+      const eff = hexToRgb(c.effectiveHex);
+      if (nom && eff) map.set((nom[0] << 16) | (nom[1] << 8) | nom[2], eff);
+    }
+    return map;
+  });
+  const printSimAvailable = $derived(printSimColors.size > 0);
 
   let stageTick = $state(0);  // incremented to force timer re-render
   let stageTimerHandle = 0;
@@ -1005,12 +1041,13 @@
     statusMessage = '';
     statusType = 'idle';
   });
-  EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string; td: number }[] }) => {
+  EventsOn('palette-resolved', (event: { gen: number; colors: { hex: string; label: string; td: number; effectiveHex?: string }[] }) => {
     if (event.gen !== run.id) return;
     // The palette is [locked..., auto...]. Extract the auto portion.
     const numLocked = colorSlots.filter(s => s !== null).length;
     const collName = inventoryCollection;
     resolvedUnlockedColors = event.colors.slice(numLocked).map(c => ({ ...c, collection: collName }));
+    resolvedPalette = event.colors.map(c => ({ hex: c.hex, label: c.label, td: c.td, effectiveHex: c.effectiveHex ?? c.hex }));
   });
   EventsOn('pipeline-stage', (event: { gen: number; stage: string; status: string; hasProgress: boolean; total: number }) => {
     if (event.gen !== run.id) return;
@@ -1506,6 +1543,7 @@
       honorTD,
       tdModel,
       infillColor,
+      infillFilament,
       colorAwareCells,
       colorRegionContrast: useC ? committedColorRegionContrast : colorRegionContrast,
       regionDither,
@@ -1727,6 +1765,7 @@
     { key: 'honorTD',                         validate: pickBool,                                          apply: (v) => { honorTD = v; } },
     { key: 'tdModel',                         validate: pickString,                                        apply: (v) => { tdModel = v; } },
     { key: 'infillColor',                     validate: pickString,                                        apply: (v) => { infillColor = v; } },
+    { key: 'infillFilament',                  validate: pickString,                                        apply: (v) => { infillFilament = v; } },
     { key: 'colorAwareCells',                 validate: pickBool,                                          apply: (v) => { colorAwareCells = v; } },
     { key: 'colorRegionContrast',             validate: pickNumber,                                        apply: (v) => { colorRegionContrast = v; committedColorRegionContrast = v; } },
     { key: 'regionDither',                    validate: pickBool,                                          apply: (v) => { regionDither = v; } },
@@ -2611,6 +2650,26 @@
                 {/if}
               </div>
 
+              <!-- Infill filament: which palette entry prints the interior /
+                   walls (palette index 0). "" = auto (most opaque). -->
+              <div class="space-y-1">
+                <div class="flex items-center gap-1.5">
+                  <Label>Infill filament</Label>
+                  <HelpTip>
+                    The filament the slicer prints the infill, solid infill and inner walls with. Behind a translucent surface color it shows through, so the most opaque filament is usually the best choice. "Auto" picks the most opaque filament for you; or force a specific one.
+                  </HelpTip>
+                </div>
+                <select
+                  class="h-9 w-full rounded-md border border-input bg-background text-foreground px-2 text-sm"
+                  bind:value={infillFilament}
+                >
+                  <option value="">Auto (most opaque)</option>
+                  {#each resolvedPalette as c}
+                    <option value={c.hex}>{c.label ? `${c.label} (${c.hex})` : c.hex}</option>
+                  {/each}
+                </select>
+              </div>
+
               <!-- Auto-fill collection source -->
               <div class="space-y-1">
                 <div class="flex items-center gap-1.5">
@@ -2830,15 +2889,10 @@
                         <option value="layered">Layered (infill-aware)</option>
                       </select>
                     </div>
-                    {#if tdModel === 'layered'}
-                      <div class="flex items-center gap-2 text-sm">
-                        <span>Infill color</span>
-                        <HelpTip>
-                          The filament that prints the infill/inner walls. Translucent surface colors wash toward this. White maximizes chroma headroom.
-                        </HelpTip>
-                        <input type="color" class="ml-auto h-9 w-12 rounded-md border border-input bg-background" bind:value={infillColor} />
-                      </div>
-                    {/if}
+                    <!-- The layered model now blends toward the designated
+                         infill filament (palette index 0), chosen via the
+                         "Infill filament" selector in the Colors section, so
+                         there is no separate infill-color picker here. -->
                   </div>
                 {/if}
               </div>
@@ -3114,7 +3168,7 @@
       </div>
     </div>
     <div class="flex-1 min-h-0 relative">
-      <ModelViewer meshUrl={outputMesh} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} pickCellMode={cellSelectMode} onCellPick={handleCellPick} />
+      <ModelViewer meshUrl={outputMesh} label="Output Model" viewerId="output" camera={sharedCamera} stages={pipelineStages} {stageTick} progressActive={running} {pipelineError} viewMode={outputViewStyle} pickTriangleMode={triangleSelectMode} onTrianglePick={handleTrianglePick} pickCellMode={cellSelectMode} onCellPick={handleCellPick} printSim={simulatePrintTD && printSimAvailable} {printSimColors} />
       <div
         bind:this={outputViewMenuRef}
         class="absolute top-2 right-2 z-10 text-xs"
@@ -3135,6 +3189,13 @@
             <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer">
               <input type="radio" name="output-view-style" bind:group={outputViewStyle} value="hidden-line" />
               <span>Hidden line</span>
+            </label>
+            <div class="border-t border-border"></div>
+            <div class="px-3 pt-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Simulation</div>
+            <label class="flex items-center gap-2 px-3 py-1.5 {printSimAvailable ? 'hover:bg-muted cursor-pointer' : 'opacity-50 cursor-not-allowed'}"
+              title={printSimAvailable ? 'Recolor the output to show how translucent filaments wash toward the infill in the physical print' : 'All filaments are opaque — nothing to simulate'}>
+              <input type="checkbox" bind:checked={simulatePrintTD} disabled={!printSimAvailable} />
+              <span>Simulate print translucency</span>
             </label>
           </div>
         {/if}

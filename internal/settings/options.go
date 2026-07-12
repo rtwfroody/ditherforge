@@ -51,6 +51,9 @@ func ToOptions(s Settings, mgr *collection.Manager) (pipeline.Options, error) {
 		// ShellThicknessMM is left zero here: it is derived from the printer
 		// process profile in applyFractionalOptions, not carried from settings.
 		InfillColor: parseHexRGB(s.InfillColor, [3]uint8{255, 255, 255}),
+		// InfillFilament is a hex designator ("" = auto). Validate like other
+		// hex fields; an unparseable value falls through to auto by staying "".
+		InfillFilamentHex: normalizeHexOrEmpty(s.InfillFilament),
 	}
 
 	// ObjectIndex: nil → -1 (all objects), matching the frontend.
@@ -196,6 +199,18 @@ func parseHexRGB(s string, def [3]uint8) [3]uint8 {
 		return def
 	}
 	return [3]uint8{uint8(v >> 16), uint8(v >> 8), uint8(v)}
+}
+
+// normalizeHexOrEmpty returns the canonical "#RRGGBB" form of s (uppercased)
+// when it is a valid hex color, or "" otherwise (including empty input). Used
+// for the optional infill-filament designator, where an invalid value means
+// "auto" rather than an error.
+func normalizeHexOrEmpty(s string) string {
+	s = strings.TrimSpace(s)
+	if !validHex(s) {
+		return ""
+	}
+	return strings.ToUpper(s)
 }
 
 // validHex reports whether s is a "#RRGGBB" hex color.

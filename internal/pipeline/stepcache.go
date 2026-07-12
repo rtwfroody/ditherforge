@@ -586,9 +586,15 @@ type splitOutput struct {
 
 type paletteOutput struct {
 	Palette       [][3]uint8
-	PaletteTDs    []float32          // parallel to Palette; transmission distance (mm) for opacity-weighted dither
-	PaletteLabels []string           // parallel to Palette; label from inventory (empty for locked/computed)
-	Cells         []voxel.ActiveCell // copy with snapped colors
+	PaletteTDs    []float32 // parallel to Palette; transmission distance (mm) for opacity-weighted dither
+	PaletteLabels []string  // parallel to Palette; label from inventory (empty for locked/computed)
+	// InfillIndex is the pre-swap index of the designated infill filament (see
+	// designateInfill). Palette/PaletteTDs/PaletteLabels are stored in
+	// export order (infill swapped to index 0, the "palette[0] = infill"
+	// invariant); InfillIndex lets the GUI reconstruct the original
+	// [locked..., auto...] ordering for its resolved-palette event. 0 = no swap.
+	InfillIndex int
+	Cells       []voxel.ActiveCell // copy with snapped colors
 }
 
 type ditherOutput struct {
@@ -1021,6 +1027,20 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 		writeFloat64(h, float64(td))
 	}
 	writeFloat64(h, opts.ColorSnap)
+	// Infill-filament designation happens in this stage (see designateInfill):
+	// it can swap a different entry to palette index 0, so its inputs must
+	// invalidate the palette cache. The salt forces a one-time rebuild of
+	// pre-feature caches whose slot-0 choice used the old most-used-only rule.
+	writeString(h, "palette-infill-v1")
+	writeBool(h, opts.HonorTD)
+	writeString(h, opts.InfillFilamentHex)
+	// TD-aware selection scores subsets on effective colors composited through
+	// the printed shell, so the shell/layer geometry that drives the leak now
+	// affects which colors get picked. The salt forces a one-time rebuild of
+	// caches whose selection predates the feature.
+	writeString(h, "palette-td-aware-v1")
+	writeFloat32(h, opts.LayerHeight)
+	writeFloat32(h, opts.ShellThicknessMM)
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
@@ -1062,10 +1082,12 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// decisions depend on it directly (elsewhere it only reaches voxelize via
 	// derived cell Z sizes).
 	if opts.HonorTD && opts.TDModel == "layered" {
-		writeString(h, "tdmodel-layered-v1")
+		// "v2": the infill color is now the designated infill filament (palette
+		// index 0), which flows in through the palette-stage key chain, so the
+		// old free-floating Options.InfillColor is no longer hashed here.
+		writeString(h, "tdmodel-layered-v2")
 		writeFloat32(h, opts.LayerHeight)
 		writeFloat32(h, opts.ShellThicknessMM)
-		h.Write(opts.InfillColor[:])
 	}
 }
 

@@ -12,6 +12,9 @@ type PaletteConfig struct {
 	NumColors int                      // total number of palette colors
 	Locked    []palette.InventoryEntry // user-locked colors (always in palette); labels may be empty
 	Inventory []palette.InventoryEntry // inventory entries for remaining slots
+	// TD carries the transmission-distance context for TD-aware inventory
+	// selection (effective-color scoring). Zero value = nominal scoring.
+	TD palette.TDParams
 }
 
 // Config holds parameters for voxel remeshing.

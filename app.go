@@ -626,7 +626,15 @@ func (a *App) processOne(req pipelineRequest) {
 			wailsRuntime.EventsEmit(a.ctx, "input-overlay-mesh",
 				meshEvent{Gen: req.gen, URL: url, PreviewScale: pvScale})
 		},
-		OnPalette: func(pal [][3]uint8, tds []float32, labels []string) {
+		OnPalette: func(pal [][3]uint8, tds []float32, labels []string, eff [][3]uint8) {
+			// eff holds the TD-effective colors (what each filament looks like
+			// once the translucent shell washes it toward the infill
+			// filament), computed by the pipeline — which knows the true
+			// infill and the resolved shell thickness; pal here is GUI-ordered
+			// so pal[0] is NOT the infill. Powers the output viewer's
+			// "Simulate print translucency" toggle. Opaque entries come back
+			// byte-identical, so the frontend can detect a no-op palette and
+			// disable the toggle.
 			colors := make([]map[string]any, len(pal))
 			for i, c := range pal {
 				label := ""
@@ -637,10 +645,15 @@ func (a *App) processOne(req pipelineRequest) {
 				if i < len(tds) && tds[i] > 0 {
 					td = tds[i]
 				}
+				e := c
+				if i < len(eff) {
+					e = eff[i]
+				}
 				colors[i] = map[string]any{
-					"hex":   fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
-					"label": label,
-					"td":    td,
+					"hex":          fmt.Sprintf("#%02X%02X%02X", c[0], c[1], c[2]),
+					"effectiveHex": fmt.Sprintf("#%02X%02X%02X", e[0], e[1], e[2]),
+					"label":        label,
+					"td":           td,
 				}
 			}
 			wailsRuntime.EventsEmit(a.ctx, "palette-resolved", map[string]any{

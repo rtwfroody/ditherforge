@@ -138,6 +138,10 @@ type Settings struct {
 	// model's shell thickness is not a setting: it is derived from the selected
 	// printer's process profile (see pipeline.Options.ShellThicknessMM).
 	InfillColor         string  `json:"infillColor,omitempty"`
+	// InfillFilament optionally forces which resolved palette entry becomes the
+	// infill filament (palette index 0). "#RRGGBB" (hex) or "" = auto (pick the
+	// most opaque). See pipeline.designateInfill.
+	InfillFilament      string  `json:"infillFilament,omitempty"`
 	ColorAwareCells     bool    `json:"colorAwareCells"`
 	ColorRegionContrast float64 `json:"colorRegionContrast"`
 	// RegionDither (advanced) confines the dither to colour regions so a
@@ -224,6 +228,7 @@ func Default() Settings {
 		NoSimplify:            false,
 		HonorTD:               true,
 		InfillColor:           "#FFFFFF",
+		InfillFilament:        "", // auto: designate the most opaque filament
 		ColorAwareCells:       true,
 		ColorRegionContrast:   20,
 		RegionDither:          false,

@@ -874,12 +874,13 @@ func applyFractionalOptions(opts Options, ext float64) Options {
 // resolveShellThickness derives opts.ShellThicknessMM from the selected
 // printer's process profile — the same profile ditherforge embeds into the
 // exported 3MF, so it is the ground truth for the print's actual wall
-// thickness. It is a no-op unless the layered TD model is active
-// (HonorTD && TDModel == "layered"); when inactive, ShellThicknessMM is left
-// zero (neither hashed nor read then). On any resolution failure it falls back
-// to layeredShellFallbackMM and logs one warning.
+// thickness. It is a no-op unless HonorTD is set; when inactive, ShellThicknessMM
+// is left zero (neither hashed nor read then). HonorTD alone (not just the
+// layered TD model) triggers resolution, because TD-aware palette selection
+// needs a real shell thickness under the area model too. On any resolution
+// failure it falls back to layeredShellFallbackMM and logs one warning.
 func resolveShellThickness(opts Options) Options {
-	if !opts.HonorTD || opts.TDModel != "layered" {
+	if !opts.HonorTD {
 		return opts
 	}
 	printerID, n, proc, ok := resolveProcessProfile(opts)
@@ -890,7 +891,7 @@ func resolveShellThickness(opts Options) Options {
 		}
 	}
 	opts.ShellThicknessMM = layeredShellFallbackMM
-	plog.Printf("Layered TD: could not derive shell thickness from %s nozzle %.2f layer %.3f mm profile; "+
+	plog.Printf("TD: could not derive shell thickness from %s nozzle %.2f layer %.3f mm profile; "+
 		"using %.2f mm fallback", printerID, opts.NozzleDiameter, opts.LayerHeight, layeredShellFallbackMM)
 	return opts
 }
@@ -2305,33 +2306,146 @@ func (r *pipelineRun) runPalette() (any, error) {
 		}
 		plog.Printf("  Snapped cell colors toward palette by delta E %.1f", r.opts.ColorSnap)
 	}
-	if len(pcfg.Locked) == 0 && len(pal) > 1 {
+	// Designate the infill filament and swap it to palette index 0. The
+	// slicer prints all infill/interior/walls with filament 1 (= palette[0]),
+	// so slot 0 must be a deliberate choice — the most-opaque filament under a
+	// translucent surface, a user override, or the legacy most-used color —
+	// not an accident of locked-color ordering. See designateInfill.
+	var counts []int
+	if len(pal) > 1 {
 		assigns, aerr := voxel.AssignColors(r.ctx, cells, pal)
 		if aerr != nil {
 			return nil, aerr
 		}
-		counts := make([]int, len(pal))
+		counts = make([]int, len(pal))
 		for _, a := range assigns {
 			counts[a]++
 		}
-		best := 0
-		for i := 1; i < len(counts); i++ {
-			if counts[i] > counts[best] {
-				best = i
-			}
+	}
+	infill := designateInfill(pal, palTDs, counts, r.opts.InfillFilamentHex, r.opts.HonorTD, len(pcfg.Locked) > 0)
+	if infill != 0 {
+		pal[0], pal[infill] = pal[infill], pal[0]
+		palLabels[0], palLabels[infill] = palLabels[infill], palLabels[0]
+		palTDs[0], palTDs[infill] = palTDs[infill], palTDs[0]
+	}
+	// Invariant from here on: palette index 0 IS the infill filament.
+	if len(pal) > 0 {
+		lbl := ""
+		if len(palLabels) > 0 {
+			lbl = palLabels[0]
 		}
-		if best != 0 {
-			pal[0], pal[best] = pal[best], pal[0]
-			palLabels[0], palLabels[best] = palLabels[best], palLabels[0]
-			palTDs[0], palTDs[best] = palTDs[best], palTDs[0]
-		}
+		plog.Printf("  Infill filament: #%02X%02X%02X %s (TD %.2f)",
+			pal[0][0], pal[0][1], pal[0][2], lbl, palTDs[0])
 	}
 	return &paletteOutput{
 		Palette:       pal,
 		PaletteTDs:    palTDs,
 		PaletteLabels: palLabels,
+		InfillIndex:   infill,
 		Cells:         cells,
 	}, nil
+}
+
+// designateInfill picks which palette entry should become the infill filament
+// (palette index 0, by the "palette[0] = infill" invariant) and returns its
+// index — the caller swaps that entry to slot 0.
+//
+// colors/tds are parallel; counts is the per-color cell-usage tally (from
+// voxel.AssignColors) or nil when unavailable; overrideHex is the user's forced
+// "#RRGGBB" choice ("" = auto); honorTD mirrors Options.HonorTD; hasLocked is
+// true when the palette has user-locked colors.
+//
+// Rules, in order:
+//  1. If overrideHex names a palette entry (case-insensitively), designate it.
+//  2. Else if honorTD and the (normalized) TDs are not all equal, designate the
+//     lowest-TD (most opaque) entry so the interior shows through translucent
+//     surface filaments as the least-tinting color. Tie-break: most-used, then
+//     lowest index.
+//  3. Else (uniform TDs or honorTD off) preserve legacy behavior exactly: with
+//     locked colors, keep index 0 (no swap); otherwise the most-used entry.
+func designateInfill(colors [][3]uint8, tds []float32, counts []int, overrideHex string, honorTD, hasLocked bool) int {
+	if len(colors) == 0 {
+		return 0
+	}
+	// 1. Explicit user override wins when it names a palette entry.
+	if overrideHex != "" {
+		if idx := paletteIndexByHex(colors, overrideHex); idx >= 0 {
+			return idx
+		}
+	}
+	// mostUsed returns the most-used index among candidates, tie-breaking on
+	// lowest index. With counts nil it degrades to the lowest candidate index.
+	mostUsed := func(cands []int) int {
+		best := cands[0]
+		for _, i := range cands[1:] {
+			if counts != nil && i < len(counts) && best < len(counts) && counts[i] > counts[best] {
+				best = i
+			}
+		}
+		return best
+	}
+	// 2. HonorTD + non-uniform TDs: designate the most opaque (lowest TD).
+	if honorTD {
+		norm := make([]float32, len(colors))
+		uniform := true
+		for i := range colors {
+			if i < len(tds) {
+				norm[i] = normInfillTD(tds[i])
+			}
+			if norm[i] != norm[0] {
+				uniform = false
+			}
+		}
+		if !uniform {
+			min := norm[0]
+			for _, t := range norm {
+				if t < min {
+					min = t
+				}
+			}
+			var cands []int
+			for i, t := range norm {
+				if t == min {
+					cands = append(cands, i)
+				}
+			}
+			return mostUsed(cands)
+		}
+	}
+	// 3. Uniform TDs or HonorTD off: legacy designation.
+	if hasLocked {
+		// Locked colors present: index 0 stays the infill (no swap),
+		// bit-identical to pre-feature behavior.
+		return 0
+	}
+	all := make([]int, len(colors))
+	for i := range all {
+		all[i] = i
+	}
+	return mostUsed(all)
+}
+
+// normInfillTD normalizes a transmission distance for infill designation:
+// missing/non-positive/NaN/Inf all collapse to 0 (fully opaque), so those
+// entries compare equal and sort as the most opaque.
+func normInfillTD(td float32) float32 {
+	d := float64(td)
+	if td <= 0 || math.IsNaN(d) || math.IsInf(d, 0) {
+		return 0
+	}
+	return td
+}
+
+// paletteIndexByHex returns the index of the first palette entry whose color
+// equals hex ("#RRGGBB", case-insensitive, leading '#' optional), or -1.
+func paletteIndexByHex(colors [][3]uint8, hex string) int {
+	want := strings.ToUpper(strings.TrimPrefix(strings.TrimSpace(hex), "#"))
+	for i, c := range colors {
+		if fmt.Sprintf("%02X%02X%02X", c[0], c[1], c[2]) == want {
+			return i
+		}
+	}
+	return -1
 }
 
 // runDither is StageDither's body (see stageDefs).
@@ -2380,7 +2494,10 @@ func (r *pipelineRun) runDither() (any, error) {
 	if layeredTD {
 		plog.Printf("  Layered TD: shell thickness %.3f mm (derived from printer process profile)",
 			r.opts.ShellThicknessMM)
-		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, r.opts.InfillColor)
+		// The infill color the layered model blends translucent filaments
+		// toward is the designated infill filament (palette index 0 by
+		// invariant), not the deprecated free-floating Options.InfillColor.
+		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
 	} else if r.opts.HonorTD {
 		palAlpha = voxel.PaletteAlphas(po.PaletteTDs)
 	}

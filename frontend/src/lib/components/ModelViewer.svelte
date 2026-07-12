@@ -83,6 +83,8 @@
     cutPlane = null,
     pipelineError = '',
     viewMode = 'solid',
+    printSim = false,
+    printSimColors = null,
     onCaptureReady,
   }: {
     meshUrl?: string;
@@ -130,6 +132,14 @@
     cutPlane?: CutPlanePreview | null;
     pipelineError?: string;
     viewMode?: 'solid' | 'hidden-line';
+    // Print-translucency simulation (output viewer only). When printSim is
+    // true and printSimColors is a non-empty map, each face's baked nominal
+    // palette color is swapped for the TD-effective color the physical print
+    // shows. The key is the packed nominal RGB (r<<16 | g<<8 | b); the value
+    // is the effective [r,g,b] bytes. Toggling re-colors the cached mesh with
+    // no refetch. Null/empty (or printSim=false) renders nominal colors.
+    printSim?: boolean;
+    printSimColors?: Map<number, [number, number, number]> | null;
     // Called with a capture function once the WebGL context is live (and null
     // when it tears down). Invoke the function to grab the current render as a
     // PNG data URL. Only wired for viewers that need snapshots (e.g. the input
@@ -703,8 +713,31 @@
   // space). Returns 3 floats per vertex when faceAlpha is absent; 4
   // floats per vertex (RGBA) when present, so alpha-blended materials
   // can use the per-face alpha straight from the buffer.
-  function unpackFaceColors(td: TypedMeshData, faceIndices: Uint32Array): { array: Float32Array; itemSize: 3 | 4 } {
-    const { faceColors, faceAlpha } = td;
+  // Return the per-face color array to render: the mesh's baked nominal
+  // colors, or — when the print-simulation toggle is on and a color map is
+  // supplied — the same array with each nominal palette color swapped for its
+  // TD-effective color. Faces whose color matches no palette entry (fallback
+  // grey) pass through unchanged. Returns the original array (no copy) when no
+  // remap applies, so the common path stays allocation-free.
+  function resolveFaceColors(td: TypedMeshData): Uint16Array {
+    const fc = td.faceColors;
+    if (!printSim || !printSimColors || printSimColors.size === 0) return fc;
+    const out = new Uint16Array(fc.length);
+    for (let i = 0; i + 2 < fc.length; i += 3) {
+      const key = (fc[i] << 16) | (fc[i + 1] << 8) | fc[i + 2];
+      const eff = printSimColors.get(key);
+      if (eff) {
+        out[i] = eff[0]; out[i + 1] = eff[1]; out[i + 2] = eff[2];
+      } else {
+        out[i] = fc[i]; out[i + 1] = fc[i + 1]; out[i + 2] = fc[i + 2];
+      }
+    }
+    return out;
+  }
+
+  function unpackFaceColors(td: TypedMeshData, faceIndices: Uint32Array, faceColorsSource?: Uint16Array): { array: Float32Array; itemSize: 3 | 4 } {
+    const faceColors = faceColorsSource ?? td.faceColors;
+    const { faceAlpha } = td;
     if (faceAlpha) {
       const colors = new Float32Array(faceIndices.length * 12);
       for (let i = 0; i < faceIndices.length; i++) {
@@ -964,6 +997,8 @@
     const nFaces = td.faces.length / 3;
     const stickerAtlasTex = await loadStickerAtlas(td);
     const fr = td.faceRenderClass;
+    // Nominal or TD-effective per-face colors depending on the print-sim toggle.
+    const faceColorsSource = resolveFaceColors(td);
 
     // Split by render class so opaque/cutout faces keep writing depth and
     // only blend faces draw in their own depthWrite=false pass. When no
@@ -1000,7 +1035,7 @@
         const mat = createAdjustedMaterial(opts, stickerAtlasTex, stickerOnly, renderClass);
         meshes.push({ geometry: geo, material: mat });
       } else {
-        const { array, itemSize } = unpackFaceColors(td, faceIndices);
+        const { array, itemSize } = unpackFaceColors(td, faceIndices, faceColorsSource);
         geo.setAttribute('color', new THREE.BufferAttribute(array, itemSize));
         const mat = createAdjustedMaterial({ vertexColors: true, flatShading: true }, stickerAtlasTex, stickerOnly, renderClass);
         meshes.push({ geometry: geo, material: mat });
@@ -1112,69 +1147,80 @@
   });
 
   let buildId = 0;
+  // Cache of the last parsed mesh, keyed by its URL. Lets the print-sim
+  // toggle re-color the output mesh from memory without re-fetching (mesh
+  // URLs are monotonic per run, so a new run always misses the cache).
+  let cachedTd: TypedMeshData | null = null;
+  let cachedTdUrl: string | undefined;
 
   $effect(() => {
     const url = meshUrl;
+    // Read the print-sim inputs so toggling / palette changes re-run this
+    // effect and rebuild the scene with the recolored buffer.
+    void printSim;
+    void printSimColors;
     const prev = untrack(() => scene);
     const myId = ++buildId;
 
+    // Build the scene from a parsed mesh, applying camera setup on first load.
+    const buildFrom = (td: TypedMeshData, t0: number) => {
+      if (myId !== buildId) return;
+      faceCount = td.faces.length / 3;
+
+      // If no viewer has set up the camera yet, compute initial pose from
+      // this mesh's geometry. Otherwise, use the shared camera state.
+      if (!sharedCamera.initialized) {
+        const setup = computeCameraSetup(td);
+        sharedCamera.posX = setup.position[0];
+        sharedCamera.posY = setup.position[1];
+        sharedCamera.posZ = setup.position[2];
+        sharedCamera.near = setup.near;
+        sharedCamera.far = setup.far;
+        sharedCamera.targetX = setup.target[0];
+        sharedCamera.targetY = setup.target[1];
+        sharedCamera.targetZ = setup.target[2];
+        sharedCamera.initialized = true;
+        ++sharedCamera.generation;
+      }
+      cameraSetup = {
+        position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
+        target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
+        near: sharedCamera.near,
+        far: sharedCamera.far,
+      };
+      appliedGen = sharedCamera.generation;
+      // Suppress handleControlsChange during OrbitControls mount so it
+      // doesn't write the freshly-applied values back to sharedCamera.
+      mountSyncing = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => { mountSyncing = false; }));
+
+      const builder = hasTextures(td) ? buildTexturedScene(td) : buildFaceColorScene(td);
+      builder.then((s) => {
+        log(`[${viewerId}] ${faceCount} triangles ready in ${(performance.now() - t0).toFixed(0)}ms`);
+        if (myId === buildId) {
+          scene = s;
+          disposeScene(prev);
+        } else {
+          disposeScene(s);
+        }
+      });
+    };
+
     if (url) {
       const t0 = performance.now();
-      fetchBinaryMesh(url).then((td) => {
-        if (myId !== buildId) return;
-        faceCount = td.faces.length / 3;
-
-        // If no viewer has set up the camera yet, compute initial pose from
-        // this mesh's geometry. Otherwise, use the shared camera state.
-        if (!sharedCamera.initialized) {
-          const setup = computeCameraSetup(td);
-          sharedCamera.posX = setup.position[0];
-          sharedCamera.posY = setup.position[1];
-          sharedCamera.posZ = setup.position[2];
-          sharedCamera.near = setup.near;
-          sharedCamera.far = setup.far;
-          sharedCamera.targetX = setup.target[0];
-          sharedCamera.targetY = setup.target[1];
-          sharedCamera.targetZ = setup.target[2];
-          sharedCamera.initialized = true;
-          ++sharedCamera.generation;
-        }
-        cameraSetup = {
-          position: [sharedCamera.posX, sharedCamera.posY, sharedCamera.posZ],
-          target: [sharedCamera.targetX, sharedCamera.targetY, sharedCamera.targetZ],
-          near: sharedCamera.near,
-          far: sharedCamera.far,
-        };
-        appliedGen = sharedCamera.generation;
-        // Suppress handleControlsChange during OrbitControls mount so it
-        // doesn't write the freshly-applied values back to sharedCamera.
-        mountSyncing = true;
-        requestAnimationFrame(() => requestAnimationFrame(() => { mountSyncing = false; }));
-
-        if (hasTextures(td)) {
-          buildTexturedScene(td).then((s) => {
-            log(`[${viewerId}] ${faceCount} triangles ready in ${(performance.now() - t0).toFixed(0)}ms`);
-            if (myId === buildId) {
-              scene = s;
-              disposeScene(prev);
-            } else {
-              disposeScene(s);
-            }
-          });
-        } else {
-          buildFaceColorScene(td).then((s) => {
-            if (myId === buildId) {
-              scene = s;
-              log(`[${viewerId}] ${faceCount} triangles ready in ${(performance.now() - t0).toFixed(0)}ms`);
-              disposeScene(prev);
-            } else {
-              disposeScene(s);
-            }
-          });
-        }
-      }).catch((err) => {
-        console.error(`[${viewerId}] mesh load error:`, err);
-      });
+      // Recolor from cache (toggle flip) instead of refetching the mesh.
+      if (cachedTd && cachedTdUrl === url) {
+        buildFrom(cachedTd, t0);
+      } else {
+        fetchBinaryMesh(url).then((td) => {
+          if (myId !== buildId) return;
+          cachedTd = td;
+          cachedTdUrl = url;
+          buildFrom(td, t0);
+        }).catch((err) => {
+          console.error(`[${viewerId}] mesh load error:`, err);
+        });
+      }
     } else {
       scene = null;
       // Keep cameraSetup around so the Canvas can remount with the current
