@@ -1163,7 +1163,12 @@
     const myId = ++buildId;
 
     // Build the scene from a parsed mesh, applying camera setup on first load.
-    const buildFrom = (td: TypedMeshData, t0: number) => {
+    // The body is untracked: on the cache-hit path it runs synchronously
+    // inside this $effect, and its sharedCamera reads would otherwise become
+    // effect dependencies — rotating writes sharedCamera every frame, which
+    // would re-trigger a full scene rebuild per frame. The effect's inputs
+    // are exactly the ones read above (meshUrl, printSim, printSimColors).
+    const buildFrom = (td: TypedMeshData, t0: number) => untrack(() => {
       if (myId !== buildId) return;
       faceCount = td.faces.length / 3;
 
@@ -1204,7 +1209,7 @@
           disposeScene(s);
         }
       });
-    };
+    });
 
     if (url) {
       const t0 = performance.now();
