@@ -75,6 +75,60 @@ func EffectivePalette(pal [][3]uint8, tds []float32, layerHeightMM, shellThickne
 	return out
 }
 
+// NeighborEffectivePalette returns, per palette entry, the print-simulation
+// color under the neighbor translucency model, using the global area-weighted
+// mean of the cells' target colors as the stand-in neighborhood every cell
+// washes toward. It is the palette-level analogue of EffectiveCellColors (which
+// blends each cell toward its actual neighbors) and of TD-aware palette
+// selection (which composites each inventory entry toward the same target
+// mean): all three share palette.NeighborLeak and an area-weighted target mean,
+// so the GUI fallback swatches, the printSimAvailable signal, the per-cell sim,
+// and the color selection stay consistent.
+//
+// An opaque or garbage-TD entry (β = 0) is returned byte-identical to its
+// nominal color, so an all-opaque palette is exact identity. pal is never
+// mutated; a new slice is returned.
+func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell, neighborPathMM float32) [][3]uint8 {
+	out := make([][3]uint8, len(pal))
+
+	// Area-weighted mean of the target (cell) colors, in linear light — the
+	// same target mean TD-aware selection composites toward.
+	const areaEps = 1e-6
+	var mean [3]float64
+	var wsum float64
+	for _, c := range cells {
+		w := math.Max(float64(c.Area), areaEps)
+		mean[0] += w * float64(srgbToLinearLUT[c.Color[0]])
+		mean[1] += w * float64(srgbToLinearLUT[c.Color[1]])
+		mean[2] += w * float64(srgbToLinearLUT[c.Color[2]])
+		wsum += w
+	}
+	if wsum > 0 {
+		mean[0] /= wsum
+		mean[1] /= wsum
+		mean[2] /= wsum
+	}
+
+	for i, c := range pal {
+		out[i] = c // default: identity (opaque/garbage TD)
+
+		var td float64
+		if i < len(tds) {
+			td = float64(tds[i])
+		}
+		beta := palette.NeighborLeak(td, float64(neighborPathMM))
+		if beta == 0 {
+			continue
+		}
+		for ch := 0; ch < 3; ch++ {
+			linC := float64(srgbToLinearLUT[c[ch]])
+			eff := (1-beta)*linC + beta*mean[ch]
+			out[i][ch] = linearToSrgbByte(float32(eff))
+		}
+	}
+	return out
+}
+
 // EffectiveCellColors returns one perceived "print-simulation" color per
 // visible cell. Where EffectivePalette composites every cell of a given
 // filament toward the single infill color, this models the dominant effect
@@ -146,15 +200,9 @@ func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8
 		if k < len(tds) {
 			td = float64(tds[k])
 		}
-		b := 0.0
-		if td > 0 && !math.IsInf(td, 0) {
-			b = math.Pow(10, -float64(neighborPathMM)/td)
-			if b < 1.0/1024.0 {
-				b = 0
-			} else if b > 0.95 {
-				b = 0.95
-			}
-		}
+		// Lateral leak β; shared with TD-aware palette selection so the
+		// simulation and the selection can't drift (see palette.NeighborLeak).
+		b := palette.NeighborLeak(td, float64(neighborPathMM))
 		beta[i] = b
 		if b > 0 {
 			anyTranslucent = true

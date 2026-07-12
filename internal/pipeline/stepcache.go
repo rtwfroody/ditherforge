@@ -1034,13 +1034,18 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeString(h, "palette-infill-v1")
 	writeBool(h, opts.HonorTD)
 	writeString(h, opts.InfillFilamentHex)
-	// TD-aware selection scores subsets on effective colors composited through
-	// the printed shell, so the shell/layer geometry that drives the leak now
-	// affects which colors get picked. The salt forces a one-time rebuild of
-	// caches whose selection predates the feature.
-	writeString(h, "palette-td-aware-v1")
+	// TD-aware selection scores subsets on effective colors under the neighbor
+	// model: each entry composited toward the target-color mean by its lateral
+	// leak β = 10^(−ℓ/TD). The in-plane path ℓ (simNeighborPathMM, overridable
+	// via DITHERFORGE_SIM_NEIGHBOR_PATH_MM) now drives which colors get picked,
+	// so it must invalidate the palette cache. LayerHeight/ShellThickness are
+	// still hashed: they drove the previous (infill-composite) selection, and
+	// leaving them in keeps caches keyed on geometry. The v2 salt forces a
+	// one-time rebuild of caches whose selection used the old infill model.
+	writeString(h, "palette-td-aware-v2")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
+	writeFloat32(h, simNeighborPathMM)
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {

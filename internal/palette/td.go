@@ -94,100 +94,106 @@ func linearOf(c [3]uint8) [3]float64 {
 	return [3]float64{r, g, b}
 }
 
+// DefaultNeighborPathMM is the representative in-plane path length (mm) a
+// translucent cell's own filament imposes before a neighbor's color shows
+// through. It is the calibration knob (against physical test prints) shared by
+// the per-cell print simulation (voxel.EffectiveCellColors) and TD-aware
+// palette selection, so both models agree on how much a translucent filament
+// washes toward its surroundings. Calibrated to 0.3 mm against a physical print
+// (the print reads between the 0.2 and 0.35 renders). The pipeline overrides it
+// from DITHERFORGE_SIM_NEIGHBOR_PATH_MM.
+const DefaultNeighborPathMM = 0.3
+
+// NeighborLeak returns β = 10^(−neighborPathMM/td): the fraction of a
+// neighbor's color that shows through a cell of a filament with transmission
+// distance td (mm) over the representative in-plane path. It is the lateral
+// analogue of TDLeak and the shared core of the neighbor translucency model —
+// voxel.EffectiveCellColors calls it per cell and TD-aware selection calls it
+// per inventory entry, so the simulation and the selection can't drift apart.
+//
+// Sanitization / clamping contract (matched by both callers):
+//   - A garbage td (≤ 0, NaN, or ±Inf) is fully opaque → 0.
+//   - A leak below 1/1024 is treated as fully opaque → 0, so an opaque cell
+//     comes back byte-identical to its nominal color.
+//   - Otherwise clamped to [0, 0.95] so a cell never fully dissolves into its
+//     neighbors.
+func NeighborLeak(td, neighborPathMM float64) float64 {
+	if !(td > 0) || math.IsInf(td, 0) {
+		return 0
+	}
+	b := math.Pow(10, -neighborPathMM/td)
+	if b < 1.0/1024.0 {
+		return 0
+	}
+	if b > 0.95 {
+		b = 0.95
+	}
+	return b
+}
+
 // TDParams carries the transmission-distance context for TD-aware palette
 // selection. When Enabled, SelectFromInventory scores candidate subsets on
-// their TD-effective colors — each filament composited toward the subset's
-// infill through the printed shell (see TDLeak) — rather than nominal filament
-// colors, so a translucent filament isn't picked as a chroma carrier it can't
-// actually deliver on the print.
+// their neighbor-effective colors — each filament composited toward the
+// area-weighted mean of the target (cell) colors by its lateral leak β (see
+// NeighborLeak) — rather than nominal filament colors, so a translucent
+// filament isn't picked as a chroma carrier it can't actually deliver on the
+// print. This is the selection-time analogue of the per-cell print simulation
+// (voxel.EffectiveCellColors): individual cell placement is unknown when the
+// palette is chosen, so the global target mean is the tractable stand-in for
+// what a translucent cell's neighbors will statistically look like.
 //
 // Enabled is a request, not a guarantee: SelectFromInventory downgrades to
 // bit-identical nominal scoring when the palette's normalized TDs are uniform
-// or all filaments are effectively opaque, since a uniform shift toward infill
-// (or no shift at all) can't change which subset scores best.
+// (a common shift toward the same mean can't reorder the subsets being
+// compared) or all filaments are effectively opaque (β = 0 everywhere).
+//
+// NeighborPathMM is the in-plane path length (mm) driving β; when ≤ 0 it
+// defaults to DefaultNeighborPathMM. LayerHeightMM and ShellThicknessMM are
+// retained for callers and the TDLeak-based layered model; the neighbor scorer
+// itself no longer uses them.
 type TDParams struct {
 	Enabled          bool
 	LayerHeightMM    float32
 	ShellThicknessMM float32
+	NeighborPathMM   float32
 }
 
-// tdScorer scores a candidate subset on TD-effective colors. It captures the
-// per-entry linear-RGB colors and normalized TDs computed once by
-// SelectFromInventory; the only per-subset work is designating the subset's
-// infill, compositing each member toward it, and converting to Lab (≤ ~8
-// colors — cheap next to the sample-scoring loop that dominates). It is safe
-// for concurrent use: score allocates its own vertex slice and mutates no
-// shared state, so the parallel exhaustive search can call it freely.
-type tdScorer struct {
-	invLin     [][3]float64 // linear RGB per inventory entry
-	invNorm    []float64    // normalized TD per inventory entry (garbage→0)
-	lockedLin  [][3]float64 // linear RGB per locked entry
-	lockedNorm []float64    // normalized TD per locked entry
-	layer      float64      // layer height (mm)
-	shell      float64      // shell thickness (mm)
-	// vertScore is the geometric scoring core (hull when dithering, nearest
-	// otherwise), applied to the composited effective-color vertices.
-	vertScore vertScoreFunc
-}
-
-// score matches scoreFunc. The precomputed invLab/fixedLab are ignored: for
-// TD-aware scoring the vertices depend on the subset's infill, so they are
-// composited fresh per call.
-func (s *tdScorer) score(indices []int, _ [][3]float64, _ [][3]float64, samples []WeightedLabSample) float64 {
-	return s.vertScore(s.effVerts(indices), samples)
-}
-
-// effVerts composites the subset (all locked entries plus the chosen inventory
-// indices) toward its designated infill and returns the effective colors in
-// CIELAB, ready for hull/nearest scoring.
-func (s *tdScorer) effVerts(indices []int) [][3]float64 {
-	nLocked := len(s.lockedLin)
-
-	// Designate the subset's infill: the lowest normalized TD (most opaque).
-	// Ties resolve to locked-before-inventory then lowest index, which falls
-	// out of a strict-less scan over locked entries first, then the (ascending
-	// in the exhaustive search) inventory indices. This mirrors the pipeline's
-	// designateInfill rule minus the most-used tie-break, which can't be
-	// evaluated at selection time. Ties don't matter for the effective colors:
-	// tied-lowest entries are all near-opaque, so which one is nominally the
-	// infill barely moves the composite.
-	infillTD := math.Inf(1)
-	var infillLin [3]float64
-	for i := 0; i < nLocked; i++ {
-		if s.lockedNorm[i] < infillTD {
-			infillTD = s.lockedNorm[i]
-			infillLin = s.lockedLin[i]
+// weightedMeanLinear returns the cellWeights-weighted mean of cellColors in
+// linear-light RGB — the stand-in "neighborhood" every translucent cell washes
+// toward under TD-aware selection (see TDParams). cellWeights, when nil, weights
+// every color equally; a zero total weight yields black, which only arises when
+// there are no cells (in which case selection is already degenerate).
+func weightedMeanLinear(cellColors [][3]uint8, cellWeights []float32) [3]float64 {
+	var mean [3]float64
+	var wsum float64
+	for i, c := range cellColors {
+		w := 1.0
+		if cellWeights != nil && i < len(cellWeights) {
+			w = float64(cellWeights[i])
 		}
+		lin := linearOf(c)
+		mean[0] += w * lin[0]
+		mean[1] += w * lin[1]
+		mean[2] += w * lin[2]
+		wsum += w
 	}
-	for _, idx := range indices {
-		if s.invNorm[idx] < infillTD {
-			infillTD = s.invNorm[idx]
-			infillLin = s.invLin[idx]
-		}
+	if wsum > 0 {
+		mean[0] /= wsum
+		mean[1] /= wsum
+		mean[2] /= wsum
 	}
-
-	verts := make([][3]float64, nLocked+len(indices))
-	for i := 0; i < nLocked; i++ {
-		verts[i] = effLab(s.lockedLin[i], s.lockedNorm[i], infillLin, s.layer, s.shell)
-	}
-	for j, idx := range indices {
-		verts[nLocked+j] = effLab(s.invLin[idx], s.invNorm[idx], infillLin, s.layer, s.shell)
-	}
-	return verts
+	return mean
 }
 
-// effLab composites one filament's linear-RGB color toward the infill through
-// the printed shell (leak fraction from TDLeak) and returns the result in
-// CIELAB. An opaque filament (leak 0) short-circuits to its own color, so its
-// vertex is unaffected by the infill choice.
-func effLab(lin [3]float64, normTD float64, infillLin [3]float64, layer, shell float64) [3]float64 {
-	leak := TDLeak(normTD, layer, shell)
-	r, g, b := lin[0], lin[1], lin[2]
-	if leak > 0 {
-		r = (1-leak)*lin[0] + leak*infillLin[0]
-		g = (1-leak)*lin[1] + leak*infillLin[1]
-		b = (1-leak)*lin[2] + leak*infillLin[2]
-	}
-	l, a, bb := colorful.LinearRgb(r, g, b).Lab()
-	return [3]float64{l, a, bb}
+// neighborEffLab composites one filament's linear-RGB color toward the target
+// mean by its lateral leak β and returns the result in CIELAB, ready for
+// hull/nearest scoring. Callers skip it for β = 0 (opaque) and keep the
+// filament's nominal Lab, so opaque entries stay bit-identical to the nominal
+// scoring path.
+func neighborEffLab(lin [3]float64, beta float64, meanTargetLin [3]float64) [3]float64 {
+	r := (1-beta)*lin[0] + beta*meanTargetLin[0]
+	g := (1-beta)*lin[1] + beta*meanTargetLin[1]
+	b := (1-beta)*lin[2] + beta*meanTargetLin[2]
+	l, aa, bb := colorful.LinearRgb(r, g, b).Lab()
+	return [3]float64{l, aa, bb}
 }

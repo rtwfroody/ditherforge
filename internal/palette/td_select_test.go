@@ -88,23 +88,28 @@ func TestSelectUniformTDBitIdentical(t *testing.T) {
 // TestSelectTDAwareGrayEagle is the gray-eagle regression in miniature: a dark
 // warm-brown body over ~50% near-gray coverage. Nominal scoring anchors the
 // dark end on opaque Black and leans on translucent Orange (TD 3.3) for warmth,
-// leaving opaque Brown out entirely — but on the print those translucent
-// filaments wash toward the infill, so the palette that looked right on screen
-// prints muddy. TD-aware scoring composites every filament toward the subset's
-// infill before scoring; the effective picture then wants opaque Brown as the
-// dark warm anchor, so Brown enters the palette (displacing Black) exactly
-// where nominal scoring never would.
+// leaving opaque Brown out entirely. TD-aware scoring composites every filament
+// toward the area-weighted mean of the target colors by its lateral leak β (the
+// neighbor model: β = 10^(−ℓ/TD), ℓ = DefaultNeighborPathMM = 0.3 mm) before
+// scoring. The effective picture then wants opaque Brown (β = 0, its full sienna
+// survives) as the dark warm anchor, so Brown enters the palette (displacing
+// Black) exactly where nominal scoring never would.
 //
-// The recorded outcome (stable across the gray fraction sweep that produced
-// this fixture):
+// The recorded outcome (ℓ = 0.3 mm, the calibrated default):
 //
 //	nominal:  Black  SteelGrey Orange Cream
 //	td-aware: Brown  SteelGrey Orange ColdWhite
 //
-// The load-bearing claim is the Brown/Black swap on the opaque dark anchor —
-// the whole point of TD-aware selection. Orange survives both (at this layer/
-// shell its 0.44 leak darkens but doesn't neutralize it); the test asserts only
-// the properties that discriminate.
+// Two colors move under the neighbor model: Black → Brown on the opaque dark
+// anchor (the load-bearing fix — nominal can't justify opaque Brown, TD-aware
+// does), and Cream → ColdWhite on the light anchor.
+//
+// Orange (TD 3.3, β ≈ 0.81) SURVIVES here even though it barely delivers its own
+// color, because this cloud is ~50% warm brown: a translucent orange cell washes
+// toward its warm neighbors and still reads warm. That is exactly the effect the
+// neighbor model captures and the old infill-composite model (orange over black
+// infill → muddy gray) got wrong — whether Orange survives is target-dependent,
+// so the stable, load-bearing claim remains the opaque Brown/Black swap.
 func TestSelectTDAwareGrayEagle(t *testing.T) {
 	black := [3]uint8{0x08, 0x0A, 0x0D}
 	brown := [3]uint8{0x55, 0x33, 0x1A}
@@ -135,14 +140,29 @@ func TestSelectTDAwareGrayEagle(t *testing.T) {
 	t.Logf("nominal:  %s", fmtSel(nominal))
 	t.Logf("td-aware: %s", fmtSel(tdAware))
 
-	if !hasColor(tdAware, brown) {
-		t.Errorf("td-aware selection should include opaque Brown (the fix); got %s", fmtSel(tdAware))
+	// Exact TD-aware selection under the neighbor model (see docstring).
+	for _, c := range [][3]uint8{brown, steel, orange, white} {
+		if !hasColor(tdAware, c) {
+			t.Errorf("td-aware selection missing %s; got %s", hexOf(c), fmtSel(tdAware))
+		}
 	}
+	// Pin the exact set: the two colors the neighbor model displaces must be
+	// gone (Black → Brown on the dark anchor, Cream → ColdWhite on the light).
+	if hasColor(tdAware, black) {
+		t.Errorf("td-aware should drop Black for opaque Brown; got %s", fmtSel(tdAware))
+	}
+	if hasColor(tdAware, cream) {
+		t.Errorf("td-aware should drop Cream for ColdWhite; got %s", fmtSel(tdAware))
+	}
+
 	// The test only discriminates if the two paths actually diverge — that is
 	// the whole point of the feature. Nominal must omit Brown (it anchors the
-	// dark end on Black) while still reaching for translucent Orange.
+	// dark end on opaque Black) while still reaching for translucent Orange.
 	if hasColor(nominal, brown) {
 		t.Errorf("test does not discriminate: nominal already picks Brown; got %s", fmtSel(nominal))
+	}
+	if !hasColor(nominal, black) {
+		t.Errorf("expected nominal to anchor the dark end on opaque Black; got %s", fmtSel(nominal))
 	}
 	if !hasColor(nominal, orange) {
 		t.Errorf("expected nominal to pick translucent Orange; got %s", fmtSel(nominal))

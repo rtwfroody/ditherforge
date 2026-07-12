@@ -519,13 +519,22 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 	}
 
 	// TD-aware scoring: only when requested AND the palette's normalized TDs
-	// are non-uniform with at least one filament genuinely translucent. A
-	// uniform shift toward infill (or no shift at all, when every filament is
-	// effectively opaque) can't change which subset scores best, so those
-	// cases keep the bit-identical nominal path above.
+	// are non-uniform with at least one filament genuinely translucent. When
+	// active, each inventory/locked entry's scoring color is composited toward
+	// the area-weighted mean of the target (cell) colors by its lateral leak β
+	// (the neighbor model — see TDParams and voxel.EffectiveCellColors), so a
+	// translucent filament scores as the muddied color it actually prints, not
+	// its vivid nominal color. Because an entry's effective color no longer
+	// depends on which subset it lands in, we simply replace its nominal Lab
+	// with the effective Lab up front and reuse the ordinary scorer. A uniform
+	// shift toward that mean (or no shift at all, when every filament is
+	// effectively opaque) can't change which subset scores best, so those cases
+	// keep the bit-identical nominal path above.
 	if tdp.Enabled {
-		layer := float64(tdp.LayerHeightMM)
-		shell := float64(tdp.ShellThicknessMM)
+		neighborPath := float64(tdp.NeighborPathMM)
+		if neighborPath <= 0 {
+			neighborPath = DefaultNeighborPathMM
+		}
 		uniform := true
 		anyLeak := false
 		var first float64
@@ -538,7 +547,7 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 			} else if nt != first {
 				uniform = false
 			}
-			if TDLeak(nt, layer, shell) > 0 {
+			if NeighborLeak(nt, neighborPath) > 0 {
 				anyLeak = true
 			}
 		}
@@ -549,33 +558,20 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 			checkTD(e.TD)
 		}
 		if !uniform && anyLeak {
-			invLin := make([][3]float64, len(inventory))
-			invNorm := make([]float64, len(inventory))
+			meanTargetLin := weightedMeanLinear(cellColors, cellWeights)
+			// Replace only translucent entries' Lab with their effective color;
+			// opaque entries (β = 0) keep their nominal Lab bit-identically.
 			for i, e := range inventory {
-				invLin[i] = linearOf(e.Color)
-				invNorm[i] = normSelTD(e.TD)
+				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
+					invLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin)
+				}
 			}
-			lockedLin := make([][3]float64, len(locked))
-			lockedNorm := make([]float64, len(locked))
 			for i, e := range locked {
-				lockedLin[i] = linearOf(e.Color)
-				lockedNorm[i] = normSelTD(e.TD)
+				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
+					lockedLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin)
+				}
 			}
-			vs := hullScoreVerts
-			if !dithering {
-				vs = nearestScoreVerts
-			}
-			sc := &tdScorer{
-				invLin:     invLin,
-				invNorm:    invNorm,
-				lockedLin:  lockedLin,
-				lockedNorm: lockedNorm,
-				layer:      layer,
-				shell:      shell,
-				vertScore:  vs,
-			}
-			scorer = sc.score
-			fmt.Printf("  TD-aware selection: shell %.2f mm, layer %.2f mm\n", shell, layer)
+			fmt.Printf("  TD-aware selection: neighbor path %.2f mm\n", neighborPath)
 		}
 	}
 
@@ -632,12 +628,6 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 // scoreFunc is the signature for palette subset scoring functions.
 // fixedLab contains locked colors that are always part of the palette.
 type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64
-
-// vertScoreFunc scores a fully assembled palette (locked + candidate) given as
-// Lab vertices. It is the geometric core shared by the nominal scorers (which
-// build verts from precomputed Lab) and the TD-aware scorer (which composites
-// effective-color verts per subset — see tdScorer).
-type vertScoreFunc func(verts [][3]float64, samples []WeightedLabSample) float64
 
 // ditherSpreadFactor controls how much the nearest-vertex distance penalizes
 // colors that are inside the hull but far from any palette color. This
@@ -730,7 +720,7 @@ func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64
 }
 
 // hullScoreVerts is weightedHullScore's geometric core over already-assembled
-// Lab vertices (see vertScoreFunc).
+// Lab vertices.
 func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
 	total := 0.0
 	for _, s := range samples {
@@ -761,7 +751,7 @@ func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]floa
 }
 
 // nearestScoreVerts is weightedNearestScore's geometric core over
-// already-assembled Lab vertices (see vertScoreFunc).
+// already-assembled Lab vertices.
 func nearestScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
 	total := 0.0
 	for _, s := range samples {

@@ -695,15 +695,23 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		// export-ordered downstream stages).
 		//
 		// The TD-effective colors are computed HERE, on the export-ordered
-		// palette, because the true infill is po.Palette[0] and r.opts carries
-		// the resolved shell thickness — after the un-swap below, index 0 is
-		// no longer the infill, so callers can't compute this correctly
-		// themselves. The effective slice gets the same un-swap so it stays
-		// parallel to what the callback receives.
+		// palette, so the GUI swatches match the neighbor-model print
+		// simulation (voxel.EffectiveCellColors / SimFaceColors): each entry is
+		// composited toward the area-weighted mean of the voxelized target
+		// colors by its lateral leak β. The Voxelize output is cached, so this
+		// is a cheap hit here. If it is somehow unavailable, fall back to the
+		// infill-composite EffectivePalette (true infill is po.Palette[0]
+		// before the un-swap below). The effective slice gets the same un-swap
+		// so it stays parallel to what the callback receives.
 		var eff [][3]uint8
 		if len(po.Palette) > 0 {
-			eff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
-				r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
+			if vo, verr := r.Voxelize(); verr == nil && vo != nil {
+				eff = voxel.NeighborEffectivePalette(po.Palette, po.PaletteTDs,
+					vo.Cells, simNeighborPathMM)
+			} else {
+				eff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
+					r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
+			}
 		}
 		dp, dt, dl := po.Palette, po.PaletteTDs, po.PaletteLabels
 		if po.InfillIndex != 0 && po.InfillIndex < len(dp) {
@@ -927,7 +935,7 @@ var simNeighborPathMM = func() float32 {
 			return float32(v)
 		}
 	}
-	return 1.0
+	return palette.DefaultNeighborPathMM
 }()
 
 // anyTranslucentTD reports whether any palette entry leaks light through the
@@ -1380,6 +1388,7 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 		Enabled:          opts.HonorTD,
 		LayerHeightMM:    opts.LayerHeight,
 		ShellThicknessMM: opts.ShellThicknessMM,
+		NeighborPathMM:   simNeighborPathMM,
 	}
 
 	if opts.InventoryFile != "" {
