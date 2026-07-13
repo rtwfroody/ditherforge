@@ -45,7 +45,7 @@
     type SizeMode,
     type BaseColorMode,
   } from '$lib/settingsOptions';
-  import { ProcessPipeline, Export3MF, SaveSettings, SaveSettingsDialog, OpenFileDialog, OpenModelDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, DitherModePreviews, Quit } from '../wailsjs/go/main/App';
+  import { ProcessPipeline, Export3MF, ExportSwatchPlates, SaveSettings, SaveSettingsDialog, OpenFileDialog, OpenModelDialog, LoadSettingsFile, DefaultSettingsPath, Version, LogMessage, GetCollectionColors, ImportCollection, ExportCollection, CreateCollection, DeleteCollection, OpenStickerImage, ReadStickerThumbnail, OpenMaterialXFile, ValidateMaterialX, EnumerateObjects, ListPrinters, SelectCellDiagnostics, DitherModePreviews, Quit } from '../wailsjs/go/main/App';
   import type { main } from '../wailsjs/go/models';
   import { collectionStore } from '$lib/stores/collections.svelte';
   import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime';
@@ -2147,6 +2147,22 @@
       saving = false;
     }
   }
+
+  async function exportSwatchPlates() {
+    saving = true;
+    saveError = '';
+    try {
+      const path = await ExportSwatchPlates();
+      if (path) {
+        statusMessage = `Exported swatch plates to ${path}`;
+        statusType = 'success';
+      }
+    } catch (err: any) {
+      saveError = String(err);
+    } finally {
+      saving = false;
+    }
+  }
 </script>
 
 <svelte:window
@@ -2189,6 +2205,7 @@
         <Menubar.Item onSelect={handleSaveAs}>Save JSON As...</Menubar.Item>
         <Menubar.Separator />
         <Menubar.Item onSelect={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Menubar.Item>
+        <Menubar.Item onSelect={exportSwatchPlates} disabled={!outputMeshUrl || running || saving}>Export Swatch Plates…</Menubar.Item>
         <Menubar.Separator />
         <Menubar.Item onSelect={Quit}>Exit</Menubar.Item>
       </Menubar.Content>

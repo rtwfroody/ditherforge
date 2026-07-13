@@ -331,7 +331,7 @@ type Callbacks struct {
 	// because only the pipeline knows the true infill (export-ordered
 	// palette[0]) and the resolved shell thickness — callers must NOT treat
 	// their slice's index 0 as the infill.
-	OnPalette           func(pal [][3]uint8, tds []float32, labels []string, effective [][3]uint8)
+	OnPalette func(pal [][3]uint8, tds []float32, labels []string, effective [][3]uint8)
 	// OnWarning is called for non-fatal user-facing notices (e.g. an
 	// LSCM solve that didn't converge cleanly). kind is a stable
 	// identifier (see progress package constants) that lets the
@@ -343,9 +343,9 @@ type Callbacks struct {
 
 // MeshData holds flat arrays for 3D preview rendering.
 type MeshData struct {
-	Vertices       []float32 `json:"Vertices"`                 // flat [x,y,z, x,y,z, ...]
-	Faces          []uint32  `json:"Faces"`                    // flat [i,j,k, i,j,k, ...]
-	FaceColors     []uint16  `json:"FaceColors"`               // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
+	Vertices   []float32 `json:"Vertices"`   // flat [x,y,z, x,y,z, ...]
+	Faces      []uint32  `json:"Faces"`      // flat [i,j,k, i,j,k, ...]
+	FaceColors []uint16  `json:"FaceColors"` // flat [r,g,b, r,g,b, ...] per face (uint16 to avoid base64 JSON encoding of []uint8)
 	// SimFaceColors is the per-face print-simulation color (same flat rgb
 	// shape as FaceColors, 0-255). Each output face takes its cell's
 	// neighbor-blended effective color (voxel.EffectiveCellColors), so the
@@ -353,7 +353,7 @@ type MeshData struct {
 	// remap. Nil when no filament is translucent or the merge dropped cell
 	// provenance (the frontend/CLI then fall back to the global effective
 	// palette). Delivered binary alongside FaceColors, never JSON-encoded.
-	SimFaceColors []uint16 `json:"-"`
+	SimFaceColors  []uint16  `json:"-"`
 	UVs            []float32 `json:"UVs,omitempty"`            // flat [u,v, u,v, ...] per vertex, optional
 	Textures       []string  `json:"Textures,omitempty"`       // base64 JPEG images, optional
 	FaceTextureIdx []int32   `json:"FaceTextureIdx,omitempty"` // per-face texture index; -1 = use FaceColors
@@ -886,6 +886,49 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 	plog.Printf("Exported in %.1fs", time.Since(tExport).Seconds())
 
 	return len(outModel.Faces), nil
+}
+
+// ResolvedPalette returns the resolved palette of a completed run, in export
+// order (infill at index 0), reading the cached Palette-stage output. The opts
+// must be the same Options used in the most recent successful RunCached call so
+// the cache lookup hits (the size-relative fields are resolved here exactly as
+// ExportFile does). Returns an error if the palette stage has not been run.
+func ResolvedPalette(cache *StageCache, opts Options) (pal [][3]uint8, tds []float32, labels []string, err error) {
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+	po := cache.getPalette(opts)
+	if po == nil {
+		return nil, nil, nil, fmt.Errorf("pipeline has not been run yet")
+	}
+	return po.Palette, po.PaletteTDs, po.PaletteLabels, nil
+}
+
+// OutputFaceAssignments returns the final (post-merge) output mesh together
+// with the per-face palette-index assignment and the resolved palette, reading
+// the same cached stage outputs ExportFile uses. It is the printable geometry:
+// verts/faces in pipeline-mm (Z-up), assignments parallel to faces (index into
+// palette, export order). The opts must match the most recent RunCached call.
+func OutputFaceAssignments(cache *StageCache, opts Options) (verts [][3]float32, faces [][3]uint32, assignments []int32, palette [][3]uint8, err error) {
+	cache.WaitForDiskWrites()
+	if pre := cache.getPreload(opts); pre != nil {
+		opts = applyFractionalOptions(opts, float64(pre.ScaledMaxExtentMM))
+	}
+	po := cache.getPalette(opts)
+	mo := cache.getMerge(opts)
+	if po == nil || mo == nil {
+		return nil, nil, nil, nil, fmt.Errorf("pipeline has not been run yet")
+	}
+	return mo.ShellVerts, mo.ShellFaces, mo.ShellAssignments, po.Palette, nil
+}
+
+// UpperCellSizeMM returns the upper-layer voxel cell width (mm) a run with the
+// given options would use — the printer profile's line width times the upper
+// XY scale, or the nozzle-diameter fallback. Callers synthesizing geometry at
+// cell resolution (e.g. swatch plates) size their features to this so one
+// feature maps to roughly one voxel cell.
+func UpperCellSizeMM(opts Options) float32 {
+	return voxelCellSizes(opts).UpperXY
 }
 
 // buildOutputModel constructs a LoadedModel from merge output, suitable for

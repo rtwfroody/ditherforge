@@ -34,6 +34,10 @@ export function ExportCollection(arg1) {
   return window['go']['main']['App']['ExportCollection'](arg1);
 }
 
+export function ExportSwatchPlates() {
+  return window['go']['main']['App']['ExportSwatchPlates']();
+}
+
 export function GetCollectionColors(arg1) {
   return window['go']['main']['App']['GetCollectionColors'](arg1);
 }

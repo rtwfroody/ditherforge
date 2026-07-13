@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -20,8 +21,8 @@ import (
 	"golang.org/x/image/draw"
 
 	"github.com/rtwfroody/ditherforge/internal/collection"
-	"github.com/rtwfroody/ditherforge/internal/ditherpreview"
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
+	"github.com/rtwfroody/ditherforge/internal/ditherpreview"
 	"github.com/rtwfroody/ditherforge/internal/export3mf"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/materialx"
@@ -30,6 +31,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/settings"
+	"github.com/rtwfroody/ditherforge/internal/swatch"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -355,6 +357,230 @@ func (a *App) Export3MF() (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// --- Swatch calibration plates ---
+
+// swatchManifest is written next to the exported 3MF as "<path>.swatch.json".
+// It records exactly which filaments each plate mixes and the realized vs.
+// nominal coverage per section, so a later photo-analysis step knows the ground
+// truth for each plate/section.
+type swatchManifest struct {
+	AppVersion string                `json:"appVersion"`
+	Printer    string                `json:"printer"`
+	NozzleMM   float32               `json:"nozzleMM"`
+	LayerMM    float32               `json:"layerMM"`
+	BlockMM    float64               `json:"blockMM"`
+	Palette    []swatchManifestColor `json:"palette"`
+	Infill     string                `json:"infill"`
+	Plates     []swatchManifestPlate `json:"plates"`
+}
+
+type swatchManifestColor struct {
+	Label string  `json:"label"`
+	Hex   string  `json:"hex"`
+	TD    float32 `json:"td"`
+}
+
+type swatchManifestPlate struct {
+	Pair      [2]string               `json:"pair"` // [labelA, labelB]
+	YOffsetMM float64                 `json:"yOffsetMM"`
+	Sections  []swatchManifestSection `json:"sections"`
+}
+
+type swatchManifestSection struct {
+	Index                 int     `json:"index"`
+	NominalCoverage       float64 `json:"nominalCoverage"`
+	RealizedCoverageFront float64 `json:"realizedCoverageFront"`
+	RealizedCoverageBack  float64 `json:"realizedCoverageBack"`
+}
+
+// ExportSwatchPlates generates physical filament-calibration plates for the
+// current palette (all C(n,2) pairs), runs them through an independent pipeline
+// instance (so the GUI's cache/viewer are untouched), exports a 3MF, and writes
+// a manifest of nominal vs. realized per-section coverage. Requires a completed
+// run so the current palette is known. Returns the saved 3MF path, or empty if
+// the user cancelled.
+func (a *App) ExportSwatchPlates() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	last := a.lastOpts.Load()
+	if last == nil {
+		return "", fmt.Errorf("run the pipeline first")
+	}
+	pal, tds, labels, err := pipeline.ResolvedPalette(a.cache, *last)
+	if err != nil || len(pal) == 0 {
+		return "", fmt.Errorf("run the pipeline first")
+	}
+
+	// Build the swatch filament list in export order (infill at index 0).
+	filaments := make([]swatch.Filament, len(pal))
+	for i := range pal {
+		lbl := ""
+		if i < len(labels) {
+			lbl = labels[i]
+		}
+		td := float32(palette.DefaultTD)
+		if i < len(tds) && tds[i] > 0 {
+			td = tds[i]
+		}
+		filaments[i] = swatch.Filament{
+			Hex:   fmt.Sprintf("#%02X%02X%02X", pal[i][0], pal[i][1], pal[i][2]),
+			TD:    td,
+			Label: lbl,
+		}
+	}
+
+	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:           "Save Swatch Plates",
+		DefaultFilename: "swatches.3mf",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", nil
+	}
+
+	// Assemble swatch settings from defaults, copying the printer/geometry
+	// knobs from the last run and locking the palette so color assignment is
+	// deterministic (no selection, no swaps). Everything that would perturb the
+	// sampled cell colors is disabled.
+	s := settings.Default()
+	s.Printer = last.Printer
+	s.NozzleDiameter = strconv.FormatFloat(float64(last.NozzleDiameter), 'g', -1, 32)
+	s.LayerHeight = strconv.FormatFloat(float64(last.LayerHeight), 'g', -1, 32)
+	s.Layer0AdhesionXYScale = float64(last.Layer0AdhesionXYScale)
+	s.UpperLayerXYScale = float64(last.UpperLayerXYScale)
+	// Fixed 1:1 scale — the plates are already authored at their true mm size.
+	s.SizeMode = "scale"
+	s.ScaleValue = "1.0"
+	s.Dither = "none"
+	s.MeshRepair = "none"
+	s.SplitEnabled = false
+	s.Stickers = nil
+	s.Brightness, s.Contrast, s.Saturation = 0, 0, 0
+	s.WarpPins = nil
+	s.ColorSnap = 0
+	s.HonorTD = false
+	s.BaseColor = nil
+	s.BaseColorMode = "solid"
+	s.ColorSlots = make([]*settings.ColorSlotSetting, len(filaments))
+	for i, fil := range filaments {
+		s.ColorSlots[i] = &settings.ColorSlotSetting{Hex: fil.Hex, TD: fil.TD, Label: fil.Label}
+	}
+	s.InfillFilament = filaments[0].Hex
+
+	swatchOpts, err := settings.ToOptions(s, a.collections)
+	if err != nil {
+		return "", fmt.Errorf("swatch settings: %w", err)
+	}
+
+	// Block size = the upper-layer voxel cell width this run will use, snapped
+	// so an integer number of blocks spans the 30mm face.
+	blockMM := float64(pipeline.UpperCellSizeMM(swatchOpts))
+	if blockMM <= 0 {
+		blockMM = 0.5
+	}
+	plan := swatch.BuildPlan(filaments, blockMM)
+
+	tmpDir, err := os.MkdirTemp("", "ditherforge-swatch-")
+	if err != nil {
+		return "", fmt.Errorf("swatch temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	objPath, err := swatch.WriteOBJ(plan, tmpDir)
+	if err != nil {
+		return "", err
+	}
+	s.InputFile = objPath
+	swatchOpts, err = settings.ToOptions(s, a.collections)
+	if err != nil {
+		return "", fmt.Errorf("swatch settings: %w", err)
+	}
+
+	// Independent cache + no viewer callbacks: this run must not disturb the
+	// GUI's a.cache, a.lastOpts, or the output viewer state. The stage cache is
+	// disk-backed (stage outputs are only retained on disk), so give it its own
+	// temp directory under tmpDir, cleaned up with the rest.
+	freshCache := pipeline.NewStageCache()
+	cacheDir := filepath.Join(tmpDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("swatch cache dir: %w", err)
+	}
+	disk, err := diskcache.Open(cacheDir)
+	if err != nil {
+		return "", fmt.Errorf("swatch cache: %w", err)
+	}
+	freshCache.SetDisk(disk)
+	if _, err := pipeline.RunCached(a.ctx, freshCache, swatchOpts, nil); err != nil {
+		return "", fmt.Errorf("swatch pipeline: %w", err)
+	}
+
+	if _, err := pipeline.ExportFile(freshCache, swatchOpts, path, export3mf.Options{
+		PrinterID:      last.Printer,
+		NozzleDiameter: last.NozzleDiameter,
+		LayerHeight:    last.LayerHeight,
+		AppVersion:     pipeline.VersionSemver,
+	}); err != nil {
+		return "", fmt.Errorf("swatch export: %w", err)
+	}
+
+	// Realized coverage from the printed output mesh.
+	manifest, err := a.buildSwatchManifest(freshCache, swatchOpts, plan, blockMM)
+	if err != nil {
+		return "", err
+	}
+	if data, err := json.MarshalIndent(manifest, "", "  "); err == nil {
+		if werr := os.WriteFile(path+".swatch.json", data, 0644); werr != nil {
+			plog.Printf("swatch: writing manifest: %v", werr)
+		}
+	}
+
+	return path, nil
+}
+
+// buildSwatchManifest measures realized per-section coverage from the swatch
+// run's output mesh and assembles the manifest.
+func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Options, plan swatch.Plan, blockMM float64) (*swatchManifest, error) {
+	verts, faces, assignments, _, err := pipeline.OutputFaceAssignments(cache, opts)
+	if err != nil {
+		return nil, fmt.Errorf("swatch coverage: %w", err)
+	}
+	front, back := swatch.MeasureCoverage(plan, verts, faces, assignments)
+
+	m := &swatchManifest{
+		AppVersion: pipeline.VersionSemver,
+		Printer:    opts.Printer,
+		NozzleMM:   opts.NozzleDiameter,
+		LayerMM:    opts.LayerHeight,
+		BlockMM:    blockMM,
+		Infill:     plan.Palette[0].Label,
+	}
+	for _, fil := range plan.Palette {
+		m.Palette = append(m.Palette, swatchManifestColor{Label: fil.Label, Hex: fil.Hex, TD: fil.TD})
+	}
+	for p, plate := range plan.Plates {
+		mp := swatchManifestPlate{
+			Pair:      [2]string{plan.Palette[plate.A].Label, plan.Palette[plate.B].Label},
+			YOffsetMM: plate.YOffsetMM,
+		}
+		for _, sec := range swatch.PlateSections() {
+			mp.Sections = append(mp.Sections, swatchManifestSection{
+				Index:                 sec.Index,
+				NominalCoverage:       sec.NominalCoverage,
+				RealizedCoverageFront: front[p][sec.Index],
+				RealizedCoverageBack:  back[p][sec.Index],
+			})
+		}
+		m.Plates = append(m.Plates, mp)
+	}
+	return m, nil
 }
 
 // ProcessPipeline enqueues a pipeline request and returns immediately.
