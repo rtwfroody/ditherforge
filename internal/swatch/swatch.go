@@ -19,6 +19,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -214,24 +215,44 @@ func (plan Plan) blockColor(plate Plate, i, j int) int {
 	return plate.A
 }
 
-// patternImage renders one plate's Nx×Nrows block pattern into an NRGBA image,
-// upsampled by patternUpsample so each block is a K×K run of identical texels.
-// Column c of the image is block column c/K (so texture U = x/PlateWidthMM lands
-// section 0 at the left); the row axis is the pattern's Z rows — its up/down
-// orientation is irrelevant because a section's B-fraction is invariant to
-// vertical flip and both faces sample the same image.
+// patternImage renders one plate's block pattern into an NRGBA image, upsampled
+// by patternUpsample. Column c is block column c/K, so texture U = x/PlateWidthMM
+// puts section 0 at the left.
+//
+// The vertical axis is mapped to MATCH the pipeline's non-uniform slab rows: the
+// texture V axis is linear in z (v = z/PlateHeightMM), but the physical rows are
+// not uniform (the first slab is the taller initial-layer height). So each texel
+// row is colored by the PHYSICAL row that contains its z, giving each row a texel
+// height proportional to its real height. Without this, a uniform texel-per-row
+// layout misaligns the taller first row from the linear UV and cells sample the
+// wrong row / bilinear-blend two rows into a third color (the White+Orange->Beige
+// contamination) — badly at 0.08mm where the first row is 2.5x the others. Row
+// up/down orientation is otherwise irrelevant (a section's B-fraction is flip-
+// invariant and both faces share the image).
 func (plan Plan) patternImage(plate Plate) *image.NRGBA {
 	k := patternUpsample
-	nx, nz := plan.Nx, plan.Nrows()
-	img := image.NewNRGBA(image.Rect(0, 0, nx*k, nz*k))
-	for col := 0; col < nx; col++ {
-		for row := 0; row < nz; row++ {
+	nx := plan.Nx
+	// Texel height fine enough that the thinnest slab row still spans ~K texels.
+	texelH := plan.UpperZMM / float64(k)
+	if texelH <= 0 {
+		texelH = PlateHeightMM / float64(plan.Nrows()*k)
+	}
+	htex := int(math.Ceil(PlateHeightMM / texelH))
+	if htex < 1 {
+		htex = 1
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, nx*k, htex))
+	row := 0
+	for ty := 0; ty < htex; ty++ {
+		z := (float64(ty) + 0.5) / float64(htex) * PlateHeightMM
+		for row+1 < plan.Nrows() && z >= plan.RowEdges[row+1] {
+			row++
+		}
+		for col := 0; col < nx; col++ {
 			r, g, b := hexToBytes(plan.Palette[plan.blockColor(plate, col, row)].Hex)
 			c := color.NRGBA{R: r, G: g, B: b, A: 255}
-			for dy := 0; dy < k; dy++ {
-				for dx := 0; dx < k; dx++ {
-					img.SetNRGBA(col*k+dx, row*k+dy, c)
-				}
+			for dx := 0; dx < k; dx++ {
+				img.SetNRGBA(col*k+dx, ty, c)
 			}
 		}
 	}

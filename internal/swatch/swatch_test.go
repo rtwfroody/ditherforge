@@ -267,14 +267,19 @@ func TestPatternImageCoverage(t *testing.T) {
 	plan := BuildPlan(pal, 0.525, testLayer0Z, testUpperZ)
 	img := plan.patternImage(plan.Plates[0])
 	k := patternUpsample
+	htex := img.Bounds().Dy()
+	// Count B texels over each section's block-column centers across all texel
+	// rows. Texel rows are proportional to physical slab-row heights, so this is
+	// an area-weighted B-fraction — it should match the nominal coverage (up to a
+	// small skew from the single taller first row).
 	for s := 0; s < Sections; s++ {
 		bCount, tot := 0, 0
 		for col := 0; col < plan.Nx; col++ {
 			if SectionIndex((float64(col)+0.5)*plan.BlockWidthMM) != s {
 				continue
 			}
-			for row := 0; row < plan.Nrows(); row++ {
-				r, _, _, _ := img.At(col*k+k/2, row*k+k/2).RGBA()
+			for ty := 0; ty < htex; ty++ {
+				r, _, _, _ := img.At(col*k+k/2, ty).RGBA()
 				if r>>8 > 128 {
 					bCount++
 				}
@@ -282,7 +287,7 @@ func TestPatternImageCoverage(t *testing.T) {
 			}
 		}
 		got := float64(bCount) / float64(tot)
-		if math.Abs(got-Coverage(s)) > 0.02 {
+		if math.Abs(got-Coverage(s)) > 0.03 {
 			t.Errorf("section %d texture B-fraction = %.3f, want ~%.3f", s, got, Coverage(s))
 		}
 	}

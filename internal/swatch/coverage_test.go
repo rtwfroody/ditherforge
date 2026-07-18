@@ -55,11 +55,74 @@ func TestMeasureCoverageSynthetic(t *testing.T) {
 
 	front, back := MeasureCoverage(plan, verts, faces, assign)
 	for s := 0; s < Sections; s++ {
-		if math.Abs(front[0][s]-1) > 1e-9 {
-			t.Errorf("front section %d coverage = %v, want 1", s, front[0][s])
+		if math.Abs(front[0][s].B-1) > 1e-9 {
+			t.Errorf("front section %d B = %v, want 1", s, front[0][s].B)
 		}
-		if math.Abs(back[0][s]-0) > 1e-9 {
-			t.Errorf("back section %d coverage = %v, want 0", s, back[0][s])
+		if math.Abs(back[0][s].B-0) > 1e-9 {
+			t.Errorf("back section %d B = %v, want 0", s, back[0][s].B)
+		}
+		if front[0][s].Foreign != 0 || back[0][s].Foreign != 0 {
+			t.Errorf("section %d foreign = (%v,%v), want 0", s, front[0][s].Foreign, back[0][s].Foreign)
+		}
+	}
+}
+
+// TestForeignDetectionAndSnap builds a synthetic plate whose front face is
+// painted a THIRD color (not the plate's A or B), asserts MeasureCoverage
+// surfaces it as foreign, and asserts SnapToPairs rewrites it to a pair member
+// (removing the foreign coverage). This is the detector the manifest relies on
+// and the fix for the real White+Orange->Beige contamination.
+func TestForeignDetectionAndSnap(t *testing.T) {
+	// Palette engineered like the repro: a plate of ColdWhite(A)+Orange(B) whose
+	// blend lands on Beige, a third palette entry.
+	pal := []Filament{
+		{Hex: "#080A0D", Label: "Black"},
+		{Hex: "#C2AB72", Label: "Beige"},
+		{Hex: "#D9DFE5", Label: "ColdWhite"},
+		{Hex: "#F67405", Label: "Orange"},
+	}
+	plan := BuildPlan(pal, 1.0, 0.25, 0.20)
+	// Use the ColdWhite(2)+Orange(3) plate.
+	var plate Plate
+	var plateIdx int
+	for i, pl := range plan.Plates {
+		if pl.A == 2 && pl.B == 3 {
+			plate, plateIdx = pl, i
+		}
+	}
+	const w, h = PlateWidthMM, PlateHeightMM
+	y0 := float32(plate.YOffsetMM)
+	y1 := y0 + float32(ThickMM)
+	verts := [][3]float32{
+		{0, y0, 0}, {w, y0, 0}, {w, y0, h}, {0, y0, h}, // front 0..3
+		{0, y1, 0}, {w, y1, 0}, {w, y1, h}, {0, y1, h}, // back 4..7
+	}
+	faces := [][3]uint32{
+		{0, 1, 2}, {0, 2, 3}, // front -> Beige (foreign, index 1)
+		{4, 6, 5}, {4, 7, 6}, // back  -> Orange (B, index 3)
+	}
+	const beige = int32(1)
+	assign := []int32{beige, beige, int32(plate.B), int32(plate.B)}
+
+	front, _ := MeasureCoverage(plan, verts, faces, assign)
+	for s := 0; s < Sections; s++ {
+		if math.Abs(front[plateIdx][s].Foreign-1) > 1e-9 {
+			t.Fatalf("section %d foreign = %v, want 1 (front is all Beige)", s, front[plateIdx][s].Foreign)
+		}
+	}
+
+	// SnapToPairs must rewrite the Beige front faces to a pair member so no
+	// foreign remains.
+	snapped := SnapToPairs(plan, verts, faces, assign)
+	for i, a := range snapped {
+		if a != int32(plate.A) && a != int32(plate.B) {
+			t.Errorf("face %d still foreign after snap: %d", i, a)
+		}
+	}
+	frontS, _ := MeasureCoverage(plan, verts, faces, snapped)
+	for s := 0; s < Sections; s++ {
+		if frontS[plateIdx][s].Foreign != 0 {
+			t.Errorf("section %d foreign after snap = %v, want 0", s, frontS[plateIdx][s].Foreign)
 		}
 	}
 }

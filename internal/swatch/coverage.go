@@ -1,11 +1,27 @@
 package swatch
 
-import "math"
+import (
+	"math"
 
-// MeasureCoverage computes the realized fraction of filament B in each section
-// of each plate, separately for the front and back faces, from a run's output
-// mesh (verts in pipeline-mm Z-up, faces, and per-face palette-index
-// assignments as returned by pipeline.OutputFaceAssignments).
+	colorful "github.com/lucasb-eyer/go-colorful"
+)
+
+// SectionCoverage holds the per-section realized measurements for one face of a
+// plate: the fraction of B (the intended mixing curve) and the fraction assigned
+// to a FOREIGN color — any palette entry that is neither of the plate's two.
+// Foreign should be 0; a nonzero value means the pipeline let a third color
+// contaminate the plate (see SnapToPairs), so it is surfaced rather than
+// silently folded into the "not B" bucket.
+type SectionCoverage struct {
+	B       float64
+	Foreign float64
+}
+
+// MeasureCoverage computes, per section of each plate and separately for the
+// front and back faces, the realized fraction of filament B and the fraction
+// assigned to a foreign (non-pair) color, from a run's output mesh (verts in
+// pipeline-mm Z-up, faces, and per-face palette-index assignments as returned by
+// pipeline.OutputFaceAssignments).
 //
 // Method: a face is a front face when its outward normal points along -Y and a
 // back face when it points along +Y (rim and interior-wall faces, whose
@@ -13,13 +29,13 @@ import "math"
 // its centroid Y, then its (X,Z) projection is clipped to each section's
 // 10x10mm box — inset by ~1.5 block widths to exclude the boundary strip where
 // voxel cells straddle section lines — and the clipped area is accumulated as
-// total vs. filament-B area. This area-exact attribution is immune to the
-// coplanar-merge coalescence that makes per-face-centroid binning unreliable.
+// total, filament-B, and foreign area. This area-exact attribution is immune to
+// the coplanar-merge coalescence that makes per-face-centroid binning unreliable.
 //
 // Returns front[plate][section] and back[plate][section]; a section with no
-// measured area reports 0.
-func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignments []int32) (front, back [][]float64) {
-	type acc struct{ b, tot float64 }
+// measured area reports zeroes.
+func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignments []int32) (front, back [][]SectionCoverage) {
+	type acc struct{ b, foreign, tot float64 }
 	fAcc := make([][]acc, len(plan.Plates))
 	bAcc := make([][]acc, len(plan.Plates))
 	for p := range fAcc {
@@ -76,7 +92,12 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 			continue
 		}
 		plate := plan.Plates[plateIdx]
-		isB := fi < len(assignments) && int(assignments[fi]) == plate.B
+		var isB, isForeign bool
+		if fi < len(assignments) {
+			a := int(assignments[fi])
+			isB = a == plate.B
+			isForeign = a != plate.A && a != plate.B
+		}
 
 		tri := [3][2]float64{
 			{float64(v0[0]), float64(v0[2])},
@@ -101,22 +122,71 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 			if isB {
 				dst[plateIdx][sec].b += a
 			}
+			if isForeign {
+				dst[plateIdx][sec].foreign += a
+			}
 		}
 	}
 
-	toCov := func(a [][]acc) [][]float64 {
-		out := make([][]float64, len(a))
+	toCov := func(a [][]acc) [][]SectionCoverage {
+		out := make([][]SectionCoverage, len(a))
 		for p := range a {
-			out[p] = make([]float64, Sections)
+			out[p] = make([]SectionCoverage, Sections)
 			for s := range a[p] {
 				if a[p][s].tot > 0 {
-					out[p][s] = a[p][s].b / a[p][s].tot
+					out[p][s] = SectionCoverage{
+						B:       a[p][s].b / a[p][s].tot,
+						Foreign: a[p][s].foreign / a[p][s].tot,
+					}
 				}
 			}
 		}
 		return out
 	}
 	return toCov(fAcc), toCov(bAcc)
+}
+
+// SnapToPairs returns a copy of assignments in which every front/back/rim face
+// is forced to the nearer (CIELAB ΔE) of its plate's two filaments {A,B}. A
+// voxel cell straddling a block boundary can be painted a blended color that
+// the palette assignment rounds to a THIRD entry (e.g. a White+Orange blend
+// landing on Beige); since a physical swatch plate contains only its two
+// filaments, snapping the stray to the nearer pair member removes that
+// contamination. Faces already A or B are unchanged, and faces that match no
+// plate are left as-is.
+func SnapToPairs(plan Plan, verts [][3]float32, faces [][3]uint32, assignments []int32) []int32 {
+	out := make([]int32, len(assignments))
+	copy(out, assignments)
+
+	// Precompute Lab for each palette entry.
+	lab := make([]colorful.Color, len(plan.Palette))
+	for i, fil := range plan.Palette {
+		r, g, b := hexToUnit(fil.Hex)
+		lab[i] = colorful.Color{R: r, G: g, B: b}
+	}
+	nearestOfPair := func(a int, pa, pb int) int {
+		if a == pa || a == pb || a < 0 || a >= len(lab) {
+			return a
+		}
+		if lab[a].DistanceLab(lab[pa]) <= lab[a].DistanceLab(lab[pb]) {
+			return pa
+		}
+		return pb
+	}
+
+	for fi, f := range faces {
+		if fi >= len(out) || int(f[0]) >= len(verts) {
+			continue
+		}
+		cy := float64(verts[f[0]][1]+verts[f[1]][1]+verts[f[2]][1]) / 3
+		p := int(math.Round(cy / PitchMM))
+		if p < 0 || p >= len(plan.Plates) {
+			continue
+		}
+		plate := plan.Plates[p]
+		out[fi] = int32(nearestOfPair(int(out[fi]), plate.A, plate.B))
+	}
+	return out
 }
 
 // clipTriToRect returns the area of triangle tri (2D) clipped to the

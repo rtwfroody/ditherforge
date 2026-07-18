@@ -852,6 +852,15 @@ func Run(ctx context.Context, opts Options) (*PrepareResult, *Result, error) {
 // call so the cache lookups hit.
 // Returns the number of faces in the output.
 func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts export3mf.Options) (int, error) {
+	return ExportFileWithAssignments(cache, opts, outputPath, exportOpts, nil)
+}
+
+// ExportFileWithAssignments is ExportFile, but paints the output faces with the
+// caller-supplied per-face palette indices instead of the pipeline's own. The
+// override must be parallel to the output faces (as returned by
+// OutputFaceAssignments); pass nil to use the pipeline's assignments. Used by
+// the swatch export to force every plate to only its two filaments.
+func ExportFileWithAssignments(cache *StageCache, opts Options, outputPath string, exportOpts export3mf.Options, assignments []int32) (int, error) {
 	// Stage outputs are written to disk asynchronously by runStage, and
 	// ExportFile reads them back from disk. After a fresh RunCached the
 	// writes may still be in flight (a 1M-face merge encode takes
@@ -878,9 +887,18 @@ func ExportFile(cache *StageCache, opts Options, outputPath string, exportOpts e
 
 	outModel := buildOutputModel(lo.ColorModel, mo)
 
+	shellAssignments := mo.ShellAssignments
+	if assignments != nil {
+		if len(assignments) != len(mo.ShellFaces) {
+			return 0, fmt.Errorf("assignment override has %d entries, want %d output faces",
+				len(assignments), len(mo.ShellFaces))
+		}
+		shellAssignments = assignments
+	}
+
 	plog.Printf("Exporting %s...", outputPath)
 	tExport := time.Now()
-	if err := export3mf.Export(outModel, mo.ShellAssignments, outputPath, po.Palette, exportOpts); err != nil {
+	if err := export3mf.Export(outModel, shellAssignments, outputPath, po.Palette, exportOpts); err != nil {
 		return 0, fmt.Errorf("exporting 3MF: %w", err)
 	}
 	plog.Printf("Exported in %.1fs", time.Since(tExport).Seconds())

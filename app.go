@@ -405,6 +405,13 @@ type swatchManifestSection struct {
 	NominalCoverage       float64 `json:"nominalCoverage"`
 	RealizedCoverageFront float64 `json:"realizedCoverageFront"`
 	RealizedCoverageBack  float64 `json:"realizedCoverageBack"`
+	// Fraction of the section assigned to a color that is NEITHER of the plate's
+	// two filaments. Must be 0 for a correct swatch; a nonzero value means a
+	// third color contaminated the plate (see swatch.SnapToPairs). Measured on
+	// the exported (snapped) assignments, so it is the honest per-section figure
+	// for what actually prints.
+	ForeignCoverageFront float64 `json:"foreignCoverageFront"`
+	ForeignCoverageBack  float64 `json:"foreignCoverageBack"`
 }
 
 // swatchFilename builds the default export filename from the palette labels:
@@ -589,20 +596,33 @@ func (a *App) ExportSwatchPlates() (string, error) {
 		return "", fmt.Errorf("swatch pipeline: %w", err)
 	}
 
-	if _, err := pipeline.ExportFile(freshCache, swatchOpts, path, export3mf.Options{
+	// Snap every output face to the nearer of its plate's two filaments before
+	// export. A voxel cell straddling a block boundary can be painted a blended
+	// color the palette rounds to a THIRD filament (e.g. a White+Orange blend
+	// landing on Beige); snapping removes that contamination so each plate shows
+	// only its two colors. See swatch.SnapToPairs.
+	verts, faces, rawAssign, _, err := pipeline.OutputFaceAssignments(freshCache, swatchOpts)
+	if err != nil {
+		return "", fmt.Errorf("swatch coverage: %w", err)
+	}
+	snapped := swatch.SnapToPairs(plan, verts, faces, rawAssign)
+	if n := countChanged(rawAssign, snapped); n > 0 {
+		plog.Printf("swatch: snapped %d/%d output faces off a foreign color onto the plate's pair",
+			n, len(rawAssign))
+	}
+
+	if _, err := pipeline.ExportFileWithAssignments(freshCache, swatchOpts, path, export3mf.Options{
 		PrinterID:      last.Printer,
 		NozzleDiameter: last.NozzleDiameter,
 		LayerHeight:    last.LayerHeight,
 		AppVersion:     pipeline.VersionSemver,
-	}); err != nil {
+	}, snapped); err != nil {
 		return "", fmt.Errorf("swatch export: %w", err)
 	}
 
-	// Realized coverage from the printed output mesh.
-	manifest, err := a.buildSwatchManifest(freshCache, swatchOpts, plan)
-	if err != nil {
-		return "", err
-	}
+	// Manifest from the exported (snapped) mesh: realized coverage and the
+	// per-section foreign fraction (must be 0 now that we snap).
+	manifest := buildSwatchManifest(swatchOpts, plan, verts, faces, snapped)
 	if data, err := json.MarshalIndent(manifest, "", "  "); err == nil {
 		if werr := os.WriteFile(path+".swatch.json", data, 0644); werr != nil {
 			plog.Printf("swatch: writing manifest: %v", werr)
@@ -612,13 +632,21 @@ func (a *App) ExportSwatchPlates() (string, error) {
 	return path, nil
 }
 
-// buildSwatchManifest measures realized per-section coverage from the swatch
-// run's output mesh and assembles the manifest.
-func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Options, plan swatch.Plan) (*swatchManifest, error) {
-	verts, faces, assignments, _, err := pipeline.OutputFaceAssignments(cache, opts)
-	if err != nil {
-		return nil, fmt.Errorf("swatch coverage: %w", err)
+// countChanged returns how many entries differ between two equal-length slices.
+func countChanged(a, b []int32) int {
+	n := 0
+	for i := range a {
+		if i < len(b) && a[i] != b[i] {
+			n++
+		}
 	}
+	return n
+}
+
+// buildSwatchManifest assembles the manifest from the exported output mesh and
+// its per-face assignments (post-snap): realized B coverage and the foreign
+// (non-pair) fraction per section.
+func buildSwatchManifest(opts pipeline.Options, plan swatch.Plan, verts [][3]float32, faces [][3]uint32, assignments []int32) *swatchManifest {
 	front, back := swatch.MeasureCoverage(plan, verts, faces, assignments)
 
 	m := &swatchManifest{
@@ -641,16 +669,19 @@ func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Opti
 			YOffsetMM: plate.YOffsetMM,
 		}
 		for _, sec := range swatch.PlateSections() {
+			i := sec.Index
 			mp.Sections = append(mp.Sections, swatchManifestSection{
-				Index:                 sec.Index,
+				Index:                 i,
 				NominalCoverage:       sec.NominalCoverage,
-				RealizedCoverageFront: front[p][sec.Index],
-				RealizedCoverageBack:  back[p][sec.Index],
+				RealizedCoverageFront: front[p][i].B,
+				RealizedCoverageBack:  back[p][i].B,
+				ForeignCoverageFront:  front[p][i].Foreign,
+				ForeignCoverageBack:   back[p][i].Foreign,
 			})
 		}
 		m.Plates = append(m.Plates, mp)
 	}
-	return m, nil
+	return m
 }
 
 // ProcessPipeline enqueues a pipeline request and returns immediately.
