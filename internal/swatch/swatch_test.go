@@ -54,26 +54,30 @@ func TestBayerValuesComplete(t *testing.T) {
 	}
 }
 
-// TestSectionIndex checks the reading-order mapping of the 3x3 grid: top-left
-// is 0, bottom-right is 8, top row is the highest Z.
+// TestSectionIndex checks the single-row left->right mapping: section 0 is the
+// leftmost 10mm, section 8 the rightmost, with out-of-range X clamped.
 func TestSectionIndex(t *testing.T) {
 	cases := []struct {
-		cx, cz float64
-		want   int
+		cx   float64
+		want int
 	}{
-		{5, 25, 0}, // top-left
-		{15, 25, 1},
-		{25, 25, 2}, // top-right
-		{5, 15, 3},
-		{15, 15, 4}, // center
-		{25, 15, 5},
-		{5, 5, 6}, // bottom-left
-		{15, 5, 7},
-		{25, 5, 8}, // bottom-right
+		{5, 0},   // leftmost
+		{15, 1},  //
+		{45, 4},  // center
+		{85, 8},  // rightmost
+		{-3, 0},  // clamp low
+		{200, 8}, // clamp high
 	}
 	for _, c := range cases {
-		if got := SectionIndex(c.cx, c.cz); got != c.want {
-			t.Errorf("SectionIndex(%.0f,%.0f)=%d, want %d", c.cx, c.cz, got, c.want)
+		if got := SectionIndex(c.cx); got != c.want {
+			t.Errorf("SectionIndex(%.0f)=%d, want %d", c.cx, got, c.want)
+		}
+	}
+	// Every section's midpoint maps to that section.
+	for s := 0; s < Sections; s++ {
+		mid := (float64(s) + 0.5) * SectionMM
+		if got := SectionIndex(mid); got != s {
+			t.Errorf("SectionIndex(midpoint of %d)=%d, want %d", s, got, s)
 		}
 	}
 }
@@ -101,16 +105,22 @@ func TestPlanPairCount(t *testing.T) {
 	}
 }
 
-// TestBlockSnap checks the grid is snapped to an integer block count spanning
-// exactly 30mm.
+// TestBlockSnap checks the square block grid snaps to integer block counts
+// spanning exactly the face height (10mm) and width (90mm), with square blocks
+// and Nx = Sections*Nz so block boundaries align with section boundaries.
 func TestBlockSnap(t *testing.T) {
 	plan := BuildPlan(testPalette, 0.525)
-	if plan.N < 1 {
-		t.Fatalf("N=%d", plan.N)
+	if plan.Nz < 1 || plan.Nx < 1 {
+		t.Fatalf("Nx=%d Nz=%d", plan.Nx, plan.Nz)
 	}
-	span := plan.BlockMM * float64(plan.N)
-	if math.Abs(span-PlateMM) > 1e-9 {
-		t.Errorf("blocks span %.6f mm, want %.6f", span, PlateMM)
+	if plan.Nx != Sections*plan.Nz {
+		t.Errorf("Nx=%d, want Sections*Nz=%d", plan.Nx, Sections*plan.Nz)
+	}
+	if spanZ := plan.BlockMM * float64(plan.Nz); math.Abs(spanZ-PlateHeightMM) > 1e-9 {
+		t.Errorf("blocks span %.6f mm in Z, want %.6f", spanZ, PlateHeightMM)
+	}
+	if spanX := plan.BlockMM * float64(plan.Nx); math.Abs(spanX-PlateWidthMM) > 1e-9 {
+		t.Errorf("blocks span %.6f mm in X, want %.6f", spanX, PlateWidthMM)
 	}
 }
 
@@ -178,7 +188,7 @@ func TestLoadRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Bounding box: X,Z in [0,30]; Y spans the plate layout.
+	// Bounding box: X in [0,90], Z in [0,10]; Y spans the plate layout.
 	var min, max [3]float32
 	for k := 0; k < 3; k++ {
 		min[k] = math.MaxFloat32
@@ -197,9 +207,9 @@ func TestLoadRoundTrip(t *testing.T) {
 	nPlates := len(plan.Plates)
 	wantYMax := float32(float64(nPlates-1)*PitchMM + ThickMM)
 	checkClose(t, "minX", min[0], 0)
-	checkClose(t, "maxX", max[0], PlateMM)
+	checkClose(t, "maxX", max[0], PlateWidthMM)
 	checkClose(t, "minZ", min[2], 0)
-	checkClose(t, "maxZ", max[2], PlateMM)
+	checkClose(t, "maxZ", max[2], PlateHeightMM)
 	checkClose(t, "minY", min[1], 0)
 	checkClose(t, "maxY", max[1], wantYMax)
 }

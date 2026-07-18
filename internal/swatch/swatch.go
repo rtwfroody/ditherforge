@@ -21,13 +21,16 @@ import (
 )
 
 // Physical dimensions of a plate, in millimeters. These are fixed by the
-// calibration protocol and are not user-tunable.
+// calibration protocol and are not user-tunable. The face is a single row of
+// 9 sections: 90mm wide (X), 10mm tall (Z), so the plate is short when standing
+// and needs few print layers (fewer tool changes).
 const (
-	PlateMM   = 30.0 // face width (X) and height (Z)
-	ThickMM   = 2.0  // slab thickness (Y)
-	PitchMM   = 12.0 // center-to-center spacing of adjacent plates along Y
-	SectionMM = 10.0 // side of each of the 9 sections (3x3 grid over the 30mm face)
-	Sections  = 9    // sections per face
+	PlateWidthMM  = 90.0 // face width (X): Sections * SectionMM
+	PlateHeightMM = 10.0 // face height (Z): one section tall
+	ThickMM       = 2.0  // slab thickness (Y)
+	PitchMM       = 12.0 // center-to-center spacing of adjacent plates along Y
+	SectionMM     = 10.0 // side of each of the 9 square sections
+	Sections      = 9    // sections per face (single row, left -> right)
 )
 
 // Filament is one palette entry: its sRGB hex ("#RRGGBB"), transmission
@@ -54,8 +57,9 @@ type Plate struct {
 // Plan is the full set of plates for a palette, plus the resolved block grid.
 type Plan struct {
 	Palette []Filament
-	BlockMM float64 // realized block size (PlateMM/N), snapped to an integer block count
-	N       int     // blocks per 30mm axis
+	BlockMM float64 // realized (square) block size, = SectionMM/Nz
+	Nx      int     // blocks along X (face width), = Sections * Nz
+	Nz      int     // blocks along Z (face height, one section tall)
 	Plates  []Plate
 }
 
@@ -78,15 +82,12 @@ var Bayer8 = [8][8]int{
 // (0..8): 0, 1/8, ..., 1.
 func Coverage(section int) float64 { return float64(section) / 8.0 }
 
-// SectionIndex returns which of the 9 sections the point (cx, cz) on the FRONT
-// face falls in, in reading order (top-left = 0). The face is viewed from
-// outside (from -Y): +X is to the viewer's right, +Z is up, so the top row is
-// the highest Z. Coordinates outside [0,PlateMM) are clamped into the grid.
-func SectionIndex(cx, cz float64) int {
-	col := clampInt(int(cx/SectionMM), 0, 2)
-	rowFromBottom := clampInt(int(cz/SectionMM), 0, 2)
-	row := 2 - rowFromBottom // top row (highest Z) is reading-order row 0
-	return row*3 + col
+// SectionIndex returns which of the 9 sections the X coordinate cx on the FRONT
+// face falls in, left -> right (0..8). The face is viewed from outside (from
+// -Y), where +X is to the viewer's right, so section 0 is the leftmost 10mm and
+// section 8 the rightmost. cx outside [0,PlateWidthMM) is clamped into range.
+func SectionIndex(cx float64) int {
+	return clampInt(int(cx/SectionMM), 0, Sections-1)
 }
 
 // blockIsB reports whether the block at grid index (i,j) whose center falls in
@@ -97,17 +98,20 @@ func blockIsB(i, j, section int) bool {
 }
 
 // BuildPlan lays out one plate per unordered pair of distinct palette entries
-// (all C(n,2) pairs, in ascending (a,b) order), and resolves the block grid so
-// an integer number of blocks spans the 30mm face at ~blockMM each.
+// (all C(n,2) pairs, in ascending (a,b) order), and resolves a square block
+// grid. The block size is snapped so an integer number of blocks (Nz) spans the
+// 10mm face height at ~blockMM each; the width then holds Sections*Nz blocks
+// exactly, so block boundaries land on section boundaries.
 func BuildPlan(palette []Filament, blockMM float64) Plan {
-	n := int(PlateMM/blockMM + 0.5)
-	if n < 1 {
-		n = 1
+	nz := int(PlateHeightMM/blockMM + 0.5)
+	if nz < 1 {
+		nz = 1
 	}
 	plan := Plan{
 		Palette: palette,
-		BlockMM: PlateMM / float64(n),
-		N:       n,
+		BlockMM: PlateHeightMM / float64(nz),
+		Nx:      Sections * nz,
+		Nz:      nz,
 	}
 	idx := 0
 	for a := 0; a < len(palette); a++ {
@@ -141,32 +145,34 @@ type Tri struct {
 }
 
 // BuildMesh tessellates every plate into a single watertight triangle mesh in
-// FINAL Z-up millimeter coordinates: X in [0,30], Z in [0,30], the slab's two
-// 30x30 faces at Y = YOffsetMM (front, facing -Y) and Y = YOffsetMM+2 (back).
-// Plates are disjoint closed box components (they do not share vertices). Each
-// front/back block and each rim triangle carries its filament's palette index.
+// FINAL Z-up millimeter coordinates: X in [0,PlateWidthMM], Z in
+// [0,PlateHeightMM], the slab's two faces at Y = YOffsetMM (front, facing -Y)
+// and Y = YOffsetMM+ThickMM (back). Plates are disjoint closed box components
+// (they do not share vertices). Each front/back block and each rim triangle
+// carries its filament's palette index.
 //
 // Triangle winding is oriented outward per-triangle against the plate center
 // (valid because each plate is a convex box), so callers get consistent
 // outward normals without depending on emission order.
 func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
-	n := plan.N
+	nx := plan.Nx
+	nz := plan.Nz
 	block := plan.BlockMM
 	for _, plate := range plan.Plates {
 		y0 := plate.YOffsetMM
 		y1 := y0 + ThickMM
-		center := [3]float64{PlateMM / 2, y0 + ThickMM/2, PlateMM / 2}
+		center := [3]float64{PlateWidthMM / 2, y0 + ThickMM/2, PlateHeightMM / 2}
 
-		// Two (n+1)x(n+1) vertex grids, front (Y=y0) and back (Y=y1), indexed
+		// Two (nx+1)x(nz+1) vertex grids, front (Y=y0) and back (Y=y1), indexed
 		// [i][j] with i along X, j along Z. Shared by the block faces and the
 		// rim strips so every boundary edge is used by exactly two triangles.
-		front := make([][]int, n+1)
-		back := make([][]int, n+1)
-		for i := 0; i <= n; i++ {
-			front[i] = make([]int, n+1)
-			back[i] = make([]int, n+1)
+		front := make([][]int, nx+1)
+		back := make([][]int, nx+1)
+		for i := 0; i <= nx; i++ {
+			front[i] = make([]int, nz+1)
+			back[i] = make([]int, nz+1)
 			x := float64(i) * block
-			for j := 0; j <= n; j++ {
+			for j := 0; j <= nz; j++ {
 				z := float64(j) * block
 				front[i][j] = len(verts)
 				verts = append(verts, [3]float64{x, y0, z})
@@ -188,11 +194,10 @@ func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 		}
 
 		// Block faces (front + back share each block's material).
-		for i := 0; i < n; i++ {
-			for j := 0; j < n; j++ {
+		for i := 0; i < nx; i++ {
+			for j := 0; j < nz; j++ {
 				cx := (float64(i) + 0.5) * block
-				cz := (float64(j) + 0.5) * block
-				s := SectionIndex(cx, cz)
+				s := SectionIndex(cx)
 				mat := plate.A
 				if blockIsB(i, j, s) {
 					mat = plate.B
@@ -205,13 +210,15 @@ func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 		// Rim strips: solid filament A, subdivided to match the grid boundary
 		// vertices so front/back boundary edges are shared, not duplicated.
 		rimMat := plate.A
-		for k := 0; k < n; k++ {
-			// z=0 edge (j=0) and z=max edge (j=n).
+		for k := 0; k < nx; k++ {
+			// z=0 edge (j=0) and z=max edge (j=nz).
 			addQuad(front[k][0], front[k+1][0], back[k+1][0], back[k][0], rimMat)
-			addQuad(front[k][n], front[k+1][n], back[k+1][n], back[k][n], rimMat)
-			// x=0 edge (i=0) and x=max edge (i=n).
+			addQuad(front[k][nz], front[k+1][nz], back[k+1][nz], back[k][nz], rimMat)
+		}
+		for k := 0; k < nz; k++ {
+			// x=0 edge (i=0) and x=max edge (i=nx).
 			addQuad(front[0][k], front[0][k+1], back[0][k+1], back[0][k], rimMat)
-			addQuad(front[n][k], front[n][k+1], back[n][k+1], back[n][k], rimMat)
+			addQuad(front[nx][k], front[nx][k+1], back[nx][k+1], back[nx][k], rimMat)
 		}
 	}
 	return verts, tris

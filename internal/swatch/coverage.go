@@ -78,19 +78,19 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 		if isBack {
 			dst = bAcc
 		}
-		for col := 0; col < 3; col++ {
-			for rowB := 0; rowB < 3; rowB++ {
-				a := clipTriToRect(tri,
-					float64(col)*SectionMM+inset, float64(col+1)*SectionMM-inset,
-					float64(rowB)*SectionMM+inset, float64(rowB+1)*SectionMM-inset)
-				if a <= 0 {
-					continue
-				}
-				sec := (2-rowB)*3 + col
-				dst[plateIdx][sec].tot += a
-				if isB {
-					dst[plateIdx][sec].b += a
-				}
+		// Single row of Sections columns (left -> right). Clip to each section's
+		// 10x10 box inset on all sides to skip the boundary strip where voxel
+		// cells straddle section lines.
+		for sec := 0; sec < Sections; sec++ {
+			a := clipTriToRect(tri,
+				float64(sec)*SectionMM+inset, float64(sec+1)*SectionMM-inset,
+				inset, PlateHeightMM-inset)
+			if a <= 0 {
+				continue
+			}
+			dst[plateIdx][sec].tot += a
+			if isB {
+				dst[plateIdx][sec].b += a
 			}
 		}
 	}

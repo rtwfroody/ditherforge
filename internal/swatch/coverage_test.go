@@ -33,16 +33,17 @@ func TestClipTriToRect(t *testing.T) {
 // verifies MeasureCoverage reports front=1, back=0 for every section.
 func TestMeasureCoverageSynthetic(t *testing.T) {
 	pal := []Filament{{Hex: "#000000"}, {Hex: "#FFFFFF"}}
-	plan := BuildPlan(pal, 1.0) // one plate, A=0 B=1, N=30
+	plan := BuildPlan(pal, 1.0) // one plate, A=0 B=1
 	plate := plan.Plates[0]
 
 	// Two quads at the plate's front (Y=0, normal -Y = B) and back
-	// (Y=ThickMM, normal +Y = A) planes, each spanning the full 30x30 face.
+	// (Y=ThickMM, normal +Y = A) planes, each spanning the full 90x10 face.
+	const w, h = PlateWidthMM, PlateHeightMM
 	y0 := float32(plate.YOffsetMM)
 	y1 := y0 + float32(ThickMM)
 	verts := [][3]float32{
-		{0, y0, 0}, {PlateMM, y0, 0}, {PlateMM, y0, PlateMM}, {0, y0, PlateMM}, // front 0..3
-		{0, y1, 0}, {PlateMM, y1, 0}, {PlateMM, y1, PlateMM}, {0, y1, PlateMM}, // back 4..7
+		{0, y0, 0}, {w, y0, 0}, {w, y0, h}, {0, y0, h}, // front 0..3
+		{0, y1, 0}, {w, y1, 0}, {w, y1, h}, {0, y1, h}, // back 4..7
 	}
 	// Front winding for outward -Y normal: (0,1,2),(0,2,3) gives -Y (see BuildMesh).
 	// Back winding for +Y normal: reverse.
