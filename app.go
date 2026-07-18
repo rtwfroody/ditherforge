@@ -528,6 +528,11 @@ func (a *App) ExportSwatchPlates() (string, error) {
 	s.HonorTD = false
 	s.BaseColor = nil
 	s.BaseColorMode = "solid"
+	// The pattern is a regular per-cell grid carried by a texture; color-aware
+	// cell segmentation would re-cut cells along the sampled (bilinear) color
+	// boundaries and bias the per-section coverage, so keep one cell per grid
+	// block.
+	s.ColorAwareCells = false
 	s.ColorSlots = make([]*settings.ColorSlotSetting, len(filaments))
 	for i, fil := range filaments {
 		s.ColorSlots[i] = &settings.ColorSlotSetting{Hex: fil.Hex, TD: fil.TD, Label: fil.Label}

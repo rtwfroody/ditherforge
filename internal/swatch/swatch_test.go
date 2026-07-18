@@ -188,10 +188,10 @@ func TestWatertight(t *testing.T) {
 	}
 }
 
-// TestLoadRoundTrip writes the OBJ+MTL and loads it back through the real OBJ
-// loader, checking the face count, that face base colors match the exact
-// palette hexes, and that the bounding box matches the expected 90x10x2-per-
-// plate layout after the Y-up -> Z-up conversion.
+// TestLoadRoundTrip writes the OBJ+MTL+PNGs and loads them back through the real
+// OBJ loader, checking the coarse box face count, that the pattern is carried by
+// textures with UVs (not per-face colors), and that the bounding box matches the
+// expected 90x10x2-per-plate layout after the Y-up -> Z-up conversion.
 func TestLoadRoundTrip(t *testing.T) {
 	plan := BuildPlan(testPalette, 2.0, testLayer0Z, testUpperZ) // coarse for speed
 	dir := t.TempDir()
@@ -208,20 +208,27 @@ func TestLoadRoundTrip(t *testing.T) {
 		t.Fatalf("LoadOBJ: %v", err)
 	}
 
+	// Coarse box: 12 triangles per plate.
+	if want := 12 * len(plan.Plates); len(model.Faces) != want {
+		t.Errorf("loaded %d faces, want %d (12 per plate)", len(model.Faces), want)
+	}
 	_, wantTris := BuildMesh(plan)
 	if len(model.Faces) != len(wantTris) {
-		t.Errorf("loaded %d faces, want %d", len(model.Faces), len(wantTris))
+		t.Errorf("loaded %d faces, want BuildMesh's %d", len(model.Faces), len(wantTris))
 	}
 
-	// Every face's base color must be exactly one of the palette hexes.
-	palRGB := make(map[[3]uint8]bool)
-	for _, f := range testPalette {
-		palRGB[hexRGB(f.Hex)] = true
+	// The pattern is a texture, so the mesh must carry UVs and per-plate
+	// textures, and every face must reference a valid texture (the OBJ loader
+	// rejects meshes mixing textured and untextured faces).
+	if len(model.Textures) != len(plan.Plates) {
+		t.Errorf("loaded %d textures, want %d (one per plate)", len(model.Textures), len(plan.Plates))
 	}
-	for i, bc := range model.FaceBaseColor {
-		rgb := [3]uint8{bc[0], bc[1], bc[2]}
-		if !palRGB[rgb] {
-			t.Fatalf("face %d base color %v is not a palette color", i, rgb)
+	if len(model.UVs) != len(model.Vertices) {
+		t.Fatalf("UVs len %d != vertices len %d", len(model.UVs), len(model.Vertices))
+	}
+	for i, ti := range model.FaceTextureIdx {
+		if ti < 0 || int(ti) >= len(model.Textures) {
+			t.Fatalf("face %d texture index %d out of range [0,%d)", i, ti, len(model.Textures))
 		}
 	}
 
@@ -251,12 +258,33 @@ func TestLoadRoundTrip(t *testing.T) {
 	checkClose(t, "maxY", max[1], wantYMax)
 }
 
-func hexRGB(hex string) [3]uint8 {
-	r, g, b := hexToUnit(hex)
-	return [3]uint8{
-		uint8(r*255 + 0.5),
-		uint8(g*255 + 0.5),
-		uint8(b*255 + 0.5),
+// TestPatternImageCoverage verifies the generated per-plate pattern texture
+// encodes the intended B-fraction per section (this is the color field the
+// pipeline samples per cell, so it must match the nominal coverage). Uses a
+// two-color palette so a texel is B iff its red channel is high.
+func TestPatternImageCoverage(t *testing.T) {
+	pal := []Filament{{Hex: "#000000", Label: "A"}, {Hex: "#FFFFFF", Label: "B"}}
+	plan := BuildPlan(pal, 0.525, testLayer0Z, testUpperZ)
+	img := plan.patternImage(plan.Plates[0])
+	k := patternUpsample
+	for s := 0; s < Sections; s++ {
+		bCount, tot := 0, 0
+		for col := 0; col < plan.Nx; col++ {
+			if SectionIndex((float64(col)+0.5)*plan.BlockWidthMM) != s {
+				continue
+			}
+			for row := 0; row < plan.Nrows(); row++ {
+				r, _, _, _ := img.At(col*k+k/2, row*k+k/2).RGBA()
+				if r>>8 > 128 {
+					bCount++
+				}
+				tot++
+			}
+		}
+		got := float64(bCount) / float64(tot)
+		if math.Abs(got-Coverage(s)) > 0.02 {
+			t.Errorf("section %d texture B-fraction = %.3f, want ~%.3f", s, got, Coverage(s))
+		}
 	}
 }
 
