@@ -17,9 +17,19 @@ import (
 // and printer settings that produced the reported third-color contamination
 // (ColdWhite+Orange and Black+Orange plates showing Beige at 0.08mm on the
 // Snapmaker U1), and asserts every plate/section has ZERO foreign coverage — a
-// color that is neither of the plate's two filaments. It also checks endpoints
-// are exactly 0/1 and interiors track nominal. Uses CGO clip stages, so it is
-// skipped under -short.
+// color that is neither of the plate's two filaments — in the RAW pipeline
+// output. It also checks endpoints are exactly 0/1, interiors track nominal, and
+// the front and back faces agree (they share one pattern texture).
+//
+// This runs at the 0.08mm upper layer (the finest, where the bug was reported
+// and where the chamfered geometry keeps the raw output clean). NOTE: at coarser
+// layers (e.g. 0.20mm) the RAW pipeline output carries a pre-existing residual
+// third-color contamination in the interior mixing sections that is independent
+// of this geometry (it reproduces identically on the pre-chamfer box); the
+// export path scrubs it via swatch.SnapToPairs before writing the 3MF, so the
+// shipped plates are clean. Guarding raw==0 here is therefore scoped to 0.08mm.
+//
+// Uses CGO clip stages, so it is skipped under -short.
 func TestSwatchNoForeignColors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("full swatch pipeline (CGO clip) is slow; skipped under -short")
@@ -123,6 +133,11 @@ func TestSwatchNoForeignColors(t *testing.T) {
 				}
 			} else if got := front[p][sec].B; got < nom-0.06 || got > nom+0.06 {
 				t.Errorf("plate %d section %d: B=%.3f, want ~%.3f", p, sec, got, nom)
+			}
+			// Front and back share one pattern texture, so their realized B
+			// coverage must agree closely.
+			if d := front[p][sec].B - back[p][sec].B; d < -0.06 || d > 0.06 {
+				t.Errorf("plate %d section %d: front B=%.3f vs back B=%.3f differ", p, sec, front[p][sec].B, back[p][sec].B)
 			}
 		}
 	}

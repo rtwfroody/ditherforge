@@ -47,12 +47,16 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 	// left/right boundary. Vertical inset spans a few slab rows so the top and
 	// bottom pattern rows don't leak from the rim; size it to clear the taller
 	// first-layer row plus a couple upper rows. Rows are much thinner than a
-	// cell width, so the two insets differ.
-	insetX := 1.5 * plan.BlockWidthMM
+	// cell width, so the two insets differ. Both also clear the ChamferMM-wide
+	// 45° border bands (color A, front-facing at ~45° so counted as front/back)
+	// that ring the textured face after the edge chamfer.
+	chamfer := plateChamferMM(plan.BlockWidthMM)
+	insetX := 1.5*plan.BlockWidthMM + chamfer
 	insetZ := 3 * plan.UpperZMM
 	if floor := plan.Layer0ZMM + 2*plan.UpperZMM; floor > insetZ {
 		insetZ = floor
 	}
+	insetZ += chamfer
 
 	for fi, f := range faces {
 		if int(f[0]) >= len(verts) || int(f[1]) >= len(verts) || int(f[2]) >= len(verts) {

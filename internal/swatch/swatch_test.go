@@ -165,7 +165,7 @@ func TestBlockSnap(t *testing.T) {
 // by exactly one anti-parallel directed edge (closed, consistently-oriented
 // manifold). Because plates are disjoint, this holds per plate as well.
 func TestWatertight(t *testing.T) {
-	plan := BuildPlan(testPalette, 1.5, testLayer0Z, testUpperZ) // coarse grid keeps the test fast
+	plan := BuildPlan(testPalette, 0.525, testLayer0Z, testUpperZ) // realistic block width
 	verts, tris := BuildMesh(plan)
 	if len(verts) == 0 || len(tris) == 0 {
 		t.Fatal("empty mesh")
@@ -189,11 +189,11 @@ func TestWatertight(t *testing.T) {
 }
 
 // TestLoadRoundTrip writes the OBJ+MTL+PNGs and loads them back through the real
-// OBJ loader, checking the coarse box face count, that the pattern is carried by
-// textures with UVs (not per-face colors), and that the bounding box matches the
-// expected 90x10x2-per-plate layout after the Y-up -> Z-up conversion.
+// OBJ loader, checking the chamfered box face count, that the pattern is carried
+// by textures with UVs (not per-face colors), and that the bounding box matches
+// the expected 90x10x2-per-plate layout after the Y-up -> Z-up conversion.
 func TestLoadRoundTrip(t *testing.T) {
-	plan := BuildPlan(testPalette, 2.0, testLayer0Z, testUpperZ) // coarse for speed
+	plan := BuildPlan(testPalette, 0.525, testLayer0Z, testUpperZ) // realistic block width
 	dir := t.TempDir()
 	objPath, err := WriteOBJ(plan, dir)
 	if err != nil {
@@ -208,9 +208,10 @@ func TestLoadRoundTrip(t *testing.T) {
 		t.Fatalf("LoadOBJ: %v", err)
 	}
 
-	// Coarse box: 12 triangles per plate.
-	if want := 12 * len(plan.Plates); len(model.Faces) != want {
-		t.Errorf("loaded %d faces, want %d (12 per plate)", len(model.Faces), want)
+	// Chamfered box: 44 triangles per plate (6 inset faces=12, 12 bands=24,
+	// 8 corner tris=8).
+	if want := 44 * len(plan.Plates); len(model.Faces) != want {
+		t.Errorf("loaded %d faces, want %d (44 per plate)", len(model.Faces), want)
 	}
 	_, wantTris := BuildMesh(plan)
 	if len(model.Faces) != len(wantTris) {
@@ -290,6 +291,100 @@ func TestPatternImageCoverage(t *testing.T) {
 		if math.Abs(got-Coverage(s)) > 0.03 {
 			t.Errorf("section %d texture B-fraction = %.3f, want ~%.3f", s, got, Coverage(s))
 		}
+	}
+}
+
+// TestChamferGeometry verifies the chamfered-plate topology: exact vertex/face
+// counts, watertight 2-manifoldness, that NO vertex sits at an original sharp
+// box corner (every corner is cut back by the Y+Z chamfer), that the chamfer
+// insets Z by ChamferMM while leaving X un-inset (see plateVertices), and that
+// the outer bounding box is unchanged (chamfer only removes material inward from
+// the edges).
+func TestChamferGeometry(t *testing.T) {
+	plan := BuildPlan(testPalette, 0.525, testLayer0Z, testUpperZ)
+	verts, tris := BuildMesh(plan)
+	nP := len(plan.Plates)
+	chamfer := plateChamferMM(plan.BlockWidthMM)
+
+	// 24 verts, 44 tris per plate.
+	if want := 24 * nP; len(verts) != want {
+		t.Errorf("got %d verts, want %d (24 per plate)", len(verts), want)
+	}
+	if want := 44 * nP; len(tris) != want {
+		t.Errorf("got %d tris, want %d (44 per plate)", len(tris), want)
+	}
+
+	// Watertight & 2-manifold: every directed edge matched by exactly one
+	// anti-parallel twin.
+	type edge struct{ a, b int }
+	dir := make(map[edge]int)
+	for _, tr := range tris {
+		dir[edge{tr.A, tr.B}]++
+		dir[edge{tr.B, tr.C}]++
+		dir[edge{tr.C, tr.A}]++
+	}
+	for e, count := range dir {
+		if count != 1 {
+			t.Errorf("directed edge (%d->%d) used %d times, want 1", e.a, e.b, count)
+		}
+		if dir[edge{e.b, e.a}] != 1 {
+			t.Errorf("edge (%d,%d) lacks exactly one anti-parallel twin", e.a, e.b)
+		}
+	}
+
+	// Per plate: no vertex at an original sharp corner, correct bounding box,
+	// and the chamfer inset equals ChamferMM.
+	const eps = 1e-9
+	for p, plate := range plan.Plates {
+		y0 := plate.YOffsetMM
+		y1 := y0 + ThickMM
+		sharp := [8][3]float64{
+			{0, y0, 0}, {PlateWidthMM, y0, 0}, {PlateWidthMM, y0, PlateHeightMM}, {0, y0, PlateHeightMM},
+			{0, y1, 0}, {PlateWidthMM, y1, 0}, {PlateWidthMM, y1, PlateHeightMM}, {0, y1, PlateHeightMM},
+		}
+		var lo, hi [3]float64
+		for k := 0; k < 3; k++ {
+			lo[k], hi[k] = math.MaxFloat64, -math.MaxFloat64
+		}
+		for i := 0; i < 24; i++ {
+			v := verts[p*24+i]
+			for _, s := range sharp {
+				if math.Abs(v[0]-s[0]) < eps && math.Abs(v[1]-s[1]) < eps && math.Abs(v[2]-s[2]) < eps {
+					t.Errorf("plate %d: vertex %v sits at a sharp box corner", p, v)
+				}
+			}
+			for k := 0; k < 3; k++ {
+				if v[k] < lo[k] {
+					lo[k] = v[k]
+				}
+				if v[k] > hi[k] {
+					hi[k] = v[k]
+				}
+			}
+		}
+		// Outer extents unchanged: the extreme inset faces still reach the box.
+		wantLo := [3]float64{0, y0, 0}
+		wantHi := [3]float64{PlateWidthMM, y1, PlateHeightMM}
+		for k := 0; k < 3; k++ {
+			if math.Abs(lo[k]-wantLo[k]) > eps || math.Abs(hi[k]-wantHi[k]) > eps {
+				t.Errorf("plate %d axis %d bounds [%.4f,%.4f], want [%.4f,%.4f]", p, k, lo[k], hi[k], wantLo[k], wantHi[k])
+			}
+		}
+	}
+
+	// Chamfer insets: on plate 0 the front-face (Y=y0) corner vertex sits
+	// `chamfer` inside the box in Z but flush (X=0) in X — the textured face
+	// keeps its full X extent so the pattern's cell/block phase is preserved.
+	if math.Abs(chamfer-ChamferMM) > eps {
+		t.Errorf("realized chamfer %.4f, want %.2f", chamfer, ChamferMM)
+	}
+	pv := plateVertices(plan.Plates[0].YOffsetMM, chamfer)
+	corner := pv[chamferVertIdx(0, 0, 0, 1)] // Y-pinned vertex of corner (0,0,0)
+	if math.Abs(corner[0]-0) > eps {
+		t.Errorf("front corner X = %.4f, want 0 (X must not be inset)", corner[0])
+	}
+	if math.Abs(corner[2]-chamfer) > eps {
+		t.Errorf("front corner Z = %.4f, want %.4f (Z inset by chamfer)", corner[2], chamfer)
 	}
 }
 

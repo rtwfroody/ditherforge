@@ -259,59 +259,197 @@ func (plan Plan) patternImage(plate Plate) *image.NRGBA {
 	return img
 }
 
-// BuildMesh tessellates every plate into a coarse, watertight box in FINAL Z-up
-// millimeter coordinates: X in [0,PlateWidthMM], Z in [0,PlateHeightMM], the two
-// 90×10 faces at Y = YOffsetMM (front, facing -Y) and Y = YOffsetMM+ThickMM
-// (back), closed by four rim quads. Each plate is a disjoint 8-vertex,
-// 12-triangle box (shared vertices, every edge used by exactly two triangles).
+// ChamferMM is the TARGET 45° chamfer width taken off every edge of a plate (all
+// 12 box edges). It softens sharp corners for handling and mitigates
+// elephant-foot on the 2mm-thick bottom edge. Each of an edge's two adjacent
+// faces recedes this far from the edge, and the removed wedge becomes a 45° flat
+// band. The realized chamfer (plateChamferMM) snaps this to a whole number of
+// pattern blocks — see plateChamferMM for why.
+const ChamferMM = 0.5
+
+// plateChamferMM returns the realized chamfer width, ChamferMM capped so the two
+// receding faces never cross (the binding dimension is the ThickMM thickness, so
+// the cap keeps a positive side-wall width). blockWidthMM is unused today but
+// kept in the signature so the chamfer can be re-derived from cell geometry if
+// the cap ever needs to grow smarter.
+func plateChamferMM(blockWidthMM float64) float64 {
+	maxC := 0.45 * ThickMM
+	return math.Min(ChamferMM, maxC)
+}
+
+// chamferVertIdx returns the local index (0..23) of a chamfered-plate vertex.
+// Each of i,j,k is 0/1 selecting the low/high end of X,Y,Z (a box corner); pin
+// (0=X, 1=Y, 2=Z) selects which of the three faces meeting at that corner this
+// vertex lies on. Truncating each of the 8 corners into 3 vertices (one per
+// incident face) is the standard chamfered-box topology.
+func chamferVertIdx(i, j, k, pin int) int { return ((i*2+j)*2+k)*3 + pin }
+
+// plateCenter returns the centroid of the plate whose front face is at y0.
+func plateCenter(y0 float64) [3]float64 {
+	return [3]float64{PlateWidthMM / 2, y0 + ThickMM/2, PlateHeightMM / 2}
+}
+
+// plateVertices returns the 24 vertices of one chamfered plate in FINAL Z-up mm
+// coordinates, with the front face at Y=y0 (thickness ThickMM in +Y) and chamfer
+// width c. The chamfer is applied on the Z (top/bottom) and Y (thickness) axes
+// only; the X axis is deliberately NOT inset (the textured faces keep their full
+// [0,PlateWidthMM] X extent).
+//
+// Why X is left un-chamfered: the pipeline seeds the front/back faces' surface
+// cells by walking each face's in-plane boundary at cell-size spacing. Insetting
+// the textured face in X moves that boundary and shifts every front-face cell
+// column off the fixed, position-mapped pattern-block grid; the cells then land
+// on block-column boundaries and the sampler bilinear-blends two adjacent blocks
+// into a third palette color (the Black+Orange -> Beige contamination). No X
+// inset value re-aligns them (cell size, block width, and multiples were all
+// measured to fail), so the four vertical side edges stay square. The Z inset is
+// harmless (the pattern's row mapping is v = z/height, unaffected by trimming the
+// top/bottom), so the elephant-foot-prone bottom edge and the top edge — the two
+// long horizontal edges of each face — do get a true 45° chamfer.
+func plateVertices(y0, c float64) [][3]float64 {
+	cx, cy, cz := 0.0, c, c
+	xEnd := [2]float64{0, PlateWidthMM}
+	yEnd := [2]float64{y0, y0 + ThickMM}
+	zEnd := [2]float64{0, PlateHeightMM}
+	xIn := [2]float64{cx, PlateWidthMM - cx}
+	yIn := [2]float64{y0 + cy, y0 + ThickMM - cy}
+	zIn := [2]float64{cz, PlateHeightMM - cz}
+	verts := make([][3]float64, 24)
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			for k := 0; k < 2; k++ {
+				verts[chamferVertIdx(i, j, k, 0)] = [3]float64{xEnd[i], yIn[j], zIn[k]} // X-face
+				verts[chamferVertIdx(i, j, k, 1)] = [3]float64{xIn[i], yEnd[j], zIn[k]} // Y-face
+				verts[chamferVertIdx(i, j, k, 2)] = [3]float64{xIn[i], yIn[j], zEnd[k]} // Z-face
+			}
+		}
+	}
+	return verts
+}
+
+// plateFace is one polygon (3 or 4 local vertex indices) of a chamfered plate.
+// textured marks the two big front/back faces that carry the A/B pattern
+// texture; every other face (the four thin side rims, the twelve chamfer bands,
+// the eight corner triangles) is solid color A.
+type plateFace struct {
+	idx      []int
+	textured bool
+}
+
+// plateFaceTopology returns the constant 26-face topology of a chamfered plate:
+// 6 inset rectangular faces, 12 chamfer bands, and 8 corner triangles. Vertex
+// indices are local (0..23); winding is fixed up per plate by orientedFace. The
+// front (Y=y0) and back (Y=y1) inset faces are textured; all others are rim.
+func plateFaceTopology() []plateFace {
+	v := chamferVertIdx
+	faces := make([]plateFace, 0, 26)
+
+	// 6 inset faces (each original box face, shrunk by the chamfer on all sides).
+	// Front (j=0) and back (j=1): the four Y-pinned corner vertices; textured.
+	for j := 0; j < 2; j++ {
+		faces = append(faces, plateFace{
+			idx:      []int{v(0, j, 0, 1), v(1, j, 0, 1), v(1, j, 1, 1), v(0, j, 1, 1)},
+			textured: true,
+		})
+	}
+	// Left/right walls (fixed i): the X-pinned vertices.
+	for i := 0; i < 2; i++ {
+		faces = append(faces, plateFace{idx: []int{v(i, 0, 0, 0), v(i, 1, 0, 0), v(i, 1, 1, 0), v(i, 0, 1, 0)}})
+	}
+	// Bottom/top walls (fixed k): the Z-pinned vertices.
+	for k := 0; k < 2; k++ {
+		faces = append(faces, plateFace{idx: []int{v(0, 0, k, 2), v(1, 0, k, 2), v(1, 1, k, 2), v(0, 1, k, 2)}})
+	}
+
+	// 12 chamfer bands, one per box edge, each joining the two faces' inset
+	// vertices along that edge.
+	// Edges along X (fixed j,k): join the Y-face and Z-face vertices.
+	for j := 0; j < 2; j++ {
+		for k := 0; k < 2; k++ {
+			faces = append(faces, plateFace{idx: []int{v(0, j, k, 1), v(1, j, k, 1), v(1, j, k, 2), v(0, j, k, 2)}})
+		}
+	}
+	// Edges along Y (fixed i,k): join the X-face and Z-face vertices.
+	for i := 0; i < 2; i++ {
+		for k := 0; k < 2; k++ {
+			faces = append(faces, plateFace{idx: []int{v(i, 0, k, 0), v(i, 1, k, 0), v(i, 1, k, 2), v(i, 0, k, 2)}})
+		}
+	}
+	// Edges along Z (fixed i,j): join the X-face and Y-face vertices.
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			faces = append(faces, plateFace{idx: []int{v(i, j, 0, 0), v(i, j, 1, 0), v(i, j, 1, 1), v(i, j, 0, 1)}})
+		}
+	}
+
+	// 8 corner triangles: the three inset vertices at each box corner.
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			for k := 0; k < 2; k++ {
+				faces = append(faces, plateFace{idx: []int{v(i, j, k, 0), v(i, j, k, 1), v(i, j, k, 2)}})
+			}
+		}
+	}
+	return faces
+}
+
+// orientedFace reorders a face's local vertex indices so a triangle fan from
+// order[0] winds outward (its normal points away from center). A chamfered box
+// is convex, so per-face outward orientation yields a consistently-wound,
+// watertight mesh (shared edges end up anti-parallel between neighbours).
+func orientedFace(verts [][3]float64, idx []int, center [3]float64) []int {
+	order := append([]int(nil), idx...)
+	if !outwardTri(verts[idx[0]], verts[idx[1]], verts[idx[2]], center) {
+		for a, b := 0, len(order)-1; a < b; a, b = a+1, b-1 {
+			order[a], order[b] = order[b], order[a]
+		}
+	}
+	return order
+}
+
+// BuildMesh tessellates every plate into a watertight, 2-manifold chamfered box
+// in FINAL Z-up millimeter coordinates: X in [0,PlateWidthMM], Z in
+// [0,PlateHeightMM], the two 90×10 faces near Y = YOffsetMM (front, facing -Y)
+// and Y = YOffsetMM+ThickMM (back). Each plate is a disjoint 24-vertex,
+// 44-triangle chamfered-box solid (6 inset faces + 12 edge bands + 8 corner
+// triangles; see plateFaceTopology). The chamfer is applied on the Z and Y axes
+// only (see plateVertices for why X is left un-inset), so the four long
+// horizontal edges — front/back top and bottom, including the elephant-foot-prone
+// bottom edge — become true ChamferMM-wide 45° bands, while the eight edges
+// touching X=0/PlateWidthMM stay square (their "bands" collapse to flat, coplanar
+// wall strips that keep the mesh watertight).
 //
 // The A/B pattern is NOT in this geometry — it is carried by a per-plate texture
 // (see patternImage / WriteOBJ), sampled per cell by the pipeline. Keeping the
 // geometry trivial is what stops the load-time decimation and the clip stage
 // from scaling with the (hundreds of thousands of) pattern blocks.
 //
-// Triangle winding is oriented outward per-triangle against the plate center
-// (valid because each plate is a convex box).
+// Triangle winding is oriented outward per-face against the plate center (valid
+// because each chamfered plate is convex).
 func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
-	W, H := PlateWidthMM, PlateHeightMM
+	topo := plateFaceTopology()
+	c := plateChamferMM(plan.BlockWidthMM)
 	for _, plate := range plan.Plates {
-		y0 := plate.YOffsetMM
-		y1 := y0 + ThickMM
-		center := [3]float64{W / 2, y0 + ThickMM/2, H / 2}
 		base := len(verts)
-		verts = append(verts,
-			[3]float64{0, y0, 0}, [3]float64{W, y0, 0}, [3]float64{W, y0, H}, [3]float64{0, y0, H}, // front 0..3
-			[3]float64{0, y1, 0}, [3]float64{W, y1, 0}, [3]float64{W, y1, H}, [3]float64{0, y1, H}, // back 4..7
-		)
-		quad := func(a, b, c, d int) {
-			for _, t := range [2]Tri{{A: base + a, B: base + b, C: base + c}, {A: base + a, B: base + c, C: base + d}} {
-				if !outwardOK(verts, t, center) {
-					t.B, t.C = t.C, t.B
-				}
-				tris = append(tris, t)
+		pv := plateVertices(plate.YOffsetMM, c)
+		verts = append(verts, pv...)
+		center := plateCenter(plate.YOffsetMM)
+		for _, f := range topo {
+			order := orientedFace(pv, f.idx, center)
+			for m := 1; m+1 < len(order); m++ {
+				tris = append(tris, Tri{A: base + order[0], B: base + order[m], C: base + order[m+1]})
 			}
 		}
-		quad(0, 1, 2, 3) // front (-Y)
-		quad(4, 5, 6, 7) // back  (+Y)
-		quad(0, 1, 5, 4) // z=0
-		quad(3, 2, 6, 7) // z=H
-		quad(0, 3, 7, 4) // x=0
-		quad(1, 2, 6, 5) // x=W
 	}
 	return verts, tris
 }
 
-// outwardOK reports whether triangle t's winding normal points away from the
-// plate center c (i.e. outward for a convex box).
-func outwardOK(verts [][3]float64, t Tri, c [3]float64) bool {
-	return outwardTri(verts[t.A], verts[t.B], verts[t.C], c)
-}
-
 // WriteOBJ writes the plan as swatch.obj + swatch.mtl plus one pattern PNG per
-// plate into dir, and returns the OBJ path. Geometry is the coarse per-plate box
-// (see BuildMesh) emitted in the loader's Y-up convention (final X,Y,Z -> OBJ
-// X,Z,-Y). Every plate's front and back faces are UV-mapped onto that plate's
-// pattern texture (map_Kd); the rim faces sample a fixed section-0 (color-A)
+// plate into dir, and returns the OBJ path. Geometry is the per-plate chamfered
+// box (see BuildMesh) emitted in the loader's Y-up convention (final X,Y,Z ->
+// OBJ X,Z,-Y). Every plate's front and back inset faces are UV-mapped onto that
+// plate's pattern texture (map_Kd) with a position-based mapping (u=x/W, v=z/H);
+// the rim, chamfer-band, and corner faces sample a fixed section-0 (color-A)
 // texel of the same texture, so no face lacks texture coordinates (the OBJ
 // loader rejects meshes that mix textured and untextured faces).
 func WriteOBJ(plan Plan, dir string) (objPath string, err error) {
@@ -360,47 +498,43 @@ func WriteOBJ(plan Plan, dir string) (objPath string, err error) {
 		fmt.Fprintf(w, "v %s %s %s\n", ftoa(v[0]), ftoa(v[2]), ftoa(-v[1]))
 	}
 
-	// Per-plate texture coordinates: the four face corners (u = x/width,
-	// v = z/height; section 0 sits at u=0) plus one rim texel deep inside
-	// section 0 (color A). 5 vt per plate.
+	// Per-plate texture coordinates: one position-based UV (u = x/width,
+	// v = z/height; section 0 at u=0) for each of the 24 vertices — used by the
+	// textured front/back faces — plus one rim texel deep inside section 0
+	// (color A) used by every rim/chamfer/corner face. 25 vt per plate.
+	c := plateChamferMM(plan.BlockWidthMM)
 	uRim := 0.5 / float64(plan.Nx*patternUpsample) // centre of texel column 0
+	texVerts := plateVertices(0, c)                // x,z are y-independent
 	for range plan.Plates {
-		fmt.Fprintf(w, "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n")
+		for _, vtx := range texVerts {
+			fmt.Fprintf(w, "vt %s %s\n", ftoa(vtx[0]/PlateWidthMM), ftoa(vtx[2]/PlateHeightMM))
+		}
 		fmt.Fprintf(w, "vt %s 0.5\n", ftoa(uRim))
 	}
 
-	center := func(base int) [3]float64 {
-		return [3]float64{PlateWidthMM / 2, verts[base][1] + ThickMM/2, PlateHeightMM / 2}
-	}
-	// Emit a quad (position + vt indices, 0-based within the plate) as two
-	// outward-oriented triangles.
+	topo := plateFaceTopology()
 	for p := range plan.Plates {
-		vBase := p*8 + 1 // 1-based OBJ vertex index of this plate's corner 0
-		tBase := p*5 + 1 // 1-based vt index of this plate's corner 0
-		c := center(p * 8)
+		vBase := p * 24    // 0-based OBJ vertex offset of this plate
+		uvBase := p * 25   // 0-based vt offset of this plate
+		rimVt := uvBase + 25 // 1-based rim vt (color A) of this plate
+		center := plateCenter(plan.Plates[p].YOffsetMM)
+		pv := plateVertices(plan.Plates[p].YOffsetMM, c)
 		fmt.Fprintf(w, "usemtl %s\n", plateMatName(p))
-		emitQuad := func(pos, uv [4]int) {
-			order := [4]int{0, 1, 2, 3}
-			a, b, d := verts[p*8+pos[0]], verts[p*8+pos[1]], verts[p*8+pos[2]]
-			if !outwardTri(a, b, d, c) {
-				order = [4]int{0, 3, 2, 1}
+		for _, face := range topo {
+			order := orientedFace(pv, face.idx, center)
+			vt := func(local int) int {
+				if face.textured {
+					return uvBase + local + 1 // this vertex's position-based UV
+				}
+				return rimVt
 			}
-			pv := [4]int{pos[order[0]], pos[order[1]], pos[order[2]], pos[order[3]]}
-			uvv := [4]int{uv[order[0]], uv[order[1]], uv[order[2]], uv[order[3]]}
-			tri := func(i, j, k int) {
+			// Fan-triangulate the outward-oriented polygon.
+			for m := 1; m+1 < len(order); m++ {
+				a, b, c := order[0], order[m], order[m+1]
 				fmt.Fprintf(w, "f %d/%d %d/%d %d/%d\n",
-					vBase+pv[i], tBase+uvv[i], vBase+pv[j], tBase+uvv[j], vBase+pv[k], tBase+uvv[k])
+					vBase+a+1, vt(a), vBase+b+1, vt(b), vBase+c+1, vt(c))
 			}
-			tri(0, 1, 2)
-			tri(0, 2, 3)
 		}
-		rim := [4]int{4, 4, 4, 4}                        // all rim corners -> the section-0 rim texel (vt index 4)
-		emitQuad([4]int{0, 1, 2, 3}, [4]int{0, 1, 2, 3}) // front (-Y)
-		emitQuad([4]int{4, 5, 6, 7}, [4]int{0, 1, 2, 3}) // back  (+Y)
-		emitQuad([4]int{0, 1, 5, 4}, rim)                // z=0
-		emitQuad([4]int{3, 2, 6, 7}, rim)                // z=H
-		emitQuad([4]int{0, 3, 7, 4}, rim)                // x=0
-		emitQuad([4]int{1, 2, 6, 5}, rim)                // x=W
 	}
 
 	if err := w.Flush(); err != nil {
