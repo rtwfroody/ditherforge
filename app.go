@@ -12,11 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"golang.org/x/image/draw"
 
@@ -53,7 +55,12 @@ type App struct {
 	// atomic.Pointer so SplitPreview (and other read-only Wails
 	// methods) can snapshot it without blocking on `mu`, which the
 	// pipeline worker holds for the entire duration of a run.
-	lastOpts      atomic.Pointer[pipeline.Options]
+	lastOpts atomic.Pointer[pipeline.Options]
+	// settingsPath is the path of the most recently loaded or saved settings
+	// JSON file, tracked so exports can default their save dialog to the same
+	// directory. atomic.Pointer so read-only Wails methods snapshot it without
+	// taking mu. nil until a settings file is loaded or saved this session.
+	settingsPath  atomic.Pointer[string]
 	meshes        *meshHandler         // serves binary mesh data over HTTP
 	lastInputID   string               // mesh handler ID for last input mesh (protected by mu)
 	lastOverlayID string               // mesh handler ID for the alpha-wrap sticker overlay
@@ -395,6 +402,45 @@ type swatchManifestSection struct {
 	RealizedCoverageBack  float64 `json:"realizedCoverageBack"`
 }
 
+// swatchFilename builds the default export filename from the palette labels:
+// "swatches-<Label1>-<Label2>-...3mf" with the labels sanitized for filenames
+// and sorted alphabetically (case-insensitively). Falls back to
+// "swatches.3mf" when no label survives sanitization.
+func swatchFilename(filaments []swatch.Filament) string {
+	var labels []string
+	for _, f := range filaments {
+		if part := sanitizeFilenamePart(f.Label); part != "" {
+			labels = append(labels, part)
+		}
+	}
+	if len(labels) == 0 {
+		return "swatches.3mf"
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		return strings.ToLower(labels[i]) < strings.ToLower(labels[j])
+	})
+	return "swatches-" + strings.Join(labels, "-") + ".3mf"
+}
+
+// sanitizeFilenamePart makes a label safe to embed in a filename on any common
+// platform: it drops characters reserved by Windows/Unix filesystems
+// (<>:"/\|?* and control chars) and removes whitespace so multi-word labels
+// join without spaces.
+func sanitizeFilenamePart(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r), r < 0x20:
+			continue
+		case strings.ContainsRune(`<>:"/\|?*`, r):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // ExportSwatchPlates generates physical filament-calibration plates for the
 // current palette (all C(n,2) pairs), runs them through an independent pipeline
 // instance (so the GUI's cache/viewer are untouched), exports a 3MF, and writes
@@ -432,9 +478,17 @@ func (a *App) ExportSwatchPlates() (string, error) {
 		}
 	}
 
+	// Default the dialog to the directory of the currently loaded/saved
+	// settings file (falling back to the OS default when none is loaded), and
+	// name the file after the palette colors in alphabetical order.
+	defaultDir := ""
+	if sp := a.settingsPath.Load(); sp != nil {
+		defaultDir = filepath.Dir(*sp)
+	}
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
-		Title:           "Save Swatch Plates",
-		DefaultFilename: "swatches.3mf",
+		Title:            "Save Swatch Plates",
+		DefaultFilename:  swatchFilename(filaments),
+		DefaultDirectory: defaultDir,
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},
 		},
@@ -1363,7 +1417,20 @@ func (a *App) ReadStickerThumbnail(path string) (string, error) {
 // overwrite guard, and the on-disk-asset path relativisation all live in
 // internal/settings so the CLI shares them verbatim.
 func (a *App) SaveSettings(path string, s Settings) error {
-	return settings.Save(path, s)
+	if err := settings.Save(path, s); err != nil {
+		return err
+	}
+	a.rememberSettingsPath(path)
+	return nil
+}
+
+// rememberSettingsPath records path as the current settings file (empty is
+// ignored), so exports can default their save dialog to its directory.
+func (a *App) rememberSettingsPath(path string) {
+	if path == "" {
+		return
+	}
+	a.settingsPath.Store(&path)
 }
 
 // SaveSettingsDialog opens a save dialog and writes settings to the chosen path.
@@ -1385,6 +1452,8 @@ func (a *App) SaveSettingsDialog(s Settings) (string, error) {
 	if err := a.SaveSettings(path, s); err != nil {
 		return "", err
 	}
+	// SaveSettings already recorded the path; keep this explicit for clarity.
+	a.rememberSettingsPath(path)
 	return path, nil
 }
 
@@ -1440,6 +1509,7 @@ func (a *App) LoadSettingsFile(path string) (*LoadSettingsResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.rememberSettingsPath(path)
 	return &LoadSettingsResult{Path: path, Settings: s, LegacyAbsoluteUnits: legacyAbsoluteUnits}, nil
 }
 
