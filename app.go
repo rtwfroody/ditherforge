@@ -373,14 +373,19 @@ func (a *App) Export3MF() (string, error) {
 // nominal coverage per section, so a later photo-analysis step knows the ground
 // truth for each plate/section.
 type swatchManifest struct {
-	AppVersion string                `json:"appVersion"`
-	Printer    string                `json:"printer"`
-	NozzleMM   float32               `json:"nozzleMM"`
-	LayerMM    float32               `json:"layerMM"`
-	BlockMM    float64               `json:"blockMM"`
-	Palette    []swatchManifestColor `json:"palette"`
-	Infill     string                `json:"infill"`
-	Plates     []swatchManifestPlate `json:"plates"`
+	AppVersion string  `json:"appVersion"`
+	Printer    string  `json:"printer"`
+	NozzleMM   float32 `json:"nozzleMM"`
+	LayerMM    float32 `json:"layerMM"`
+	// Pattern-block dimensions. Blocks are one voxel cell wide and one print
+	// layer tall, so the pattern has layer-height granularity in Z.
+	BlockWidthMM  float64               `json:"blockWidthMM"`  // block width = voxel cell width
+	RowHeight0MM  float64               `json:"rowHeight0MM"`  // first-row (slab 0) height
+	RowHeightUpMM float64               `json:"rowHeightUpMM"` // height of rows above the first
+	RowCount      int                   `json:"rowCount"`      // number of pattern rows spanning the 10mm face
+	Palette       []swatchManifestColor `json:"palette"`
+	Infill        string                `json:"infill"`
+	Plates        []swatchManifestPlate `json:"plates"`
 }
 
 type swatchManifestColor struct {
@@ -534,13 +539,16 @@ func (a *App) ExportSwatchPlates() (string, error) {
 		return "", fmt.Errorf("swatch settings: %w", err)
 	}
 
-	// Block size = the upper-layer voxel cell width this run will use, snapped
-	// so an integer number of blocks spans the 30mm face.
-	blockMM := float64(pipeline.UpperCellSizeMM(swatchOpts))
-	if blockMM <= 0 {
-		blockMM = 0.5
+	// Block width = the upper-layer voxel cell width this run will use (snapped
+	// so an integer number of blocks spans each 10mm section). Row heights come
+	// from the slab grid: first row spans the initial-layer height, the rest the
+	// layer height, so each pattern row is one print layer tall.
+	blockWidthMM := float64(pipeline.UpperCellSizeMM(swatchOpts))
+	if blockWidthMM <= 0 {
+		blockWidthMM = 0.5
 	}
-	plan := swatch.BuildPlan(filaments, blockMM)
+	layer0Z, upperZ := pipeline.SlabHeightsMM(swatchOpts)
+	plan := swatch.BuildPlan(filaments, blockWidthMM, float64(layer0Z), float64(upperZ))
 
 	tmpDir, err := os.MkdirTemp("", "ditherforge-swatch-")
 	if err != nil {
@@ -586,7 +594,7 @@ func (a *App) ExportSwatchPlates() (string, error) {
 	}
 
 	// Realized coverage from the printed output mesh.
-	manifest, err := a.buildSwatchManifest(freshCache, swatchOpts, plan, blockMM)
+	manifest, err := a.buildSwatchManifest(freshCache, swatchOpts, plan)
 	if err != nil {
 		return "", err
 	}
@@ -601,7 +609,7 @@ func (a *App) ExportSwatchPlates() (string, error) {
 
 // buildSwatchManifest measures realized per-section coverage from the swatch
 // run's output mesh and assembles the manifest.
-func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Options, plan swatch.Plan, blockMM float64) (*swatchManifest, error) {
+func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Options, plan swatch.Plan) (*swatchManifest, error) {
 	verts, faces, assignments, _, err := pipeline.OutputFaceAssignments(cache, opts)
 	if err != nil {
 		return nil, fmt.Errorf("swatch coverage: %w", err)
@@ -609,12 +617,15 @@ func (a *App) buildSwatchManifest(cache *pipeline.StageCache, opts pipeline.Opti
 	front, back := swatch.MeasureCoverage(plan, verts, faces, assignments)
 
 	m := &swatchManifest{
-		AppVersion: pipeline.VersionSemver,
-		Printer:    opts.Printer,
-		NozzleMM:   opts.NozzleDiameter,
-		LayerMM:    opts.LayerHeight,
-		BlockMM:    blockMM,
-		Infill:     plan.Palette[0].Label,
+		AppVersion:    pipeline.VersionSemver,
+		Printer:       opts.Printer,
+		NozzleMM:      opts.NozzleDiameter,
+		LayerMM:       opts.LayerHeight,
+		BlockWidthMM:  plan.BlockWidthMM,
+		RowHeight0MM:  plan.Layer0ZMM,
+		RowHeightUpMM: plan.UpperZMM,
+		RowCount:      plan.Nrows(),
+		Infill:        plan.Palette[0].Label,
 	}
 	for _, fil := range plan.Palette {
 		m.Palette = append(m.Palette, swatchManifestColor{Label: fil.Label, Hex: fil.Hex, TD: fil.TD})

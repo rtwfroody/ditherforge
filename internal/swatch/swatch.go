@@ -55,12 +55,30 @@ type Plate struct {
 }
 
 // Plan is the full set of plates for a palette, plus the resolved block grid.
+//
+// Blocks are RECTANGULAR: their width is the voxel cell width (snapped so an
+// integer count spans each 10mm section), and their height is one PRINT LAYER —
+// the pattern rows are aligned to the pipeline's slab grid (first row spans the
+// initial-layer height Layer0ZMM, every row above spans UpperZMM) so each
+// pipeline cell samples exactly one row's color. This gives the pattern
+// layer-height granularity in Z, so a p=1/8 section places isolated
+// single-layer-tall B cells sandwiched between A cells.
 type Plan struct {
-	Palette []Filament
-	BlockMM float64 // realized (square) block size, = SectionMM/Nz
-	Nx      int     // blocks along X (face width), = Sections * Nz
-	Nz      int     // blocks along Z (face height, one section tall)
-	Plates  []Plate
+	Palette      []Filament
+	BlockWidthMM float64   // block width (= SectionMM/blocksPerSection), aligned to sections
+	Nx           int       // blocks along X (face width), = Sections * blocksPerSection
+	RowEdges     []float64 // Z boundaries of the Nrows pattern rows: len Nrows+1, [0]=0, [last]=PlateHeightMM
+	Layer0ZMM    float64   // first-row (slab 0) height
+	UpperZMM     float64   // height of every row above the first
+	Plates       []Plate
+}
+
+// Nrows returns the number of pattern rows (slab-tall bands) in the plan.
+func (p Plan) Nrows() int {
+	if len(p.RowEdges) < 2 {
+		return 0
+	}
+	return len(p.RowEdges) - 1
 }
 
 // Bayer8 is the standard 8x8 ordered-dither threshold matrix, holding the
@@ -90,28 +108,54 @@ func SectionIndex(cx float64) int {
 	return clampInt(int(cx/SectionMM), 0, Sections-1)
 }
 
-// blockIsB reports whether the block at grid index (i,j) whose center falls in
-// the given section is filament B under the ordered Bayer threshold.
+// blockIsB reports whether the block at grid column i (X) and row j (Z, the
+// slab-row index) whose center falls in the given section is filament B under
+// the ordered Bayer threshold.
 func blockIsB(i, j, section int) bool {
 	p := Coverage(section)
 	return float64(Bayer8[i%8][j%8]) < p*64.0
 }
 
+// slabRowEdges returns the Z boundaries partitioning [0, PlateHeightMM] into
+// slab-tall rows: [0, layer0Z, layer0Z+upperZ, …], with the final boundary
+// clamped to PlateHeightMM (so the top row may be shorter than upperZ). This
+// mirrors cellslicer.SlabBoundaryPlanesFirst(0, PlateHeightMM, layer0Z, upperZ)
+// up to the sub-µm per-plane nudges, which are negligible at ~0.2mm rows.
+func slabRowEdges(layer0Z, upperZ float64) []float64 {
+	if layer0Z <= 0 {
+		layer0Z = upperZ
+	}
+	if upperZ <= 0 {
+		upperZ = 0.2
+	}
+	const eps = 1e-6
+	edges := []float64{0}
+	z := layer0Z
+	for z < PlateHeightMM-eps {
+		edges = append(edges, z)
+		z += upperZ
+	}
+	edges = append(edges, PlateHeightMM)
+	return edges
+}
+
 // BuildPlan lays out one plate per unordered pair of distinct palette entries
-// (all C(n,2) pairs, in ascending (a,b) order), and resolves a square block
-// grid. The block size is snapped so an integer number of blocks (Nz) spans the
-// 10mm face height at ~blockMM each; the width then holds Sections*Nz blocks
-// exactly, so block boundaries land on section boundaries.
-func BuildPlan(palette []Filament, blockMM float64) Plan {
-	nz := int(PlateHeightMM/blockMM + 0.5)
-	if nz < 1 {
-		nz = 1
+// (all C(n,2) pairs, in ascending (a,b) order) and resolves the rectangular
+// block grid. blockWidthMM is snapped so an integer number of blocks spans each
+// 10mm section (block boundaries land on section boundaries); rows are one slab
+// tall each, aligned to the pipeline's slab grid via (layer0ZMM, upperZMM).
+func BuildPlan(palette []Filament, blockWidthMM, layer0ZMM, upperZMM float64) Plan {
+	perSection := int(SectionMM/blockWidthMM + 0.5)
+	if perSection < 1 {
+		perSection = 1
 	}
 	plan := Plan{
-		Palette: palette,
-		BlockMM: PlateHeightMM / float64(nz),
-		Nx:      Sections * nz,
-		Nz:      nz,
+		Palette:      palette,
+		BlockWidthMM: SectionMM / float64(perSection),
+		Nx:           Sections * perSection,
+		RowEdges:     slabRowEdges(layer0ZMM, upperZMM),
+		Layer0ZMM:    layer0ZMM,
+		UpperZMM:     upperZMM,
 	}
 	idx := 0
 	for a := 0; a < len(palette); a++ {
@@ -156,16 +200,18 @@ type Tri struct {
 // outward normals without depending on emission order.
 func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 	nx := plan.Nx
-	nz := plan.Nz
-	block := plan.BlockMM
+	nz := plan.Nrows()
+	block := plan.BlockWidthMM
+	rowZ := plan.RowEdges // length nz+1
 	for _, plate := range plan.Plates {
 		y0 := plate.YOffsetMM
 		y1 := y0 + ThickMM
 		center := [3]float64{PlateWidthMM / 2, y0 + ThickMM/2, PlateHeightMM / 2}
 
 		// Two (nx+1)x(nz+1) vertex grids, front (Y=y0) and back (Y=y1), indexed
-		// [i][j] with i along X, j along Z. Shared by the block faces and the
-		// rim strips so every boundary edge is used by exactly two triangles.
+		// [i][j] with i along X and j along Z (rows at the slab boundaries in
+		// rowZ). Shared by the block faces and the rim strips so every boundary
+		// edge is used by exactly two triangles.
 		front := make([][]int, nx+1)
 		back := make([][]int, nx+1)
 		for i := 0; i <= nx; i++ {
@@ -173,7 +219,7 @@ func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 			back[i] = make([]int, nz+1)
 			x := float64(i) * block
 			for j := 0; j <= nz; j++ {
-				z := float64(j) * block
+				z := rowZ[j]
 				front[i][j] = len(verts)
 				verts = append(verts, [3]float64{x, y0, z})
 				back[i][j] = len(verts)
@@ -193,11 +239,12 @@ func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 			addTri(a, c, d, mat)
 		}
 
-		// Block faces (front + back share each block's material).
+		// Block faces (front + back share each block's material). Column i sets
+		// the section; row j is the slab-row index that drives the Bayer phase.
 		for i := 0; i < nx; i++ {
+			cx := (float64(i) + 0.5) * block
+			s := SectionIndex(cx)
 			for j := 0; j < nz; j++ {
-				cx := (float64(i) + 0.5) * block
-				s := SectionIndex(cx)
 				mat := plate.A
 				if blockIsB(i, j, s) {
 					mat = plate.B

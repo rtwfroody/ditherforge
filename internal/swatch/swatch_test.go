@@ -16,6 +16,13 @@ var testPalette = []Filament{
 	{Hex: "#F67405", TD: 3.3, Label: "Orange"},
 }
 
+// Representative slab heights (Snapmaker U1, 0.4 nozzle, 0.20mm layer): a
+// taller first layer then uniform upper layers.
+const (
+	testLayer0Z = 0.25
+	testUpperZ  = 0.20
+)
+
 // TestBayerCoverageExactness verifies that for each nominal coverage p=k/8, a
 // full 8x8 Bayer tile contains exactly k*8 filament-B blocks. This is the
 // property that makes the endpoint sections exactly solid and the interior
@@ -85,7 +92,7 @@ func TestSectionIndex(t *testing.T) {
 // TestPlanPairCount checks all C(n,2) plates are produced with the expected
 // A<B pairing and Y layout.
 func TestPlanPairCount(t *testing.T) {
-	plan := BuildPlan(testPalette, 0.5)
+	plan := BuildPlan(testPalette, 0.5, testLayer0Z, testUpperZ)
 	wantPlates := 4 * 3 / 2 // C(4,2)=6
 	if len(plan.Plates) != wantPlates {
 		t.Fatalf("got %d plates, want %d", len(plan.Plates), wantPlates)
@@ -105,22 +112,52 @@ func TestPlanPairCount(t *testing.T) {
 	}
 }
 
-// TestBlockSnap checks the square block grid snaps to integer block counts
-// spanning exactly the face height (10mm) and width (90mm), with square blocks
-// and Nx = Sections*Nz so block boundaries align with section boundaries.
+// TestBlockSnap checks the block WIDTH snaps to an integer count per 10mm
+// section (so block boundaries align with section boundaries) and that the
+// rows are slab-tall: first row = layer0Z, upper rows = upperZ, final row
+// clamped to the 10mm face top (may be partial).
 func TestBlockSnap(t *testing.T) {
-	plan := BuildPlan(testPalette, 0.525)
-	if plan.Nz < 1 || plan.Nx < 1 {
-		t.Fatalf("Nx=%d Nz=%d", plan.Nx, plan.Nz)
+	plan := BuildPlan(testPalette, 0.525, testLayer0Z, testUpperZ)
+	if plan.Nx < 1 {
+		t.Fatalf("Nx=%d", plan.Nx)
 	}
-	if plan.Nx != Sections*plan.Nz {
-		t.Errorf("Nx=%d, want Sections*Nz=%d", plan.Nx, Sections*plan.Nz)
+	// Width: integer blocks tile each section, and the whole 90mm width.
+	if plan.Nx%Sections != 0 {
+		t.Errorf("Nx=%d not a multiple of Sections=%d", plan.Nx, Sections)
 	}
-	if spanZ := plan.BlockMM * float64(plan.Nz); math.Abs(spanZ-PlateHeightMM) > 1e-9 {
-		t.Errorf("blocks span %.6f mm in Z, want %.6f", spanZ, PlateHeightMM)
-	}
-	if spanX := plan.BlockMM * float64(plan.Nx); math.Abs(spanX-PlateWidthMM) > 1e-9 {
+	if spanX := plan.BlockWidthMM * float64(plan.Nx); math.Abs(spanX-PlateWidthMM) > 1e-9 {
 		t.Errorf("blocks span %.6f mm in X, want %.6f", spanX, PlateWidthMM)
+	}
+	perSection := plan.Nx / Sections
+	if math.Abs(plan.BlockWidthMM*float64(perSection)-SectionMM) > 1e-9 {
+		t.Errorf("blocks don't tile a 10mm section: width %.6f x %d", plan.BlockWidthMM, perSection)
+	}
+
+	// Rows: aligned to the slab grid.
+	edges := plan.RowEdges
+	if len(edges) != plan.Nrows()+1 {
+		t.Fatalf("RowEdges len %d, want Nrows+1 = %d", len(edges), plan.Nrows()+1)
+	}
+	if edges[0] != 0 {
+		t.Errorf("first edge = %v, want 0", edges[0])
+	}
+	if math.Abs(edges[len(edges)-1]-PlateHeightMM) > 1e-9 {
+		t.Errorf("last edge = %v, want %v", edges[len(edges)-1], PlateHeightMM)
+	}
+	if h0 := edges[1] - edges[0]; math.Abs(h0-testLayer0Z) > 1e-9 {
+		t.Errorf("first row height = %v, want %v (layer0)", h0, testLayer0Z)
+	}
+	for j := 1; j < plan.Nrows()-1; j++ { // interior rows are full upper layers
+		if h := edges[j+1] - edges[j]; math.Abs(h-testUpperZ) > 1e-9 {
+			t.Errorf("row %d height = %v, want %v (upper)", j, h, testUpperZ)
+		}
+	}
+	if last := edges[plan.Nrows()] - edges[plan.Nrows()-1]; last > testUpperZ+1e-9 || last <= 0 {
+		t.Errorf("last row height = %v, want (0, %v]", last, testUpperZ)
+	}
+	// 10mm face at ~0.2mm rows should be ~50 rows.
+	if plan.Nrows() < 40 || plan.Nrows() > 60 {
+		t.Errorf("Nrows=%d, want ~50", plan.Nrows())
 	}
 }
 
@@ -128,7 +165,7 @@ func TestBlockSnap(t *testing.T) {
 // by exactly one anti-parallel directed edge (closed, consistently-oriented
 // manifold). Because plates are disjoint, this holds per plate as well.
 func TestWatertight(t *testing.T) {
-	plan := BuildPlan(testPalette, 1.5) // coarse grid keeps the test fast
+	plan := BuildPlan(testPalette, 1.5, testLayer0Z, testUpperZ) // coarse grid keeps the test fast
 	verts, tris := BuildMesh(plan)
 	if len(verts) == 0 || len(tris) == 0 {
 		t.Fatal("empty mesh")
@@ -153,10 +190,10 @@ func TestWatertight(t *testing.T) {
 
 // TestLoadRoundTrip writes the OBJ+MTL and loads it back through the real OBJ
 // loader, checking the face count, that face base colors match the exact
-// palette hexes, and that the bounding box matches the expected 30x30x2-per-
+// palette hexes, and that the bounding box matches the expected 90x10x2-per-
 // plate layout after the Y-up -> Z-up conversion.
 func TestLoadRoundTrip(t *testing.T) {
-	plan := BuildPlan(testPalette, 2.0) // coarse for speed
+	plan := BuildPlan(testPalette, 2.0, testLayer0Z, testUpperZ) // coarse for speed
 	dir := t.TempDir()
 	objPath, err := WriteOBJ(plan, dir)
 	if err != nil {

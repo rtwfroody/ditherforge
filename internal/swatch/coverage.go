@@ -27,7 +27,16 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 		bAcc[p] = make([]acc, Sections)
 	}
 
-	inset := 1.5 * plan.BlockMM
+	// Horizontal inset ~1.5 cell widths clears cells straddling a section's
+	// left/right boundary. Vertical inset spans a few slab rows so the top and
+	// bottom pattern rows don't leak from the rim; size it to clear the taller
+	// first-layer row plus a couple upper rows. Rows are much thinner than a
+	// cell width, so the two insets differ.
+	insetX := 1.5 * plan.BlockWidthMM
+	insetZ := 3 * plan.UpperZMM
+	if floor := plan.Layer0ZMM + 2*plan.UpperZMM; floor > insetZ {
+		insetZ = floor
+	}
 
 	for fi, f := range faces {
 		if int(f[0]) >= len(verts) || int(f[1]) >= len(verts) || int(f[2]) >= len(verts) {
@@ -79,12 +88,12 @@ func MeasureCoverage(plan Plan, verts [][3]float32, faces [][3]uint32, assignmen
 			dst = bAcc
 		}
 		// Single row of Sections columns (left -> right). Clip to each section's
-		// 10x10 box inset on all sides to skip the boundary strip where voxel
-		// cells straddle section lines.
+		// 10x10 box, inset horizontally by insetX and vertically by insetZ to
+		// skip the boundary strips where voxel cells straddle section/rim lines.
 		for sec := 0; sec < Sections; sec++ {
 			a := clipTriToRect(tri,
-				float64(sec)*SectionMM+inset, float64(sec+1)*SectionMM-inset,
-				inset, PlateHeightMM-inset)
+				float64(sec)*SectionMM+insetX, float64(sec+1)*SectionMM-insetX,
+				insetZ, PlateHeightMM-insetZ)
 			if a <= 0 {
 				continue
 			}

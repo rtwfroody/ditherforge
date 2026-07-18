@@ -931,6 +931,18 @@ func UpperCellSizeMM(opts Options) float32 {
 	return voxelCellSizes(opts).UpperXY
 }
 
+// SlabHeightsMM returns the two vertical slab heights a run with the given
+// options would use: layer0Z is the first slab (the profile's initial-layer
+// print height) and upperZ every slab above it, matching the cellslicer's
+// SlabBoundaryPlanesFirst(zMin, zMax, layer0Z, upperZ) partition. Callers
+// synthesizing geometry with layer-height granularity in Z (e.g. swatch plates)
+// align their rows to [0, layer0Z], then upperZ increments, so each pipeline
+// cell samples exactly one row.
+func SlabHeightsMM(opts Options) (layer0Z, upperZ float32) {
+	c := voxelCellSizes(opts)
+	return c.Layer0Z, c.UpperZ
+}
+
 // buildOutputModel constructs a LoadedModel from merge output, suitable for
 // export or preview mesh building.
 //

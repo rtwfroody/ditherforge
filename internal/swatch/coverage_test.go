@@ -33,7 +33,7 @@ func TestClipTriToRect(t *testing.T) {
 // verifies MeasureCoverage reports front=1, back=0 for every section.
 func TestMeasureCoverageSynthetic(t *testing.T) {
 	pal := []Filament{{Hex: "#000000"}, {Hex: "#FFFFFF"}}
-	plan := BuildPlan(pal, 1.0) // one plate, A=0 B=1
+	plan := BuildPlan(pal, 1.0, 0.25, 0.20) // one plate, A=0 B=1
 	plate := plan.Plates[0]
 
 	// Two quads at the plate's front (Y=0, normal -Y = B) and back
