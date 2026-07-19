@@ -24,6 +24,15 @@ the 3MF, is enough to recover:
       (voxel.EffectiveCellColors) on the known Bayer pattern and least-squares
       matching the measured section colors.
 
+Illumination is normalized by a robustly-fit (IRLS) polynomial paper surface, so
+plates brighter than the paper (Cold White) normalize to linear values >1.0 that
+are carried UNCLAMPED through sampling and the fit — only the display hex clamps,
+and the clip is flagged. Endpoints aggregate by median (robust to per-plate
+gloss), with per-plate values reported. The global ℓ rejects per-pair outliers.
+NOTE: the pipeline blend is additive in linear RGB; bright+bright pairs mix more
+subtractively than it can model, so those pairs rail and are excluded from the
+robust global ℓ (see README "Model limitation").
+
 The forward blend model is ported faithfully from the Go source:
   internal/voxel/td_layered.go   (EffectiveCellColors: 2 Jacobi passes)
   internal/palette/td.go         (NeighborLeak: β = 10^(−ℓ/TD), clamps)
@@ -395,82 +404,70 @@ def load_manifest(path: str) -> Manifest:
 # ---------------------------------------------------------------------------
 
 
-def _inpaint_nan_grid(g: np.ndarray) -> np.ndarray:
-    """Fill NaN cells of a small (h,w,3) grid by iterative neighbor averaging."""
-    g = g.copy()
-    nan = np.isnan(g[..., 0])
-    if not nan.any():
-        return g
-    while nan.any():
-        filled = g.copy()
-        for a, b in zip(*np.where(nan)):
-            acc = []
-            for da in (-1, 0, 1):
-                for db in (-1, 0, 1):
-                    aa, bb = a + da, b + db
-                    if 0 <= aa < g.shape[0] and 0 <= bb < g.shape[1] and not nan[aa, bb]:
-                        acc.append(g[aa, bb])
-            if acc:
-                filled[a, b] = np.mean(acc, axis=0)
-        g = filled
-        nan = np.isnan(g[..., 0])
-    return g
-
-
 def _saturation(x: np.ndarray) -> np.ndarray:
     mx = x.max(axis=2)
     mn = x.min(axis=2)
     return np.where(mx > 1e-6, (mx - mn) / mx, 0.0)
 
 
-def estimate_illumination(lin: np.ndarray, exclude: np.ndarray) -> np.ndarray:
-    """Smoothed per-channel illumination map from paper pixels.
+def _poly_features(xn: np.ndarray, yn: np.ndarray, deg: int) -> np.ndarray:
+    """2D polynomial design matrix (…,nterms) for normalized coords in [-1,1]."""
+    terms = []
+    for i in range(deg + 1):
+        for j in range(deg + 1 - i):
+            terms.append((xn**i) * (yn**j))
+    return np.stack(terms, axis=-1)
 
-    `exclude` marks known non-paper pixels to keep out of the estimate. A coarse
-    grid of paper medians (NaN where a block has too little paper) is inpainted,
-    upscaled and blurred. Blocks fully inside a plate contribute nothing and are
-    filled from neighbors."""
+
+def estimate_illumination(lin: np.ndarray, deg: int = 3, iters: int = 12) -> np.ndarray:
+    """Per-channel smooth illumination surface, fit robustly (IRLS) so it follows
+    the PAPER lighting and rejects the plates.
+
+    A low-order 2D polynomial is fit to a downsampled image; each pass hard-rejects
+    pixels whose residual exceeds ~2.5 robust-σ (both signs), so plates that are
+    brighter than paper (Cold White) OR darker (Black/Orange speckle) fall out of
+    the fit instead of dragging the "white" reference toward themselves. This is
+    the key fix for bright-than-paper plates: a paper-median estimate seeded on
+    saturation lets a low-saturation Cold White plate contaminate its own
+    neighborhood and normalize itself to ~1.0, flattening its ramp."""
     import cv2
 
     H, W = lin.shape[:2]
-    Y = lin @ np.array([0.2126, 0.7152, 0.0722])
-    paper = (~exclude) & (Y > 0.35)
+    scale = max(1, int(round(max(H, W) / 240.0)))
+    small = lin[::scale, ::scale]
+    hs, ws = small.shape[:2]
+    yy, xx = np.mgrid[0:hs, 0:ws].astype(np.float64)
+    xn = (xx / max(ws - 1, 1)) * 2 - 1
+    yn = (yy / max(hs - 1, 1)) * 2 - 1
+    X = _poly_features(xn.ravel(), yn.ravel(), deg)  # (N, T)
 
-    gh, gw = 24, 32
-    ys = np.linspace(0, H, gh + 1).astype(int)
-    xs = np.linspace(0, W, gw + 1).astype(int)
-    small = np.full((gh, gw, 3), np.nan)
-    for a in range(gh):
-        for b in range(gw):
-            blk = lin[ys[a] : ys[a + 1], xs[b] : xs[b + 1]]
-            pm = paper[ys[a] : ys[a + 1], xs[b] : xs[b + 1]]
-            if pm.sum() > 0.15 * pm.size:
-                small[a, b] = np.median(blk[pm], axis=0)
-    small = _inpaint_nan_grid(small)
-    illum = cv2.resize(small.astype(np.float32), (W, H), interpolation=cv2.INTER_CUBIC)
-    illum = cv2.GaussianBlur(illum, (0, 0), sigmaX=max(2.0, W * 0.02))
+    illum_small = np.zeros((hs, ws, 3))
+    for ch in range(3):
+        y = small[..., ch].ravel()
+        w = np.ones_like(y)
+        pred = y.copy()
+        for _ in range(iters):
+            sw = np.sqrt(w)
+            coef, *_ = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)
+            pred = X @ coef
+            resid = y - pred
+            keep = w > 0
+            med = np.median(resid[keep])
+            sigma = 1.4826 * np.median(np.abs(resid[keep] - med)) + 1e-6
+            w = (np.abs(resid - med) < 2.5 * sigma).astype(np.float64)
+            if w.sum() < X.shape[1] * 4:  # too few inliers; stop
+                break
+        illum_small[..., ch] = pred.reshape(hs, ws)
+    illum = cv2.resize(illum_small.astype(np.float32), (W, H), interpolation=cv2.INTER_CUBIC)
     return np.maximum(illum.astype(np.float64), 1e-3)
 
 
-def normalize_illumination(lin: np.ndarray, n_iter: int = 3):
-    """Iteratively estimate paper illumination and divide it out. Each pass
-    normalizes, re-flags non-paper pixels (deviation from white OR saturation)
-    and dilates them, so bright low-saturation plates (Cold White) that hide in
-    an absolute-brightness test are progressively excluded from the estimate.
-    Returns (normalized_linear, illum)."""
-    import cv2
-
-    exclude = _saturation(lin) > 0.15  # seed: only obvious chromatic plates
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    illum = None
-    norm = lin
-    for _ in range(n_iter):
-        illum = estimate_illumination(lin, exclude)
-        norm = np.clip(lin / illum, 0, 4)
-        dev = np.abs(norm - 1.0).max(axis=2)
-        nonpaper = ((dev > 0.10) | (_saturation(norm) > 0.12)).astype(np.uint8)
-        nonpaper = cv2.dilate(nonpaper, k)
-        exclude = nonpaper > 0
+def normalize_illumination(lin: np.ndarray):
+    """Divide out the robustly-estimated paper illumination. Paper -> ~1.0;
+    plates brighter than paper stay ABOVE 1.0 (not clamped) so their true color
+    survives into sampling and the fit. Returns (normalized_linear, illum)."""
+    illum = estimate_illumination(lin)
+    norm = np.maximum(lin / illum, 0.0)  # no upper clamp: keep >1.0 highlights
     return norm, illum
 
 
@@ -665,27 +662,40 @@ def identify_and_orient(plates: list[DetectedPlate], manifest: Manifest):
 
 
 def corrected_filaments(assignments, manifest: Manifest):
-    """Average each filament's measured pure-endpoint color across the plates it
-    appears on -> corrected linear color; report cross-plate spread (sRGB)."""
-    acc: dict[str, list[np.ndarray]] = {l: [] for l in manifest.filaments}
+    """Aggregate each filament's measured pure-endpoint color across the plates it
+    appears on into a corrected linear color.
+
+    The aggregate is the per-channel MEDIAN across plates, not the mean: a glossy
+    plate photographed at a bad angle inflates one endpoint (Black's spread across
+    its three plates can be ~27 sRGB from sheen), and the median rejects that
+    outlier where the mean would smear it. Per-plate endpoint colors, the spread,
+    and a per-channel clipped flag (linear > 1: brighter than the paper-white
+    reference, so the display hex saturates but the stored linear value is honest)
+    are all surfaced so a disagreement is visible rather than hidden."""
+    acc: dict[str, list[tuple[str, np.ndarray]]] = {l: [] for l in manifest.filaments}
     for a in assignments:
         if a is None:
             continue
-        acc[a["endpointA_label"]].append(a["oriented_sections_lin"][0])
-        acc[a["endpointB_label"]].append(a["oriented_sections_lin"][SECTIONS - 1])
+        acc[a["endpointA_label"]].append(("+".join(a["pair"]), a["oriented_sections_lin"][0]))
+        acc[a["endpointB_label"]].append(("+".join(a["pair"]), a["oriented_sections_lin"][SECTIONS - 1]))
     out = {}
     for lbl, vals in acc.items():
         if not vals:
             continue
-        v = np.array(vals)
-        mean_lin = v.mean(axis=0)
+        v = np.array([c for _, c in vals])
+        med_lin = np.median(v, axis=0)
         srgb = linear_to_srgb(v) * 255.0
         spread = float(np.sqrt((srgb.var(axis=0)).mean())) if len(v) > 1 else 0.0
         out[lbl] = {
-            "hex": linear_to_hex(mean_lin),
-            "linear": mean_lin,
+            "hex": linear_to_hex(med_lin),
+            "linear": med_lin,
             "spread_srgb": spread,
             "n": len(v),
+            "clipped": [bool(c) for c in (med_lin > 1.0)],
+            "per_plate": [
+                {"pair": key, "hex": linear_to_hex(c), "linear": [round(float(x), 4) for x in c]}
+                for key, c in vals
+            ],
         }
     return out
 
@@ -739,7 +749,22 @@ def fit_ell_for_pairs(assignments, corrected, manifest: Manifest, aniso: bool):
         else:
             fits[key] = {"ell_mm": float(sol.x[0]), "residual_rms_lin": rms}
 
-    resid = build_residual(valid, aniso)
+    # Robust global fit: reject per-pair ℓ outliers (MAD) before pooling, so a
+    # pair whose ramp the additive model can't fit — bright+bright pairs mix more
+    # subtractively than the model and rail ℓ to a bound — doesn't drag the global
+    # estimate. The well-constrained pairs (a translucent filament bleeding into a
+    # dark one) agree tightly; those carry the fit.
+    def key_ell(v):
+        return v.get("ell_x_mm", v.get("ell_mm"))
+
+    ells = np.array([key_ell(fits["+".join(a["pair"])]) for a in valid])
+    med = float(np.median(ells))
+    mad = 1.4826 * float(np.median(np.abs(ells - med))) + 1e-6
+    inlier = np.abs(ells - med) < max(3 * mad, 0.05)
+    excluded = ["+".join(a["pair"]) for a, ok in zip(valid, inlier) if not ok]
+    pooled = [a for a, ok in zip(valid, inlier) if ok] or valid
+
+    resid = build_residual(pooled, aniso)
     x0 = [0.3, 0.3] if aniso else [0.3]
     lo = [1e-3, 1e-3] if aniso else [1e-3]
     hi = [5.0, 5.0] if aniso else [5.0]
@@ -749,6 +774,8 @@ def fit_ell_for_pairs(assignments, corrected, manifest: Manifest, aniso: bool):
         glob = {"ell_x_mm": float(sol.x[0]), "ell_z_mm": float(sol.x[1]), "residual_rms_lin": grms}
     else:
         glob = {"ell_mm": float(sol.x[0]), "residual_rms_lin": grms}
+    glob["n_pairs_used"] = len(pooled)
+    glob["excluded_pairs"] = excluded
     return fits, glob
 
 
@@ -835,7 +862,14 @@ def run_analysis(photo_path: str, manifest_path: str, out_dir: str, aniso: bool)
     fits, glob = fit_ell_for_pairs(assignments, corrected, manifest, aniso)
 
     result["corrected_filaments"] = {
-        lbl: {"hex": d["hex"], "spread_srgb": d["spread_srgb"], "n_measurements": d["n"]}
+        lbl: {
+            "hex": d["hex"],
+            "linear": [round(float(x), 4) for x in d["linear"]],
+            "spread_srgb": round(d["spread_srgb"], 1),
+            "n_measurements": d["n"],
+            "clipped_channels": d["clipped"],
+            "per_plate": d["per_plate"],
+        }
         for lbl, d in corrected.items()
     }
     result["per_pair_ell"] = fits
@@ -927,12 +961,16 @@ def generate_synthetic(manifest: Manifest, ell_true: float, seed: int,
         base = hex_to_linear(manifest.filaments[l].hex)
         nudge = 1.0 + rng.uniform(-0.06, 0.06, size=3)
         true_lin[l] = np.clip(base * nudge, 0, 1)
+    # Paper is a mid off-white (linear ~0.6), DARKER than the Cold White plate —
+    # so at least one plate is brighter than paper and normalizes to >1.0. This
+    # reproduces the real-photo regime the earlier all-white-paper scene missed.
+    paper_lin = np.array([0.63, 0.60, 0.57])
 
     # Slots must exceed a rotated plate's diagonal (~906px) in BOTH dimensions so
     # plates never overlap or merge into one component.
     slot_w, slot_h = 980, 980
     canvas_w, canvas_h = slot_w * 3, slot_h * 2
-    canvas = np.ones((canvas_h, canvas_w, 3))  # white paper (linear)
+    canvas = np.ones((canvas_h, canvas_w, 3)) * paper_lin  # off-white paper (linear)
 
     placements = []
     for pi, spec in enumerate(manifest.plates):
@@ -976,7 +1014,13 @@ def generate_synthetic(manifest: Manifest, ell_true: float, seed: int,
     srgb = cv2.GaussianBlur(srgb, (0, 0), sigmaX=1.2)
     srgb = srgb + rng.normal(0, 0.006, srgb.shape)
     photo = np.clip(np.round(srgb * 255.0), 0, 255).astype(np.uint8)
-    truth = {"ell_true": ell_true, "colors_lin": true_lin, "placements": placements, "aniso_z": aniso_z}
+    truth = {
+        "ell_true": ell_true,
+        "colors_lin": true_lin,
+        "paper_lin": paper_lin,
+        "placements": placements,
+        "aniso_z": aniso_z,
+    }
     return photo, truth
 
 
@@ -1016,14 +1060,21 @@ def run_selftest(aniso: bool, ell_true: float, seed: int) -> int:
     check("detected 6 plates", res["n_plates_detected"] == 6, f"(got {res['n_plates_detected']})")
     check("identified 6 plates", res.get("n_plates_identified") == 6, f"(got {res.get('n_plates_identified')})")
 
-    # Hex recovery: corrected vs true printed color, in sRGB byte space.
-    max_hex_err = 0.0
+    # Recovery is checked in paper-NORMALIZED linear space: the analysis divides
+    # out paper, so the recoverable ground truth is true_lin / paper_lin. Checking
+    # linear (not clipped hex) also verifies brighter-than-paper values (>1.0)
+    # survive instead of being clamped.
+    paper = truth["paper_lin"]
+    max_lin_err = 0.0
+    any_over_one = False
     for lbl, d in res.get("corrected_filaments", {}).items():
-        rec = np.array([int(d["hex"][i : i + 2], 16) for i in (1, 3, 5)])
-        true_srgb = linear_to_srgb_byte(truth["colors_lin"][lbl]).astype(float)
-        err = np.abs(rec - true_srgb).max()
-        max_hex_err = max(max_hex_err, err)
-    check("hex recovery < 10 (sRGB)", max_hex_err < 10.0, f"(max |Δ|={max_hex_err:.1f})")
+        rec = np.array(d["linear"])
+        norm_truth = truth["colors_lin"][lbl] / paper
+        any_over_one = any_over_one or bool((norm_truth > 1.02).any())
+        max_lin_err = max(max_lin_err, float(np.abs(rec - norm_truth).max()))
+    check("linear recovery < 0.05 (paper-normalized)", max_lin_err < 0.05, f"(max |Δ|={max_lin_err:.3f})")
+    check("a plate is brighter than paper (>1.0 carried)", any_over_one,
+          "(Cold White should normalize above 1.0)")
 
     # ℓ recovery.
     glob = res.get("global_ell", {})
