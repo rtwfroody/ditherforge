@@ -33,15 +33,16 @@ palette) is a 90×10×2 mm bar with nine 10 mm sections at B-fraction
 4. **Fits (γ, ℓ)** — jointly across all six pairs, in manufacturer-anchored
    space, by forward-simulating the pipeline's own neighbor-blend model
    (`voxel.EffectiveCellColors`: β = 10^(−ℓ/TD), two Jacobi passes, 26-connected
-   area-weighted blend — ported faithfully) run in the **power-law domain**
-   `f(c)=c^γ` on the known Bayer pattern at each section's **realized** coverage.
-   Reports the global `(γ, ℓ)`, the additive `γ=1` best-ℓ baseline for comparison,
-   per-pair residuals under the global fit, and a per-pair ℓ refit at the global γ.
+   area-weighted blend — ported faithfully) on the known Bayer pattern at each
+   section's **realized** coverage. Several **candidate mixing models** (below)
+   are fit and compared by leave-one-pair-out cross-validation; the winning
+   model, its parameters, per-pair residuals and the additive baseline are all
+   reported.
 
-Outputs a JSON (global & per-pair fit, additive baseline, manufacturer hexes,
-photo-absolute endpoints as a labeled diagnostic with per-plate values, per-plate
-per-section measured colors) and a `ramp_fits.png` of anchored measured vs modeled
-curves, into the output directory.
+Outputs a JSON (candidate comparison + winner, manufacturer hexes, photo-absolute
+endpoints as a labeled diagnostic with per-plate values, per-plate per-section
+measured colors) and a `ramp_fits.png` of the anchored measured vs the winning
+model's curves, into the output directory.
 
 ### Manufacturer-anchored fit (`--anchor mfg`, default)
 
@@ -54,30 +55,61 @@ manufacturer palette hexes:
 This cancels white balance, flare, paper color and per-plate black gloss (each
 plate's black maps to manufacturer black regardless of sheen), leaving only the
 relative mixing shape. A channel whose endpoints barely differ (`|mB − mA|` below
-a contrast threshold — e.g. Cold White + Orange in red) would divide by ~0, so it
-is dropped from that plate's residual. `--anchor photo` restores the older
-photo-absolute behavior (trusting the phone's colors).
+a contrast threshold) would divide by ~0, so it is dropped from that plate's
+residual. `--anchor photo` restores the older photo-absolute behavior.
 
-### Power-law mixing domain (γ)
+### Candidate mixing models
 
-Spatial averaging of the fine speckle by camera/eye is additive in linear light,
-so the **section average stays linear**. The subtractive behavior lives in the
-per-cell effective colors: the neighbor Jacobi blend (same β, same self-ref-C0)
-runs in `f(c)=c^γ`, then `f⁻¹` per cell, then cells are averaged linearly.
-`γ=1` is the exact additive model (regression-guarded bit-for-bit); `γ→0`
-approaches geometric / optical-density mixing; `γ<0` (allowed in the extended
-fit) biases a mix toward its darker member. `c` is floored at `1e-4` before `f`
-so `γ≤0` stays finite.
+All are **local per-cell rules** on the neighbor graph with **per-filament**
+parameters only (no per-pair free parameters), so the winner ports to
+`voxel.EffectiveCellColors`. Section averaging always stays linear; only the
+per-cell blend changes:
 
-### Model adequacy (open question)
+| model | params | idea |
+|---|---|---|
+| `additive` | ℓ | the current Go model (β=10^(−ℓ/TD)). Regression baseline. |
+| `global_gamma` | ℓ, γ | power-mean domain `f(c)=c^γ`, uniform γ. |
+| `td_gamma` | ℓ, a, b | per-cell `γ_i = clamp(a + b·log10(TD_i))`. |
+| `transmittance` | ℓ, κ | neighbor light filtered by the cell's own hue `T_i=(C0_i/max)^κ`, applied to the neighbor's *deviation* from C0 (κ=0 → additive). |
+| `transmittance_shadow` | ℓ, κ, s | + interface micro-shadowing `×(1−s·u_i)`. |
+| `td_gamma_shadow` | ℓ, a, b, s | + micro-shadowing on `td_gamma`. |
 
-On the real print the subtractive domain **helps but does not fully fit**: the
-global γ rails to the lower bound (the data want the most-subtractive end; the
-extended fit lands at γ<0), the residual improves ~25 % over additive, and all
-six pairs now participate — but the two bright + bright pairs (Cold White +
-Orange especially) still misfit, and the per-pair ℓ refit at the global γ spreads
-widely. A single global `(γ, ℓ)` is therefore an improvement, not the final word;
-the residual pattern points at a per-pair or TD-dependent γ.
+The **transmittance** filter deliberately acts on the neighbor's deviation from
+the cell's own color (not the raw neighbor sum): a uniform patch then reads as its
+own color, so the anchored endpoints stay on the manufacturer hexes — the literal
+`(1−β)C + β·T∘nbAvg` form self-filters pure patches and its endpoint shift fights
+the anchoring, pinning κ→0.
+
+### Model selection & result
+
+Candidates are ranked by **leave-one-pair-out cross-validation** (fit on 5 pairs,
+evaluate the held-out one, all 6 rotations, mean held-out RMS — the primary
+criterion on a 6-pair dataset), with a **parsimony rule**: among models within a
+small LOO margin of the best, take the fewest parameters. On the real print:
+
+| model | #p | in-sample RMS | LOO RMS | LOO worst |
+|---|---|---|---|---|
+| additive | 1 | 0.109 | 0.117 | 0.217 |
+| global_gamma | 2 | 0.068 | 0.077 | 0.120 |
+| td_gamma | 3 | 0.066 | 0.074 | 0.118 |
+| **transmittance** | **2** | **0.070** | **0.069** | **0.097** |
+| transmittance_shadow | 3 | 0.066 | 0.072 | 0.105 |
+| td_gamma_shadow | 4 | 0.058 | 0.067 | 0.099 |
+
+**Winner: `transmittance` (ℓ≈0.13 mm, κ≈3.0).** It halves the additive residual,
+has the best (lowest) held-out worst-case, and — critically — **Cold White +
+Orange finally fits** (0.066, was the worst pair at ~0.12 under global-γ); the
+per-pair residual spread collapses to 0.046–0.097. Micro-shadowing (candidate 3)
+does **not** robustly earn its parameter: it *hurts* the transmittance model's
+LOO (0.069 → 0.072). `td_gamma_shadow` edges the raw LOO but needs 4 parameters
+for a marginal gain, so parsimony picks transmittance. **Recommendation: port the
+transmittance filter to `voxel.EffectiveCellColors`.**
+
+Residual structure the family still can't fully express: `Black+Orange` becomes
+the hardest pair under transmittance (0.097) — a very-translucent-over-opaque mix
+whose measured mids sit far below any endpoint blend (−0.54 linear); a
+TD-dependent κ (κ growing with the translucent filament's TD) is the natural next
+refinement.
 
 ## Invocation
 
@@ -102,12 +134,17 @@ is the open question the mode exists to explore.
 ## Self-test
 
 `--selftest` renders synthetic "photos" of all six plates from the *manufacturer*
-colors through the *same* forward model at a known injected `(γ, ℓ)`, applies a
-per-plate per-channel affine distortion (WB/gloss) that anchoring must invert,
-plus random pose on off-white paper (with a Cold White plate **brighter** than
-the paper), a lighting gradient, blur and sensor noise. It then asserts: the
-plates are detected/identified/oriented, `γ` and `ℓ` are recovered within
-tolerance, the subtractive residual beats the additive baseline, a
-brighter-than-paper value survives unclamped, and — as a regression guard — the
-`γ=1` path reproduces the additive forward model bit-for-bit. Set
-`SWATCHPHOTO_DEBUG=1` to print per-component detection diagnostics to stderr.
+colors through a *known* candidate model, applies a per-plate per-channel affine
+distortion (WB/gloss) that anchoring must invert, plus random pose on off-white
+paper (with a Cold White plate **brighter** than the paper), a lighting gradient,
+blur and sensor noise. It runs two scenes and asserts, in each, that the plates
+are detected/identified/oriented and the injected parameters are recovered:
+
+- a `(γ, ℓ)` scene → `global_gamma` recovers `γ` and `ℓ`, and its residual beats
+  the additive baseline; a brighter-than-paper value survives unclamped;
+- a `(κ, ℓ)` scene → `transmittance` recovers `κ` and `ℓ` (this is why the
+  synthetic generator is model-parameterized).
+
+Plus a regression guard that the `γ=1` path reproduces the additive forward model
+bit-for-bit against an independent reference. Set `SWATCHPHOTO_DEBUG=1` to print
+per-component detection diagnostics to stderr.

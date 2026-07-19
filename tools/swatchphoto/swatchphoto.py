@@ -36,12 +36,24 @@ measured endpoints are affine-mapped onto the manifest's manufacturer hexes and
 only the RELATIVE mixing shape is fit; the photo-absolute colors are kept as a
 labeled diagnostic. --anchor photo restores the old photo-absolute behavior.
 
-POWER-LAW MIXING (global γ): the per-cell neighbor blend runs in the domain
-f(c)=c^γ (subtractive when γ<1), while section averaging of the fine speckle
-stays LINEAR (as camera/eye do). The global (γ, ℓ) is fit jointly across all six
-pairs; γ=1 is the exact additive model (regression-guarded bit-for-bit).
+CANDIDATE MIXING MODELS: the additive blend can't express the printed speckle's
+subtractive darkening, so several refinements are fit and compared (each a LOCAL
+per-cell rule with per-FILAMENT parameters only, so the winner can port to
+voxel.EffectiveCellColors). Section averaging always stays LINEAR (camera/eye);
+only the per-cell mixing changes:
+  additive            (ℓ)        : the current Go model. γ=1 regression baseline.
+  global_gamma        (ℓ, γ)     : power-mean domain f(c)=c^γ, uniform γ.
+  td_gamma            (ℓ, a, b)  : per-cell γ_i = clamp(a + b·log10(TD_i)).
+  transmittance       (ℓ, κ)     : neighbor light filtered by the cell's own hue,
+                                   T_i=(C0_i/max)^κ, applied to the neighbor's
+                                   deviation from C0 (κ=0 → additive).
+  transmittance_shadow(ℓ, κ, s)  : + interface micro-shadowing ×(1−s·u_i).
+  td_gamma_shadow     (ℓ, a,b,s) : + micro-shadowing on td_gamma.
+Ranked by LEAVE-ONE-PAIR-OUT cross-validation (primary), with a parsimony rule
+(fewest params within a small LOO margin of the best). γ=1 / additive is
+regression-guarded bit-for-bit.
 
-The forward blend model is ported faithfully from the Go source:
+The base blend model is ported faithfully from the Go source:
   internal/voxel/td_layered.go   (EffectiveCellColors: 2 Jacobi passes)
   internal/palette/td.go         (NeighborLeak: β = 10^(−ℓ/TD), clamps)
   internal/voxel/color.go        (BuildNeighbors: 26-conn weights 1.0/0.1/0.01)
@@ -62,6 +74,7 @@ a real photo exists.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import sys
@@ -249,6 +262,97 @@ for _dr in (-1, 0, 1):
         _OFFSETS.append((_dr, _dc, _w))
 
 
+GAMMA_CLAMP = (-3.0, 1.5)  # per-cell γ is clamped to this range
+
+
+def _cell_area(geom: Geom, rows: int, cols: int) -> np.ndarray:
+    return np.maximum(np.broadcast_to((geom.row_heights() * geom.block_width_mm)[:, None], (rows, cols)), 1e-6)
+
+
+def _unlike_fraction(pattern: np.ndarray, area: np.ndarray) -> np.ndarray:
+    """Per cell, the fraction of its neighbor weight (weight × area_j) that belongs
+    to cells of the OTHER filament — the local unlike-interface density that
+    candidate 3's micro-shadowing scales with. Depends only on the pattern."""
+    patf = pattern.astype(np.float64)
+    uw = np.zeros(pattern.shape)
+    tw = np.zeros(pattern.shape)
+    for dr, dc, w in _OFFSETS:
+        npat, valid = _shift(patf, dr, dc)
+        narea, _ = _shift(area, dr, dc)
+        wij = w * narea * valid
+        tw += wij
+        uw += wij * ((npat != patf) & valid)
+    return uw / np.maximum(tw, 1e-9)
+
+
+def _blend_gamma(c0_lin, beta, area, gamma_grid, iterations):
+    """Candidate 1 / power-mean core. Per cell i the neighbor blend runs in that
+    cell's OWN domain f_i(c) = c^{γ_i}: read neighbors in linear, raise to γ_i,
+    weighted-mean, blend with the (1−β) self term (also in γ_i-space, self = C0),
+    then invert per cell. The running state stays LINEAR, so the rule is purely
+    local — each cell only ever needs its neighbors' linear colors and its own γ_i.
+    Uniform γ_i reproduces the global power-mean model."""
+    rows, cols = c0_lin.shape[:2]
+    g = gamma_grid[..., None]
+    lo, hi = 1e-4, 1e-6
+    cf_self = np.maximum(c0_lin, lo) ** g
+    cur = c0_lin.copy()
+    for _ in range(iterations):
+        wsum = np.zeros((rows, cols))
+        ssum = np.zeros((rows, cols, 3))
+        for dr, dc, w in _OFFSETS:
+            nv, valid = _shift(cur, dr, dc)
+            narea, _ = _shift(area, dr, dc)
+            wij = w * narea * valid
+            wsum += wij
+            ssum += wij[..., None] * (np.maximum(nv, lo) ** g)
+        active = (wsum > 0) & (beta > 0)
+        mean = np.zeros_like(ssum)
+        nz = wsum > 0
+        mean[nz] = ssum[nz] / wsum[nz][..., None]
+        cf = (1.0 - beta)[..., None] * cf_self + beta[..., None] * mean
+        blended = np.maximum(cf, hi) ** (1.0 / g)
+        cur = np.where(active[..., None], blended, c0_lin)
+    return cur
+
+
+def _blend_transmittance(c0_lin, beta, area, kappa, iterations):
+    """Candidate 2 core (linear domain). Neighbor light returning to cell i passes
+    through cell i's translucent body and is filtered by its per-channel
+    transmittance color T_i. We filter the neighbor's DEVIATION from the cell's own
+    color (not the raw neighbor sum):
+
+        effective_i = C0_i + β_i · ( T_i ∘ (nbAvg_i − C0_i) ),   T_i,c = (C0_i,c / max_c C0_i,c)^κ
+
+    κ=0 → T_i = 1 → the additive model (1−β)C0 + β·nbAvg exactly. Filtering the
+    deviation (rather than the literal (1−β)C0 + β·T∘nbAvg) keeps a UNIFORM patch
+    at its own color — essential so the anchored endpoints (sections 0 and 8) stay
+    on the manufacturer hexes; the literal form self-filters pure patches and its
+    endpoint shift fights the affine anchoring, pinning κ→0. Larger κ still tints
+    cross-color neighbor light by the cell's hue, so orange next to white keeps its
+    saturated low green/blue instead of washing out — an asymmetry no scalar γ has."""
+    rows, cols = c0_lin.shape[:2]
+    maxc = np.maximum(c0_lin.max(axis=2, keepdims=True), 1e-6)
+    T = (c0_lin / maxc) ** kappa  # (rows,cols,3)
+    cur = c0_lin.copy()
+    for _ in range(iterations):
+        wsum = np.zeros((rows, cols))
+        ssum = np.zeros((rows, cols, 3))
+        for dr, dc, w in _OFFSETS:
+            nv, valid = _shift(cur, dr, dc)
+            narea, _ = _shift(area, dr, dc)
+            wij = w * narea * valid
+            wsum += wij
+            ssum += wij[..., None] * nv
+        active = (wsum > 0) & (beta > 0)
+        nbAvg = np.zeros_like(ssum)
+        nz = wsum > 0
+        nbAvg[nz] = ssum[nz] / wsum[nz][..., None]
+        blended = c0_lin + beta[..., None] * (T * (nbAvg - c0_lin))
+        cur = np.where(active[..., None], blended, c0_lin)
+    return cur
+
+
 def effective_cell_colors(
     pattern: np.ndarray,
     colA_lin: np.ndarray,
@@ -260,89 +364,85 @@ def effective_cell_colors(
     ell_z: float | None = None,
     iterations: int = BLEED_ITERATIONS,
     gamma: float = 1.0,
+    gamma_ab: tuple | None = None,
+    kappa: float | None = None,
+    shadow_s: float = 0.0,
 ) -> np.ndarray:
     """Return (rows, cols, 3) linear-light per-cell simulated colors.
 
-    Faithful port of voxel.EffectiveCellColors: C_{t+1}(i) = (1−β)·C0(i) +
-    β·(Σ_j w_ij·C_t(j))/(Σ_j w_ij), self term always C0, w_ij = weight ×
-    max(area_j, ε), 2 passes.
+    Base is the faithful port of voxel.EffectiveCellColors: C_{t+1}(i) =
+    (1−β)·C0(i) + β·(Σ_j w_ij·C_t(j))/(Σ_j w_ij), self term always C0, w_ij =
+    weight × max(area_j, ε), β = 10^(−ℓ/TD), 2 passes, LINEAR light. Callers
+    average the returned per-cell linear colors, so spatial averaging of the fine
+    speckle stays additive (as camera/eye do). γ=1, no gamma_ab/kappa/shadow is the
+    exact additive model, bit-for-bit.
 
-    The per-cell blend runs in the power-law domain f(c) = c^γ (endpoints ->
-    f-space, exact same Jacobi math, then f⁻¹ per cell), then callers average the
-    returned per-cell LINEAR colors — so spatial averaging of the fine speckle
-    stays additive in linear light (as camera/eye do) while the per-cell mixing is
-    subtractive. γ=1 is the exact additive model (identity transform, bit-for-bit).
-    γ→0 approaches geometric/optical-density mixing; γ<0 (harmonic-mean side)
-    biases a mix toward its darker member. c is floored at 1e-4 before f (and the
-    blend result at 1e-6 before f⁻¹) so γ≤0 stays finite.
+    Candidate refinements (each a LOCAL per-cell rule on the neighbor graph, with
+    per-FILAMENT parameters only, so the winner can port to Go):
+      gamma / gamma_ab : power-mean domain (candidate 1). gamma is a uniform
+        exponent; gamma_ab=(a,b) makes it per-cell γ_i = clamp(a + b·log10(TD_i))
+        so translucency sets how subtractive the cell mixes. See _blend_gamma.
+      kappa            : transmittance-filtered neighbor term (candidate 2, linear
+        domain). See _blend_transmittance.
+      shadow_s         : interface micro-shadowing (candidate 3), a post-multiply
+        effective_i *= (1 − s·u_i) with u_i the unlike-neighbor weight fraction —
+        combinable with either base.
 
-    Isotropic when ell_z is None or == ell_x (single β per cell, exactly the Go
-    form). Anisotropic (ell_z != ell_x) uses a direction-dependent leak — an
-    algebraic generalization that collapses to the Go form when ell_x == ell_z:
-    C_{t+1}(i) = C0(i) + (Σ_j w_ij·β_dir·(C_t(j)−C0(i)))/(Σ_j w_ij), with
-    β_dir = 10^(−ℓ_dir/TD), ℓ_dir = ell_x (in-column X neighbor), ell_z (in-row
-    Z neighbor), hypot(ell_x, ell_z) (diagonal). The layer-tall rows were
-    designed to probe vertical bleed the single-ℓ model can't separate."""
+    Anisotropy (ell_z != ell_x, additive only) keeps the direction-dependent leak
+    for the exploratory --anisotropic mode."""
     rows, cols = pattern.shape
     aniso = ell_z is not None and abs(ell_z - ell_x) > 1e-12
     if ell_z is None:
         ell_z = ell_x
 
-    c0_lin = np.where(pattern[..., None] == 1, colB_lin[None, None, :], colA_lin[None, None, :])
-    c0_lin = c0_lin.astype(np.float64)
-    # Blend domain: γ=1 is the linear (additive) domain, unchanged bit-for-bit.
-    use_gamma = abs(gamma - 1.0) > 1e-12
-    c0 = np.maximum(c0_lin, 1e-4) ** gamma if use_gamma else c0_lin
-
+    c0_lin = np.where(pattern[..., None] == 1, colB_lin[None, None, :], colA_lin[None, None, :]).astype(np.float64)
     td_grid = np.where(pattern == 1, tdB, tdA).astype(np.float64)
-    # per-cell isotropic β (used in the exact Go form)
     beta_iso = neighbor_leak_grid(td_grid, ell_x)
-    # Precompute the (at most 3) direction-dependent β grids once for anisotropy.
-    beta_by_dir = {}
-    if aniso:
-        for ell_dir in {ell_x, ell_z, math.hypot(ell_x, ell_z)}:
-            beta_by_dir[ell_dir] = neighbor_leak_grid(td_grid, ell_dir)
+    area = _cell_area(geom, rows, cols)
 
-    area_row = geom.row_heights() * geom.block_width_mm  # (rows,)
-    area = np.maximum(np.broadcast_to(area_row[:, None], (rows, cols)), 1e-6)
-
-    cur = c0.copy()
-    for _ in range(iterations):
-        wsum = np.zeros((rows, cols), dtype=np.float64)
-        ssum = np.zeros((rows, cols, 3), dtype=np.float64)  # Σ w·cur (iso) or Σ w·β·(cur−c0) (aniso)
-        for dr, dc, w in _OFFSETS:
-            nv, valid = _shift(cur, dr, dc)
-            narea, _ = _shift(area, dr, dc)
-            wij = w * narea * valid  # (rows,cols)
-            wsum += wij
-            if not aniso:
-                ssum += wij[..., None] * nv
-            else:
-                if dr != 0 and dc != 0:
-                    ell_dir = math.hypot(ell_x, ell_z)
-                elif dc != 0:
-                    ell_dir = ell_x
-                else:
-                    ell_dir = ell_z
-                beta_dir = beta_by_dir[ell_dir]
-                ssum += (wij * beta_dir)[..., None] * (nv - c0)
-
-        nxt = c0.copy()
-        if not aniso:
-            active = (wsum > 0) & (beta_iso > 0)
-            mean = np.zeros_like(ssum)
-            nz = wsum > 0
-            mean[nz] = ssum[nz] / wsum[nz][..., None]
-            blended = (1.0 - beta_iso)[..., None] * c0 + beta_iso[..., None] * mean
-            nxt = np.where(active[..., None], blended, c0)
+    if kappa is not None:
+        cur = _blend_transmittance(c0_lin, beta_iso, area, kappa, iterations)
+    elif gamma_ab is not None or abs(gamma - 1.0) > 1e-12:
+        if gamma_ab is not None:
+            a, b = gamma_ab
+            gg = np.clip(a + b * np.log10(td_grid), GAMMA_CLAMP[0], GAMMA_CLAMP[1])
         else:
-            nz = wsum > 0
-            add = np.zeros_like(ssum)
-            add[nz] = ssum[nz] / wsum[nz][..., None]
-            nxt = c0 + add
-        cur = nxt
-    if use_gamma:
-        return np.maximum(cur, 1e-6) ** (1.0 / gamma)
+            gg = np.full((rows, cols), gamma)
+        cur = _blend_gamma(c0_lin, beta_iso, area, gg, iterations)
+    else:
+        # Additive (and anisotropic) core — bit-identical to the original.
+        beta_by_dir = {}
+        if aniso:
+            for ell_dir in {ell_x, ell_z, math.hypot(ell_x, ell_z)}:
+                beta_by_dir[ell_dir] = neighbor_leak_grid(td_grid, ell_dir)
+        cur = c0_lin.copy()
+        for _ in range(iterations):
+            wsum = np.zeros((rows, cols))
+            ssum = np.zeros((rows, cols, 3))
+            for dr, dc, w in _OFFSETS:
+                nv, valid = _shift(cur, dr, dc)
+                narea, _ = _shift(area, dr, dc)
+                wij = w * narea * valid
+                wsum += wij
+                if not aniso:
+                    ssum += wij[..., None] * nv
+                else:
+                    ell_dir = math.hypot(ell_x, ell_z) if (dr and dc) else (ell_x if dc else ell_z)
+                    ssum += (wij * beta_by_dir[ell_dir])[..., None] * (nv - c0_lin)
+            if not aniso:
+                active = (wsum > 0) & (beta_iso > 0)
+                mean = np.zeros_like(ssum)
+                nz = wsum > 0
+                mean[nz] = ssum[nz] / wsum[nz][..., None]
+                cur = np.where(active[..., None], (1.0 - beta_iso)[..., None] * c0_lin + beta_iso[..., None] * mean, c0_lin)
+            else:
+                nz = wsum > 0
+                add = np.zeros_like(ssum)
+                add[nz] = ssum[nz] / wsum[nz][..., None]
+                cur = c0_lin + add
+
+    if shadow_s > 0:
+        cur = cur * (1.0 - shadow_s * _unlike_fraction(pattern, area))[..., None]
     return cur
 
 
@@ -367,11 +467,14 @@ def section_colors_from_grid(grid_lin: np.ndarray, geom: Geom,
 
 
 def model_section_curve(covA_lin, covB_lin, tdA, tdB, section_coverage, geom,
-                        ell_x, ell_z=None, gamma=1.0) -> np.ndarray:
-    """Full forward model: pattern -> per-cell blend in the γ domain -> per-section
-    centre colors (9,3), averaged LINEARLY."""
+                        ell_x, ell_z=None, gamma=1.0, gamma_ab=None, kappa=None,
+                        shadow_s=0.0) -> np.ndarray:
+    """Full forward model: pattern -> per-cell blend -> per-section centre colors
+    (9,3), averaged LINEARLY. Extra kwargs select the candidate mixing model
+    (see effective_cell_colors)."""
     pattern = build_pattern(section_coverage, geom)
-    grid = effective_cell_colors(pattern, covA_lin, covB_lin, tdA, tdB, geom, ell_x, ell_z, gamma=gamma)
+    grid = effective_cell_colors(pattern, covA_lin, covB_lin, tdA, tdB, geom, ell_x, ell_z,
+                                 gamma=gamma, gamma_ab=gamma_ab, kappa=kappa, shadow_s=shadow_s)
     return section_colors_from_grid(grid, geom)
 
 
@@ -783,26 +886,74 @@ def _pair_fit_inputs(assignments, corrected, manifest: Manifest, anchor_mode: st
     return items
 
 
-def _resid_vec(items, geom, gamma, ell, lz=None):
-    r = []
-    for it in items:
-        model = model_section_curve(it["A"], it["B"], it["tdA"], it["tdB"], it["cov"], geom, ell, lz, gamma=gamma)
-        r.append(((model - it["target"]) * it["w"][None, :]).ravel())
-    return np.concatenate(r) if r else np.zeros(0)
-
-
 def _rms(v):
     return float(np.sqrt(np.mean(v**2))) if len(v) else float("nan")
 
 
-def fit_model(assignments, corrected, manifest: Manifest, anchor_mode: str, aniso: bool):
-    """Fit the mixing model to all identified pairs jointly.
+# Candidate mixing models. Each is a LOCAL per-cell rule on the neighbor graph with
+# per-FILAMENT parameters only (so the winner ports to voxel.EffectiveCellColors);
+# per-pair values may only arise as functions of the filaments' own TDs/colors.
+# grid = coarse per-parameter point count for the deterministic init.
+MODEL_CANDIDATES = [
+    dict(name="additive", pnames=["ell"], lo=[1e-3], hi=[5.0], grid=[10],
+         kw=lambda p: dict(ell_x=p[0])),
+    dict(name="global_gamma", pnames=["ell", "gamma"], lo=[1e-3, -2.0], hi=[5.0, 1.2], grid=[7, 8],
+         kw=lambda p: dict(ell_x=p[0], gamma_ab=(p[1], 0.0))),
+    # td_gamma warm-starts from global_gamma (a=γ, b=0), so no 3-D grid needed.
+    dict(name="td_gamma", pnames=["ell", "a", "b"], lo=[1e-3, -2.0, -1.5], hi=[5.0, 1.5, 1.5], grid=[5, 5, 5],
+         kw=lambda p: dict(ell_x=p[0], gamma_ab=(p[1], p[2])),
+         warm_from=("global_gamma", lambda q: [q[0], q[1], 0.0])),
+    dict(name="transmittance", pnames=["ell", "kappa"], lo=[1e-3, 0.0], hi=[5.0, 5.0], grid=[7, 8],
+         kw=lambda p: dict(ell_x=p[0], kappa=p[1])),
+    # +shadow candidates warm-start from their base (s=0), so no extra grid dim.
+    dict(name="transmittance_shadow", pnames=["ell", "kappa", "s"], lo=[1e-3, 0.0, 0.0], hi=[5.0, 5.0, 0.5], grid=[5, 5, 4],
+         kw=lambda p: dict(ell_x=p[0], kappa=p[1], shadow_s=p[2]),
+         warm_from=("transmittance", lambda q: [q[0], q[1], 0.0])),
+    dict(name="td_gamma_shadow", pnames=["ell", "a", "b", "s"], lo=[1e-3, -2.0, -1.5, 0.0], hi=[5.0, 1.5, 1.5, 0.5], grid=[4, 4, 4, 3],
+         kw=lambda p: dict(ell_x=p[0], gamma_ab=(p[1], p[2]), shadow_s=p[3]),
+         warm_from=("td_gamma", lambda q: [q[0], q[1], q[2], 0.0])),
+]
 
-    Isotropic (default): global (γ, ℓ) by coarse grid + least-squares polish, plus
-    the additive γ=1 best-ℓ baseline for comparison, plus per-pair residuals and a
-    per-pair ℓ refit at the global γ. If γ rails at the lower bound (0.05), an
-    extended fit allowing γ down to −2 is reported so the binding bound is honest.
-    Anisotropic: the existing additive (ℓx, ℓz) fit (γ=1), for backward-compat."""
+
+def _cand_resid(items, geom, cand, params):
+    kw = cand["kw"](params)
+    r = []
+    for it in items:
+        model = model_section_curve(it["A"], it["B"], it["tdA"], it["tdB"], it["cov"], geom, **kw)
+        r.append(((model - it["target"]) * it["w"][None, :]).ravel())
+    return np.concatenate(r) if r else np.zeros(0)
+
+
+def _fit_cand(items, geom, cand, warm=None, max_nfev=None):
+    """Deterministic fit of one candidate: coarse grid (skipped when warm-started)
+    + bounded least-squares polish. Returns (params, rms)."""
+    from scipy.optimize import least_squares
+
+    if warm is None:
+        grids = [np.linspace(lo, hi, n) for lo, hi, n in zip(cand["lo"], cand["hi"], cand["grid"])]
+        best, best_ssr = None, np.inf
+        for combo in itertools.product(*grids):
+            ssr = float(np.sum(_cand_resid(items, geom, cand, combo) ** 2))
+            if ssr < best_ssr:
+                best, best_ssr = combo, ssr
+        x0 = list(best)
+    else:
+        x0 = [min(max(v, lo), hi) for v, lo, hi in zip(warm, cand["lo"], cand["hi"])]
+    sol = least_squares(lambda p: _cand_resid(items, geom, cand, p), x0,
+                        bounds=(cand["lo"], cand["hi"]), xtol=1e-9, ftol=1e-9, max_nfev=max_nfev)
+    return list(sol.x), _rms(sol.fun)
+
+
+def fit_model(assignments, corrected, manifest: Manifest, anchor_mode: str, aniso: bool,
+              candidates=None, do_loo=True):
+    """Fit and compare candidate mixing models on the (anchored) pairs.
+
+    Anisotropic keeps the exploratory additive (ℓx, ℓz) fit. Otherwise every named
+    candidate is fit on all pairs (in-sample RMS) and, with do_loo, scored by
+    leave-one-pair-out cross-validation (fit on 5, evaluate the held-out pair, all
+    6 rotations, mean held-out RMS) — the primary ranking, robust on 6 pairs. Per-
+    pair residuals under each fit, worst pair, parameter count and bound hits are
+    reported; the winner is the lowest LOO RMS (ties -> fewer parameters)."""
     from scipy.optimize import least_squares
 
     geom = manifest.geom
@@ -811,63 +962,87 @@ def fit_model(assignments, corrected, manifest: Manifest, anchor_mode: str, anis
         return {"error": "no fittable pairs"}
 
     if aniso:  # additive (ℓx, ℓz), γ=1 — unchanged exploratory mode
-        sol = least_squares(lambda p: _resid_vec(items, geom, 1.0, p[0], p[1]),
-                            [0.3, 0.3], bounds=([1e-3, 1e-3], [5.0, 5.0]), xtol=1e-10, ftol=1e-10)
+        def aniso_resid(p):
+            r = [((model_section_curve(it["A"], it["B"], it["tdA"], it["tdB"], it["cov"], geom, p[0], p[1])
+                   - it["target"]) * it["w"][None, :]).ravel() for it in items]
+            return np.concatenate(r)
+
+        sol = least_squares(aniso_resid, [0.3, 0.3], bounds=([1e-3, 1e-3], [5.0, 5.0]), xtol=1e-10, ftol=1e-10)
         return {"anchor": anchor_mode, "aniso": True,
                 "global_fit": {"gamma": 1.0, "ell_x_mm": float(sol.x[0]), "ell_z_mm": float(sol.x[1]),
                                "residual_rms": _rms(sol.fun)}}
 
-    def fit_joint(gamma_lo):
-        # Coarse (γ, ℓ) grid for a deterministic init, then a bounded polish. The
-        # grid only has to land in the right basin; least-squares does the rest.
-        best, best_ssr = (1.0, 0.3), np.inf
-        for g in np.linspace(gamma_lo, 1.0, 9):
-            for e in np.linspace(0.03, 0.9, 11):
-                ssr = float(np.sum(_resid_vec(items, geom, g, e) ** 2))
-                if ssr < best_ssr:
-                    best, best_ssr = (g, e), ssr
-        sol = least_squares(lambda p: _resid_vec(items, geom, p[0], p[1]), list(best),
-                            bounds=([gamma_lo, 1e-3], [1.0, 5.0]), xtol=1e-10, ftol=1e-10)
-        return sol
-
-    sol = fit_joint(0.05)
-    gamma, ell = float(sol.x[0]), float(sol.x[1])
-    global_fit = {
-        "gamma": gamma, "ell_mm": ell, "residual_rms": _rms(sol.fun),
-        "gamma_at_lower_bound": gamma <= 0.05 + 1e-4,
-        "ell_at_bound": ell <= 1e-3 + 1e-5 or ell >= 5.0 - 1e-3,
-    }
-
-    # Extended γ (allow the harmonic-mean side, γ<0) when γ rails at 0.05.
-    extended = None
-    if global_fit["gamma_at_lower_bound"]:
-        sole = fit_joint(-2.0)
-        extended = {"gamma": float(sole.x[0]), "ell_mm": float(sole.x[1]), "residual_rms": _rms(sole.fun),
-                    "gamma_at_lower_bound": float(sole.x[0]) <= -2.0 + 1e-3}
-
-    # Additive baseline: γ=1, best ℓ only.
-    solb = least_squares(lambda p: _resid_vec(items, geom, 1.0, p[0]), [0.3],
-                         bounds=([1e-3], [5.0]), xtol=1e-12, ftol=1e-12)
-    additive = {"gamma": 1.0, "ell_mm": float(solb.x[0]), "residual_rms": _rms(solb.fun)}
-
-    # Per-pair: residual under the global (γ, ℓ), and ℓ refit at the global γ.
-    per_pair = {}
-    for it in items:
-        key = "+".join(it["pair"])
-        rglob = _rms(_resid_vec([it], geom, gamma, ell))
-        solp = least_squares(lambda p: _resid_vec([it], geom, gamma, p[0]), [ell],
-                             bounds=([1e-3], [5.0]), xtol=1e-12, ftol=1e-12)
-        per_pair[key] = {
-            "residual_rms_under_global": rglob,
-            "ell_refit_at_global_gamma": float(solp.x[0]),
-            "dropped_channels": [bool(x) for x in (it["w"] == 0)],
+    names = candidates or [c["name"] for c in MODEL_CANDIDATES]
+    cand_by_name = {c["name"]: c for c in MODEL_CANDIDATES}
+    results = {}
+    fitted_params = {}
+    # Iterate in registry order so a warm_from base is fit before its dependent.
+    for cand in MODEL_CANDIDATES:
+        name = cand["name"]
+        if name not in names:
+            continue
+        warm = None
+        wf = cand.get("warm_from")
+        if wf is not None and wf[0] in fitted_params:
+            warm = wf[1](fitted_params[wf[0]])
+        params, rms = _fit_cand(items, geom, cand, warm=warm)
+        fitted_params[name] = params
+        per_pair = {}
+        for it in items:
+            per_pair["+".join(it["pair"])] = _rms(_cand_resid([it], geom, cand, params))
+        worst = max(per_pair.items(), key=lambda kv: kv[1])
+        bounds_hit = {pn: bool(abs(v - lo) < 1e-6 or abs(v - hi) < 1e-4)
+                      for pn, v, lo, hi in zip(cand["pnames"], params, cand["lo"], cand["hi"])}
+        entry = {
+            "params": {pn: round(float(v), 5) for pn, v in zip(cand["pnames"], params)},
+            "n_params": len(cand["pnames"]),
+            "in_sample_rms": round(rms, 5),
+            "per_pair_rms": {k: round(v, 5) for k, v in per_pair.items()},
+            "worst_pair": [worst[0], round(worst[1], 5)],
+            "bounds_hit": bounds_hit,
         }
+        if do_loo and len(items) > 2:
+            held = []
+            for k in range(len(items)):
+                train = [it for j, it in enumerate(items) if j != k]
+                test = [items[k]]
+                # Warm-start each fold from the full-data fit (deterministic); a
+                # capped polish keeps 36 refits tractable.
+                p_tr, _ = _fit_cand(train, geom, cand, warm=params, max_nfev=40)
+                held.append(_rms(_cand_resid(test, geom, cand, p_tr)))
+            entry["loo_rms"] = round(float(np.mean(held)), 5)
+            entry["loo_worst"] = round(float(np.max(held)), 5)
+        results[name] = entry
 
-    out = {"anchor": anchor_mode, "aniso": False, "global_fit": global_fit,
-           "additive_baseline": additive, "per_pair": per_pair}
-    if extended is not None:
-        out["global_fit_extended_gamma"] = extended
-    return out
+    # Winner: parsimony rule on the LOO RMS (the primary criterion). Among all
+    # candidates within a small margin of the best held-out RMS, take the FEWEST
+    # parameters (ties -> lower LOO). A 2-param model that generalizes as well as a
+    # 4-param one is preferred — the extra freedom is overfitting, not physics.
+    winner = None
+    winner_margin = 0.006
+    if results:
+        def loo_of(n):
+            return results[n].get("loo_rms", results[n]["in_sample_rms"])
+        best_loo = min(loo_of(n) for n in results)
+        within = [n for n in results if loo_of(n) <= best_loo + winner_margin]
+        winner = min(within, key=lambda n: (results[n]["n_params"], loo_of(n)))
+
+    # Diagnostic: is any pair's mid darker than the linear mix of its (anchored)
+    # endpoints? If not, candidate 3's micro-shadowing has nothing to explain.
+    below_mix = {}
+    for it in items:
+        cov = it["cov"][:, None]
+        lin_mix = (1 - cov) * it["A"][None, :] + cov * it["B"][None, :]
+        d = (it["target"] - lin_mix)[1:SECTIONS - 1]  # interior sections
+        below_mix["+".join(it["pair"])] = round(float(d.min()), 4)  # most-negative = darkest below mix
+
+    return {
+        "anchor": anchor_mode, "aniso": False,
+        "candidates": results, "winner": winner,
+        "winner_rule": f"fewest params within {winner_margin} LOO-RMS of the best",
+        "min_interior_below_linmix": below_mix,
+        "dropped_channels": {"+".join(it["pair"]): [bool(x) for x in (it["w"] == 0)] for it in items},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -876,9 +1051,9 @@ def fit_model(assignments, corrected, manifest: Manifest, anchor_mode: str, anis
 
 
 def save_plots(assignments, corrected, manifest, fit, anchor_mode, out_dir):
-    """Measured (points) vs modeled (lines) per pair, in the fit's own space:
-    manufacturer-anchored measured curve vs the global (γ, ℓ) model, in linear
-    RGB. Dropped (low-contrast) channels are drawn faded."""
+    """Measured (points) vs modeled (lines) per pair, in the fit's space: the
+    manufacturer-anchored measured curve vs the WINNING candidate's model, in
+    linear RGB. Dropped (low-contrast) channels are drawn faded."""
     import os
 
     import matplotlib
@@ -889,12 +1064,18 @@ def save_plots(assignments, corrected, manifest, fit, anchor_mode, out_dir):
     items = _pair_fit_inputs(assignments, corrected, manifest, anchor_mode)
     if not items:
         return None
-    gf = fit.get("global_fit", {})
-    gamma = gf.get("gamma", 1.0)
-    ell = gf.get("ell_mm", 0.3)
-    lz = gf.get("ell_z_mm")
-    if lz is not None:
-        ell = gf.get("ell_x_mm", ell)
+
+    if fit.get("aniso"):
+        gf = fit["global_fit"]
+        kw = dict(ell_x=gf["ell_x_mm"], ell_z=gf["ell_z_mm"])
+        label = f"aniso γ=1 ℓx={gf['ell_x_mm']:.3f} ℓz={gf['ell_z_mm']:.3f}"
+    else:
+        winner = fit.get("winner")
+        cand = next(c for c in MODEL_CANDIDATES if c["name"] == winner)
+        e = fit["candidates"][winner]
+        params = [e["params"][pn] for pn in cand["pnames"]]
+        kw = cand["kw"](params)
+        label = f"{winner}: " + ", ".join(f"{pn}={v:g}" for pn, v in e["params"].items())
 
     ncol = 3
     nrow = int(math.ceil(len(items) / ncol))
@@ -902,8 +1083,7 @@ def save_plots(assignments, corrected, manifest, fit, anchor_mode, out_dir):
     xs = np.linspace(0, 1, SECTIONS)
     for idx, it in enumerate(items):
         ax = axes[idx // ncol][idx % ncol]
-        modeled = model_section_curve(it["A"], it["B"], it["tdA"], it["tdB"], it["cov"],
-                                      manifest.geom, ell, lz, gamma=gamma)
+        modeled = model_section_curve(it["A"], it["B"], it["tdA"], it["tdB"], it["cov"], manifest.geom, **kw)
         for ch, cname in zip(range(3), ("r", "g", "b")):
             alpha = 1.0 if it["w"][ch] > 0 else 0.25
             ax.plot(xs, it["target"][:, ch], "o", color=cname, ms=4, alpha=alpha)
@@ -914,10 +1094,7 @@ def save_plots(assignments, corrected, manifest, fit, anchor_mode, out_dir):
         ax.set_ylim(0, max(1.05, float(np.max([it["A"], it["B"]])) + 0.05))
     for j in range(len(items), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
-    title = f"Measured (o) vs modeled (—) [{anchor_mode}-anchored] — γ={gamma:.3f}, ℓ={ell:.3f}mm"
-    if lz is not None:
-        title += f", ℓz={lz:.3f}"
-    fig.suptitle(title)
+    fig.suptitle(f"Measured (o) vs modeled (—) [{anchor_mode}-anchored] — {label}")
     fig.tight_layout()
     path = os.path.join(out_dir, "ramp_fits.png")
     fig.savefig(path, dpi=110)
@@ -926,7 +1103,7 @@ def save_plots(assignments, corrected, manifest, fit, anchor_mode, out_dir):
 
 
 def run_analysis(photo_path: str, manifest_path: str, out_dir: str, aniso: bool,
-                 anchor_mode: str = "mfg") -> dict:
+                 anchor_mode: str = "mfg", candidates=None, do_loo=True) -> dict:
     import os
 
     import cv2
@@ -953,7 +1130,7 @@ def run_analysis(photo_path: str, manifest_path: str, out_dir: str, aniso: bool,
     result["n_plates_identified"] = n_ident
 
     corrected = corrected_filaments(assignments, manifest)
-    fit = fit_model(assignments, corrected, manifest, anchor_mode, aniso)
+    fit = fit_model(assignments, corrected, manifest, anchor_mode, aniso, candidates=candidates, do_loo=do_loo)
     result["fit"] = fit
 
     # Manufacturer hexes are the trusted endpoint truth. The photo-absolute
@@ -1048,14 +1225,14 @@ def _render_plate_srgb(section_lin: np.ndarray, chamfer_lin: np.ndarray,
     return img  # linear
 
 
-def generate_synthetic(manifest: Manifest, ell_true: float, gamma_true: float, seed: int,
-                       aniso_z: float | None = None):
+def generate_synthetic(manifest: Manifest, seed: int, model_kw: dict):
     """Return (photo_srgb_uint8, truth). The plates are rendered from the
     MANUFACTURER palette colors (the anchored fit's endpoint truth) through the
-    (γ_true, ℓ_true) mixing model, then each plate gets a per-channel affine
-    distortion (gain + offset) standing in for the phone's white balance, flare
-    and per-plate black gloss. Manufacturer anchoring inverts that affine exactly,
-    so the fit must recover (γ_true, ℓ_true) despite it."""
+    given mixing model (model_kw passed to model_section_curve, e.g. {ell_x, gamma}
+    or {ell_x, kappa}), then each plate gets a per-channel affine distortion (gain
+    + offset) standing in for the phone's white balance, flare and per-plate black
+    gloss. Manufacturer anchoring inverts that affine exactly, so the fit must
+    recover the injected model parameters despite it."""
     import cv2
 
     rng = np.random.default_rng(seed)
@@ -1079,7 +1256,7 @@ def generate_synthetic(manifest: Manifest, ell_true: float, gamma_true: float, s
         cB = true_lin[spec.pair[1]]
         tdA = manifest.filaments[spec.pair[0]].td
         tdB = manifest.filaments[spec.pair[1]].td
-        sec = model_section_curve(cA, cB, tdA, tdB, spec.realized, geom, ell_true, aniso_z, gamma=gamma_true)
+        sec = model_section_curve(cA, cB, tdA, tdB, spec.realized, geom, **model_kw)
         # Per-plate, per-channel affine distortion (WB gain + flare/gloss offset).
         gain = rng.uniform(0.9, 1.1, size=3)
         offset = rng.uniform(-0.03, 0.03, size=3)
@@ -1120,14 +1297,7 @@ def generate_synthetic(manifest: Manifest, ell_true: float, gamma_true: float, s
     srgb = cv2.GaussianBlur(srgb, (0, 0), sigmaX=1.2)
     srgb = srgb + rng.normal(0, 0.006, srgb.shape)
     photo = np.clip(np.round(srgb * 255.0), 0, 255).astype(np.uint8)
-    truth = {
-        "ell_true": ell_true,
-        "gamma_true": gamma_true,
-        "colors_lin": true_lin,
-        "paper_lin": paper_lin,
-        "placements": placements,
-        "aniso_z": aniso_z,
-    }
+    truth = {"model_kw": model_kw, "colors_lin": true_lin, "paper_lin": paper_lin, "placements": placements}
     return photo, truth
 
 
@@ -1183,51 +1353,64 @@ def run_selftest(aniso: bool, ell_true: float, gamma_true: float, seed: int) -> 
     # Regression guard: the γ=1 path must reproduce the additive forward model
     # bit-for-bit (independent reference), on a fixed input.
     cov = np.array([s / 8.0 for s in range(SECTIONS)])
-    cA, cB = np.array([0.02, 0.03, 0.04]), np.array([0.9, 0.2, 0.01])
-    g1 = model_section_curve(cA, cB, 0.1, 3.3, cov, geom, 0.25, None, gamma=1.0)
-    ref = _additive_reference_curve(cA, cB, 0.1, 3.3, cov, geom, 0.25)
+    rcA, rcB = np.array([0.02, 0.03, 0.04]), np.array([0.9, 0.2, 0.01])
+    g1 = model_section_curve(rcA, rcB, 0.1, 3.3, cov, geom, 0.25, None, gamma=1.0)
+    ref = _additive_reference_curve(rcA, rcB, 0.1, 3.3, cov, geom, 0.25)
     check("γ=1 reproduces additive model (regression)", float(np.abs(g1 - ref).max()) < 1e-12,
           f"(max|Δ|={np.abs(g1 - ref).max():.2e})")
 
-    aniso_z = ell_true if aniso else None
-    g_inject = 1.0 if aniso else gamma_true  # aniso mode is additive (γ=1)
     manifest = _synthetic_manifest(geom)
-    photo, truth = generate_synthetic(manifest, ell_true, g_inject, seed, aniso_z=aniso_z)
-
     tmp = tempfile.mkdtemp(prefix="swatchphoto_selftest_")
-    photo_path = os.path.join(tmp, "synthetic.png")
-    cv2.imwrite(photo_path, cv2.cvtColor(photo, cv2.COLOR_RGB2BGR))
     manifest_path = os.path.join(tmp, "manifest.swatch.json")
     _write_manifest_json(manifest, manifest_path)
 
-    print(f"[selftest] injected γ={g_inject}, ℓ={ell_true}mm, anchor=mfg, output dir {tmp}")
-    res = run_analysis(photo_path, manifest_path, tmp, aniso, anchor_mode="mfg")
+    def run_scene(tag, model_kw, cands, aniso_flag):
+        photo, truth = generate_synthetic(manifest, seed, model_kw)
+        pp = os.path.join(tmp, tag + ".png")
+        cv2.imwrite(pp, cv2.cvtColor(photo, cv2.COLOR_RGB2BGR))
+        res = run_analysis(pp, manifest_path, os.path.join(tmp, tag), aniso_flag, "mfg",
+                           candidates=cands, do_loo=False)
+        return res, truth
 
-    check("detected 6 plates", res["n_plates_detected"] == 6, f"(got {res['n_plates_detected']})")
-    check("identified 6 plates", res.get("n_plates_identified") == 6, f"(got {res.get('n_plates_identified')})")
-
-    # Brighter-than-paper (>1.0) must be carried, not clamped.
-    paper = truth["paper_lin"]
-    any_over_one = any(bool((truth["colors_lin"][lbl] / paper > 1.02).any())
-                       for lbl in res.get("manufacturer_hexes", {}))
-    check("a plate is brighter than paper (>1.0 carried)", any_over_one,
-          "(Cold White should normalize above 1.0)")
-
-    gf = res.get("fit", {}).get("global_fit", {})
     if aniso:
-        lx, lz = gf.get("ell_x_mm", 0), gf.get("ell_z_mm", 0)
+        res, truth = run_scene("aniso", {"ell_x": ell_true, "ell_z": ell_true}, None, True)
+        check("detected 6 plates", res["n_plates_detected"] == 6, f"(got {res['n_plates_detected']})")
+        check("identified 6 plates", res.get("n_plates_identified") == 6, f"(got {res.get('n_plates_identified')})")
+        gf = res["fit"]["global_fit"]
+        lx, lz = gf["ell_x_mm"], gf["ell_z_mm"]
         check("ℓx,ℓz recovery within 0.08mm", max(abs(lx - ell_true), abs(lz - ell_true)) < 0.08,
               f"(ℓx={lx:.3f} ℓz={lz:.3f}, true {ell_true})")
     else:
-        gam, le = gf.get("gamma", 0), gf.get("ell_mm", 0)
-        check("γ recovery within 0.08", abs(gam - gamma_true) < 0.08, f"(γ={gam:.3f}, true {gamma_true})")
-        check("ℓ recovery within 0.06mm", abs(le - ell_true) < 0.06, f"(ℓ={le:.4f}, true {ell_true})")
-        add = res["fit"].get("additive_baseline", {})
-        check("subtractive (γ,ℓ) residual <= additive baseline",
-              gf.get("residual_rms", 1) <= add.get("residual_rms", 0) + 1e-6,
-              f"(γℓ rms={gf.get('residual_rms', 0):.4f} vs additive rms={add.get('residual_rms', 0):.4f})")
+        # Candidate 1 / global-γ recovery + anchoring inversion + >1 carried.
+        res, truth = run_scene("gamma", {"ell_x": ell_true, "gamma": gamma_true},
+                               ["additive", "global_gamma"], False)
+        check("detected 6 plates", res["n_plates_detected"] == 6, f"(got {res['n_plates_detected']})")
+        check("identified 6 plates", res.get("n_plates_identified") == 6, f"(got {res.get('n_plates_identified')})")
+        paper = truth["paper_lin"]
+        any_over_one = any(bool((truth["colors_lin"][lbl] / paper > 1.02).any())
+                           for lbl in res.get("manufacturer_hexes", {}))
+        check("a plate is brighter than paper (>1.0 carried)", any_over_one, "(Cold White > 1.0)")
+        cands = res["fit"]["candidates"]
+        gg = cands["global_gamma"]["params"]
+        check("γ recovery within 0.08", abs(gg["gamma"] - gamma_true) < 0.08,
+              f"(γ={gg['gamma']:.3f}, true {gamma_true})")
+        check("ℓ recovery within 0.06mm", abs(gg["ell"] - ell_true) < 0.06,
+              f"(ℓ={gg['ell']:.4f}, true {ell_true})")
+        check("subtractive (γ) in-sample <= additive",
+              cands["global_gamma"]["in_sample_rms"] <= cands["additive"]["in_sample_rms"] + 1e-6,
+              f"(γ rms={cands['global_gamma']['in_sample_rms']:.4f} vs additive {cands['additive']['in_sample_rms']:.4f})")
 
-    print(f"[selftest] {'ALL PASS' if ok else 'FAILURES'} — result JSON: {res.get('_json')}, plot: {res.get('plot')}")
+        # Candidate 2 (transmittance) recovery from a κ-generated scene.
+        kap_true, ellk = 1.5, 0.3
+        res2, _ = run_scene("kappa", {"ell_x": ellk, "kappa": kap_true},
+                            ["additive", "transmittance"], False)
+        check("κ-scene identified 6 plates", res2.get("n_plates_identified") == 6,
+              f"(got {res2.get('n_plates_identified')})")
+        tp = res2["fit"]["candidates"]["transmittance"]["params"]
+        check("κ recovery within 0.3", abs(tp["kappa"] - kap_true) < 0.3, f"(κ={tp['kappa']:.3f}, true {kap_true})")
+        check("ℓ(κ) recovery within 0.08mm", abs(tp["ell"] - ellk) < 0.08, f"(ℓ={tp['ell']:.4f}, true {ellk})")
+
+    print(f"[selftest] {'ALL PASS' if ok else 'FAILURES'} — dir {tmp}")
     return 0 if ok else 1
 
 
