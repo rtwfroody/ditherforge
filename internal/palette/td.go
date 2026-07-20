@@ -173,19 +173,20 @@ func NeighborLeak(td, neighborPathMM float64) float64 {
 
 // TDParams carries the transmission-distance context for TD-aware palette
 // selection. When Enabled, SelectFromInventory scores candidate subsets on
-// their neighbor-effective colors — each filament composited toward the
-// area-weighted mean of the target (cell) colors by its lateral leak β (see
-// NeighborLeak) — rather than nominal filament colors, so a translucent
-// filament isn't picked as a chroma carrier it can't actually deliver on the
-// print. This is the selection-time analogue of the per-cell print simulation
-// (voxel.EffectiveCellColors): individual cell placement is unknown when the
-// palette is chosen, so the global target mean is the tractable stand-in for
-// what a translucent cell's neighbors will statistically look like.
+// their PER-SAMPLE neighbor-effective colors — for each target sample, each
+// filament composited toward THAT sample's color by its lateral leak β (see
+// NeighborLeak) and hue filter T — rather than nominal filament colors, so a
+// translucent filament isn't picked as a chroma carrier it can't actually
+// deliver per cell on the print. This is the selection-time analogue of the
+// per-cell print simulation (voxel.EffectiveCellColors): the per-sample vertex
+// set mirrors the dither's own per-cell effective-color rule, so a saturated
+// translucent filament can't fake-enclose interior body colors it physically
+// can't render (see tdSelectState).
 //
 // Enabled is a request, not a guarantee: SelectFromInventory downgrades to
 // bit-identical nominal scoring when the palette's normalized TDs are uniform
-// (a common shift toward the same mean can't reorder the subsets being
-// compared) or all filaments are effectively opaque (β = 0 everywhere).
+// (a common shift toward each sample can't reorder the subsets being compared)
+// or all filaments are effectively opaque (β = 0 everywhere).
 //
 // NeighborPathMM is the in-plane path length (mm) driving β; when ≤ 0 it
 // defaults to DefaultNeighborPathMM. LayerHeightMM and ShellThicknessMM are
@@ -202,56 +203,31 @@ type TDParams struct {
 	Kappa float32
 }
 
-// weightedMeanLinear returns the cellWeights-weighted mean of cellColors in
-// linear-light RGB — the stand-in "neighborhood" every translucent cell washes
-// toward under TD-aware selection (see TDParams). cellWeights, when nil, weights
-// every color equally; a zero total weight yields black, which only arises when
-// there are no cells (in which case selection is already degenerate).
-func weightedMeanLinear(cellColors [][3]uint8, cellWeights []float32) [3]float64 {
-	var mean [3]float64
-	var wsum float64
-	for i, c := range cellColors {
-		w := 1.0
-		if cellWeights != nil && i < len(cellWeights) {
-			w = float64(cellWeights[i])
-		}
-		lin := linearOf(c)
-		mean[0] += w * lin[0]
-		mean[1] += w * lin[1]
-		mean[2] += w * lin[2]
-		wsum += w
-	}
-	if wsum > 0 {
-		mean[0] /= wsum
-		mean[1] /= wsum
-		mean[2] /= wsum
-	}
-	return mean
-}
-
-// neighborEffLab composites one filament's linear-RGB color toward the target
-// mean under the transmittance model and returns the result in CIELAB, ready for
+// neighborEffLab composites one filament's linear-RGB color toward a target
+// under the transmittance model and returns the result in CIELAB, ready for
 // hull/nearest scoring:
 //
-//	eff = own + β · T ∘ (meanTarget − own),  T = (own / max_channel(own))^κ
+//	eff = own + β · T ∘ (target − own),  T = (own / max_channel(own))^κ
 //
 // so the neighbor light the filament washes toward is first filtered by the
 // filament's own hue — a translucent orange scores as it actually prints
 // (keeping its warmth next to warm targets, dying next to dark ones) rather than
-// its vivid nominal color. κ = 0 collapses to the plain additive composite
-// (1−β)·own + β·meanTarget, bit-for-bit. Callers skip this for β = 0 (opaque) and
-// keep the filament's nominal Lab, so opaque entries stay bit-identical.
-func neighborEffLab(lin [3]float64, beta float64, meanTargetLin [3]float64, kappa float64) [3]float64 {
+// its vivid nominal color. TD-aware selection calls this per (filament, sample)
+// with that sample's own color as the target, mirroring the dither's per-cell
+// rule. κ = 0 collapses to the plain additive composite (1−β)·own + β·target,
+// bit-for-bit. Callers skip this for β = 0 (opaque) and keep the filament's
+// nominal Lab, so opaque entries stay bit-identical.
+func neighborEffLab(lin [3]float64, beta float64, targetLin [3]float64, kappa float64) [3]float64 {
 	var r, g, b float64
 	if kappa == 0 {
-		r = (1-beta)*lin[0] + beta*meanTargetLin[0]
-		g = (1-beta)*lin[1] + beta*meanTargetLin[1]
-		b = (1-beta)*lin[2] + beta*meanTargetLin[2]
+		r = (1-beta)*lin[0] + beta*targetLin[0]
+		g = (1-beta)*lin[1] + beta*targetLin[1]
+		b = (1-beta)*lin[2] + beta*targetLin[2]
 	} else {
 		t := TransmittanceColor(lin, kappa)
-		r = lin[0] + beta*t[0]*(meanTargetLin[0]-lin[0])
-		g = lin[1] + beta*t[1]*(meanTargetLin[1]-lin[1])
-		b = lin[2] + beta*t[2]*(meanTargetLin[2]-lin[2])
+		r = lin[0] + beta*t[0]*(targetLin[0]-lin[0])
+		g = lin[1] + beta*t[1]*(targetLin[1]-lin[1])
+		b = lin[2] + beta*t[2]*(targetLin[2]-lin[2])
 	}
 	l, aa, bb := colorful.LinearRgb(r, g, b).Lab()
 	return [3]float64{l, aa, bb}

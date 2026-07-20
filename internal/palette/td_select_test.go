@@ -5,8 +5,29 @@ import (
 	"math"
 	"testing"
 
+	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 )
+
+// nominalLabOf returns an sRGB byte color's CIELAB (go-colorful scaled), the
+// same conversion the selector uses for nominal vertices.
+func nominalLabOf(c [3]uint8) [3]float64 {
+	l, a, b := colorful.Color{
+		R: float64(c[0]) / 255, G: float64(c[1]) / 255, B: float64(c[2]) / 255,
+	}.Lab()
+	return [3]float64{l, a, b}
+}
+
+// labDE00 returns perceptual ΔE (CIEDE2000) between two sRGB colors — the same
+// metric the near-duplicate suppression uses (go-colorful scales it by 1/100).
+func labDE00(a, b [3]uint8) float64 {
+	col := func(c [3]uint8) colorful.Color {
+		return colorful.Color{R: float64(c[0]) / 255, G: float64(c[1]) / 255, B: float64(c[2]) / 255}
+	}
+	return 100 * col(a).DistanceCIEDE2000(col(b))
+}
+
+var tdKappaParams = TDParams{Enabled: true, LayerHeightMM: 0.08, ShellThicknessMM: 0.84, Kappa: TransmittanceKappa}
 
 // TestTDLeak checks the scalar leak model against hand-computed values and its
 // sanitization contract. voxel.EffectivePalette depends on these exact
@@ -213,4 +234,125 @@ func hexOf(c [3]uint8) string {
 		hexdig[c[2]>>4], hexdig[c[2]&0xF],
 	}
 	return string(b)
+}
+
+// TestSelectPerSampleBrownOverWineRed is the defect-2 regression in miniature.
+// With a translucent Lemon Yellow locked and a warm-brown-dominant target
+// cloud, the selector must keep OPAQUE Brown (which renders its sienna faithfully
+// per cell) and drop translucent Wine Red — whose hue filter T ≈ [1,0,0] kills
+// the green/blue it would need to move toward brown, so per sample its effective
+// vertex stays saturated-red and far from every warm-brown target. The old
+// global-mean approximation let Wine Red's single averaged vertex fake-enclose
+// the body and displaced Brown; the per-sample eff scorer cannot be fooled that
+// way.
+func TestSelectPerSampleBrownOverWineRed(t *testing.T) {
+	brown := [3]uint8{0x55, 0x33, 0x1A}
+	winered := [3]uint8{0xD6, 0x02, 0x12}
+	black := [3]uint8{0x08, 0x0A, 0x0D}
+	white := [3]uint8{0xD9, 0xDF, 0xE5}
+	inv := []InventoryEntry{
+		{Color: brown, TD: 0.1},
+		{Color: winered, TD: 1.0},
+		{Color: black, TD: 0.1},
+		{Color: white, TD: 0.3},
+	}
+	locked := []InventoryEntry{{Color: [3]uint8{0xEE, 0xD2, 0x30}, TD: 3.3}} // Lemon Yellow
+
+	warm := [][3]uint8{{0x68, 0x38, 0x18}, {0x5A, 0x30, 0x16}, {0x72, 0x40, 0x20}}
+	var samples [][3]uint8
+	for i := 0; i < 40; i++ {
+		samples = append(samples, warm[i%len(warm)])
+	}
+	for i := 0; i < 10; i++ {
+		samples = append(samples, black)
+		samples = append(samples, white)
+	}
+
+	sel, err := SelectFromInventory(context.Background(), samples, nil, inv, 3, locked, true, tdKappaParams, progress.NullTracker{})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	t.Logf("selected: %s", fmtSel(sel))
+	if !hasColor(sel, brown) {
+		t.Errorf("expected opaque Brown selected for the warm body; got %s", fmtSel(sel))
+	}
+	if hasColor(sel, winered) {
+		t.Errorf("translucent Wine Red must not be selected (can't render warm brown per cell); got %s", fmtSel(sel))
+	}
+}
+
+// TestSelectNominalDuplicateSuppressed pins defect 1: two nominally
+// near-identical whites (ΔE < nominalDupDeltaE) must never both be chosen, even
+// when the target cloud is white-heavy and bare scoring would happily spend two
+// slots on them.
+func TestSelectNominalDuplicateSuppressed(t *testing.T) {
+	white1 := [3]uint8{0xEB, 0xF7, 0xFF} // TD 3.2 (translucent)
+	white2 := [3]uint8{0xD9, 0xDF, 0xE5} // TD 0.3 (near-opaque), ΔE ≈ 5 from white1
+	black := [3]uint8{0x08, 0x0A, 0x0D}
+	brown := [3]uint8{0x55, 0x33, 0x1A}
+
+	if de := labDE00(white1, white2); de >= nominalDupDeltaE {
+		t.Fatalf("test setup: whites ΔE00 %.2f must be below the %.1f threshold", de, nominalDupDeltaE)
+	}
+
+	inv := []InventoryEntry{
+		{Color: white1, TD: 3.2},
+		{Color: white2, TD: 0.3},
+		{Color: black, TD: 0.1},
+		{Color: brown, TD: 0.1},
+	}
+	var samples [][3]uint8
+	for i := 0; i < 40; i++ {
+		samples = append(samples, white1)
+		samples = append(samples, white2)
+	}
+	for i := 0; i < 10; i++ {
+		samples = append(samples, black)
+	}
+
+	sel, err := SelectFromInventory(context.Background(), samples, nil, inv, 3, nil, true, tdKappaParams, progress.NullTracker{})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	t.Logf("selected: %s", fmtSel(sel))
+	if hasColor(sel, white1) && hasColor(sel, white2) {
+		t.Errorf("both near-identical whites selected (ΔE00 %.1f); expected at most one; got %s",
+			labDE00(white1, white2), fmtSel(sel))
+	}
+}
+
+// TestTDSelectPerSampleEff checks the core of the per-sample model: a
+// translucent candidate's effective vertex must VARY between two different
+// target samples (it washes toward each), while an opaque candidate's vertex
+// stays exactly its nominal Lab at every sample (β = 0, bit-identical).
+func TestTDSelectPerSampleEff(t *testing.T) {
+	// TD 0.02 puts NeighborLeak below the 1/1024 floor → β = 0 (the opaque
+	// limit); note a "typical opaque" filament like TD 0.1 actually leaks β ≈
+	// 0.05 at ℓ = 0.13, so the truly-β0 case needs a smaller TD.
+	opaque := InventoryEntry{Color: [3]uint8{0x55, 0x33, 0x1A}, TD: 0.02} // β = 0
+	translu := InventoryEntry{Color: [3]uint8{0xF6, 0x74, 0x05}, TD: 3.3} // Orange, β ≈ 0.8
+	inv := []InventoryEntry{opaque, translu}
+	invLab := [][3]float64{nominalLabOf(opaque.Color), nominalLabOf(translu.Color)}
+	if NeighborLeak(normSelTD(opaque.TD), DefaultNeighborPathMM) != 0 {
+		t.Fatalf("test setup: opaque candidate should have β = 0")
+	}
+
+	// Two clearly different target colors → two samples.
+	samples := CellColorHistogram([][3]uint8{{0x20, 0x10, 0x08}, {0xE0, 0xE0, 0xE0}}, nil)
+	if len(samples) != 2 {
+		t.Fatalf("expected 2 distinct samples, got %d", len(samples))
+	}
+
+	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true)
+
+	// Opaque Brown: eff == nominal at every sample.
+	for j := range samples {
+		if st.invEff[0][j] != invLab[0] {
+			t.Errorf("opaque entry eff at sample %d = %v, want nominal %v", j, st.invEff[0][j], invLab[0])
+		}
+	}
+	// Translucent Orange: vertex differs between the two samples.
+	if st.invEff[1][0] == st.invEff[1][1] {
+		t.Errorf("translucent entry vertex identical across two different samples: %v", st.invEff[1][0])
+	}
 }

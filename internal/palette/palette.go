@@ -520,16 +520,17 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 
 	// TD-aware scoring: only when requested AND the palette's normalized TDs
 	// are non-uniform with at least one filament genuinely translucent. When
-	// active, each inventory/locked entry's scoring color is composited toward
-	// the area-weighted mean of the target (cell) colors by its lateral leak β
-	// (the neighbor model — see TDParams and voxel.EffectiveCellColors), so a
-	// translucent filament scores as the muddied color it actually prints, not
-	// its vivid nominal color. Because an entry's effective color no longer
-	// depends on which subset it lands in, we simply replace its nominal Lab
-	// with the effective Lab up front and reuse the ordinary scorer. A uniform
-	// shift toward that mean (or no shift at all, when every filament is
-	// effectively opaque) can't change which subset scores best, so those cases
-	// keep the bit-identical nominal path above.
+	// active, each candidate subset is scored on its PER-SAMPLE effective colors:
+	// for every target sample s, filament c contributes eff(c, s) — c composited
+	// toward THAT sample's color by its lateral leak β and hue filter T (the
+	// neighbor model; see TDParams and voxel.EffectiveCellColors) — so the vertex
+	// set varies per sample exactly as the dither's per-cell rule does. A
+	// saturated translucent filament therefore can't fake-enclose interior body
+	// colors it physically can't render per cell (defect 2). A uniform shift (or
+	// no shift, when every filament is effectively opaque) can't reorder the
+	// subsets being compared, so those cases keep the bit-identical nominal path
+	// above. See tdSelectState.
+	var tdState *tdSelectState
 	if tdp.Enabled {
 		neighborPath := float64(tdp.NeighborPathMM)
 		if neighborPath <= 0 {
@@ -559,20 +560,15 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		}
 		if !uniform && anyLeak {
 			kappa := float64(tdp.Kappa)
-			meanTargetLin := weightedMeanLinear(cellColors, cellWeights)
-			// Replace only translucent entries' Lab with their effective color;
-			// opaque entries (β = 0) keep their nominal Lab bit-identically.
-			for i, e := range inventory {
-				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
-					invLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin, kappa)
-				}
+			tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering)
+			// The search functions call scorer(indices, invLab, lockedLab,
+			// samples); the TD scorer captures its own precomputed state and
+			// ignores those args (invLab is still passed so the enumerators size
+			// off len(inventory)).
+			scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample) float64 {
+				return tdState.score(indices)
 			}
-			for i, e := range locked {
-				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
-					lockedLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin, kappa)
-				}
-			}
-			fmt.Printf("  TD-aware selection: neighbor path %.2f mm, κ %.2f\n", neighborPath, kappa)
+			fmt.Printf("  TD-aware selection (per-sample eff): neighbor path %.2f mm, κ %.2f\n", neighborPath, kappa)
 		}
 	}
 
@@ -617,6 +613,13 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 			return nil, err
 		}
 		fmt.Printf("  Selected colors (%d evaluated) in %.1fs\n", evaluated, time.Since(start).Seconds())
+	}
+
+	// Predicted-usage safety net: replace any free pick the dither would barely
+	// place with a genuinely-used alternative of near-equal score (TD-aware path
+	// only; see tdSelectState.refineUsage).
+	if tdState != nil {
+		bestSubset = tdState.refineUsage(bestSubset)
 	}
 
 	result := make([]InventoryEntry, n)

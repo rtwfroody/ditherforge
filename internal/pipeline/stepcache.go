@@ -1041,9 +1041,10 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// via DITHERFORGE_SIM_NEIGHBOR_PATH_MM) and κ (simKappa, via
 	// DITHERFORGE_SIM_KAPPA) both drive which colors get picked, so both must
 	// invalidate the palette cache. LayerHeight/ShellThickness are still hashed
-	// (geometry). The v3 salt forces a one-time rebuild of caches whose selection
-	// used the pre-transmittance additive model (and the old ℓ = 0.3 default).
-	writeString(h, "palette-td-aware-v3")
+	// (geometry). The v4 salt forces a one-time rebuild of caches whose selection
+	// used the global-mean effective-color approximation (v3); v4 scores subsets
+	// on per-sample effective colors with near-duplicate + predicted-usage nets.
+	writeString(h, "palette-td-aware-v4")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	writeFloat32(h, simNeighborPathMM)
