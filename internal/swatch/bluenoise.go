@@ -12,12 +12,31 @@ import "math"
 // (blue-noise) minority set — the whole point of preferring this over an ordered
 // Bayer tile, which prints as a visibly regular grid.
 //
-// Kernel distances are PHYSICAL millimeters because blocks are anisotropic (one
-// voxel cell wide in X, one print layer tall in Z): dx = Δcol*blockWidthMM,
-// dz = Δrow*upperZMM. The energy kernel is an isotropic Gaussian in that physical
-// space with sigma ≈ 1.5*sqrt(blockWidthMM*upperZMM). Both axes wrap toroidally
-// (the per-axis delta uses the shorter of the two wrapped distances), so the
-// pattern tiles seamlessly across the repeated sections and stacked rows.
+// The energy kernel is exp(-r) with the PER-AXIS normalized radius
+// r = sqrt((dx/sigmaX)^2 + (dz/sigmaZ)^2), sigmaX = 1.5 block widths,
+// sigmaZ = 1.5*sqrt(blockWidthMM*upperZMM) mm. Every part of that shape is
+// load-bearing, because blocks are anisotropic (a voxel cell wide in X, a
+// print layer tall in Z — 2.5:1 at 0.2mm layers, 6:1 at 0.08mm) and the
+// obvious kernels all produce printable artifacts somewhere:
+//   - a physically-isotropic Gaussian (sigma 1.5*sqrt(w*h) mm both axes)
+//     leaves sigmaX under one block, so it cannot discriminate horizontal
+//     arrangements while physically-near rows all couple strongly; near 50%
+//     coverage the energy landscape goes almost degenerate and the greedy
+//     scan produced wavy horizontal worm bands across mid-plate.
+//   - an index-isotropic Gaussian (1.5 grid units both axes) treats a
+//     0.08mm-tall row like a 0.5mm-wide column, so at thin layers minority
+//     blocks stack into touching vertical runs that print as clumps.
+//   - the per-axis split fixes both, but a GAUSSIAN's flat top barely
+//     separates 1-row from 2-row spacing when sigmaZ spans several rows
+//     (0.97 vs 0.87 at 0.08mm), so greedy fills still placed occasional
+//     touching vertical pairs. exp(-r) has a sharp peak (nonzero slope at 0)
+//     that strongly penalizes closest approach while keeping the broad tail
+//     that suppresses low-frequency clumping.
+// All variants were rendered and measured at 0.2mm and 0.08mm (min pairwise
+// B-B distance at 1/16..1/4 coverage plus visual strips) before settling on
+// this. Both axes wrap toroidally (the per-axis delta uses the shorter of the
+// two wrapped distances), so the pattern tiles seamlessly across the repeated
+// sections and stacked rows.
 //
 // Determinism is a hard requirement: the same (perSection, nrows, blockWidthMM,
 // upperZMM) always yields a byte-identical ranking. The seed pattern comes from
@@ -46,11 +65,14 @@ func blueNoiseRank(perSection, nrows int, blockWidthMM, upperZMM float64) [][]in
 	// Precompute the toroidal Gaussian kernel keyed by (Δrow, Δcol). kernel[dr][dc]
 	// is the energy a placed minority cell contributes to a cell offset (dr,dc)
 	// away; symmetric under wrap so it can be indexed by a raw modular delta.
-	sigma := 1.5 * math.Sqrt(blockWidthMM*upperZMM)
-	if !(sigma > 0) {
-		sigma = 1.0
+	sigmaX := 1.5 * blockWidthMM
+	if !(sigmaX > 0) {
+		sigmaX = 1.0
 	}
-	inv2s2 := 1.0 / (2.0 * sigma * sigma)
+	sigmaZ := 1.5 * math.Sqrt(blockWidthMM*upperZMM)
+	if !(sigmaZ > 0) {
+		sigmaZ = 1.0
+	}
 	kernel := make([][]float64, nrows)
 	for dr := 0; dr < nrows; dr++ {
 		kernel[dr] = make([]float64, perSection)
@@ -58,14 +80,14 @@ func blueNoiseRank(perSection, nrows int, blockWidthMM, upperZMM float64) [][]in
 		if nrows-dr < wdr {
 			wdr = nrows - dr
 		}
-		dz := float64(wdr) * upperZMM
+		dz := float64(wdr) * upperZMM / sigmaZ
 		for dc := 0; dc < perSection; dc++ {
 			wdc := dc
 			if perSection-dc < wdc {
 				wdc = perSection - dc
 			}
-			dx := float64(wdc) * blockWidthMM
-			kernel[dr][dc] = math.Exp(-(dx*dx + dz*dz) * inv2s2)
+			dx := float64(wdc) * blockWidthMM / sigmaX
+			kernel[dr][dc] = math.Exp(-math.Sqrt(dx*dx + dz*dz))
 		}
 	}
 
@@ -146,20 +168,33 @@ func blueNoiseRank(perSection, nrows int, blockWidthMM, upperZMM float64) [][]in
 		place(perm[i])
 	}
 
-	// Relax the seed pattern: repeatedly move the tightest cluster's cell into the
-	// largest void until the vacated cell IS the largest void (stable), or a
-	// generous iteration cap trips. The loop top always holds exactly `ones`
-	// placed cells, so breaking on the cap leaves a valid prototype.
-	maxSwaps := 4 * n
-	for iter := 0; iter < maxSwaps; iter++ {
-		tc := tightestCluster()
-		clear(tc)
-		lv := largestVoid()
-		if lv == tc {
-			place(tc) // stable: restore and stop
+	// Relax the seed pattern to FULL stability: sweep every placed cell in
+	// linear-index order, moving it to the global largest void unless it already
+	// is one, and repeat until a whole sweep moves nothing. The classic
+	// formulation stops as soon as the single TIGHTEST cluster is stable, which
+	// leaves other clumped cells unexamined — measured on the 0.2mm grid it left
+	// a vertically-touching pair (and 8 sub-2-row pairs) in the prototype, and
+	// every coverage above the seed fraction inherits prototype defects. Each
+	// sweep preserves the invariant of exactly `ones` placed cells, so breaking
+	// on the pass cap still leaves a valid prototype.
+	for pass := 0; pass < 100; pass++ {
+		moved := false
+		for i := 0; i < n; i++ {
+			if !on[i] {
+				continue
+			}
+			clear(i)
+			lv := largestVoid()
+			if lv == i {
+				place(i)
+			} else {
+				place(lv)
+				moved = true
+			}
+		}
+		if !moved {
 			break
 		}
-		place(lv)
 	}
 
 	// Phase 1 — rank the prototype's cells 0..ones-1. Remove tightest clusters one
