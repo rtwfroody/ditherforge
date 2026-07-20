@@ -2206,7 +2206,6 @@
         <Menubar.Item onSelect={handleSaveAs}>Save JSON As...</Menubar.Item>
         <Menubar.Separator />
         <Menubar.Item onSelect={exportTo3MF} disabled={!outputMeshUrl || running || saving}>Export 3MF...</Menubar.Item>
-        <Menubar.Item onSelect={exportSwatchPlates} disabled={!outputMeshUrl || running || saving}>Export Swatch Plates…</Menubar.Item>
         <Menubar.Separator />
         <Menubar.Item onSelect={Quit}>Exit</Menubar.Item>
       </Menubar.Content>
@@ -2238,6 +2237,8 @@
         <Menubar.Item onSelect={() => { cellSelectMode = true; }} disabled={!outputMeshUrl || running}>
           Select Cell…
         </Menubar.Item>
+        <Menubar.Separator />
+        <Menubar.Item onSelect={exportSwatchPlates} disabled={!outputMeshUrl || running || saving}>Export Swatch Plates…</Menubar.Item>
         <Menubar.Separator />
         <Menubar.CheckboxItem bind:checked={stats} closeOnSelect={false}>
           Stats
