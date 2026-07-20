@@ -1051,14 +1051,13 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
-	// Salt: bump when the dither *algorithm* changes (settings are
-	// unchanged but cached outputs are stale). "perceptual-v1" =
-	// every dither mode moved to a CIELAB nearest-color decision
-	// with linear-light error/residual handling. "td-v1" = every
-	// mode now
-	// opacity-weights the mix by filament TD, and DitherCorrected's
-	// drift measurement weights input and output consistently.
-	writeString(h, "td-v1")
+	// Salt: bump when the dither *algorithm* changes (settings are unchanged but
+	// cached outputs are stale). "perceptual-v1" = CIELAB nearest-color decision,
+	// linear-light error. "td-v1" = opacity-mass TD weighting. "td-v2-
+	// transmittance" = the dither now scores candidates by their predicted printed
+	// appearance eff(c,t) = C + β·T∘(t−C) and diffuses t−eff(chosen) (full mass);
+	// the old α/opacity-mass machinery is gone.
+	writeString(h, "td-v2-transmittance")
 	writeString(h, opts.Dither)
 	writeFloat64(h, opts.RiemersmaInputBias)
 	writeFloat64(h, opts.BlueNoiseTolerance)
@@ -1075,13 +1074,13 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// unconditionally (not only when true) so the false key can't alias a
 	// legacy entry computed when TD was always honored.
 	writeBool(h, opts.HonorTD)
-	// Salt: FloydSteinberg's opacity-weighted diffusion moved to the mass
-	// domain (the proxy-ratio formula exploded under FS's deterministic
-	// traversal and collapsed walls to one color). Folded in ONLY for the
-	// affected mode+flag combination so every other key stays byte-identical
-	// and warm caches (and their downstream clip/merge outputs) survive.
-	if opts.HonorTD && opts.Dither == "floyd-steinberg" {
-		writeString(h, "fs-td-mass-v1")
+	// The transmittance dither decision depends on ℓ (simNeighborPathMM) and κ
+	// (simKappa) exactly as the sim/selection do, so both must invalidate the
+	// dither cache when overridden. Folded in only when HonorTD is on (otherwise
+	// the model is opaque and neither is consulted).
+	if opts.HonorTD {
+		writeFloat32(h, simNeighborPathMM)
+		writeFloat64(h, simKappa)
 	}
 	// Layered TD model: fold its inputs into the key ONLY when it's active, so
 	// an inactive-model key is byte-identical to a pre-feature key (existing

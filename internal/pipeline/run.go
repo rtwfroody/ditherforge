@@ -2478,28 +2478,27 @@ func (r *pipelineRun) runDither() (any, error) {
 	defer stage.Done()
 	cells := po.Cells
 	pal := po.Palette
-	// Per-color opacity from transmission distance drives the opacity-
-	// weighted error diffusion so translucent filaments contribute less per
-	// unit area (see voxel.AlphaFromTD). Nil/uniform alpha is identity.
-	// HonorTD (default on) gates the whole effect: when off, palAlpha stays
-	// nil and every mode reverts to the plain area-weighted mix.
+	// The dither scores each palette candidate by its PREDICTED PRINTED
+	// appearance under the transmittance model (voxel.DitherModel): a candidate
+	// c presents eff(c, target) = C_c + β_c·T_c∘(target − C_c), the dither picks
+	// the nearest eff and diffuses target − eff(chosen). This supersedes the old
+	// opacity-mass diffusion; opaque filaments (β = 0) fall back to the classic
+	// nearest-color dither, bit-for-bit. HonorTD (default on) gates it — off, the
+	// model is opaque and every mode is the plain area-weighted dither.
 	//
-	// The "layered" model instead pre-transforms the palette into effective
-	// (infill-aware) colors and dithers against those with plain area
-	// weighting (palAlpha nil); see voxel.EffectivePalette. It feeds ONLY the
-	// dither kernels below — assignments are palette indices either way, so
-	// counting, ditherOutput, and export colors keep using po.Palette.
-	var palAlpha []float32
+	// The "layered" model (opt-in, now vestigial) instead pre-transforms the
+	// palette into effective infill-aware colors and dithers against those with
+	// the classic (opaque) decision; see voxel.EffectivePalette. Either way
+	// assignments are palette indices, so counting/export keep using po.Palette.
+	var model *voxel.DitherModel
 	layeredTD := r.opts.HonorTD && r.opts.TDModel == "layered"
 	if layeredTD {
 		plog.Printf("  Layered TD: shell thickness %.3f mm (derived from printer process profile)",
 			r.opts.ShellThicknessMM)
-		// The infill color the layered model blends translucent filaments
-		// toward is the designated infill filament (palette index 0 by
-		// invariant), not the deprecated free-floating Options.InfillColor.
 		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
-	} else if r.opts.HonorTD {
-		palAlpha = voxel.PaletteAlphas(po.PaletteTDs)
+		model = voxel.NewDitherModel(pal, nil, 0, 0, false)
+	} else {
+		model = voxel.NewDitherModel(po.Palette, po.PaletteTDs, float64(simNeighborPathMM), simKappa, r.opts.HonorTD)
 	}
 	tDither := time.Now()
 	var assignments []int32
@@ -2543,20 +2542,20 @@ func (r *pipelineRun) runDither() (any, error) {
 		// tests/ditherrank). dlcCorrectionPasses above pins the
 		// budget to this pass count.
 		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.DitherLocalCorrectedTuned(r.ctx, cells, pal, palAlpha, neighbors, r.tracker, 0.3, dlcCorrectionPasses)
+		assignments, derr = voxel.DitherLocalCorrectedTuned(r.ctx, cells, pal, model, neighbors, r.tracker, 0.3, dlcCorrectionPasses)
 	case "floyd-steinberg":
 		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, palAlpha, neighbors, r.tracker)
+		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, model, neighbors, r.tracker)
 	case "riemersma":
 		neighbors := cut(vo.Neighbors)
 		bias := r.opts.RiemersmaInputBias
 		if regionDither {
-			assignments, derr = voxel.DitherPerComponent(r.ctx, cells, pal, palAlpha, neighbors, r.tracker,
-				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, pa []float32, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
-					return voxel.Riemersma(ctx, c, p, pa, nb, bias, tr)
+			assignments, derr = voxel.DitherPerComponent(r.ctx, cells, pal, model, neighbors, r.tracker,
+				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, m *voxel.DitherModel, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
+					return voxel.Riemersma(ctx, c, p, m, nb, bias, tr)
 				})
 		} else {
-			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, palAlpha, neighbors, bias, r.tracker)
+			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, model, neighbors, bias, r.tracker)
 		}
 	case "bn-adapt-5":
 		// Adaptive simplex blue-noise threshold dither: per-cell
@@ -2570,7 +2569,7 @@ func (r *pipelineRun) runDither() (any, error) {
 		// the product and the election ballots score the same
 		// algorithm.
 		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, palAlpha, neighbors, 5, r.tracker)
+		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, model, neighbors, 5, r.tracker)
 	default:
 		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
 	}

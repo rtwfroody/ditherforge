@@ -1472,103 +1472,6 @@ func linearToSrgbByte(l float32) uint8 {
 	return uint8(v)
 }
 
-// NominalOpticalThicknessMM is the assumed optical path length (mm) a single
-// dithered cell presents to the viewer. It converts a filament's transmission
-// distance into an opacity for the reflectance-weighted mixing model. Only the
-// ratio thickness/TD matters, so this is a single global knob: at 1.0 mm an
-// opaque filament (TD≈1) reads ~fully opaque while a translucent one (TD≈4)
-// contributes far less, which is what lets red+yellow actually reach orange
-// instead of collapsing toward the opaque red. See AlphaFromTD.
-const NominalOpticalThicknessMM = 1.0
-
-// alphaFloor is the smallest opacity AlphaFromTD will return. A filament with
-// astronomically high TD has alpha≈0, but an exact 0 would zero the
-// weighted-average denominator in the diffusion (div-by-zero → Inf/NaN), so we
-// clamp to a tiny positive value that keeps the math finite without
-// meaningfully changing a near-transparent filament's contribution.
-const alphaFloor = 1e-4
-
-// AlphaFromTD returns the opacity in [alphaFloor,1] of a filament with
-// transmission distance td (mm) at NominalOpticalThicknessMM, via the
-// Beer–Lambert law alpha = 1 - 10^(-t/TD).
-//
-// This is the single chokepoint that sanitizes TD before it reaches the
-// dither: a hand-authored --inventory file (whose entries bypass the tdAt
-// payload guard, pipeline.go) can carry garbage — TD ≤ 0, NaN, or ±Inf — and
-// any of those is treated as fully opaque (alpha 1, i.e. "no TD effect")
-// rather than poisoning the error diffusion with a 0 or NaN weight.
-func AlphaFromTD(td float32) float32 {
-	t := float64(td)
-	// !(t > 0) catches both NaN and t ≤ 0; IsInf catches ±Inf.
-	if !(t > 0) || math.IsInf(t, 0) {
-		return 1
-	}
-	a := 1 - math.Pow(10, -NominalOpticalThicknessMM/t)
-	if a < alphaFloor {
-		a = alphaFloor
-	}
-	return float32(a)
-}
-
-// PaletteAlphas maps a per-color transmission-distance slice to per-color
-// opacity. It returns nil — the kernels' exact "all opaque" identity path —
-// for an empty input OR when every TD is identical, because a uniform opacity
-// cancels in the renormalized mix. Returning nil (rather than a uniform but
-// non-nil slice) keeps the common all-default-TD pipeline path BIT-identical
-// to the historical area-weighted dither, not merely algebraically equal:
-// the uniform-alpha kernel path differs by floating-point rounding
-// (a·k)/(b·k) ≠ a/b, which could flip a boundary assignment.
-func PaletteAlphas(tds []float32) []float32 {
-	if len(tds) == 0 {
-		return nil
-	}
-	uniform := true
-	for _, td := range tds {
-		if td != tds[0] {
-			uniform = false
-			break
-		}
-	}
-	if uniform {
-		return nil
-	}
-	a := make([]float32, len(tds))
-	for i, td := range tds {
-		a[i] = AlphaFromTD(td)
-	}
-	return a
-}
-
-// alphaAt returns palAlpha[i], or 1 when palAlpha is nil/short. Centralizes
-// the "nil means opaque" contract so uniform/empty alpha is exactly identity.
-func alphaAt(palAlpha []float32, i int) float32 {
-	if i < len(palAlpha) {
-		return palAlpha[i]
-	}
-	return 1
-}
-
-// cellAlphaProxies precomputes, per cell, the opacity of the palette color
-// nearest the cell's own (pre-diffusion) color — a stable stand-in for the
-// receiver's eventual assignment opacity, which the opacity-weighted diffusion
-// needs to convert reflectance mass back into a color shift but which isn't
-// known until that cell is processed. Returns nil when palAlpha is nil (the
-// opaque identity path), which every caller treats as "all proxies = 1".
-func cellAlphaProxies(cells []ActiveCell, palAlpha []float32, palLab [][3]float32) []float32 {
-	if palAlpha == nil {
-		return nil
-	}
-	proxy := make([]float32, len(cells))
-	for i := range cells {
-		cr := srgbToLinearLUT[cells[i].Color[0]]
-		cg := srgbToLinearLUT[cells[i].Color[1]]
-		cb := srgbToLinearLUT[cells[i].Color[2]]
-		pl, pa, pb := linearToLab(cr, cg, cb)
-		proxy[i] = alphaAt(palAlpha, nearestPaletteLab(pl, pa, pb, palLab))
-	}
-	return proxy
-}
-
 // paletteLinearLab precomputes each palette color in both linear-light
 // RGB (for residual computation/diffusion) and CIELAB (for the
 // nearest-color decision).
@@ -1601,11 +1504,116 @@ func nearestPaletteLab(L, A, B float32, palLab [][3]float32) int {
 	return best
 }
 
+// DitherModel scores palette candidates by their predicted PRINTED appearance
+// under the transmittance model (the same model as voxel.EffectiveCellColors /
+// TD-aware selection), for the dither's nearest-color decision AND its error
+// diffusion. For a target t (linear-light RGB, post error diffusion) a candidate
+// c presents
+//
+//	eff(c, t) = C_c + a_c ∘ (t − C_c),   a_c = β_c · T_c   (per channel)
+//
+// with β_c = palette.NeighborLeak(ℓ, TD_c) and T_c = palette.TransmittanceColor(C_c, κ).
+// The dither picks the candidate whose eff is nearest t in CIELAB and diffuses
+// the residual t − eff(chosen, t) = (1 − a_c) ∘ (t − C_c) instead of t − C_c.
+// Rationale: if the dither succeeds, a cell's neighborhood averages to its local
+// target, so eff(c, target) is candidate c's expected appearance there — a
+// self-consistent fixed point that supersedes the old opacity-mass model.
+//
+// An opaque filament has β_c = 0 → a_c = 0 → eff = C_c, so choose() falls back to
+// the classic nearest-CIELAB decision with residual t − C_c, BIT-FOR-BIT. When
+// honorTD is false (or every filament is opaque) the whole model is the classic
+// path, and the dither is bit-identical to the historical area-weighted dither.
+type DitherModel struct {
+	lin  [][3]float32 // palette colors, linear light
+	lab  [][3]float32 // palette colors, CIELAB (opaque fast path)
+	gain [][3]float32 // a_c = β_c·T_c per channel; all-zero → opaque
+	td   bool         // any translucent filament (a_c > 0) → use the eff decision
+}
+
+// NewDitherModel builds the per-palette-color appearance model. neighborPathMM
+// (ℓ) and kappa (κ) are the shared sim/selection calibration (see
+// palette.DefaultNeighborPathMM / palette.TransmittanceKappa). honorTD == false
+// yields the classic (opaque) model.
+func NewDitherModel(pal [][3]uint8, tds []float32, neighborPathMM, kappa float64, honorTD bool) *DitherModel {
+	lin, lab := paletteLinearLab(pal)
+	m := &DitherModel{lin: lin, lab: lab, gain: make([][3]float32, len(pal))}
+	if !honorTD {
+		return m
+	}
+	for i := range pal {
+		var td float64
+		if i < len(tds) {
+			td = float64(tds[i])
+		}
+		beta := palette.NeighborLeak(td, neighborPathMM)
+		if beta <= 0 {
+			continue // opaque → gain stays 0
+		}
+		lc := [3]float64{float64(lin[i][0]), float64(lin[i][1]), float64(lin[i][2])}
+		t := palette.TransmittanceColor(lc, kappa)
+		m.gain[i] = [3]float32{float32(beta * t[0]), float32(beta * t[1]), float32(beta * t[2])}
+		m.td = true
+	}
+	return m
+}
+
+// choose returns the best palette index for a linear-light target (r,g,b) and
+// the linear residual (t − eff(best,t)) to diffuse. With no translucent filament
+// it is exactly nearestPaletteLab + (t − C_best).
+func (m *DitherModel) choose(r, g, b float32) (int, float32, float32, float32) {
+	tL, tA, tB := linearToLab(r, g, b)
+	if !m.td {
+		best := nearestPaletteLab(tL, tA, tB, m.lab)
+		return best, r - m.lin[best][0], g - m.lin[best][1], b - m.lin[best][2]
+	}
+	best := 0
+	bestDist := float32(math.MaxFloat32)
+	for i := range m.lin {
+		gi := m.gain[i]
+		eR := m.lin[i][0] + gi[0]*(r-m.lin[i][0])
+		eG := m.lin[i][1] + gi[1]*(g-m.lin[i][1])
+		eB := m.lin[i][2] + gi[2]*(b-m.lin[i][2])
+		eL, eA, eBb := linearToLab(eR, eG, eB)
+		dL, dA, dB := tL-eL, tA-eA, tB-eBb
+		if d := dL*dL + dA*dA + dB*dB; d < bestDist {
+			bestDist = d
+			best = i
+		}
+	}
+	gi := m.gain[best]
+	return best,
+		(1-gi[0])*(r-m.lin[best][0]),
+		(1-gi[1])*(g-m.lin[best][1]),
+		(1-gi[2])*(b-m.lin[best][2])
+}
+
+// effLabAt returns candidate i's predicted appearance eff(i, target) for a
+// linear-light target (r,g,b), in CIELAB — for scorers (Riemersma) that add
+// their own bias terms and can't use choose() directly. For an opaque palette it
+// is the fixed palette Lab (bit-identical to the classic nearest search).
+func (m *DitherModel) effLabAt(i int, r, g, b float32) (float32, float32, float32) {
+	if !m.td {
+		return m.lab[i][0], m.lab[i][1], m.lab[i][2]
+	}
+	gi := m.gain[i]
+	eR := m.lin[i][0] + gi[0]*(r-m.lin[i][0])
+	eG := m.lin[i][1] + gi[1]*(g-m.lin[i][1])
+	eB := m.lin[i][2] + gi[2]*(b-m.lin[i][2])
+	return linearToLab(eR, eG, eB)
+}
+
+// effResidual returns target − eff(i, target) in linear light (the error a
+// scorer diffuses once it has committed candidate i). Opaque → target − C_i.
+func (m *DitherModel) effResidual(i int, r, g, b float32) (float32, float32, float32) {
+	gi := m.gain[i]
+	return (1-gi[0])*(r-m.lin[i][0]), (1-gi[1])*(g-m.lin[i][1]), (1-gi[2])*(b-m.lin[i][2])
+}
+
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
 // error diffusion to actual spatial neighbors. Produces blue-noise-like
 // results without directional bias.
-func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32) ([]int32, error) {
-	return DitherWithNeighbors(ctx, cells, pal, palAlpha, BuildNeighbors(cells), nil)
+func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel) ([]int32, error) {
+	return DitherWithNeighbors(ctx, cells, pal, model, BuildNeighbors(cells), nil)
 }
 
 // DitherWithNeighbors runs dizzy dithering using a precomputed neighbor table.
@@ -1628,8 +1636,8 @@ func DitherCellsDizzy(ctx context.Context, cells []ActiveCell, pal [][3]uint8, p
 // unit area and the solver must spend more area on it to hit a target —
 // the fix for opaque-red swamping translucent-yellow. A nil or uniform
 // palAlpha cancels out and reproduces the historical area-weighted result.
-func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
-	assignments, _, err := ditherCore(ctx, cells, pal, palAlpha, neighbors, tracker, nil, false)
+func DitherWithNeighbors(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	assignments, _, err := ditherCore(ctx, cells, pal, model, neighbors, tracker, nil, false)
 	return assignments, err
 }
 
@@ -1662,9 +1670,12 @@ type strandedDrop struct {
 //
 // With seedErr == nil and recordDrops == false this is bit-identical to
 // the historical DitherWithNeighbors body.
-func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, seedErr [][3]float32, recordDrops bool) ([]int32, []strandedDrop, error) {
+func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker, seedErr [][3]float32, recordDrops bool) ([]int32, []strandedDrop, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
+	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
 	}
 	n := len(cells)
 
@@ -1680,9 +1691,6 @@ func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlph
 	}
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
-
-	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
 
 	var drops []strandedDrop
 
@@ -1701,24 +1709,16 @@ func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlph
 		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
 		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
-		tL, tA, tB := linearToLab(r, g, b)
-		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
+		// Decide the candidate whose predicted printed appearance is nearest
+		// the target (CIELAB) and diffuse the residual t − eff(chosen). For an
+		// opaque palette eff = C, so this is the classic nearest-color dither.
+		bestIdx, eR, eG, eB := model.choose(r, g, b)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		eR := r - palLin[bestIdx][0]
-		eG := g - palLin[bestIdx][1]
-		eB := b - palLin[bestIdx][2]
-
-		// Opacity-weighted error diffusion: outgoing mass is eR*aSender,
-		// where the sender's effective area folds in the chosen color's
-		// opacity (aᵢαₖ). Each neighbor's color-domain shift = mass *
-		// adjacency_fraction / aReceiverEff, with the receiver's effective
-		// area using its proxy opacity. Conserves Σ(aαₖ cₖ)/Σ(aαₖ) (modulo
-		// the documented stranded-cell drop). With nil/uniform alpha the
-		// opacity factors cancel and this is exactly the historical
-		// area-weighted diffusion.
-		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
+		// Standard area-weighted error diffusion: a neighbor's color-domain
+		// shift = residual × adjacency_fraction × (area_sender / area_receiver).
+		aSender := areas[idx]
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -1729,11 +1729,7 @@ func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlph
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					aRecvEff := areas[nb.Idx]
-					if cellAlphaProxy != nil {
-						aRecvEff *= cellAlphaProxy[nb.Idx]
-					}
-					w := nb.Weight * scale * (aSender / aRecvEff)
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -1838,9 +1834,12 @@ const recoverQualityWeight = 0.1
 // here identically. The stranded-cell local solve still uses the unweighted
 // regionObjective; stranded cells are a small fraction, so the opacity model
 // is applied to the dominant diffusion path only. nil/uniform alpha = identity.
-func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
+	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
 	}
 	n := len(cells)
 
@@ -1852,9 +1851,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	processed := make([]bool, n)
 	targets := make([][3]float32, n) // per-cell target in linear light
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
-
-	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
+	palLin, _ := paletteLinearLab(pal)
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -1863,24 +1860,19 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		// Perceptual decision (CIELAB), linear-light residual — see
-		// "Perceptual dithering color space" and DitherWithNeighbors.
+		// Decide by predicted appearance, diffuse the residual (see
+		// DitherModel / DitherWithNeighbors).
 		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
 		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
 		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 		targets[idx] = [3]float32{r, g, b}
 
-		tL, tA, tB := linearToLab(r, g, b)
-		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
+		bestIdx, eR, eG, eB := model.choose(r, g, b)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		eR := r - palLin[bestIdx][0]
-		eG := g - palLin[bestIdx][1]
-		eB := b - palLin[bestIdx][2]
-
-		// Opacity-weighted diffusion (see DitherWithNeighbors).
-		aSender := areas[idx] * alphaAt(palAlpha, bestIdx)
+		// Standard area-weighted diffusion (see ditherCore).
+		aSender := areas[idx]
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -1891,11 +1883,7 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			scale := 1.0 / totalWeight
 			for _, nb := range neighbors[idx] {
 				if !processed[nb.Idx] {
-					aRecvEff := areas[nb.Idx]
-					if cellAlphaProxy != nil {
-						aRecvEff *= cellAlphaProxy[nb.Idx]
-					}
-					w := nb.Weight * scale * (aSender / aRecvEff)
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
 					errBuf[nb.Idx][0] += eR * w
 					errBuf[nb.Idx][1] += eG * w
 					errBuf[nb.Idx][2] += eB * w
@@ -1984,9 +1972,12 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 // but unlike dizzy the diffusion runs in the mass domain (see the comment
 // inside): dizzy's proxy-ratio formula is unstable under FS's deterministic
 // traversal order. nil/uniform = identity (bit-identical historical path).
-func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
+	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
 	}
 	n := len(cells)
 
@@ -2019,29 +2010,6 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 	errBuf := make([][3]float32, n) // accumulated residual in linear light
 	processed := make([]bool, n)
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
-	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
-
-	// Opacity-weighted diffusion (palAlpha non-nil) keeps the error buffer
-	// in the MASS domain (linear-light color × area × alpha) instead of the
-	// color domain dizzy uses. The dizzy-style formula — receiver converts
-	// incoming mass to a color shift by dividing by its PROXY alpha, then
-	// re-emits its residual scaled by its actual CHOSEN color's alpha — has
-	// a per-hop gain of alphaChosen/alphaProxy on inherited error, up to
-	// ~2x when a translucent-proxied cell picks an opaque color. Dizzy's
-	// random traversal breaks those chains up (and its random tail strands
-	// runaway mass), but FS's deterministic forward frontier compounds the
-	// gain geometrically: on a brick-textured benchy the residual reached
-	// ~1e8 and whole walls collapsed to a single saturating color.
-	//
-	// In the mass formulation inherited error passes through at gain
-	// exactly 1: outgoing mass = ownResidual·area·alphaChosen + massIn.
-	// The proxy is used only to convert a cell's accumulated mass into a
-	// color-domain shift for the nearest-palette DECISION, where a proxy
-	// mis-estimate can bias one pick but cannot amplify anything. With
-	// uniform alpha this is algebraically identical to the historical
-	// area-weighted diffusion; the nil path below stays bit-identical.
-	massDomain := palAlpha != nil
 
 	for oi, idx := range order {
 		if oi%1000 == 0 {
@@ -2050,33 +2018,18 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		// Perceptual decision (CIELAB), linear-light residual — see
-		// "Perceptual dithering color space" and DitherWithNeighbors.
-		inR := srgbToLinearLUT[cells[idx].Color[0]]
-		inG := srgbToLinearLUT[cells[idx].Color[1]]
-		inB := srgbToLinearLUT[cells[idx].Color[2]]
-		var shiftR, shiftG, shiftB float32
-		if massDomain {
-			// Convert accumulated mass to this cell's color shift via
-			// its proxy opacity (decision only; see block comment).
-			inv := 1 / (areas[idx] * cellAlphaProxy[idx])
-			shiftR, shiftG, shiftB = errBuf[idx][0]*inv, errBuf[idx][1]*inv, errBuf[idx][2]*inv
-		} else {
-			shiftR, shiftG, shiftB = errBuf[idx][0], errBuf[idx][1], errBuf[idx][2]
-		}
-		r := inR + shiftR
-		g := inG + shiftG
-		b := inB + shiftB
+		// Decide by predicted printed appearance, diffuse the residual in the
+		// color domain (see DitherModel). The transmittance model supersedes the
+		// old opacity-mass FS diffusion, so this is the plain area-weighted
+		// forward Floyd–Steinberg the nil-alpha path always used.
+		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
+		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
+		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
-		tL, tA, tB := linearToLab(r, g, b)
-		bestIdx := nearestPaletteLab(tL, tA, tB, palLab)
+		bestIdx, eR, eG, eB := model.choose(r, g, b)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
-		// Forward neighbors: same predicate as dizzy. FS differs from
-		// dizzy in traversal order — (Grid, Layer, Row, Col) vs random —
-		// and, when opacity weighting is on, in diffusing mass-domain
-		// error (see block comment above the loop).
 		var totalWeight float32
 		for _, nb := range neighbors[idx] {
 			if !processed[nb.Idx] {
@@ -2085,33 +2038,13 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pal
 		}
 		if totalWeight > 0 {
 			scale := 1.0 / totalWeight
-			if massDomain {
-				// Outgoing mass = own residual at the chosen color's
-				// actual opacity + inherited mass passed through.
-				aSelf := areas[idx] * alphaAt(palAlpha, bestIdx)
-				mR := (inR-palLin[bestIdx][0])*aSelf + errBuf[idx][0]
-				mG := (inG-palLin[bestIdx][1])*aSelf + errBuf[idx][1]
-				mB := (inB-palLin[bestIdx][2])*aSelf + errBuf[idx][2]
-				for _, nb := range neighbors[idx] {
-					if !processed[nb.Idx] {
-						w := nb.Weight * scale
-						errBuf[nb.Idx][0] += mR * w
-						errBuf[nb.Idx][1] += mG * w
-						errBuf[nb.Idx][2] += mB * w
-					}
-				}
-			} else {
-				eR := r - palLin[bestIdx][0]
-				eG := g - palLin[bestIdx][1]
-				eB := b - palLin[bestIdx][2]
-				aSender := areas[idx]
-				for _, nb := range neighbors[idx] {
-					if !processed[nb.Idx] {
-						w := nb.Weight * scale * (aSender / areas[nb.Idx])
-						errBuf[nb.Idx][0] += eR * w
-						errBuf[nb.Idx][1] += eG * w
-						errBuf[nb.Idx][2] += eB * w
-					}
+			aSender := areas[idx]
+			for _, nb := range neighbors[idx] {
+				if !processed[nb.Idx] {
+					w := nb.Weight * scale * (aSender / areas[nb.Idx])
+					errBuf[nb.Idx][0] += eR * w
+					errBuf[nb.Idx][1] += eG * w
+					errBuf[nb.Idx][2] += eB * w
 				}
 			}
 		}
@@ -2207,9 +2140,12 @@ const RiemersmaDecayRatio = 1.0 / 16.0
 // instead of area alone, so a translucent pick exerts less pull and the tour
 // spends more area on it. A nil/uniform palAlpha leaves the mass at plain area,
 // i.e. byte-identical to the historical Riemersma.
-func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, biasMax float64, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
+	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
 	}
 	n := len(cells)
 	if n == 0 {
@@ -2251,7 +2187,6 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha
 	assigns := make([]int32, n)
 	dI := make([]float32, len(pal))
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
 	for ti, idx := range tour {
 		if ti%1000 == 0 {
 			if ctx.Err() != nil {
@@ -2297,11 +2232,15 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha
 		// α is high when input is near a palette (snap suppresses
 		// runaway oscillation in flat regions) and low when input
 		// is between palettes (dither smooths textured gradients).
+		// Candidates are scored by predicted printed appearance eff(pi, ·):
+		// the input-bias term against eff(pi, input), the target term against
+		// eff(pi, target). Opaque palettes reduce to the classic palette Lab.
 		var minDI float32 = math.MaxFloat32
-		for pi := range palLab {
-			dl := iL - palLab[pi][0]
-			da := iA - palLab[pi][1]
-			db := iBb - palLab[pi][2]
+		for pi := 0; pi < len(pal); pi++ {
+			eL, eA, eB := model.effLabAt(pi, iR, iG, iB)
+			dl := iL - eL
+			da := iA - eA
+			db := iBb - eB
 			d := dl*dl + da*da + db*db
 			dI[pi] = d
 			if d < minDI {
@@ -2317,10 +2256,11 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha
 		wi := alpha
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
-		for pi := range palLab {
-			dl := tL - palLab[pi][0]
-			da := tA - palLab[pi][1]
-			db := tBb - palLab[pi][2]
+		for pi := 0; pi < len(pal); pi++ {
+			eL, eA, eB := model.effLabAt(pi, r, g, b)
+			dl := tL - eL
+			da := tA - eA
+			db := tBb - eB
 			dT := dl*dl + da*da + db*db
 			d := wt*dT + wi*dI[pi]
 			if d < bestDist {
@@ -2330,15 +2270,13 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha
 		}
 		assigns[idx] = int32(bestIdx)
 
-		window[head].residual[0] = r - palLin[bestIdx][0]
-		window[head].residual[1] = g - palLin[bestIdx][1]
-		window[head].residual[2] = b - palLin[bestIdx][2]
-		// Mass = area × opacity-of-chosen (opacity-weighted mixing). nil
-		// palAlpha keeps the mass at plain area for an exact identity path.
+		// Residual = target − eff(chosen); mass = plain sender area (the
+		// transmittance model supersedes the opacity-weighted mass).
+		rr, rg, rb := model.effResidual(bestIdx, r, g, b)
+		window[head].residual[0] = rr
+		window[head].residual[1] = rg
+		window[head].residual[2] = rb
 		window[head].area = areas[idx]
-		if palAlpha != nil {
-			window[head].area *= alphaAt(palAlpha, bestIdx)
-		}
 		head = (head + 1) % L
 	}
 	return assigns, nil
@@ -2390,8 +2328,8 @@ const RiemersmaPairCancellationDefault = 0.1
 //
 // Pass biasMax = RiemersmaInputBiasDefault to inherit the same near-
 // palette input bias Riemersma uses.
-func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
-	return riemersmaPairImpl(ctx, cells, pal, palAlpha, neighbors, biasMax, lambda, true, tracker)
+func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, lambda float32, biasMax float64, tracker progress.Tracker) ([]int32, error) {
+	return riemersmaPairImpl(ctx, cells, pal, model, neighbors, biasMax, lambda, true, tracker)
 }
 
 // riemersmaPairImpl is the shared body for RiemersmaPair (production,
@@ -2409,9 +2347,12 @@ func RiemersmaPair(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palA
 // palAlpha (see DitherWithNeighbors / Riemersma) opacity-weights each
 // committed cell's window mass by its chosen color's opacity; nil/uniform =
 // identity.
-func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, biasMax float64, lambda float32, slide bool, tracker progress.Tracker) ([]int32, error) {
+func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, biasMax float64, lambda float32, slide bool, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
+	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
 	}
 	n := len(cells)
 	if n == 0 {
@@ -2445,7 +2386,10 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 	res0 := make([][3]float32, len(pal))
 	res1 := make([][3]float32, len(pal))
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
+	// RiemersmaPair is a research/bench-only mode (production "riemersma" calls
+	// Riemersma). It keeps the nominal-color joint decision; only the full-mass
+	// (no opacity) window is inherited from the transmittance port.
+	palLin, palLab := model.lin, model.lab
 
 	step := 2
 	if slide {
@@ -2552,9 +2496,6 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			window[head].residual[1] = r0G - palLin[bestA][1]
 			window[head].residual[2] = r0B - palLin[bestA][2]
 			window[head].area = a0
-			if palAlpha != nil {
-				window[head].area *= alphaAt(palAlpha, bestA)
-			}
 			head = (head + 1) % L
 			break
 		}
@@ -2625,9 +2566,6 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		window[head].residual[1] = r0G - palLin[bestA][1]
 		window[head].residual[2] = r0B - palLin[bestA][2]
 		window[head].area = a0
-		if palAlpha != nil {
-			window[head].area *= alphaAt(palAlpha, bestA)
-		}
 		head = (head + 1) % L
 
 		if !slide {
@@ -2639,9 +2577,6 @@ func riemersmaPairImpl(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 			window[head].residual[1] = r1G - palLin[bestB][1]
 			window[head].residual[2] = r1B - palLin[bestB][2]
 			window[head].area = a1
-			if palAlpha != nil {
-				window[head].area *= alphaAt(palAlpha, bestB)
-			}
 			head = (head + 1) % L
 		}
 	}
@@ -2964,7 +2899,7 @@ const DizzyCorrectionPasses = 3
 // Σ(αₐ cₐ)/Σ(αₐ) so the correction chases the average the eye actually
 // integrates. A nil/uniform palAlpha leaves both the inner passes and the
 // drift metric bit-identical to the historical area-weighted behavior.
-func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	// Empty input: no work, no division by zero downstream.
 	if len(cells) == 0 {
 		return nil, nil
@@ -3005,33 +2940,24 @@ func DitherCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 		// offset for a single continuous K*n unit of work.
 		passTracker := ditherPassTracker{real: tracker, offset: pass * len(cells)}
 		var err error
-		assigns, err = DitherWithNeighbors(ctx, shifted, pal, palAlpha, neighbors, passTracker)
+		assigns, err = DitherWithNeighbors(ctx, shifted, pal, model, neighbors, passTracker)
 		if err != nil {
 			return nil, err
 		}
 
-		// Measure drift relative to the ORIGINAL input (linear light),
-		// weighting BOTH the output (chosen colors) and the input
-		// reference by the SAME per-cell opacity α(assignment). This
-		// consistency is essential: weighting only the output makes the
-		// α-discount of every translucent pick look like a permanent
-		// global drift, so the corrector shifts ALL cells toward the
-		// translucent hue each pass — scattering e.g. yellow into a
-		// pure-red region. Matching the weights cancels that bias,
-		// leaving only the genuine stranded-tail residual to correct.
-		// With nil/uniform alpha every weight is 1, so both reduce to the
-		// historical plain per-cell means and the behavior is unchanged.
-		var oR, oG, oB, iR, iG, iB, wSum float64
+		// Measure drift relative to the ORIGINAL input as a plain per-cell
+		// linear-light mean (the transmittance model has no opacity discount to
+		// weight by; this is the historical α = 1 metric).
+		var oR, oG, oB, iR, iG, iB float64
 		for i, a := range assigns {
-			w := float64(alphaAt(palAlpha, int(a)))
-			oR += w * float64(palLin[a][0])
-			oG += w * float64(palLin[a][1])
-			oB += w * float64(palLin[a][2])
-			iR += w * float64(srgbToLinearLUT[cells[i].Color[0]])
-			iG += w * float64(srgbToLinearLUT[cells[i].Color[1]])
-			iB += w * float64(srgbToLinearLUT[cells[i].Color[2]])
-			wSum += w
+			oR += float64(palLin[a][0])
+			oG += float64(palLin[a][1])
+			oB += float64(palLin[a][2])
+			iR += float64(srgbToLinearLUT[cells[i].Color[0]])
+			iG += float64(srgbToLinearLUT[cells[i].Color[1]])
+			iB += float64(srgbToLinearLUT[cells[i].Color[2]])
 		}
+		wSum := float64(len(assigns))
 		oR /= wSum
 		oG /= wSum
 		oB /= wSum
@@ -3136,8 +3062,8 @@ const localCorrectionDamping float32 = 0.5
 // palAlpha is threaded through exactly as in DitherCorrected; nil/uniform
 // alpha leaves both the inner passes and the drift metric identical to
 // the historical area-weighted behavior.
-func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
-	return ditherLocalCorrected(ctx, cells, pal, palAlpha, neighbors, tracker, localCorrectionDamping, LocalCorrectionPasses)
+func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
+	return ditherLocalCorrected(ctx, cells, pal, model, neighbors, tracker, localCorrectionDamping, LocalCorrectionPasses)
 }
 
 // DitherLocalCorrectedTuned forwards to the unexported ditherLocalCorrected
@@ -3145,15 +3071,15 @@ func DitherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 // tests/ditherbench parameter sweep so the bench can compare relaxation
 // settings; production code should call DitherLocalCorrected, which pins
 // the tuned defaults (localCorrectionDamping, LocalCorrectionPasses).
-func DitherLocalCorrectedTuned(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
-	return ditherLocalCorrected(ctx, cells, pal, palAlpha, neighbors, tracker, damping, passes)
+func DitherLocalCorrectedTuned(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
+	return ditherLocalCorrected(ctx, cells, pal, model, neighbors, tracker, damping, passes)
 }
 
 // ditherLocalCorrected is the implementation behind DitherLocalCorrected.
 // damping is the relaxation factor γ (see localCorrectionDamping) and
 // passes is the number of iterated dizzy passes. See DitherLocalCorrected's
 // doc comment for the algorithm; the only additions here are the two knobs.
-func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
+func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker, damping float32, passes int) ([]int32, error) {
 	// Empty input: no work, no division by zero downstream.
 	if len(cells) == 0 {
 		return nil, nil
@@ -3162,16 +3088,17 @@ func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
+	if model == nil {
+		model = NewDitherModel(pal, nil, 0, 0, false)
+	}
 
 	n := len(cells)
 
-	// Deterministic helpers of (cells, pal, palAlpha) computed once and
-	// reused every pass — the same quantities ditherCore recomputes
-	// internally, needed here to spread drops with matching scaling and
-	// to compute the output mean.
+	// Deterministic helpers computed once and reused every pass — the same
+	// quantities ditherCore recomputes internally, needed here to spread drops
+	// with matching (standard area-weighted) scaling and to gauge convergence.
 	areas := effectiveAreas(cells)
-	palLin, palLab := paletteLinearLab(pal)
-	cellAlphaProxy := cellAlphaProxies(cells, palAlpha, palLab)
+	palLin, _ := paletteLinearLab(pal)
 
 	// corr is the correction seeded into the next pass's error buffer.
 	// nil on pass 1 (plain dizzy) so pass 1 measures the natural drift.
@@ -3187,26 +3114,25 @@ func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 		passTracker := ditherPassTracker{real: tracker, offset: pass * n}
 		var drops []strandedDrop
 		var err error
-		assigns, drops, err = ditherCore(ctx, cells, pal, palAlpha, neighbors, passTracker, corr, true)
+		assigns, drops, err = ditherCore(ctx, cells, pal, model, neighbors, passTracker, corr, true)
 		if err != nil {
 			return nil, err
 		}
 
-		// Measure drift relative to the ORIGINAL input (linear light),
-		// weighting both the output and the input reference by the same
-		// per-cell opacity α(assignment). See DitherCorrected for why the
-		// weights must match.
-		var oR, oG, oB, iR, iG, iB, wSum float64
+		// Measure drift relative to the ORIGINAL input as a plain per-cell
+		// linear-light mean (chosen nominal color vs input). The transmittance
+		// model has no opacity discount, so there's no α to match here — this
+		// is the historical area-weighted (α = 1) drift metric.
+		var oR, oG, oB, iR, iG, iB float64
 		for i, a := range assigns {
-			w := float64(alphaAt(palAlpha, int(a)))
-			oR += w * float64(palLin[a][0])
-			oG += w * float64(palLin[a][1])
-			oB += w * float64(palLin[a][2])
-			iR += w * float64(srgbToLinearLUT[cells[i].Color[0]])
-			iG += w * float64(srgbToLinearLUT[cells[i].Color[1]])
-			iB += w * float64(srgbToLinearLUT[cells[i].Color[2]])
-			wSum += w
+			oR += float64(palLin[a][0])
+			oG += float64(palLin[a][1])
+			oB += float64(palLin[a][2])
+			iR += float64(srgbToLinearLUT[cells[i].Color[0]])
+			iG += float64(srgbToLinearLUT[cells[i].Color[1]])
+			iB += float64(srgbToLinearLUT[cells[i].Color[2]])
 		}
+		wSum := float64(len(assigns))
 		oR /= wSum
 		oG /= wSum
 		oB /= wSum
@@ -3257,13 +3183,9 @@ func ditherLocalCorrected(ctx context.Context, cells []ActiveCell, pal [][3]uint
 			if totalW <= 0 {
 				continue
 			}
-			aSender := areas[i] * alphaAt(palAlpha, int(assigns[i]))
+			aSender := areas[i]
 			for _, nb := range nbrs {
-				aRecvEff := areas[nb.Idx]
-				if cellAlphaProxy != nil {
-					aRecvEff *= cellAlphaProxy[nb.Idx]
-				}
-				w := nb.Weight / totalW * (aSender / aRecvEff)
+				w := nb.Weight / totalW * (aSender / areas[nb.Idx])
 				next[nb.Idx][0] += d.e[0] * w
 				next[nb.Idx][1] += d.e[1] * w
 				next[nb.Idx][2] += d.e[2] * w

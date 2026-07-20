@@ -98,12 +98,11 @@ func TestDitherPerComponentIsolatesError(t *testing.T) {
 	}
 	cells := makeRowCells(colors)
 	pal := [][3]uint8{{0, 0, 0}, {255, 255, 255}}
-	palAlpha := []float32{1, 1}
 	cut := CutNeighborsByColor(cells, BuildNeighbors(cells), 20)
 
-	assign, err := DitherPerComponent(context.Background(), cells, pal, palAlpha, cut, progress.NullTracker{},
-		func(ctx context.Context, c []ActiveCell, p [][3]uint8, pa []float32, nbr [][]Neighbor, tr progress.Tracker) ([]int32, error) {
-			return FloydSteinberg(ctx, c, p, pa, nbr, tr)
+	assign, err := DitherPerComponent(context.Background(), cells, pal, nil, cut, progress.NullTracker{},
+		func(ctx context.Context, c []ActiveCell, p [][3]uint8, m *DitherModel, nbr [][]Neighbor, tr progress.Tracker) ([]int32, error) {
+			return FloydSteinberg(ctx, c, p, m, nbr, tr)
 		})
 	if err != nil {
 		t.Fatalf("DitherPerComponent: %v", err)

@@ -2,49 +2,8 @@ package voxel
 
 import (
 	"context"
-	"math"
 	"testing"
 )
-
-// TestAlphaFromTDSanitizesGarbage guards the single chokepoint that protects
-// the dither from a hand-authored inventory file: TD ≤ 0, NaN, or ±Inf must
-// become opaque (1), and a finite-but-huge TD must floor above 0 so it never
-// zeroes a weighted-average denominator. Every returned alpha must be finite
-// and in (0,1].
-func TestAlphaFromTDSanitizesGarbage(t *testing.T) {
-	nan := float32(math.NaN())
-	inf := float32(math.Inf(1))
-	for _, tc := range []struct {
-		td   float32
-		want float32 // exact expected value where it matters
-	}{
-		{0, 1}, {-5, 1}, {nan, 1}, {inf, 1},
-	} {
-		if got := AlphaFromTD(tc.td); got != tc.want {
-			t.Errorf("AlphaFromTD(%v) = %v, want %v", tc.td, got, tc.want)
-		}
-	}
-	// Huge but finite TD: alpha tiny but strictly positive and finite.
-	huge := AlphaFromTD(1e9)
-	if huge <= 0 || huge > 1 || math.IsNaN(float64(huge)) || math.IsInf(float64(huge), 0) {
-		t.Errorf("AlphaFromTD(1e9) = %v, want a small finite value in (0,1]", huge)
-	}
-}
-
-// TestPaletteAlphasUniformIsNil locks in that a uniform TD slice collapses to
-// nil (the kernels' exact identity path), so the default all-opaque pipeline
-// is bit-identical to the pre-TD dither.
-func TestPaletteAlphasUniformIsNil(t *testing.T) {
-	if a := PaletteAlphas([]float32{1, 1, 1, 1}); a != nil {
-		t.Errorf("uniform TDs gave %v, want nil", a)
-	}
-	if a := PaletteAlphas([]float32{4.3, 4.3}); a != nil {
-		t.Errorf("uniform non-default TDs gave %v, want nil", a)
-	}
-	if a := PaletteAlphas([]float32{1, 4.3}); a == nil {
-		t.Errorf("mixed TDs gave nil, want a real slice")
-	}
-}
 
 // gridCells builds a w×h grid of cells all set to target color `col`,
 // with a 4-neighbor adjacency graph (face weight 1.0). Area = 1 each.
@@ -86,251 +45,153 @@ func fracAssignedTo(assigns []int32, idx int32) float64 {
 	return float64(c) / float64(len(assigns))
 }
 
-// TestOpacityWeightingRaisesTranslucentArea is the core check for the
-// red+yellow→orange problem: an opaque red (low TD) and a translucent
-// yellow (high TD) dithered toward orange must spend MORE area on the
-// yellow when opacity weighting is on, because each translucent yellow
-// cell contributes less to the perceived mix.
-func TestOpacityWeightingRaisesTranslucentArea(t *testing.T) {
-	orange := [3]uint8{255, 140, 0}
-	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (idx 0), yellow (idx 1)
-	cells, neighbors := gridCells(48, 48, orange)
+// The neighbor/κ calibration used by the dither model in these tests (mirrors
+// palette.DefaultNeighborPathMM / palette.TransmittanceKappa; kept local so the
+// voxel package's tests don't depend on the palette constants).
+const (
+	testDitherEll   = 0.130
+	testDitherKappa = 3.04
+)
 
-	// Baseline: opaque (nil alpha) — historical area-weighted behavior.
-	base, err := DitherWithNeighbors(context.Background(), cells, pal, nil, neighbors, nil)
-	if err != nil {
-		t.Fatalf("baseline dither: %v", err)
-	}
-	baseYellow := fracAssignedTo(base, 1)
-
-	// Opacity-weighted: red opaque (TD 1), yellow translucent (TD 4.3).
-	palAlpha := PaletteAlphas([]float32{1.0, 4.3})
-	weighted, err := DitherWithNeighbors(context.Background(), cells, pal, palAlpha, neighbors, nil)
-	if err != nil {
-		t.Fatalf("weighted dither: %v", err)
-	}
-	weightedYellow := fracAssignedTo(weighted, 1)
-
-	t.Logf("yellow area fraction: opaque=%.3f  opacity-weighted=%.3f (alpha red=%.3f yellow=%.3f)",
-		baseYellow, weightedYellow, AlphaFromTD(1.0), AlphaFromTD(4.3))
-
-	if weightedYellow <= baseYellow {
-		t.Errorf("opacity weighting did not raise translucent-yellow area: opaque=%.3f weighted=%.3f",
-			baseYellow, weightedYellow)
-	}
-	// Both colors should still be in play (sanity: we're actually dithering).
-	if baseYellow <= 0 || baseYellow >= 1 {
-		t.Errorf("baseline yellow fraction %.3f is degenerate; test fixture not dithering", baseYellow)
-	}
-}
-
-// TestAllModesRespondToTD verifies every production dither mode spends more
-// area on the translucent yellow when opacity weighting is on — i.e. TD is
-// actually wired into each mode, not just the dizzy family.
-func TestAllModesRespondToTD(t *testing.T) {
-	orange := [3]uint8{255, 140, 0}
-	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (0), yellow (1)
-	cells, neighbors := gridCells(48, 48, orange)
-	mixed := PaletteAlphas([]float32{1.0, 4.3}) // red opaque, yellow translucent
+// TestDitherModelOpaqueIsClassic: an opaque DitherModel (honorTD = false) and a
+// nil model both drive the classic nearest-color dither, byte-for-byte. This is
+// the identity guarantee that keeps the default (non-HonorTD) pipeline unchanged
+// by the transmittance port.
+func TestDitherModelOpaqueIsClassic(t *testing.T) {
+	target := [3]uint8{90, 160, 70}
+	pal := [][3]uint8{{0, 0, 0}, {255, 255, 255}, {0, 255, 0}, {255, 0, 0}}
+	tds := []float32{0.1, 0.3, 0.5, 3.3}
+	cells, neighbors := gridCells(40, 40, target)
 	ctx := context.Background()
 
-	modes := []struct {
-		name string
-		run  func(palAlpha []float32) ([]int32, error)
-	}{
-		{"floyd-steinberg", func(a []float32) ([]int32, error) {
-			return FloydSteinberg(ctx, cells, pal, a, neighbors, nil)
-		}},
-		{"dizzy-corrected", func(a []float32) ([]int32, error) {
-			return DitherCorrected(ctx, cells, pal, a, neighbors, nil)
-		}},
-		{"riemersma", func(a []float32) ([]int32, error) {
-			return Riemersma(ctx, cells, pal, a, neighbors, RiemersmaInputBiasDefault, nil)
-		}},
-		{"riemersma-pair", func(a []float32) ([]int32, error) {
-			return RiemersmaPair(ctx, cells, pal, a, neighbors, RiemersmaPairCancellationDefault, RiemersmaInputBiasDefault, nil)
-		}},
-		{"blue-noise", func(a []float32) ([]int32, error) {
-			return BlueNoiseAdaptive(ctx, cells, pal, a, neighbors, BlueNoiseAdaptiveTolDefault, nil)
-		}},
+	opaque := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, false) // honorTD off → opaque
+	viaModel, err := DitherWithNeighbors(ctx, cells, pal, opaque, neighbors, nil)
+	if err != nil {
+		t.Fatalf("opaque-model dither: %v", err)
 	}
-	for _, m := range modes {
-		base, err := m.run(nil)
-		if err != nil {
-			t.Fatalf("%s base: %v", m.name, err)
-		}
-		weighted, err := m.run(mixed)
-		if err != nil {
-			t.Fatalf("%s weighted: %v", m.name, err)
-		}
-		by, wy := fracAssignedTo(base, 1), fracAssignedTo(weighted, 1)
-		t.Logf("%-16s yellow area: opaque=%.3f opacity-weighted=%.3f", m.name, by, wy)
-		if wy <= by {
-			t.Errorf("%s: opacity weighting did not raise yellow area (opaque=%.3f weighted=%.3f)", m.name, by, wy)
-		}
-		if by <= 0 || by >= 1 {
-			t.Errorf("%s: baseline yellow fraction %.3f degenerate (not dithering)", m.name, by)
+	viaNil, err := DitherWithNeighbors(ctx, cells, pal, nil, neighbors, nil)
+	if err != nil {
+		t.Fatalf("nil-model dither: %v", err)
+	}
+	for i := range viaNil {
+		if viaModel[i] != viaNil[i] {
+			t.Fatalf("opaque model differs from nil (classic) at cell %d: %d vs %d", i, viaModel[i], viaNil[i])
 		}
 	}
 }
 
-// TestDitherCorrectedNoTranslucentBleed is a regression guard for the bug
-// where DitherCorrected weighted the OUTPUT mean by alpha but the INPUT mean
-// plainly: a translucent color's alpha-discount then looked like a permanent
-// global drift, so the corrector shifted every cell toward that hue and
-// scattered it into solid regions of other colors (yellow speckles all over a
-// pure-red 3DBenchy hull). A field that is half pure-red, half pure-yellow
-// with a translucent yellow must keep the deep-red region essentially red.
-func TestDitherCorrectedNoTranslucentBleed(t *testing.T) {
-	w, h := 64, 64
-	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}}  // red (0), yellow (1)
-	palAlpha := PaletteAlphas([]float32{1.0, 4.3}) // yellow translucent
-	cells, neighbors := gridCells(w, h, [3]uint8{255, 0, 0})
-	for y := 0; y < h; y++ {
-		for x := w / 2; x < w; x++ {
-			cells[y*w+x].Color = [3]uint8{255, 255, 0} // right half: yellow target
-		}
-	}
-	assigns, err := DitherCorrected(context.Background(), cells, pal, palAlpha, neighbors, nil)
-	if err != nil {
-		t.Fatalf("DitherCorrected: %v", err)
-	}
-	// Deep-red quarter (x < w/4), far from the red/yellow boundary.
-	yellow, total := 0, 0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w/4; x++ {
-			total++
-			if assigns[y*w+x] == 1 {
-				yellow++
+// TestDitherModelExactTargetMatches guards the swatch-export property: for a
+// two-filament pair, a cell whose color is exactly filament A must be assigned A
+// — eff(A, C_A) = C_A, so exact targets still match exactly even under the
+// transmittance decision, translucent or not.
+func TestDitherModelExactTargetMatches(t *testing.T) {
+	pal := [][3]uint8{{0x08, 0x0A, 0x0D}, {0xF6, 0x74, 0x05}} // Black (A), Orange (B, translucent)
+	tds := []float32{0.1, 3.3}
+	for _, honor := range []bool{false, true} {
+		m := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, honor)
+		for want, c := range pal {
+			r := srgbToLinearLUT[c[0]]
+			g := srgbToLinearLUT[c[1]]
+			b := srgbToLinearLUT[c[2]]
+			got, _, _, _ := m.choose(r, g, b)
+			if got != want {
+				t.Errorf("honorTD=%v: exact target %v chose %d, want %d", honor, c, got, want)
 			}
 		}
 	}
-	frac := float64(yellow) / float64(total)
-	t.Logf("yellow fraction in deep-red quarter: %.3f", frac)
-	if frac > 0.02 {
-		t.Errorf("translucent yellow bled into solid-red region: %.3f (want ~0)", frac)
-	}
 }
 
-// TestUniformAlphaIsIdentity guarantees the backwards-compatibility
-// property: a nil alpha and any uniform alpha must produce byte-identical
-// assignments, since a constant opacity cancels in the renormalized mix.
-func TestUniformAlphaIsIdentity(t *testing.T) {
-	target := [3]uint8{90, 160, 70}
-	pal := [][3]uint8{{0, 0, 0}, {255, 255, 255}, {0, 255, 0}, {255, 0, 0}}
-	cells, neighbors := gridCells(40, 40, target)
+// TestTransmittanceDitherWiredAllModes: with a translucent filament in play the
+// transmittance model must actually change what each production dither mode
+// places (vs the opaque model), i.e. the model is wired into every mode. Uses an
+// orange target over {red, translucent-yellow}: the printed appearance of the
+// translucent yellow differs from its nominal, so the decision must shift.
+func TestTransmittanceDitherWiredAllModes(t *testing.T) {
+	orange := [3]uint8{255, 140, 0}
+	pal := [][3]uint8{{255, 0, 0}, {255, 255, 0}} // red (opaque), yellow (translucent)
+	tds := []float32{0.1, 3.3}
+	cells, neighbors := gridCells(48, 48, orange)
+	ctx := context.Background()
 
-	nilA, err := DitherWithNeighbors(context.Background(), cells, pal, nil, neighbors, nil)
-	if err != nil {
-		t.Fatalf("nil-alpha dither: %v", err)
+	opaque := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, false)
+	tmodel := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, true)
+
+	modes := []struct {
+		name string
+		run  func(m *DitherModel) ([]int32, error)
+	}{
+		{"dlc", func(m *DitherModel) ([]int32, error) {
+			return DitherLocalCorrectedTuned(ctx, cells, pal, m, neighbors, nil, 0.3, 7)
+		}},
+		{"floyd-steinberg", func(m *DitherModel) ([]int32, error) {
+			return FloydSteinberg(ctx, cells, pal, m, neighbors, nil)
+		}},
+		{"riemersma", func(m *DitherModel) ([]int32, error) {
+			return Riemersma(ctx, cells, pal, m, neighbors, RiemersmaInputBiasDefault, nil)
+		}},
 	}
-	uniform := []float32{0.5, 0.5, 0.5, 0.5}
-	uniA, err := DitherWithNeighbors(context.Background(), cells, pal, uniform, neighbors, nil)
-	if err != nil {
-		t.Fatalf("uniform-alpha dither: %v", err)
-	}
-	for i := range nilA {
-		if nilA[i] != uniA[i] {
-			t.Fatalf("uniform alpha changed assignment at cell %d: nil=%d uniform=%d", i, nilA[i], uniA[i])
+	for _, mode := range modes {
+		base, err := mode.run(opaque)
+		if err != nil {
+			t.Fatalf("%s opaque: %v", mode.name, err)
+		}
+		tr, err := mode.run(tmodel)
+		if err != nil {
+			t.Fatalf("%s transmittance: %v", mode.name, err)
+		}
+		changed := 0
+		for i := range base {
+			if base[i] != tr[i] {
+				changed++
+			}
+		}
+		by, ty := fracAssignedTo(base, 1), fracAssignedTo(tr, 1)
+		t.Logf("%-16s yellow frac: opaque=%.3f transmittance=%.3f (%d/%d cells changed)",
+			mode.name, by, ty, changed, len(base))
+		if changed == 0 {
+			t.Errorf("%s: transmittance model changed nothing — not wired in", mode.name)
+		}
+		if by <= 0 || by >= 1 {
+			t.Errorf("%s: opaque baseline degenerate (yellow frac %.3f) — not dithering", mode.name, by)
 		}
 	}
 }
 
-// TestDitherCorrectedUniformAlphaIsIdentity extends the identity guarantee
-// to the production default mode (dizzy-corrected), whose drift correction
-// also became opacity-weighted.
-func TestDitherCorrectedUniformAlphaIsIdentity(t *testing.T) {
-	target := [3]uint8{120, 90, 200}
-	pal := [][3]uint8{{0, 0, 0}, {255, 255, 255}, {0, 0, 255}, {255, 0, 0}}
-	cells, neighbors := gridCells(40, 40, target)
-
-	nilA, err := DitherCorrected(context.Background(), cells, pal, nil, neighbors, nil)
-	if err != nil {
-		t.Fatalf("nil-alpha corrected: %v", err)
-	}
-	uniform := []float32{0.7, 0.7, 0.7, 0.7}
-	uniA, err := DitherCorrected(context.Background(), cells, pal, uniform, neighbors, nil)
-	if err != nil {
-		t.Fatalf("uniform-alpha corrected: %v", err)
-	}
-	for i := range nilA {
-		if nilA[i] != uniA[i] {
-			t.Fatalf("uniform alpha changed corrected assignment at cell %d: nil=%d uniform=%d", i, nilA[i], uniA[i])
-		}
-	}
-}
-
-// TestFloydSteinbergTDStable is the regression guard for the FS × TD
-// wall-collapse bug (brick benchy, 2026-07-09): the dizzy-style
-// opacity-weighted diffusion re-emitted inherited error scaled by
-// alphaChosen/alphaProxy (up to ~2x), and FS's deterministic forward
-// frontier compounded that gain geometrically — the residual exploded
-// to ~1e8 and 75% of the surface collapsed to a single saturating
-// color. The fix diffuses mass-domain error (pass-through gain exactly
-// 1; see FloydSteinberg).
-//
-// Uses the real palette + TDs from the failing model (Panchroma Basic:
-// Orange TD 3.3, Wine Red 1.0, Steel Grey 0.4, Cream 1.5) on a uniform
-// brick-orange field. Two properties the broken code violated:
-//
-//  1. No collapse: the dominant color stayed under ~50% healthy,
-//     hit 75% broken. Assert < 65%.
-//  2. Conservation: the opacity-weighted output average must match the
-//     plain average of the no-TD FS output (both approximate the same
-//     target under different weights). Broken drift was ~22/13/10
-//     sRGB steps; healthy is ~0. Assert within 8 per channel.
-func TestFloydSteinbergTDStable(t *testing.T) {
+// TestFloydSteinbergTransmittanceStable is the regression guard for the FS × TD
+// instability class (the old opacity-mass diffusion exploded to ~1e8 under FS's
+// deterministic scan order and collapsed whole walls to one color). The
+// transmittance model diffuses the residual t − eff(chosen) = (1−β·T)∘(t − C),
+// which is SMALLER than the classic t − C (never larger), so FS stays bounded.
+// On a uniform brick-orange field with a real translucent palette no color may
+// dominate (>65%) and the output must be a genuine dither.
+func TestFloydSteinbergTransmittanceStable(t *testing.T) {
 	pal := [][3]uint8{
 		{0xF6, 0x74, 0x05}, // Orange
 		{0xD6, 0x02, 0x12}, // Wine Red
 		{0x61, 0x64, 0x69}, // Steel Grey
 		{0xEE, 0xD1, 0xA8}, // Cream
 	}
-	alphas := PaletteAlphas([]float32{3.3, 1.0, 0.4, 1.5})
+	tds := []float32{3.3, 1.0, 0.4, 1.5}
 	cells, neighbors := gridCells(64, 64, [3]uint8{180, 90, 60})
 	ctx := context.Background()
 
-	withTD, err := FloydSteinberg(ctx, cells, pal, alphas, neighbors, nil)
+	m := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, true)
+	withTD, err := FloydSteinberg(ctx, cells, pal, m, neighbors, nil)
 	if err != nil {
-		t.Fatalf("FS+TD: %v", err)
+		t.Fatalf("FS+transmittance: %v", err)
 	}
-	noTD, err := FloydSteinberg(ctx, cells, pal, nil, neighbors, nil)
-	if err != nil {
-		t.Fatalf("FS: %v", err)
-	}
-
+	nonEmpty := 0
 	for i := range pal {
 		f := fracAssignedTo(withTD, int32(i))
-		t.Logf("FS+TD palette[%d] fraction: %.3f", i, f)
+		t.Logf("FS+transmittance palette[%d] fraction: %.3f", i, f)
 		if f > 0.65 {
-			t.Errorf("FS+TD collapsed: palette[%d] got %.1f%% of cells", i, 100*f)
+			t.Errorf("FS+transmittance collapsed: palette[%d] got %.1f%% of cells", i, 100*f)
+		}
+		if f > 0 {
+			nonEmpty++
 		}
 	}
-
-	// Opacity-weighted average of the TD output vs plain average of the
-	// no-TD output, both in linear light, compared in sRGB bytes.
-	avg := func(assigns []int32, alphas []float32) [3]uint8 {
-		var num [3]float64
-		var den float64
-		for _, a := range assigns {
-			al := float64(alphaAt(alphas, int(a)))
-			for c := 0; c < 3; c++ {
-				num[c] += al * float64(srgbToLinearLUT[pal[a][c]])
-			}
-			den += al
-		}
-		var out [3]uint8
-		for c := 0; c < 3; c++ {
-			out[c] = linearToSrgbByte(float32(num[c] / den))
-		}
-		return out
-	}
-	got, want := avg(withTD, alphas), avg(noTD, nil)
-	t.Logf("FS+TD weighted avg=%v  FS plain avg=%v", got, want)
-	for c := 0; c < 3; c++ {
-		d := int(got[c]) - int(want[c])
-		if d < -8 || d > 8 {
-			t.Errorf("FS+TD perceived average drifted: got %v, want ~%v (channel %d off by %d)", got, want, c, d)
-		}
+	if nonEmpty < 2 {
+		t.Errorf("FS+transmittance not dithering: only %d colors used", nonEmpty)
 	}
 }

@@ -103,7 +103,7 @@ func colorComponents(neighbors [][]Neighbor) ([]int, int) {
 // (Riemersma, RiemersmaPair, FloydSteinberg, …) once their extra knobs
 // are bound in a closure: it maps cells + an adjacency graph to a
 // per-cell palette assignment.
-type CellDither func(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error)
+type CellDither func(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error)
 
 // DitherPerComponent runs dither independently on each connected
 // component of the supplied (colour-cut) adjacency graph and stitches the
@@ -117,7 +117,7 @@ type CellDither func(ctx context.Context, cells []ActiveCell, pal [][3]uint8, pa
 // boundary on a jump. Running them per component gives each region its own
 // tour and a fresh window, which is the tour-dither equivalent of
 // "dither within this colour region only".
-func DitherPerComponent(ctx context.Context, cells []ActiveCell, pal [][3]uint8, palAlpha []float32, neighbors [][]Neighbor, tracker progress.Tracker, fn CellDither) ([]int32, error) {
+func DitherPerComponent(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker, fn CellDither) ([]int32, error) {
 	labels, k := colorComponents(neighbors)
 	// Bucket global cell indices by component.
 	members := make([][]int, k)
@@ -148,7 +148,7 @@ func DitherPerComponent(ctx context.Context, cells []ActiveCell, pal [][3]uint8,
 			}
 			subNbrs[li] = sn
 		}
-		sub, err := fn(ctx, subCells, pal, palAlpha, subNbrs, tracker)
+		sub, err := fn(ctx, subCells, pal, model, subNbrs, tracker)
 		if err != nil {
 			return nil, err
 		}
