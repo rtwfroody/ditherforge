@@ -707,7 +707,7 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		if len(po.Palette) > 0 {
 			if vo, verr := r.Voxelize(); verr == nil && vo != nil {
 				eff = voxel.NeighborEffectivePalette(po.Palette, po.PaletteTDs,
-					vo.Cells, simNeighborPathMM)
+					vo.Cells, simNeighborPathMM, simKappa)
 			} else {
 				eff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
 					r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
@@ -1011,6 +1011,20 @@ var simNeighborPathMM = func() float32 {
 	return palette.DefaultNeighborPathMM
 }()
 
+// simKappa is the transmittance filter exponent κ of the print-simulation mixing
+// model (palette.TransmittanceKappa), shared by the per-cell sim and TD-aware
+// selection. Override with DITHERFORGE_SIM_KAPPA (a non-negative float; κ = 0 is
+// the plain additive blend). Note ℓ (simNeighborPathMM) and κ are a calibrated
+// pair — see palette.DefaultNeighborPathMM.
+var simKappa = func() float64 {
+	if s := os.Getenv("DITHERFORGE_SIM_KAPPA"); s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 {
+			return v
+		}
+	}
+	return palette.TransmittanceKappa
+}()
+
 // anyTranslucentTD reports whether any palette entry leaks light through the
 // shell (palette.TDLeak > 0) at the given geometry — i.e. whether the per-cell
 // print simulation would differ from the plain dither at all.
@@ -1029,7 +1043,7 @@ func anyTranslucentTD(tds []float32, layerHeightMM, shellThicknessMM float32) bo
 // provenance fall back to the global effective palette, and finally to gray.
 func buildSimFaceColors(vo *voxelizeOutput, do *ditherOutput, po *paletteOutput, mo *mergeOutput, opts Options) []uint16 {
 	cellEff := voxel.EffectiveCellColors(vo.Cells, do.Assignments, po.Palette,
-		po.PaletteTDs, vo.Neighbors, simNeighborPathMM, 2)
+		po.PaletteTDs, vo.Neighbors, simNeighborPathMM, 2, simKappa)
 
 	// Global cell index (into CellSamples) -> visible-cell index.
 	globalToVisible := make([]int, len(vo.CellSamples))
@@ -1462,6 +1476,7 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 		LayerHeightMM:    opts.LayerHeight,
 		ShellThicknessMM: opts.ShellThicknessMM,
 		NeighborPathMM:   simNeighborPathMM,
+		Kappa:            float32(simKappa),
 	}
 
 	if opts.InventoryFile != "" {

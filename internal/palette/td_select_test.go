@@ -89,13 +89,17 @@ func TestSelectUniformTDBitIdentical(t *testing.T) {
 // warm-brown body over ~50% near-gray coverage. Nominal scoring anchors the
 // dark end on opaque Black and leans on translucent Orange (TD 3.3) for warmth,
 // leaving opaque Brown out entirely. TD-aware scoring composites every filament
-// toward the area-weighted mean of the target colors by its lateral leak β (the
-// neighbor model: β = 10^(−ℓ/TD), ℓ = DefaultNeighborPathMM = 0.3 mm) before
-// scoring. The effective picture then wants opaque Brown (β = 0, its full sienna
-// survives) as the dark warm anchor, so Brown enters the palette (displacing
-// Black) exactly where nominal scoring never would.
+// toward the area-weighted mean of the target colors under the transmittance
+// model (β = 10^(−ℓ/TD), the neighbor deviation filtered by the filament's own
+// hue T = (C/max C)^κ) before scoring, with the shipped calibration
+// ℓ = DefaultNeighborPathMM = 0.130 mm and κ = TransmittanceKappa = 3.04. The
+// effective picture then wants opaque Brown (β = 0, its full sienna survives) as
+// the dark warm anchor, so Brown enters the palette (displacing Black) exactly
+// where nominal scoring never would.
 //
-// The recorded outcome (ℓ = 0.3 mm, the calibrated default):
+// The recorded outcome (ℓ = 0.130 mm, κ = 3.04 — the shipped model; the
+// load-bearing Brown/Black swap is unchanged from the earlier ℓ = 0.3, κ = 0
+// additive model):
 //
 //	nominal:  Black  SteelGrey Orange Cream
 //	td-aware: Brown  SteelGrey Orange ColdWhite
@@ -132,7 +136,7 @@ func TestSelectTDAwareGrayEagle(t *testing.T) {
 		t.Fatalf("nominal select: %v", err)
 	}
 	tdAware, err := SelectFromInventory(context.Background(), samples, nil, inv, 4, nil, true,
-		TDParams{Enabled: true, LayerHeightMM: 0.08, ShellThicknessMM: 0.84}, progress.NullTracker{})
+		TDParams{Enabled: true, LayerHeightMM: 0.08, ShellThicknessMM: 0.84, Kappa: TransmittanceKappa}, progress.NullTracker{})
 	if err != nil {
 		t.Fatalf("td-aware select: %v", err)
 	}

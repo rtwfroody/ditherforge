@@ -558,20 +558,21 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 			checkTD(e.TD)
 		}
 		if !uniform && anyLeak {
+			kappa := float64(tdp.Kappa)
 			meanTargetLin := weightedMeanLinear(cellColors, cellWeights)
 			// Replace only translucent entries' Lab with their effective color;
 			// opaque entries (β = 0) keep their nominal Lab bit-identically.
 			for i, e := range inventory {
 				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
-					invLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin)
+					invLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin, kappa)
 				}
 			}
 			for i, e := range locked {
 				if beta := NeighborLeak(normSelTD(e.TD), neighborPath); beta > 0 {
-					lockedLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin)
+					lockedLab[i] = neighborEffLab(linearOf(e.Color), beta, meanTargetLin, kappa)
 				}
 			}
-			fmt.Printf("  TD-aware selection: neighbor path %.2f mm\n", neighborPath)
+			fmt.Printf("  TD-aware selection: neighbor path %.2f mm, κ %.2f\n", neighborPath, kappa)
 		}
 	}
 

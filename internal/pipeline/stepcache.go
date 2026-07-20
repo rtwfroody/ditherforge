@@ -1035,17 +1035,19 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeBool(h, opts.HonorTD)
 	writeString(h, opts.InfillFilamentHex)
 	// TD-aware selection scores subsets on effective colors under the neighbor
-	// model: each entry composited toward the target-color mean by its lateral
-	// leak β = 10^(−ℓ/TD). The in-plane path ℓ (simNeighborPathMM, overridable
-	// via DITHERFORGE_SIM_NEIGHBOR_PATH_MM) now drives which colors get picked,
-	// so it must invalidate the palette cache. LayerHeight/ShellThickness are
-	// still hashed: they drove the previous (infill-composite) selection, and
-	// leaving them in keeps caches keyed on geometry. The v2 salt forces a
-	// one-time rebuild of caches whose selection used the old infill model.
-	writeString(h, "palette-td-aware-v2")
+	// transmittance model: each entry composited toward the target-color mean by
+	// its lateral leak β = 10^(−ℓ/TD), with the neighbor deviation filtered by the
+	// entry's own hue T = (C/max(C))^κ. The in-plane path ℓ (simNeighborPathMM,
+	// via DITHERFORGE_SIM_NEIGHBOR_PATH_MM) and κ (simKappa, via
+	// DITHERFORGE_SIM_KAPPA) both drive which colors get picked, so both must
+	// invalidate the palette cache. LayerHeight/ShellThickness are still hashed
+	// (geometry). The v3 salt forces a one-time rebuild of caches whose selection
+	// used the pre-transmittance additive model (and the old ℓ = 0.3 default).
+	writeString(h, "palette-td-aware-v3")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	writeFloat32(h, simNeighborPathMM)
+	writeFloat64(h, simKappa)
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {

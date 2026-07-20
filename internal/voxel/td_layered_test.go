@@ -3,6 +3,8 @@ package voxel
 import (
 	"math"
 	"testing"
+
+	"github.com/rtwfroody/ditherforge/internal/palette"
 )
 
 // srgbToLinearLUT / linearToSrgbByte are exercised indirectly; these tests
@@ -184,7 +186,7 @@ func TestEffectiveCellColorsLineBlend(t *testing.T) {
 		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
 		{{Idx: 1, Weight: 1}},
 	}
-	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2, 0)
 
 	if out[0] != cellBlack || out[2] != cellBlack {
 		t.Errorf("opaque black cells changed: %v %v", out[0], out[2])
@@ -215,7 +217,7 @@ func TestEffectiveCellColorsAllOpaqueIdentity(t *testing.T) {
 		{{Idx: 1, Weight: 1}},
 	}
 	_ = assign
-	out := EffectiveCellColors(cells, assignOpaque, pal, tds, neigh, 1.0, 2)
+	out := EffectiveCellColors(cells, assignOpaque, pal, tds, neigh, 1.0, 2, 0)
 	for i := range out {
 		if out[i] != pal[0] {
 			t.Errorf("opaque cell %d changed: %v want %v", i, out[i], pal[0])
@@ -234,7 +236,7 @@ func TestEffectiveCellColorsOutOfRangeAssignment(t *testing.T) {
 		{{Idx: 0, Weight: 1}, {Idx: 2, Weight: 1}},
 		{{Idx: 1, Weight: 1}},
 	}
-	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+	out := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2, 0)
 	gray := [3]uint8{128, 128, 128}
 	if out[0] != gray || out[2] != gray {
 		t.Errorf("invalid cells not gray: %v %v", out[0], out[2])
@@ -263,8 +265,8 @@ func TestEffectiveCellColorsIterationsPropagate(t *testing.T) {
 		{{Idx: 2, Weight: 1}, {Idx: 4, Weight: 1}},
 		{{Idx: 3, Weight: 1}},
 	}
-	out1 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 1)
-	out2 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2)
+	out1 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 1, 0)
+	out2 := EffectiveCellColors(cells, assign, cellPalette, cellTDs, neigh, 1.0, 2, 0)
 
 	// The middle cell (index 2) only "sees" black on the second pass.
 	if lum(out2[2]) >= lum(out1[2]) {
@@ -275,8 +277,116 @@ func TestEffectiveCellColorsIterationsPropagate(t *testing.T) {
 
 // TestEffectiveCellColorsEmpty: no cells returns an empty (non-nil) slice.
 func TestEffectiveCellColorsEmpty(t *testing.T) {
-	out := EffectiveCellColors(nil, nil, cellPalette, cellTDs, nil, 1.0, 2)
+	out := EffectiveCellColors(nil, nil, cellPalette, cellTDs, nil, 1.0, 2, 0)
 	if out == nil || len(out) != 0 {
 		t.Errorf("empty input should return empty slice, got %v", out)
+	}
+}
+
+// additiveReferenceBlend independently reimplements the pre-transmittance
+// additive model — C_{t+1}(i) = (1−β)·C0(i) + β·nbAvg(i), self term always C0,
+// 2 passes — so the κ=0 path can be checked bit-for-bit against it.
+func additiveReferenceBlend(cells []ActiveCell, assign []int32, pal [][3]uint8, tds []float32, neigh [][]Neighbor, ell float32, iters int) [][3]uint8 {
+	n := len(cells)
+	out := make([][3]uint8, n)
+	c0 := make([][3]float64, n)
+	beta := make([]float64, n)
+	valid := make([]bool, n)
+	for i := range cells {
+		k := int(assign[i])
+		if k < 0 || k >= len(pal) {
+			out[i] = [3]uint8{128, 128, 128}
+			continue
+		}
+		valid[i] = true
+		c := pal[k]
+		out[i] = c
+		c0[i] = [3]float64{float64(srgbToLinearLUT[c[0]]), float64(srgbToLinearLUT[c[1]]), float64(srgbToLinearLUT[c[2]])}
+		beta[i] = palette.NeighborLeak(float64(tds[k]), float64(ell))
+	}
+	cur := make([][3]float64, n)
+	copy(cur, c0)
+	next := make([][3]float64, n)
+	for it := 0; it < iters; it++ {
+		for i := 0; i < n; i++ {
+			if !valid[i] || beta[i] == 0 || len(neigh[i]) == 0 {
+				next[i] = c0[i]
+				continue
+			}
+			var sum [3]float64
+			var ws float64
+			for _, nb := range neigh[i] {
+				j := nb.Idx
+				if j < 0 || int(j) >= n || !valid[j] {
+					continue
+				}
+				w := float64(nb.Weight) * math.Max(float64(cells[j].Area), 1e-6)
+				ws += w
+				sum[0] += w * cur[j][0]
+				sum[1] += w * cur[j][1]
+				sum[2] += w * cur[j][2]
+			}
+			if ws == 0 {
+				next[i] = c0[i]
+				continue
+			}
+			b := beta[i]
+			for ch := 0; ch < 3; ch++ {
+				next[i][ch] = (1-b)*c0[i][ch] + b*sum[ch]/ws
+			}
+		}
+		cur, next = next, cur
+	}
+	for i := 0; i < n; i++ {
+		if !valid[i] || beta[i] == 0 {
+			continue
+		}
+		out[i] = [3]uint8{linearToSrgbByte(float32(cur[i][0])), linearToSrgbByte(float32(cur[i][1])), linearToSrgbByte(float32(cur[i][2]))}
+	}
+	return out
+}
+
+// TestEffectiveCellColorsKappaZeroBitIdentical: κ=0 must reproduce the pre-change
+// additive model bit-for-bit. Compared to an independent reimplementation on a
+// fixed mixed graph (translucent + opaque, varied weights).
+func TestEffectiveCellColorsKappaZeroBitIdentical(t *testing.T) {
+	cells := unitCells(4)
+	pal := [][3]uint8{cellBlack, cellOrange, {240, 235, 250}}
+	tds := []float32{0.1, 3.3, 0.5}
+	assign := []int32{1, 0, 2, 1}
+	neigh := [][]Neighbor{
+		{{Idx: 1, Weight: 1}, {Idx: 2, Weight: 0.1}},
+		{{Idx: 0, Weight: 1}, {Idx: 3, Weight: 1}},
+		{{Idx: 0, Weight: 0.1}, {Idx: 3, Weight: 1}},
+		{{Idx: 1, Weight: 1}, {Idx: 2, Weight: 1}},
+	}
+	got := EffectiveCellColors(cells, assign, pal, tds, neigh, 0.3, 2, 0)
+	want := additiveReferenceBlend(cells, assign, pal, tds, neigh, 0.3, 2)
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("cell %d: κ=0 %v != additive reference %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestEffectiveCellColorsTransmittanceHue: under κ>0 a translucent orange cell
+// next to a bright (white) neighbor keeps its saturated hue (low green/blue)
+// where the additive blend washes those channels up toward white. This is the
+// asymmetry the transmittance filter adds and the whole reason it was ported.
+func TestEffectiveCellColorsTransmittanceHue(t *testing.T) {
+	cells := unitCells(2)
+	pal := [][3]uint8{cellOrange, {245, 245, 250}}
+	tds := []float32{3.3, 0.1} // translucent orange, opaque near-white
+	assign := []int32{0, 1}
+	neigh := [][]Neighbor{{{Idx: 1, Weight: 1}}, {{Idx: 0, Weight: 1}}}
+	add := EffectiveCellColors(cells, assign, pal, tds, neigh, 0.13, 2, 0)
+	tm := EffectiveCellColors(cells, assign, pal, tds, neigh, 0.13, 2, 3.04)
+	// Orange cell (index 0): transmittance keeps green/blue lower than additive.
+	if !(tm[0][1] < add[0][1] && tm[0][2] < add[0][2]) {
+		t.Errorf("transmittance did not keep orange saturated next to white: additive=%v transmittance=%v", add[0], tm[0])
+	}
+	// Orange's own bright channel (red) stays high under transmittance.
+	if tm[0][0] < 150 {
+		t.Errorf("orange lost its red under transmittance: %v", tm[0])
 	}
 }

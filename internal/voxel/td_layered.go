@@ -87,8 +87,9 @@ func EffectivePalette(pal [][3]uint8, tds []float32, layerHeightMM, shellThickne
 //
 // An opaque or garbage-TD entry (β = 0) is returned byte-identical to its
 // nominal color, so an all-opaque palette is exact identity. pal is never
-// mutated; a new slice is returned.
-func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell, neighborPathMM float32) [][3]uint8 {
+// mutated; a new slice is returned. kappa is the transmittance filter exponent
+// (palette.TransmittanceKappa); κ = 0 is the plain additive composite.
+func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell, neighborPathMM float32, kappa float64) [][3]uint8 {
 	out := make([][3]uint8, len(pal))
 
 	// Area-weighted mean of the target (cell) colors, in linear light — the
@@ -120,9 +121,22 @@ func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell,
 		if beta == 0 {
 			continue
 		}
+		linC := [3]float64{
+			float64(srgbToLinearLUT[c[0]]),
+			float64(srgbToLinearLUT[c[1]]),
+			float64(srgbToLinearLUT[c[2]]),
+		}
+		if kappa == 0 {
+			for ch := 0; ch < 3; ch++ {
+				out[i][ch] = linearToSrgbByte(float32((1-beta)*linC[ch] + beta*mean[ch]))
+			}
+			continue
+		}
+		// Transmittance model: filter the mean-neighbor DEVIATION from this
+		// filament's own color by its hue T before it blends in.
+		t := palette.TransmittanceColor(linC, kappa)
 		for ch := 0; ch < 3; ch++ {
-			linC := float64(srgbToLinearLUT[c[ch]])
-			eff := (1-beta)*linC + beta*mean[ch]
+			eff := linC[ch] + beta*t[ch]*(mean[ch]-linC[ch])
 			out[i][ch] = linearToSrgbByte(float32(eff))
 		}
 	}
@@ -147,15 +161,22 @@ func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell,
 // come back byte-identical to their nominal color; it is clamped to [0, 0.95]
 // so a cell never fully dissolves into its neighbors.
 //
-// The blend is a few Jacobi passes in linear-light RGB:
+// The blend is a few Jacobi passes in linear-light RGB. The returning neighbor
+// light is filtered by the cell's own per-channel transmittance T_i (the
+// "transmittance model", fit against a photographed swatch print — see
+// palette.TransmittanceKappa), applied to the neighbor DEVIATION from the cell's
+// own color:
 //
-//	C_{t+1}(i) = (1−β_i)·C0(i) + β_i · (Σ_j w_ij·C_t(j)) / (Σ_j w_ij)
+//	nbAvg_i  = (Σ_j w_ij·C_t(j)) / (Σ_j w_ij)
+//	C_{t+1}(i) = C0(i) + β_i · T_i ∘ (nbAvg_i − C0(i))
+//	T_i,c    = (C0(i)_c / max_channel C0(i))^κ
 //
 // where C0(i) is cell i's nominal filament color and w_ij = Neighbor.Weight ×
-// max(area_j, ε). The self term always references C0 (not C_t(i)), keeping the
-// cell's own filament dominant and the iteration gently convergent. A cell
-// with no (valid) neighbors keeps C0, and an all-opaque palette returns the
-// nominal colors unchanged.
+// max(area_j, ε). κ = 0 gives T_i = 1 and reduces EXACTLY (bit-for-bit) to the
+// historical additive blend (1−β_i)·C0(i) + β_i·nbAvg_i. The self term always
+// references C0 (not C_t(i)), keeping the cell's own filament dominant and the
+// iteration gently convergent. A cell with no (valid) neighbors keeps C0, and an
+// all-opaque palette returns the nominal colors unchanged.
 //
 // cells, assignments, neighbors and the returned slice are all parallel and
 // indexed by visible-cell position. An out-of-range assignment yields a gray
@@ -163,7 +184,7 @@ func NeighborEffectivePalette(pal [][3]uint8, tds []float32, cells []ActiveCell,
 //
 // Runs serially: two Jacobi passes over a few hundred thousand cells is cheap,
 // and correctness is easier to reason about without a worker pool.
-func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8, tds []float32, neighbors [][]Neighbor, neighborPathMM float32, iterations int) [][3]uint8 {
+func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8, tds []float32, neighbors [][]Neighbor, neighborPathMM float32, iterations int, kappa float64) [][3]uint8 {
 	n := len(cells)
 	out := make([][3]uint8, n)
 	if n == 0 {
@@ -173,8 +194,10 @@ func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8
 	c0 := make([][3]float64, n)      // nominal color, linear-light
 	nominal := make([][3]uint8, n)   // nominal color bytes (identity fast paths)
 	beta := make([]float64, n)       // lateral leak per cell
+	trans := make([][3]float64, n)   // per-cell transmittance T_i (κ ≠ 0 only)
 	valid := make([]bool, n)         // false = out-of-range assignment (gray)
 	const grayByte uint8 = 128
+	useKappa := kappa != 0
 
 	anyTranslucent := false
 	for i := range cells {
@@ -206,6 +229,9 @@ func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8
 		beta[i] = b
 		if b > 0 {
 			anyTranslucent = true
+			if useKappa {
+				trans[i] = palette.TransmittanceColor(c0[i], kappa)
+			}
 		}
 	}
 
@@ -242,8 +268,17 @@ func EffectiveCellColors(cells []ActiveCell, assignments []int32, pal [][3]uint8
 				continue
 			}
 			b := beta[i]
+			if !useKappa {
+				// Additive path — bit-for-bit identical to the historical model.
+				for ch := 0; ch < 3; ch++ {
+					next[i][ch] = (1-b)*c0[i][ch] + b*sum[ch]/wsum
+				}
+				continue
+			}
+			// Transmittance model: filter the neighbor DEVIATION from C0 by T_i.
+			t := trans[i]
 			for ch := 0; ch < 3; ch++ {
-				next[i][ch] = (1-b)*c0[i][ch] + b*sum[ch]/wsum
+				next[i][ch] = c0[i][ch] + b*t[ch]*(sum[ch]/wsum-c0[i][ch])
 			}
 		}
 		cur, next = next, cur

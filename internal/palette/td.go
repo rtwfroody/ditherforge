@@ -99,10 +99,50 @@ func linearOf(c [3]uint8) [3]float64 {
 // through. It is the calibration knob (against physical test prints) shared by
 // the per-cell print simulation (voxel.EffectiveCellColors) and TD-aware
 // palette selection, so both models agree on how much a translucent filament
-// washes toward its surroundings. Calibrated to 0.3 mm against a physical print
-// (the print reads between the 0.2 and 0.35 renders). The pipeline overrides it
-// from DITHERFORGE_SIM_NEIGHBOR_PATH_MM.
-const DefaultNeighborPathMM = 0.3
+// washes toward its surroundings. Calibrated to 0.130 mm against a photographed
+// swatch print (tools/swatchphoto) under the transmittance model.
+//
+// NOTE: ℓ is MODEL-SPECIFIC — this 0.130 was fit jointly WITH the transmittance
+// filter TransmittanceKappa = 3.04; the two go together (the old additive model
+// used 0.3). The pipeline overrides it from DITHERFORGE_SIM_NEIGHBOR_PATH_MM.
+const DefaultNeighborPathMM = 0.130
+
+// TransmittanceKappa is the neighbor-transmittance filter exponent κ of the
+// print-simulation mixing model: returning neighbor light passes back through the
+// translucent cell's body and is filtered by the cell's own per-channel hue
+// T_c = (C_c / max_channel(C))^κ before it blends in. κ=0 is the plain additive
+// neighbor blend (bit-for-bit). κ≈3 was fit against a photographed swatch print
+// (tools/swatchphoto): it best predicts how a saturated filament next to a bright
+// neighbor keeps its own hue instead of washing out (and, with a dark neighbor,
+// dies). Shared by the per-cell sim and TD-aware selection so they can't drift;
+// the pipeline overrides it from DITHERFORGE_SIM_KAPPA. See DefaultNeighborPathMM
+// for why ℓ and κ are calibrated as a pair.
+const TransmittanceKappa = 3.04
+
+// TransmittanceColor returns the per-channel transmittance T of a filament whose
+// LINEAR-light color is lin: T_c = (lin_c / max_c lin)^κ, in [0,1]. It is the hue
+// filter the returning neighbor light passes through. A pure-black cell (max ≤ 0)
+// or κ = 0 yields T = {1,1,1} (no filtering → additive).
+func TransmittanceColor(lin [3]float64, kappa float64) [3]float64 {
+	if kappa == 0 {
+		return [3]float64{1, 1, 1}
+	}
+	maxc := lin[0]
+	if lin[1] > maxc {
+		maxc = lin[1]
+	}
+	if lin[2] > maxc {
+		maxc = lin[2]
+	}
+	if !(maxc > 0) {
+		return [3]float64{1, 1, 1}
+	}
+	return [3]float64{
+		math.Pow(lin[0]/maxc, kappa),
+		math.Pow(lin[1]/maxc, kappa),
+		math.Pow(lin[2]/maxc, kappa),
+	}
+}
 
 // NeighborLeak returns β = 10^(−neighborPathMM/td): the fraction of a
 // neighbor's color that shows through a cell of a filament with transmission
@@ -156,6 +196,10 @@ type TDParams struct {
 	LayerHeightMM    float32
 	ShellThicknessMM float32
 	NeighborPathMM   float32
+	// Kappa is the transmittance filter exponent κ (see TransmittanceKappa).
+	// 0 is the plain additive blend (bit-identical to the pre-transmittance
+	// selection); the pipeline sets it to the calibrated TransmittanceKappa.
+	Kappa float32
 }
 
 // weightedMeanLinear returns the cellWeights-weighted mean of cellColors in
@@ -186,14 +230,29 @@ func weightedMeanLinear(cellColors [][3]uint8, cellWeights []float32) [3]float64
 }
 
 // neighborEffLab composites one filament's linear-RGB color toward the target
-// mean by its lateral leak β and returns the result in CIELAB, ready for
-// hull/nearest scoring. Callers skip it for β = 0 (opaque) and keep the
-// filament's nominal Lab, so opaque entries stay bit-identical to the nominal
-// scoring path.
-func neighborEffLab(lin [3]float64, beta float64, meanTargetLin [3]float64) [3]float64 {
-	r := (1-beta)*lin[0] + beta*meanTargetLin[0]
-	g := (1-beta)*lin[1] + beta*meanTargetLin[1]
-	b := (1-beta)*lin[2] + beta*meanTargetLin[2]
+// mean under the transmittance model and returns the result in CIELAB, ready for
+// hull/nearest scoring:
+//
+//	eff = own + β · T ∘ (meanTarget − own),  T = (own / max_channel(own))^κ
+//
+// so the neighbor light the filament washes toward is first filtered by the
+// filament's own hue — a translucent orange scores as it actually prints
+// (keeping its warmth next to warm targets, dying next to dark ones) rather than
+// its vivid nominal color. κ = 0 collapses to the plain additive composite
+// (1−β)·own + β·meanTarget, bit-for-bit. Callers skip this for β = 0 (opaque) and
+// keep the filament's nominal Lab, so opaque entries stay bit-identical.
+func neighborEffLab(lin [3]float64, beta float64, meanTargetLin [3]float64, kappa float64) [3]float64 {
+	var r, g, b float64
+	if kappa == 0 {
+		r = (1-beta)*lin[0] + beta*meanTargetLin[0]
+		g = (1-beta)*lin[1] + beta*meanTargetLin[1]
+		b = (1-beta)*lin[2] + beta*meanTargetLin[2]
+	} else {
+		t := TransmittanceColor(lin, kappa)
+		r = lin[0] + beta*t[0]*(meanTargetLin[0]-lin[0])
+		g = lin[1] + beta*t[1]*(meanTargetLin[1]-lin[1])
+		b = lin[2] + beta*t[2]*(meanTargetLin[2]-lin[2])
+	}
 	l, aa, bb := colorful.LinearRgb(r, g, b).Lab()
 	return [3]float64{l, aa, bb}
 }
