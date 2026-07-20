@@ -9,12 +9,12 @@
 #EED230 3.3 Lemon Yellow
 #EED1A8 1.5 Cream
 #C2AB72 0.5 Beige
-#A79E82 Tan
+#A79E82 0.7 Tan
 #06924D 0.4 Green
 #D5D701 2.3 Lime Green
 #4E742D 0.1 Jungle Green
 #948902 0.1 Olive Green
-#575B54 Dark Olive Drab
+#575B54 0.1 Dark Olive Drab
 #003776 0.3 Blue
 #0066D9 1.5 Azure Blue
 #487BA2 0.3 Stone Blue
