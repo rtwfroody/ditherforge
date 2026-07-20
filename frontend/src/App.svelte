@@ -637,8 +637,9 @@
   let resolvedPalette = $state<{ hex: string; label: string; td: number; effectiveHex: string }[]>([]);
   // Output-viewer view state (not persisted in settings): show each filament's
   // TD-effective color (what the translucent print actually looks like) instead
-  // of its nominal color.
-  let simulatePrintTD = $state(false);
+  // of its nominal color. On by default: the dither optimizes for predicted
+  // printed appearance, so this is the truthful preview.
+  let simulatePrintTD = $state(true);
 
   // Pipeline progress stages for the output viewer.
   type StageInfo = {
