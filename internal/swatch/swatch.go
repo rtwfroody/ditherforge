@@ -2,10 +2,12 @@
 // pair {A,B} of a chosen filament palette it lays out a 90x10x2mm plate, printed
 // standing vertically, whose face is a single row of nine 10x10mm sections
 // mixing A and B at coverage p = 0, 1/8, ..., 8/8 (left to right). The mixture is
-// cell-scale speckle (an ordered Bayer threshold on the block grid: blocks are
-// one voxel cell wide and one print layer tall) with exact, known coverage, so a
-// photograph of the printed plate yields the real physical color-mixing curve
-// between the two filaments.
+// cell-scale speckle (a deterministic void-and-cluster blue-noise threshold on
+// the block grid: blocks are one voxel cell wide and one print layer tall) with
+// exact, known coverage, so a photograph of the printed plate yields the real
+// physical color-mixing curve between the two filaments. Blue noise (over the
+// old ordered Bayer tile) prints without a visibly regular grid and better
+// resembles the error-diffusion dithering the real pipeline uses.
 //
 // To keep the pipeline fast (its cost scales with input triangles, and the block
 // grid is very fine), the geometry emitted is only a coarse box per plate; the
@@ -84,6 +86,12 @@ type Plan struct {
 	Layer0ZMM    float64   // first-row (slab 0) height
 	UpperZMM     float64   // height of every row above the first
 	Plates       []Plate
+	// Rank is the shared void-and-cluster blue-noise ranking over ONE section's
+	// block grid: Rank[row][col] with row in [0,Nrows) and col in [0,perSection),
+	// holding every value in [0, perSection*Nrows) exactly once. Every section and
+	// plate reuses it. A block is filament B iff its rank < round(coverage*N); see
+	// blockIsB and blueNoiseRank.
+	Rank [][]int
 }
 
 // Nrows returns the number of pattern rows (slab-tall bands) in the plan.
@@ -92,21 +100,6 @@ func (p Plan) Nrows() int {
 		return 0
 	}
 	return len(p.RowEdges) - 1
-}
-
-// Bayer8 is the standard 8x8 ordered-dither threshold matrix, holding the
-// values 0..63 each exactly once. A block at grid index (i,j) is filament B
-// iff Bayer8[i%8][j%8] < coverage*64, which places isolated B blocks at
-// evenly spaced positions as coverage rises.
-var Bayer8 = [8][8]int{
-	{0, 32, 8, 40, 2, 34, 10, 42},
-	{48, 16, 56, 24, 50, 18, 58, 26},
-	{12, 44, 4, 36, 14, 46, 6, 38},
-	{60, 28, 52, 20, 62, 30, 54, 22},
-	{3, 35, 11, 43, 1, 33, 9, 41},
-	{51, 19, 59, 27, 49, 17, 57, 25},
-	{15, 47, 7, 39, 13, 45, 5, 37},
-	{63, 31, 55, 23, 61, 29, 53, 21},
 }
 
 // Coverage returns the nominal fraction of filament B for section index s
@@ -121,12 +114,20 @@ func SectionIndex(cx float64) int {
 	return clampInt(int(cx/SectionMM), 0, Sections-1)
 }
 
-// blockIsB reports whether the block at grid column i (X) and row j (Z, the
-// slab-row index) whose center falls in the given section is filament B under
-// the ordered Bayer threshold.
-func blockIsB(i, j, section int) bool {
-	p := Coverage(section)
-	return float64(Bayer8[i%8][j%8]) < p*64.0
+// blockIsB reports whether the block at grid column i (X, over the whole face)
+// and row j (Z, the slab-row index), whose center falls in the given section, is
+// filament B under the shared blue-noise ranking. The block's within-section
+// column is i mod perSection; it is B iff its rank is below round(coverage*N),
+// where N = perSection*Nrows. Because ranks are a permutation of [0,N), this
+// makes the per-section B count exactly round(coverage*N).
+func (plan Plan) blockIsB(i, j, section int) bool {
+	perSection := plan.Nx / Sections
+	if perSection < 1 {
+		return false
+	}
+	n := perSection * plan.Nrows()
+	thr := int(math.Round(Coverage(section) * float64(n)))
+	return plan.Rank[j][i%perSection] < thr
 }
 
 // slabRowEdges returns the Z boundaries partitioning [0, PlateHeightMM] into
@@ -170,6 +171,10 @@ func BuildPlan(palette []Filament, blockWidthMM, layer0ZMM, upperZMM float64) Pl
 		Layer0ZMM:    layer0ZMM,
 		UpperZMM:     upperZMM,
 	}
+	// One blue-noise ranking shared by every section and plate. The kernel uses
+	// the resolved block width and the upper-row layer height (the taller first
+	// row is a negligible refinement, so it is ignored for kernel distances).
+	plan.Rank = blueNoiseRank(perSection, plan.Nrows(), plan.BlockWidthMM, upperZMM)
 	idx := 0
 	for a := 0; a < len(palette); a++ {
 		for b := a + 1; b < len(palette); b++ {
@@ -202,14 +207,14 @@ type Tri struct {
 }
 
 // blockColor returns the palette index painted on block (column i, row j) of the
-// given plate: column i selects the section (hence coverage), and the Bayer
+// given plate: column i selects the section (hence coverage), and the blue-noise
 // threshold at (i, row j) decides A vs. B. This is the pattern's color field;
 // it is baked into a texture (see patternImage) rather than into geometry, so
 // the mesh stays trivial and the pipeline's cost no longer scales with the
 // (very fine) block count.
 func (plan Plan) blockColor(plate Plate, i, j int) int {
 	cx := (float64(i) + 0.5) * plan.BlockWidthMM
-	if blockIsB(i, j, SectionIndex(cx)) {
+	if plan.blockIsB(i, j, SectionIndex(cx)) {
 		return plate.B
 	}
 	return plate.A

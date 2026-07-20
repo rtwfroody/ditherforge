@@ -23,40 +23,148 @@ const (
 	testUpperZ  = 0.20
 )
 
-// TestBayerCoverageExactness verifies that for each nominal coverage p=k/8, a
-// full 8x8 Bayer tile contains exactly k*8 filament-B blocks. This is the
-// property that makes the endpoint sections exactly solid and the interior
-// sections carry a known, even coverage.
-func TestBayerCoverageExactness(t *testing.T) {
-	for k := 0; k <= 8; k++ {
-		count := 0
-		for i := 0; i < 8; i++ {
-			for j := 0; j < 8; j++ {
-				if blockIsB(i, j, k) {
-					count++
-				}
-			}
+// blueNoiseGrids returns a couple of representative (block width, layer0, upper)
+// configs spanning the layer heights the swatch pattern is printed at.
+func blueNoiseGrids() []struct {
+	name                  string
+	blockWidth, l0, upper float64
+} {
+	return []struct {
+		name                  string
+		blockWidth, l0, upper float64
+	}{
+		{"0.20mm-layer", 0.5, 0.25, 0.20},
+		{"0.08mm-layer", 0.4, 0.10, 0.08},
+	}
+}
+
+// TestBlueNoiseRankComplete verifies the shared void-and-cluster ranking is a
+// permutation of [0, N): every value 0..N-1 appears exactly once over the
+// perSection x Nrows grid.
+func TestBlueNoiseRankComplete(t *testing.T) {
+	for _, g := range blueNoiseGrids() {
+		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
+		perSection := plan.Nx / Sections
+		nrows := plan.Nrows()
+		n := perSection * nrows
+		if len(plan.Rank) != nrows {
+			t.Fatalf("%s: Rank has %d rows, want %d", g.name, len(plan.Rank), nrows)
 		}
-		want := k * 8
-		if count != want {
-			t.Errorf("coverage %d/8: got %d B blocks in 8x8 tile, want %d", k, count, want)
+		seen := make([]bool, n)
+		for j := 0; j < nrows; j++ {
+			if len(plan.Rank[j]) != perSection {
+				t.Fatalf("%s: Rank[%d] has %d cols, want %d", g.name, j, len(plan.Rank[j]), perSection)
+			}
+			for i := 0; i < perSection; i++ {
+				v := plan.Rank[j][i]
+				if v < 0 || v >= n {
+					t.Fatalf("%s: Rank[%d][%d]=%d out of range [0,%d)", g.name, j, i, v, n)
+				}
+				if seen[v] {
+					t.Fatalf("%s: rank value %d appears more than once", g.name, v)
+				}
+				seen[v] = true
+			}
 		}
 	}
 }
 
-// TestBayerValuesComplete verifies the matrix holds 0..63 exactly once.
-func TestBayerValuesComplete(t *testing.T) {
-	var seen [64]bool
-	for i := 0; i < 8; i++ {
-		for j := 0; j < 8; j++ {
-			v := Bayer8[i][j]
-			if v < 0 || v > 63 {
-				t.Fatalf("Bayer8[%d][%d]=%d out of range", i, j, v)
+// TestBlueNoiseCoverageExactness verifies that for each nominal coverage p=k/8,
+// each section carries exactly round(k/8*N) filament-B blocks — the property
+// that makes the endpoint sections exactly solid and the interior sections carry
+// a known, even coverage. Counted through the real blockIsB threshold.
+func TestBlueNoiseCoverageExactness(t *testing.T) {
+	for _, g := range blueNoiseGrids() {
+		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
+		perSection := plan.Nx / Sections
+		nrows := plan.Nrows()
+		n := perSection * nrows
+		for k := 0; k <= 8; k++ {
+			s := k // section index == k, coverage k/8
+			count := 0
+			// Columns of section s span [s*perSection, (s+1)*perSection).
+			for i := s * perSection; i < (s+1)*perSection; i++ {
+				for j := 0; j < nrows; j++ {
+					if plan.blockIsB(i, j, s) {
+						count++
+					}
+				}
 			}
-			if seen[v] {
-				t.Fatalf("Bayer8 value %d appears more than once", v)
+			want := int(math.Round(Coverage(k) * float64(n)))
+			if count != want {
+				t.Errorf("%s coverage %d/8: got %d B blocks, want %d (round(%d/8*%d))",
+					g.name, k, count, want, k, n)
 			}
-			seen[v] = true
+		}
+	}
+}
+
+// TestBlueNoiseDeterminism verifies the ranking is byte-identical across two
+// independent BuildPlan calls with the same geometry — a hard requirement so a
+// printed plate's manifest reproduces the exact pattern.
+func TestBlueNoiseDeterminism(t *testing.T) {
+	for _, g := range blueNoiseGrids() {
+		a := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
+		b := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
+		if len(a.Rank) != len(b.Rank) {
+			t.Fatalf("%s: rank row counts differ %d vs %d", g.name, len(a.Rank), len(b.Rank))
+		}
+		for j := range a.Rank {
+			for i := range a.Rank[j] {
+				if a.Rank[j][i] != b.Rank[j][i] {
+					t.Fatalf("%s: Rank[%d][%d] differs %d vs %d", g.name, j, i, a.Rank[j][i], b.Rank[j][i])
+				}
+			}
+		}
+	}
+}
+
+// TestBlueNoiseSpread is a coarse blue-noise sanity check: at low coverage (1/8)
+// the B blocks are well-spread, so the minimum PHYSICAL distance between any two
+// (measured toroidally, since the rank tiles across sections and stacked rows)
+// stays a healthy fraction of the ideal blue-noise spacing sqrt(cellArea/p). A
+// clustered or random pattern would place near-touching pairs and fall far below
+// this bound. Blocks are anisotropic, so distance must be in millimeters, not
+// grid steps — grid adjacency in the fine (Z) axis is still 0.08–0.2mm and would
+// falsely flag. The bound (0.4) is conservative: measured ratios are ~0.56–0.63.
+func TestBlueNoiseSpread(t *testing.T) {
+	for _, g := range blueNoiseGrids() {
+		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
+		perSection := plan.Nx / Sections
+		nrows := plan.Nrows()
+		n := perSection * nrows
+		bw, up := plan.BlockWidthMM, g.upper
+		extX, extZ := float64(perSection)*bw, float64(nrows)*up
+		thr := int(math.Round((1.0 / 8.0) * float64(n)))
+
+		var pts [][2]float64
+		for j := 0; j < nrows; j++ {
+			for i := 0; i < perSection; i++ {
+				if plan.Rank[j][i] < thr {
+					pts = append(pts, [2]float64{float64(i) * bw, float64(j) * up})
+				}
+			}
+		}
+		minD := math.Inf(1)
+		for a := 0; a < len(pts); a++ {
+			for b := a + 1; b < len(pts); b++ {
+				dx := math.Abs(pts[a][0] - pts[b][0])
+				if extX-dx < dx {
+					dx = extX - dx
+				}
+				dz := math.Abs(pts[a][1] - pts[b][1])
+				if extZ-dz < dz {
+					dz = extZ - dz
+				}
+				if d := math.Hypot(dx, dz); d < minD {
+					minD = d
+				}
+			}
+		}
+		ideal := math.Sqrt(bw * up / (1.0 / 8.0))
+		if minD < 0.4*ideal {
+			t.Errorf("%s: min B-B distance %.4fmm at 1/8 coverage < 0.4*ideal (%.4fmm); pattern not blue-noise-spread",
+				g.name, minD, 0.4*ideal)
 		}
 	}
 }

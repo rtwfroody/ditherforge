@@ -383,9 +383,16 @@ type swatchManifest struct {
 	RowHeight0MM  float64               `json:"rowHeight0MM"`  // first-row (slab 0) height
 	RowHeightUpMM float64               `json:"rowHeightUpMM"` // height of rows above the first
 	RowCount      int                   `json:"rowCount"`      // number of pattern rows spanning the 10mm face
-	Palette       []swatchManifestColor `json:"palette"`
-	Infill        string                `json:"infill"`
-	Plates        []swatchManifestPlate `json:"plates"`
+	// PatternRank is the shared void-and-cluster blue-noise ranking over ONE
+	// section's block grid (rows outer, columns inner): PatternRank[row][col] holds
+	// every value in [0, rowCount*perSection) exactly once, where perSection =
+	// round(SectionMM/blockWidthMM). A block is filament B iff its rank <
+	// round(realizedCoverage*N). Stored explicitly so swatchphoto reproduces the
+	// exact printed pattern without re-running void-and-cluster in Python.
+	PatternRank [][]int               `json:"patternRank"`
+	Palette     []swatchManifestColor `json:"palette"`
+	Infill      string                `json:"infill"`
+	Plates      []swatchManifestPlate `json:"plates"`
 }
 
 type swatchManifestColor struct {
@@ -658,6 +665,7 @@ func buildSwatchManifest(opts pipeline.Options, plan swatch.Plan, verts [][3]flo
 		RowHeight0MM:  plan.Layer0ZMM,
 		RowHeightUpMM: plan.UpperZMM,
 		RowCount:      plan.Nrows(),
+		PatternRank:   plan.Rank,
 		Infill:        plan.Palette[0].Label,
 	}
 	for _, fil := range plan.Palette {

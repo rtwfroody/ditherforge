@@ -12,17 +12,18 @@
 DitherForge's "Export Swatch Plates" prints six calibration plates, one per
 unordered pair of a four-filament palette. Each plate is a 90x10x2mm bar with
 nine 10mm sections left->right at B-fraction p = 0, 1/8, ... , 1, the A/B mix
-rendered as a fine Bayer speckle (see internal/swatch/swatch.go). A top-down
-photo of the printed plates, plus the `.swatch.json` manifest emitted next to
-the 3MF, is enough to recover:
+rendered as a fine void-and-cluster blue-noise speckle (see
+internal/swatch/swatch.go; the exact ranking rides along in the manifest's
+patternRank). A top-down photo of the printed plates, plus the `.swatch.json`
+manifest emitted next to the 3MF, is enough to recover:
 
   (a) each filament's *in-context* printed color (the surface color it actually
       shows on the print, which differs from its nominal filament hex — that
       difference is the whole point of the calibration), and
   (b) a fitted neighbor-bleed path length ℓ per pair (and a global ℓ), by
       forward-simulating the pipeline's own per-cell neighbor-blend model
-      (voxel.EffectiveCellColors) on the known Bayer pattern and least-squares
-      matching the measured section colors.
+      (voxel.EffectiveCellColors) on the known blue-noise pattern and
+      least-squares matching the measured section colors.
 
 Illumination is normalized by a robustly-fit (IRLS) polynomial paper surface, so
 plates brighter than the paper (Cold White) normalize to linear values >1.0 that
@@ -168,6 +169,12 @@ class Geom:
     row_height0_mm: float
     row_height_up_mm: float
     row_count: int
+    # Shared void-and-cluster blue-noise ranking over ONE section's block grid,
+    # shape (row_count, per_section), each value in [0, N) once. Present in
+    # manifests emitted after the blue-noise migration; None for legacy manifests
+    # (or the self-test), which fall back to the ordered Bayer rule in
+    # build_pattern.
+    rank: np.ndarray | None = None
 
     @property
     def per_section(self) -> int:
@@ -187,15 +194,28 @@ class Geom:
 def build_pattern(section_coverage: np.ndarray, geom: Geom) -> np.ndarray:
     """Return an (rows, cols) uint8 grid: 0 = filament A, 1 = filament B.
 
-    Column i is in section i//per_section; a cell is B iff
-    Bayer8[i%8][j%8] < coverage(section)*64 — the exact blockIsB rule. Uses the
-    per-section REALIZED coverage (from the manifest) as the threshold.
+    Column i is in section i//per_section. When the manifest carries the
+    void-and-cluster blue-noise ranking (geom.rank, shape (rows, per_section)), a
+    cell is B iff rank[j][i % per_section] < round(coverage(section)*N) with
+    N = per_section*rows — the exact Go blockIsB rule. Falls back to the legacy
+    ordered Bayer rule (Bayer8[i%8][j%8] < coverage*64) for pre-blue-noise
+    manifests. Either way the per-section REALIZED coverage (from the manifest) is
+    the threshold.
     """
     nx, per = geom.nx, geom.per_section
     rows = geom.row_count
     cols = np.arange(nx)
     sections = np.clip(cols // per, 0, SECTIONS - 1)
     p = section_coverage[sections]  # (nx,)
+    if geom.rank is not None:
+        n = per * rows
+        # floor(x+0.5) matches Go's math.Round (half away from zero) for the
+        # non-negative thresholds here; np.rint would round halves to even and
+        # disagree by a cell where p*N lands exactly on *.5.
+        thr = np.floor(p * n + 0.5).astype(np.int64)  # (nx,) count-exact per-section
+        rank_cols = geom.rank[:, cols % per]  # (rows, nx): rank for each column
+        return (rank_cols < thr[None, :]).astype(np.uint8)
+    # Legacy ordered-Bayer fallback (old manifests / photos).
     thr = p * 64.0  # (nx,)
     j = np.arange(rows)[:, None]  # (rows,1)
     i = cols[None, :]  # (1,nx)
@@ -507,11 +527,14 @@ class Manifest:
 def load_manifest(path: str) -> Manifest:
     with open(path) as f:
         m = json.load(f)
+    rank_raw = m.get("patternRank")
+    rank = np.asarray(rank_raw, dtype=np.int64) if rank_raw else None
     geom = Geom(
         block_width_mm=float(m["blockWidthMM"]),
         row_height0_mm=float(m["rowHeight0MM"]),
         row_height_up_mm=float(m["rowHeightUpMM"]),
         row_count=int(m["rowCount"]),
+        rank=rank,
     )
     fils = {}
     for p in m["palette"]:
