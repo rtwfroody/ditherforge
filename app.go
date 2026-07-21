@@ -421,24 +421,28 @@ type swatchManifestSection struct {
 	ForeignCoverageBack  float64 `json:"foreignCoverageBack"`
 }
 
-// swatchFilename builds the default export filename from the palette labels:
-// "swatches-<Label1>-<Label2>-...3mf" with the labels sanitized for filenames
-// and sorted alphabetically (case-insensitively). Falls back to
-// "swatches.3mf" when no label survives sanitization.
-func swatchFilename(filaments []swatch.Filament) string {
+// swatchFilename builds the default export filename from the layer height and
+// palette labels: "swatches-<layer>mm-<Label1>-<Label2>-...3mf" with the labels
+// sanitized for filenames and sorted alphabetically (case-insensitively). The
+// layer height matters because the pattern's rows are one print layer tall, so
+// plates exported at different layer heights are different physical objects.
+// A non-positive layer height omits that segment; no surviving labels omits
+// the label segment ("swatches.3mf" when both are missing).
+func swatchFilename(filaments []swatch.Filament, layerHeightMM float32) string {
+	parts := []string{"swatches"}
+	if layerHeightMM > 0 {
+		parts = append(parts, strconv.FormatFloat(float64(layerHeightMM), 'g', -1, 32)+"mm")
+	}
 	var labels []string
 	for _, f := range filaments {
 		if part := sanitizeFilenamePart(f.Label); part != "" {
 			labels = append(labels, part)
 		}
 	}
-	if len(labels) == 0 {
-		return "swatches.3mf"
-	}
 	sort.Slice(labels, func(i, j int) bool {
 		return strings.ToLower(labels[i]) < strings.ToLower(labels[j])
 	})
-	return "swatches-" + strings.Join(labels, "-") + ".3mf"
+	return strings.Join(append(parts, labels...), "-") + ".3mf"
 }
 
 // sanitizeFilenamePart makes a label safe to embed in a filename on any common
@@ -506,7 +510,7 @@ func (a *App) ExportSwatchPlates() (string, error) {
 	}
 	path, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
 		Title:            "Save Swatch Plates",
-		DefaultFilename:  swatchFilename(filaments),
+		DefaultFilename:  swatchFilename(filaments, last.LayerHeight),
 		DefaultDirectory: defaultDir,
 		Filters: []wailsRuntime.FileFilter{
 			{DisplayName: "3MF Files (*.3mf)", Pattern: "*.3mf"},

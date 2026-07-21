@@ -10,41 +10,53 @@ func TestSwatchFilename(t *testing.T) {
 	cases := []struct {
 		name      string
 		filaments []swatch.Filament
+		layerMM   float32
 		want      string
 	}{
 		{
-			name: "alphabetical order regardless of palette order",
+			name: "layer height then alphabetical labels regardless of palette order",
 			filaments: []swatch.Filament{
 				{Label: "Orange"}, {Label: "Black"}, {Label: "Beige"}, {Label: "ColdWhite"},
 			},
-			want: "swatches-Beige-Black-ColdWhite-Orange.3mf",
+			layerMM: 0.2,
+			want:    "swatches-0.2mm-Beige-Black-ColdWhite-Orange.3mf",
 		},
 		{
 			name: "whitespace removed, invalid chars stripped",
 			filaments: []swatch.Filament{
 				{Label: "Cold White"}, {Label: "Fire/Red"}, {Label: "  Sky  Blue "},
 			},
-			want: "swatches-ColdWhite-FireRed-SkyBlue.3mf",
+			layerMM: 0.08,
+			want:    "swatches-0.08mm-ColdWhite-FireRed-SkyBlue.3mf",
 		},
 		{
 			name:      "case-insensitive sort",
 			filaments: []swatch.Filament{{Label: "zinc"}, {Label: "Amber"}},
-			want:      "swatches-Amber-zinc.3mf",
+			layerMM:   0.2,
+			want:      "swatches-0.2mm-Amber-zinc.3mf",
 		},
 		{
-			name:      "no labels falls back to plain name",
+			name:      "non-positive layer height omits the segment",
+			filaments: []swatch.Filament{{Label: "Beige"}},
+			layerMM:   0,
+			want:      "swatches-Beige.3mf",
+		},
+		{
+			name:      "no labels keeps layer height",
 			filaments: []swatch.Filament{{Label: ""}, {Label: "   "}},
-			want:      "swatches.3mf",
+			layerMM:   0.2,
+			want:      "swatches-0.2mm.3mf",
 		},
 		{
-			name:      "empty palette falls back to plain name",
+			name:      "empty palette and no layer height falls back to plain name",
 			filaments: nil,
+			layerMM:   0,
 			want:      "swatches.3mf",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := swatchFilename(c.filaments); got != c.want {
+			if got := swatchFilename(c.filaments, c.layerMM); got != c.want {
 				t.Errorf("swatchFilename() = %q, want %q", got, c.want)
 			}
 		})
