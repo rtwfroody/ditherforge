@@ -379,7 +379,7 @@ type swatchManifest struct {
 	LayerMM    float32 `json:"layerMM"`
 	// Pattern-block dimensions. Blocks are one voxel cell wide and one print
 	// layer tall, so the pattern has layer-height granularity in Z.
-	BlockWidthMM  float64               `json:"blockWidthMM"`  // block width = voxel cell width
+	BlockWidthMM  float64               `json:"blockWidthMM"`  // block width = the exact (unsnapped) voxel cell width
 	RowHeight0MM  float64               `json:"rowHeight0MM"`  // first-row (slab 0) height
 	RowHeightUpMM float64               `json:"rowHeightUpMM"` // height of rows above the first
 	RowCount      int                   `json:"rowCount"`      // number of pattern rows spanning the 10mm face

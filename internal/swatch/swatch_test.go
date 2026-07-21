@@ -44,7 +44,7 @@ func blueNoiseGrids() []struct {
 func TestBlueNoiseRankComplete(t *testing.T) {
 	for _, g := range blueNoiseGrids() {
 		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
-		perSection := plan.Nx / Sections
+		perSection := plan.PerSection
 		nrows := plan.Nrows()
 		n := perSection * nrows
 		if len(plan.Rank) != nrows {
@@ -69,31 +69,70 @@ func TestBlueNoiseRankComplete(t *testing.T) {
 	}
 }
 
-// TestBlueNoiseCoverageExactness verifies that for each nominal coverage p=k/8,
-// each section carries exactly round(k/8*N) filament-B blocks — the property
-// that makes the endpoint sections exactly solid and the interior sections carry
-// a known, even coverage. Counted through the real blockIsB threshold.
+// TestBlueNoiseCoverageExactness verifies coverage at two levels.
+//
+// Per-TILE exactness (the count-exact invariant of the ranking): thresholding
+// ONE toroidal rank tile (PerSection columns x Nrows rows) at coverage k/8 turns
+// exactly round(k/8*N) cells B — this holds because the ranks are a permutation
+// of [0,N).
+//
+// Per-SECTION near-exactness: because the block grid is now UNSNAPPED (block
+// width = the pipeline cell width), sections no longer align to whole tiles — a
+// section spans PerSection or PerSection+1 global columns, so its realized B
+// count can drift by roughly one column's worth from the nominal k/8 fraction.
+// The endpoints (k=0, k=8) stay exact. This per-section check is a structural
+// consequence of unsnapping (block/section boundaries no longer coincide), NOT a
+// relaxed quality bar: the tile-level count is still exact above.
 func TestBlueNoiseCoverageExactness(t *testing.T) {
 	for _, g := range blueNoiseGrids() {
 		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
-		perSection := plan.Nx / Sections
+		perSection := plan.PerSection
 		nrows := plan.Nrows()
 		n := perSection * nrows
+
+		// Per-tile exactness: threshold a single tile directly on the ranking.
 		for k := 0; k <= 8; k++ {
-			s := k // section index == k, coverage k/8
+			thr := int(math.Round(Coverage(k) * float64(n)))
 			count := 0
-			// Columns of section s span [s*perSection, (s+1)*perSection).
-			for i := s * perSection; i < (s+1)*perSection; i++ {
-				for j := 0; j < nrows; j++ {
-					if plan.blockIsB(i, j, s) {
+			for j := 0; j < nrows; j++ {
+				for c := 0; c < perSection; c++ {
+					if plan.Rank[j][c] < thr {
 						count++
 					}
 				}
 			}
-			want := int(math.Round(Coverage(k) * float64(n)))
-			if count != want {
-				t.Errorf("%s coverage %d/8: got %d B blocks, want %d (round(%d/8*%d))",
-					g.name, k, count, want, k, n)
+			if count != thr {
+				t.Errorf("%s tile coverage %d/8: got %d B cells, want %d", g.name, k, count, thr)
+			}
+		}
+
+		// Per-section near-exactness through the real blockIsB path, binning each
+		// global column into the section that contains its center. Tolerance is one
+		// column of rows (2*Nrows is comfortably above the observed ~<Nrows drift).
+		tol := 2 * nrows
+		colsInSection := make([]int, Sections)
+		bInSection := make([]int, Sections)
+		for i := 0; i < plan.Nx; i++ {
+			s := SectionIndex((float64(i) + 0.5) * plan.BlockWidthMM)
+			colsInSection[s]++
+			for j := 0; j < nrows; j++ {
+				if plan.blockIsB(i, j, s) {
+					bInSection[s]++
+				}
+			}
+		}
+		for s := 0; s < Sections; s++ {
+			nominal := Coverage(s) * float64(colsInSection[s]*nrows)
+			if s == 0 || s == Sections-1 { // endpoints must be exact
+				if want := int(math.Round(nominal)); bInSection[s] != want {
+					t.Errorf("%s endpoint section %d: got %d B blocks, want %d (exact)",
+						g.name, s, bInSection[s], want)
+				}
+				continue
+			}
+			if d := math.Abs(float64(bInSection[s]) - nominal); d > float64(tol) {
+				t.Errorf("%s section %d: %d B blocks, nominal %.1f, drift %.1f > tol %d",
+					g.name, s, bInSection[s], nominal, d, tol)
 			}
 		}
 	}
@@ -130,7 +169,7 @@ func TestBlueNoiseDeterminism(t *testing.T) {
 func TestBlueNoiseSpread(t *testing.T) {
 	for _, g := range blueNoiseGrids() {
 		plan := BuildPlan(testPalette, g.blockWidth, g.l0, g.upper)
-		perSection := plan.Nx / Sections
+		perSection := plan.PerSection
 		nrows := plan.Nrows()
 		n := perSection * nrows
 		bw, up := plan.BlockWidthMM, g.upper
@@ -220,25 +259,31 @@ func TestPlanPairCount(t *testing.T) {
 	}
 }
 
-// TestBlockSnap checks the block WIDTH snaps to an integer count per 10mm
-// section (so block boundaries align with section boundaries) and that the
-// rows are slab-tall: first row = layer0Z, upper rows = upperZ, final row
-// clamped to the 10mm face top (may be partial).
-func TestBlockSnap(t *testing.T) {
-	plan := BuildPlan(testPalette, 0.525, testLayer0Z, testUpperZ)
+// TestBlockGrid checks the UNSNAPPED block width (block width = the exact
+// pipeline cell width so block columns stay in phase with the pipeline's cells),
+// the derived Nx = ceil(90/width) and PerSection = round(10/width) tile width,
+// and that the rows are slab-tall: first row = layer0Z, upper rows = upperZ,
+// final row clamped to the 10mm face top (may be partial).
+func TestBlockGrid(t *testing.T) {
+	const bw = 0.525
+	plan := BuildPlan(testPalette, bw, testLayer0Z, testUpperZ)
 	if plan.Nx < 1 {
 		t.Fatalf("Nx=%d", plan.Nx)
 	}
-	// Width: integer blocks tile each section, and the whole 90mm width.
-	if plan.Nx%Sections != 0 {
-		t.Errorf("Nx=%d not a multiple of Sections=%d", plan.Nx, Sections)
+	// Width is used exactly as passed (not snapped to the section grid).
+	if math.Abs(plan.BlockWidthMM-bw) > 1e-12 {
+		t.Errorf("BlockWidthMM = %.6f, want %.6f (exact, unsnapped)", plan.BlockWidthMM, bw)
 	}
-	if spanX := plan.BlockWidthMM * float64(plan.Nx); math.Abs(spanX-PlateWidthMM) > 1e-9 {
-		t.Errorf("blocks span %.6f mm in X, want %.6f", spanX, PlateWidthMM)
+	if want := int(math.Ceil(PlateWidthMM / bw)); plan.Nx != want {
+		t.Errorf("Nx=%d, want ceil(%.1f/%.3f)=%d", plan.Nx, PlateWidthMM, bw, want)
 	}
-	perSection := plan.Nx / Sections
-	if math.Abs(plan.BlockWidthMM*float64(perSection)-SectionMM) > 1e-9 {
-		t.Errorf("blocks don't tile a 10mm section: width %.6f x %d", plan.BlockWidthMM, perSection)
+	if want := int(math.Round(SectionMM / bw)); plan.PerSection != want {
+		t.Errorf("PerSection=%d, want round(%.1f/%.3f)=%d", plan.PerSection, SectionMM, bw, want)
+	}
+	// The columns must more than cover the face (last block may be partial), but
+	// not overshoot by more than one block.
+	if span := plan.BlockWidthMM * float64(plan.Nx); span < PlateWidthMM || span >= PlateWidthMM+bw {
+		t.Errorf("blocks span %.6f mm in X, want [%.1f, %.1f)", span, PlateWidthMM, PlateWidthMM+bw)
 	}
 
 	// Rows: aligned to the slab grid.

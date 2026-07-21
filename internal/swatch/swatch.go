@@ -71,26 +71,31 @@ type Plate struct {
 
 // Plan is the full set of plates for a palette, plus the resolved block grid.
 //
-// Blocks are RECTANGULAR: their width is the voxel cell width (snapped so an
-// integer count spans each 10mm section), and their height is one PRINT LAYER —
-// the pattern rows are aligned to the pipeline's slab grid (first row spans the
-// initial-layer height Layer0ZMM, every row above spans UpperZMM) so each
-// pipeline cell samples exactly one row's color. This gives the pattern
-// layer-height granularity in Z, so a p=1/8 section places isolated
-// single-layer-tall B cells sandwiched between A cells.
+// Blocks are RECTANGULAR: their width is EXACTLY the pipeline voxel cell width
+// (unsnapped), so a block column and a pipeline cell column share the same phase
+// and a cell always samples the interior of one block (see patternImage). Block
+// boundaries therefore do NOT align to the 10mm section boundaries, and an
+// integer number of blocks does not span the face — the last column may be
+// partial. Their height is one PRINT LAYER — the pattern rows are aligned to the
+// pipeline's slab grid (first row spans the initial-layer height Layer0ZMM,
+// every row above spans UpperZMM) so each pipeline cell samples exactly one
+// row's color. This gives the pattern layer-height granularity in Z, so a p=1/8
+// section places isolated single-layer-tall B cells sandwiched between A cells.
 type Plan struct {
 	Palette      []Filament
-	BlockWidthMM float64   // block width (= SectionMM/blocksPerSection), aligned to sections
-	Nx           int       // blocks along X (face width), = Sections * blocksPerSection
+	BlockWidthMM float64   // block width = the pipeline voxel cell width (UNSNAPPED)
+	Nx           int       // blocks along X (face width), = ceil(PlateWidthMM/BlockWidthMM); last may be partial
+	PerSection   int       // rank-tile width in columns = round(SectionMM/BlockWidthMM); Nx is NOT a multiple of it
 	RowEdges     []float64 // Z boundaries of the Nrows pattern rows: len Nrows+1, [0]=0, [last]=PlateHeightMM
 	Layer0ZMM    float64   // first-row (slab 0) height
 	UpperZMM     float64   // height of every row above the first
 	Plates       []Plate
 	// Rank is the shared void-and-cluster blue-noise ranking over ONE section's
-	// block grid: Rank[row][col] with row in [0,Nrows) and col in [0,perSection),
-	// holding every value in [0, perSection*Nrows) exactly once. Every section and
-	// plate reuses it. A block is filament B iff its rank < round(coverage*N); see
-	// blockIsB and blueNoiseRank.
+	// block grid (the toroidal tile): Rank[row][col] with row in [0,Nrows) and
+	// col in [0,PerSection), holding every value in [0, PerSection*Nrows) exactly
+	// once. Every section and plate reuses it; global block column i maps to tile
+	// column i % PerSection. A block is filament B iff its rank < round(coverage*N);
+	// see blockIsB and blueNoiseRank.
 	Rank [][]int
 }
 
@@ -121,7 +126,7 @@ func SectionIndex(cx float64) int {
 // where N = perSection*Nrows. Because ranks are a permutation of [0,N), this
 // makes the per-section B count exactly round(coverage*N).
 func (plan Plan) blockIsB(i, j, section int) bool {
-	perSection := plan.Nx / Sections
+	perSection := plan.PerSection
 	if perSection < 1 {
 		return false
 	}
@@ -155,26 +160,39 @@ func slabRowEdges(layer0Z, upperZ float64) []float64 {
 
 // BuildPlan lays out one plate per unordered pair of distinct palette entries
 // (all C(n,2) pairs, in ascending (a,b) order) and resolves the rectangular
-// block grid. blockWidthMM is snapped so an integer number of blocks spans each
-// 10mm section (block boundaries land on section boundaries); rows are one slab
-// tall each, aligned to the pipeline's slab grid via (layer0ZMM, upperZMM).
+// block grid. blockWidthMM is used EXACTLY as passed (the pipeline voxel cell
+// width) so block columns stay in phase with the pipeline's cell columns — it is
+// NOT snapped to the section grid, so block boundaries do not align to section
+// boundaries and the last column may be partial. The rank tile is PerSection =
+// round(SectionMM/blockWidthMM) columns wide and tiles toroidally across the
+// face (global block column i uses tile column i % PerSection); a block's
+// coverage comes from the section containing its center. Rows are one slab tall
+// each, aligned to the pipeline's slab grid via (layer0ZMM, upperZMM).
 func BuildPlan(palette []Filament, blockWidthMM, layer0ZMM, upperZMM float64) Plan {
+	if blockWidthMM <= 0 {
+		blockWidthMM = SectionMM / float64(Sections) // degenerate fallback
+	}
 	perSection := int(SectionMM/blockWidthMM + 0.5)
 	if perSection < 1 {
 		perSection = 1
 	}
+	nx := int(math.Ceil(PlateWidthMM / blockWidthMM))
+	if nx < 1 {
+		nx = 1
+	}
 	plan := Plan{
 		Palette:      palette,
-		BlockWidthMM: SectionMM / float64(perSection),
-		Nx:           Sections * perSection,
+		BlockWidthMM: blockWidthMM,
+		Nx:           nx,
+		PerSection:   perSection,
 		RowEdges:     slabRowEdges(layer0ZMM, upperZMM),
 		Layer0ZMM:    layer0ZMM,
 		UpperZMM:     upperZMM,
 	}
 	// One blue-noise ranking shared by every section and plate. The kernel uses
-	// the resolved block width and the upper-row layer height (the taller first
-	// row is a negligible refinement, so it is ignored for kernel distances).
-	plan.Rank = blueNoiseRank(perSection, plan.Nrows(), plan.BlockWidthMM, upperZMM)
+	// the block width and the upper-row layer height (the taller first row is a
+	// negligible refinement, so it is ignored for kernel distances).
+	plan.Rank = blueNoiseRank(perSection, plan.Nrows(), blockWidthMM, upperZMM)
 	idx := 0
 	for a := 0; a < len(palette); a++ {
 		for b := a + 1; b < len(palette); b++ {
@@ -220,23 +238,47 @@ func (plan Plan) blockColor(plate Plate, i, j int) int {
 	return plate.A
 }
 
-// patternImage renders one plate's block pattern into an NRGBA image, upsampled
-// by patternUpsample. Column c is block column c/K, so texture U = x/PlateWidthMM
-// puts section 0 at the left.
-//
-// The vertical axis is mapped to MATCH the pipeline's non-uniform slab rows: the
-// texture V axis is linear in z (v = z/PlateHeightMM), but the physical rows are
-// not uniform (the first slab is the taller initial-layer height). So each texel
-// row is colored by the PHYSICAL row that contains its z, giving each row a texel
-// height proportional to its real height. Without this, a uniform texel-per-row
-// layout misaligns the taller first row from the linear UV and cells sample the
-// wrong row / bilinear-blend two rows into a third color (the White+Orange->Beige
-// contamination) — badly at 0.08mm where the first row is 2.5x the others. Row
-// up/down orientation is otherwise irrelevant (a section's B-fraction is flip-
-// invariant and both faces share the image).
+// rowOf returns the pattern-row index (0..Nrows-1) whose slab band contains the
+// physical height z, i.e. the r with RowEdges[r] <= z < RowEdges[r+1]. z at or
+// above the top edge maps to the last row.
+func (plan Plan) rowOf(z float64) int {
+	edges := plan.RowEdges
+	for r := 0; r+1 < len(edges); r++ {
+		if z < edges[r+1] {
+			return r
+		}
+	}
+	if n := plan.Nrows(); n > 0 {
+		return n - 1
+	}
+	return 0
+}
+
+// patternImage renders one plate's block pattern into an NRGBA image, exactly
+// patternUpsample (K) texels per block column. Each texel is colored by the
+// block AND row that physically CONTAIN its (x,z) under the UV convention the
+// OBJ loader presents to the sampler (see WriteOBJ):
+//   - In X the textured faces carry UV u = x/(Nx*BlockWidthMM), NOT x/PlateWidthMM.
+//     Because the block grid is UNSNAPPED (Nx*BlockWidthMM slightly exceeds
+//     PlateWidthMM, last column partial), this is the ONLY U scale under which a
+//     block boundary lands on a texel boundary: block i spans exactly texels
+//     [i*K, (i+1)*K), so texel tx belongs to block tx/K. Mapping u = x/PlateWidthMM
+//     instead puts block boundaries mid-texel; the pipeline then AREA-samples a
+//     cell footprint that bleeds the neighbouring block's edge texels, rounding a
+//     sparse Orange-in-White block to a THIRD color (the White+Orange->Beige
+//     contamination) — which the snapped grid avoided by making blocks exactly K
+//     texels. The u=1 edge (x = Nx*BlockWidthMM > PlateWidthMM) falls just past
+//     the face and is never sampled.
+//   - In Z the physical slab rows are non-uniform (the first slab is the taller
+//     initial-layer height), so a texel's row is the slab band containing its z.
+//     The loader V-flips, so image row 0 must carry the color at z ≈ PlateHeightMM;
+//     get this sign wrong and the taller first row lands at the opposite end,
+//     shearing every row and blending neighbours into a third color, badly at
+//     0.08mm where the first row is ~2.5x the others.
 func (plan Plan) patternImage(plate Plate) *image.NRGBA {
 	k := patternUpsample
 	nx := plan.Nx
+	wtex := nx * k // exactly K texels per block; keeps texel/block boundaries aligned
 	// Texel height fine enough that the thinnest slab row still spans ~K texels.
 	texelH := plan.UpperZMM / float64(k)
 	if texelH <= 0 {
@@ -246,19 +288,15 @@ func (plan Plan) patternImage(plate Plate) *image.NRGBA {
 	if htex < 1 {
 		htex = 1
 	}
-	img := image.NewNRGBA(image.Rect(0, 0, nx*k, htex))
-	row := 0
+	img := image.NewNRGBA(image.Rect(0, 0, wtex, htex))
 	for ty := 0; ty < htex; ty++ {
-		z := (float64(ty) + 0.5) / float64(htex) * PlateHeightMM
-		for row+1 < plan.Nrows() && z >= plan.RowEdges[row+1] {
-			row++
-		}
-		for col := 0; col < nx; col++ {
+		// Loader V-flip: image row 0 maps to z ≈ PlateHeightMM, row htex-1 to z ≈ 0.
+		z := PlateHeightMM - (float64(ty)+0.5)/float64(htex)*PlateHeightMM
+		row := plan.rowOf(z)
+		for tx := 0; tx < wtex; tx++ {
+			col := tx / k // block boundaries fall on texel boundaries (aligned U scale)
 			r, g, b := hexToBytes(plan.Palette[plan.blockColor(plate, col, row)].Hex)
-			c := color.NRGBA{R: r, G: g, B: b, A: 255}
-			for dx := 0; dx < k; dx++ {
-				img.SetNRGBA(col*k+dx, ty, c)
-			}
+			img.SetNRGBA(tx, ty, color.NRGBA{R: r, G: g, B: b, A: 255})
 		}
 	}
 	return img
@@ -453,8 +491,8 @@ func BuildMesh(plan Plan) (verts [][3]float64, tris []Tri) {
 // plate into dir, and returns the OBJ path. Geometry is the per-plate chamfered
 // box (see BuildMesh) emitted in the loader's Y-up convention (final X,Y,Z ->
 // OBJ X,Z,-Y). Every plate's front and back inset faces are UV-mapped onto that
-// plate's pattern texture (map_Kd) with a position-based mapping (u=x/W, v=z/H);
-// the rim, chamfer-band, and corner faces sample a fixed section-0 (color-A)
+// plate's pattern texture (map_Kd) with a position-based mapping (u=x/(Nx*BlockWidthMM),
+// v=z/PlateHeightMM); the rim, chamfer-band, and corner faces sample a fixed section-0 (color-A)
 // texel of the same texture, so no face lacks texture coordinates (the OBJ
 // loader rejects meshes that mix textured and untextured faces).
 func WriteOBJ(plan Plan, dir string) (objPath string, err error) {
@@ -503,16 +541,20 @@ func WriteOBJ(plan Plan, dir string) (objPath string, err error) {
 		fmt.Fprintf(w, "v %s %s %s\n", ftoa(v[0]), ftoa(v[2]), ftoa(-v[1]))
 	}
 
-	// Per-plate texture coordinates: one position-based UV (u = x/width,
-	// v = z/height; section 0 at u=0) for each of the 24 vertices — used by the
-	// textured front/back faces — plus one rim texel deep inside section 0
-	// (color A) used by every rim/chamfer/corner face. 25 vt per plate.
+	// Per-plate texture coordinates: one position-based UV (u = x/(Nx*BlockWidthMM),
+	// v = z/PlateHeightMM; section 0 at u=0) for each of the 24 vertices — used by
+	// the textured front/back faces — plus one rim texel deep inside section 0
+	// (color A) used by every rim/chamfer/corner face. 25 vt per plate. The U scale
+	// is the block-grid span Nx*BlockWidthMM (NOT PlateWidthMM) so block boundaries
+	// land exactly on texel boundaries; see patternImage for why that alignment is
+	// required to keep the pipeline's per-cell sampling free of third colors.
 	c := plateChamferMM(plan.BlockWidthMM)
-	uRim := 0.5 / float64(plan.Nx*patternUpsample) // centre of texel column 0
-	texVerts := plateVertices(0, c)                // x,z are y-independent
+	uSpan := float64(plan.Nx) * plan.BlockWidthMM   // block-grid X span (>= PlateWidthMM)
+	uRim := 0.5 / float64(plan.Nx*patternUpsample)  // centre of texel column 0 (block 0, color A)
+	texVerts := plateVertices(0, c)                 // x,z are y-independent
 	for range plan.Plates {
 		for _, vtx := range texVerts {
-			fmt.Fprintf(w, "vt %s %s\n", ftoa(vtx[0]/PlateWidthMM), ftoa(vtx[2]/PlateHeightMM))
+			fmt.Fprintf(w, "vt %s %s\n", ftoa(vtx[0]/uSpan), ftoa(vtx[2]/PlateHeightMM))
 		}
 		fmt.Fprintf(w, "vt %s 0.5\n", ftoa(uRim))
 	}

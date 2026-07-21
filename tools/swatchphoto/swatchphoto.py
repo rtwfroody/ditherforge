@@ -178,10 +178,21 @@ class Geom:
 
     @property
     def per_section(self) -> int:
+        # Blue-noise manifests: the tile width is authoritative from the ranking
+        # shape. Legacy (Bayer) manifests have no rank, so derive it from the
+        # snapped block width the old geometry used.
+        if self.rank is not None:
+            return int(self.rank.shape[1])
         return max(1, int(round(SECTION_MM / self.block_width_mm)))
 
     @property
     def nx(self) -> int:
+        # Blue-noise manifests use the UNSNAPPED block grid (block width = the
+        # pipeline cell width), so an integer number of blocks does not tile the
+        # face: nx = ceil(90/width), last column partial. Legacy (Bayer) manifests
+        # keep the old snapped tiling nx = Sections * per_section.
+        if self.rank is not None:
+            return max(1, int(math.ceil(SECTIONS * SECTION_MM / self.block_width_mm)))
         return SECTIONS * self.per_section
 
     def row_heights(self) -> np.ndarray:
@@ -194,28 +205,35 @@ class Geom:
 def build_pattern(section_coverage: np.ndarray, geom: Geom) -> np.ndarray:
     """Return an (rows, cols) uint8 grid: 0 = filament A, 1 = filament B.
 
-    Column i is in section i//per_section. When the manifest carries the
-    void-and-cluster blue-noise ranking (geom.rank, shape (rows, per_section)), a
-    cell is B iff rank[j][i % per_section] < round(coverage(section)*N) with
-    N = per_section*rows — the exact Go blockIsB rule. Falls back to the legacy
-    ordered Bayer rule (Bayer8[i%8][j%8] < coverage*64) for pre-blue-noise
-    manifests. Either way the per-section REALIZED coverage (from the manifest) is
-    the threshold.
+    When the manifest carries the void-and-cluster blue-noise ranking (geom.rank,
+    shape (rows, per_section)), the block grid is UNSNAPPED: block width = the
+    pipeline cell width, so a block's section comes from its physical CENTER
+    (sec = clip(floor((i+0.5)*bw/SECTION_MM))), NOT from i//per_section. A cell is
+    B iff rank[j][i % per_section] < floor(coverage(section)*N + 0.5) with
+    N = per_section*rows — the exact Go blockColor/blockIsB rule (floor(x+0.5)
+    matches Go's math.Round, half away from zero, on *.5 ties).
+
+    Falls back to the legacy ordered Bayer rule (Bayer8[i%8][j%8] < coverage*64,
+    with the old SNAPPED geometry where column i is in section i//per_section) for
+    pre-blue-noise manifests. Either way the per-section REALIZED coverage (from
+    the manifest) is the threshold.
     """
     nx, per = geom.nx, geom.per_section
     rows = geom.row_count
     cols = np.arange(nx)
-    sections = np.clip(cols // per, 0, SECTIONS - 1)
-    p = section_coverage[sections]  # (nx,)
     if geom.rank is not None:
+        # Unsnapped block grid: section from the block center, not i//per.
+        sections = np.clip(
+            np.floor((cols + 0.5) * geom.block_width_mm / SECTION_MM), 0, SECTIONS - 1
+        ).astype(np.int64)
+        p = section_coverage[sections]  # (nx,)
         n = per * rows
-        # floor(x+0.5) matches Go's math.Round (half away from zero) for the
-        # non-negative thresholds here; np.rint would round halves to even and
-        # disagree by a cell where p*N lands exactly on *.5.
-        thr = np.floor(p * n + 0.5).astype(np.int64)  # (nx,) count-exact per-section
+        thr = np.floor(p * n + 0.5).astype(np.int64)  # (nx,)
         rank_cols = geom.rank[:, cols % per]  # (rows, nx): rank for each column
         return (rank_cols < thr[None, :]).astype(np.uint8)
-    # Legacy ordered-Bayer fallback (old manifests / photos).
+    # Legacy ordered-Bayer fallback (old snapped geometry, section = i//per).
+    sections = np.clip(cols // per, 0, SECTIONS - 1)
+    p = section_coverage[sections]  # (nx,)
     thr = p * 64.0  # (nx,)
     j = np.arange(rows)[:, None]  # (rows,1)
     i = cols[None, :]  # (1,nx)
