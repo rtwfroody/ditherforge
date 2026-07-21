@@ -94,30 +94,67 @@ func linearOf(c [3]uint8) [3]float64 {
 	return [3]float64{r, g, b}
 }
 
+// neighborCalibration holds the per-layer-height (ℓ mm, κ) fits of the
+// neighbor mixing model against photographed swatch prints (tools/swatchphoto;
+// blue-noise plates, Snapmaker U1, 2026-07-21, one print at each layer height).
+// Model selection (leave-one-pair-out CV with a parsimony rule) picked the
+// plain ADDITIVE blend — κ = 0 — at BOTH heights, with ℓ statistically
+// identical, so layer height turns out not to matter across the printable
+// range; the table keeps the per-height structure so a future recalibration
+// can diverge them, with NeighborModelForLayer interpolating between rows.
+//
+// The earlier transmittance fit (ℓ=0.130, κ=3.04) came from Bayer-pattern
+// swatches whose mid-coverage worm banding the filter was really fitting; the
+// properly dithered plates supersede it.
+var neighborCalibration = [...]struct{ layerMM, ellMM, kappa float64 }{
+	{0.08, 0.2053, 0},
+	{0.20, 0.2075, 0},
+}
+
+// NeighborModelForLayer returns the calibrated neighbor-model parameters
+// (ℓ mm, κ) for a print layer height, interpolating linearly between the
+// neighborCalibration rows and clamping outside them. A garbage layer height
+// (≤ 0, NaN) gets the first row. ℓ and κ are a calibrated PAIR — never mix an
+// ℓ from one calibration with a κ from another.
+func NeighborModelForLayer(layerMM float64) (ellMM, kappa float64) {
+	cal := neighborCalibration[:]
+	if !(layerMM > 0) || layerMM <= cal[0].layerMM {
+		return cal[0].ellMM, cal[0].kappa
+	}
+	last := cal[len(cal)-1]
+	if layerMM >= last.layerMM {
+		return last.ellMM, last.kappa
+	}
+	for i := 1; i < len(cal); i++ {
+		if layerMM <= cal[i].layerMM {
+			lo, hi := cal[i-1], cal[i]
+			t := (layerMM - lo.layerMM) / (hi.layerMM - lo.layerMM)
+			return lo.ellMM + t*(hi.ellMM-lo.ellMM), lo.kappa + t*(hi.kappa-lo.kappa)
+		}
+	}
+	return last.ellMM, last.kappa
+}
+
 // DefaultNeighborPathMM is the representative in-plane path length (mm) a
 // translucent cell's own filament imposes before a neighbor's color shows
 // through. It is the calibration knob (against physical test prints) shared by
 // the per-cell print simulation (voxel.EffectiveCellColors) and TD-aware
 // palette selection, so both models agree on how much a translucent filament
-// washes toward its surroundings. Calibrated to 0.130 mm against a photographed
-// swatch print (tools/swatchphoto) under the transmittance model.
-//
-// NOTE: ℓ is MODEL-SPECIFIC — this 0.130 was fit jointly WITH the transmittance
-// filter TransmittanceKappa = 3.04; the two go together (the old additive model
-// used 0.3). The pipeline overrides it from DITHERFORGE_SIM_NEIGHBOR_PATH_MM.
-const DefaultNeighborPathMM = 0.130
+// washes toward its surroundings. It is the fallback for callers without a
+// layer height; the pipeline resolves the pair (ℓ, κ) per run via
+// NeighborModelForLayer and can override both from the environment
+// (DITHERFORGE_SIM_NEIGHBOR_PATH_MM / DITHERFORGE_SIM_KAPPA).
+const DefaultNeighborPathMM = 0.206
 
 // TransmittanceKappa is the neighbor-transmittance filter exponent κ of the
 // print-simulation mixing model: returning neighbor light passes back through the
 // translucent cell's body and is filtered by the cell's own per-channel hue
 // T_c = (C_c / max_channel(C))^κ before it blends in. κ=0 is the plain additive
-// neighbor blend (bit-for-bit). κ≈3 was fit against a photographed swatch print
-// (tools/swatchphoto): it best predicts how a saturated filament next to a bright
-// neighbor keeps its own hue instead of washing out (and, with a dark neighbor,
-// dies). Shared by the per-cell sim and TD-aware selection so they can't drift;
-// the pipeline overrides it from DITHERFORGE_SIM_KAPPA. See DefaultNeighborPathMM
-// for why ℓ and κ are calibrated as a pair.
-const TransmittanceKappa = 3.04
+// neighbor blend (bit-for-bit) — and 0 is what the 2026-07 blue-noise swatch
+// recalibration selected at every layer height (see neighborCalibration), so
+// the filter is currently dormant; the machinery stays for future calibrations
+// that need it.
+const TransmittanceKappa = 0.0
 
 // TransmittanceColor returns the per-channel transmittance T of a filament whose
 // LINEAR-light color is lin: T_c = (lin_c / max_c lin)^κ, in [0,1]. It is the hue

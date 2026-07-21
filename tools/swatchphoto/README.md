@@ -24,7 +24,10 @@ palette) is a 90×10×2 mm bar with nine 10 mm sections at B-fraction
    *display* hex saturates, and the JSON flags which channels clipped).
 2. **Detects & rectifies plates** — segments non-paper regions by deviation from
    white, fits rotated rectangles (the 9:1 aspect is unambiguous), and warps each
-   to a canonical bar.
+   to a canonical bar. Closely spaced plates whose shared shadow bridges them
+   into one blob are recovered by a parallel-bar split: rotate the blob upright
+   and cut at valleys in the per-column occupancy profile (a bridge dips below
+   ~50% of the bar length; in-plate speckle never drops below ~70%).
 3. **Identifies & orients** — clusters the twelve endpoint patches into four
    filaments and matches them to the manifest palette by *robust z-scored Lab
    structure* (not absolute hex distance — the measured colors are expected to
@@ -85,31 +88,26 @@ the anchoring, pinning κ→0.
 Candidates are ranked by **leave-one-pair-out cross-validation** (fit on 5 pairs,
 evaluate the held-out one, all 6 rotations, mean held-out RMS — the primary
 criterion on a 6-pair dataset), with a **parsimony rule**: among models within a
-small LOO margin of the best, take the fewest parameters. On the real print:
+small LOO margin of the best, take the fewest parameters.
 
-| model | #p | in-sample RMS | LOO RMS | LOO worst |
+**2026-07 blue-noise recalibration** (Beige/Black/Brown/Cold White, Snapmaker
+U1, one print each at 0.08 mm and 0.2 mm layer height):
+
+| layer | winner | ℓ (mm) | κ | LOO RMS (additive / transmittance) |
 |---|---|---|---|---|
-| additive | 1 | 0.109 | 0.117 | 0.217 |
-| global_gamma | 2 | 0.068 | 0.077 | 0.120 |
-| td_gamma | 3 | 0.066 | 0.074 | 0.118 |
-| **transmittance** | **2** | **0.070** | **0.069** | **0.097** |
-| transmittance_shadow | 3 | 0.066 | 0.072 | 0.105 |
-| td_gamma_shadow | 4 | 0.058 | 0.067 | 0.099 |
+| 0.08 mm | **additive** | 0.2053 | 0 | 0.044 / 0.044 |
+| 0.20 mm | **additive** | 0.2075 | 0 | 0.053 / 0.065 |
 
-**Winner: `transmittance` (ℓ≈0.13 mm, κ≈3.0).** It halves the additive residual,
-has the best (lowest) held-out worst-case, and — critically — **Cold White +
-Orange finally fits** (0.066, was the worst pair at ~0.12 under global-γ); the
-per-pair residual spread collapses to 0.046–0.097. Micro-shadowing (candidate 3)
-does **not** robustly earn its parameter: it *hurts* the transmittance model's
-LOO (0.069 → 0.072). `td_gamma_shadow` edges the raw LOO but needs 4 parameters
-for a marginal gain, so parsimony picks transmittance. **Recommendation: port the
-transmittance filter to `voxel.EffectiveCellColors`.**
-
-Residual structure the family still can't fully express: `Black+Orange` becomes
-the hardest pair under transmittance (0.097) — a very-translucent-over-opaque mix
-whose measured mids sit far below any endpoint blend (−0.54 linear); a
-TD-dependent κ (κ growing with the translucent filament's TD) is the natural next
-refinement.
+**Winner at both heights: `additive` (κ = 0), with ℓ statistically identical
+(≈0.206 mm)** — layer height does not measurably change the mixing behavior.
+On the properly dithered plates the transmittance filter no longer earns its
+parameter: at 0.2 mm it fits κ≈0.05 (i.e. additive) and *loses* LOO; at
+0.08 mm it edges additive by less than the parsimony margin. The earlier fit
+on Bayer-pattern swatches (**transmittance, ℓ≈0.13, κ≈3.0**, LOO 0.069 vs
+additive 0.117) was to a large extent fitting the Bayer worm-banding artifacts,
+not the filament optics; those numbers are superseded. The calibrated pairs
+live in `palette.NeighborModelForLayer` (Go side), interpolated by layer
+height.
 
 ## Invocation
 

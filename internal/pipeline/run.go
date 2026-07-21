@@ -2498,7 +2498,8 @@ func (r *pipelineRun) runDither() (any, error) {
 		pal = voxel.EffectivePalette(po.Palette, po.PaletteTDs, r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
 		model = voxel.NewDitherModel(pal, nil, 0, 0, false)
 	} else {
-		model = voxel.NewDitherModel(po.Palette, po.PaletteTDs, float64(simNeighborPathMM), simKappa, r.opts.HonorTD)
+		ell, kappa := simNeighborParams(r.opts.LayerHeight)
+		model = voxel.NewDitherModel(po.Palette, po.PaletteTDs, float64(ell), kappa, r.opts.HonorTD)
 	}
 	tDither := time.Now()
 	var assignments []int32

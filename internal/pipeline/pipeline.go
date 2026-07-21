@@ -706,8 +706,9 @@ func RunCached(ctx context.Context, cache *StageCache, opts Options, cb *Callbac
 		var eff [][3]uint8
 		if len(po.Palette) > 0 {
 			if vo, verr := r.Voxelize(); verr == nil && vo != nil {
+				ell, kappa := simNeighborParams(r.opts.LayerHeight)
 				eff = voxel.NeighborEffectivePalette(po.Palette, po.PaletteTDs,
-					vo.Cells, simNeighborPathMM, simKappa)
+					vo.Cells, ell, kappa)
 			} else {
 				eff = voxel.EffectivePalette(po.Palette, po.PaletteTDs,
 					r.opts.LayerHeight, r.opts.ShellThicknessMM, po.Palette[0])
@@ -997,33 +998,43 @@ func overrideFaceColorsFromSamples(mesh *MeshData, faceSection []int32, sectionC
 	}
 }
 
-// simNeighborPathMM is the representative in-plane path length (mm) a
-// translucent cell's own filament imposes before a neighbor's color shows
-// through, used by the per-cell print simulation (voxel.EffectiveCellColors).
-// It is the calibration knob against physical test prints; override it with
-// DITHERFORGE_SIM_NEIGHBOR_PATH_MM (a positive float; garbage is ignored).
-var simNeighborPathMM = func() float32 {
+// simNeighborPathOverride / simKappaOverride are the environment overrides for
+// the neighbor mixing model's calibrated (ℓ, κ) pair, shared by the per-cell
+// print simulation (voxel.EffectiveCellColors), TD-aware selection and the
+// transmittance dither. Negative means "not set" (garbage is ignored).
+var simNeighborPathOverride = func() float32 {
 	if s := os.Getenv("DITHERFORGE_SIM_NEIGHBOR_PATH_MM"); s != "" {
 		if v, err := strconv.ParseFloat(s, 32); err == nil && v > 0 {
 			return float32(v)
 		}
 	}
-	return palette.DefaultNeighborPathMM
+	return -1
 }()
 
-// simKappa is the transmittance filter exponent κ of the print-simulation mixing
-// model (palette.TransmittanceKappa), shared by the per-cell sim and TD-aware
-// selection. Override with DITHERFORGE_SIM_KAPPA (a non-negative float; κ = 0 is
-// the plain additive blend). Note ℓ (simNeighborPathMM) and κ are a calibrated
-// pair — see palette.DefaultNeighborPathMM.
-var simKappa = func() float64 {
+var simKappaOverride = func() float64 {
 	if s := os.Getenv("DITHERFORGE_SIM_KAPPA"); s != "" {
 		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 {
 			return v
 		}
 	}
-	return palette.TransmittanceKappa
+	return -1
 }()
+
+// simNeighborParams resolves the neighbor mixing model's (ℓ mm, κ) for a run:
+// the per-layer-height swatch calibration (palette.NeighborModelForLayer),
+// with either component overridable from the environment
+// (DITHERFORGE_SIM_NEIGHBOR_PATH_MM / DITHERFORGE_SIM_KAPPA). ℓ and κ are a
+// calibrated pair; the overrides exist for recalibration experiments.
+func simNeighborParams(layerHeightMM float32) (float32, float64) {
+	ell, kappa := palette.NeighborModelForLayer(float64(layerHeightMM))
+	if simNeighborPathOverride > 0 {
+		ell = float64(simNeighborPathOverride)
+	}
+	if simKappaOverride >= 0 {
+		kappa = simKappaOverride
+	}
+	return float32(ell), kappa
+}
 
 // anyTranslucentTD reports whether any palette entry leaks light through the
 // shell (palette.TDLeak > 0) at the given geometry — i.e. whether the per-cell
@@ -1042,8 +1053,9 @@ func anyTranslucentTD(tds []float32, layerHeightMM, shellThicknessMM float32) bo
 // its cell's neighbor-blended effective color; faces with no usable per-cell
 // provenance fall back to the global effective palette, and finally to gray.
 func buildSimFaceColors(vo *voxelizeOutput, do *ditherOutput, po *paletteOutput, mo *mergeOutput, opts Options) []uint16 {
+	simEll, simK := simNeighborParams(opts.LayerHeight)
 	cellEff := voxel.EffectiveCellColors(vo.Cells, do.Assignments, po.Palette,
-		po.PaletteTDs, vo.Neighbors, simNeighborPathMM, 2, simKappa)
+		po.PaletteTDs, vo.Neighbors, simEll, 2, simK)
 
 	// Global cell index (into CellSamples) -> visible-cell index.
 	globalToVisible := make([]int, len(vo.CellSamples))
@@ -1471,12 +1483,13 @@ func buildPaletteConfig(opts Options) (voxel.PaletteConfig, error) {
 	// downgrades to nominal scoring when TDs are uniform or all-opaque, so
 	// passing it unconditionally (Enabled = HonorTD) is safe. ShellThicknessMM
 	// is resolved for any HonorTD run in resolveShellThickness.
+	selEll, selKappa := simNeighborParams(opts.LayerHeight)
 	pcfg.TD = palette.TDParams{
 		Enabled:          opts.HonorTD,
 		LayerHeightMM:    opts.LayerHeight,
 		ShellThicknessMM: opts.ShellThicknessMM,
-		NeighborPathMM:   simNeighborPathMM,
-		Kappa:            float32(simKappa),
+		NeighborPathMM:   selEll,
+		Kappa:            float32(selKappa),
 	}
 
 	if opts.InventoryFile != "" {

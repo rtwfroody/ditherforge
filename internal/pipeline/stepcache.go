@@ -1047,8 +1047,9 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	writeString(h, "palette-td-aware-v4")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
-	writeFloat32(h, simNeighborPathMM)
-	writeFloat64(h, simKappa)
+	selEll, selKappa := simNeighborParams(opts.LayerHeight)
+	writeFloat32(h, selEll)
+	writeFloat64(h, selKappa)
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
@@ -1080,8 +1081,9 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// dither cache when overridden. Folded in only when HonorTD is on (otherwise
 	// the model is opaque and neither is consulted).
 	if opts.HonorTD {
-		writeFloat32(h, simNeighborPathMM)
-		writeFloat64(h, simKappa)
+		ell, kappa := simNeighborParams(opts.LayerHeight)
+		writeFloat32(h, ell)
+		writeFloat64(h, kappa)
 	}
 	// Layered TD model: fold its inputs into the key ONLY when it's active, so
 	// an inactive-model key is byte-identical to a pre-feature key (existing
