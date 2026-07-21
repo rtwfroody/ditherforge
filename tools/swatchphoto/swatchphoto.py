@@ -646,6 +646,101 @@ class DetectedPlate:
     sections_lin: np.ndarray  # (9,3) measured section colors, in warp order
 
 
+def _plate_rect(mask: np.ndarray, dbg_tag: str = ""):
+    """Test one connected-component mask against the plate shape criteria
+    (9:1-ish rotated rectangle). Returns ordered corner points or None."""
+    import cv2
+
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    cnt = max(cnts, key=cv2.contourArea)
+    rect = cv2.minAreaRect(cnt)
+    (cx, cy), (w, h), ang = rect
+    if w < 1 or h < 1:
+        return None
+    long_side, short_side = max(w, h), min(w, h)
+    aspect = long_side / short_side
+    fill = cv2.contourArea(cnt) / (w * h) if w * h > 0 else 0
+    if dbg_tag:
+        sys.stderr.write(f"[detect] {dbg_tag}: aspect={aspect:.2f} fill={fill:.2f}\n")
+    if not (5.0 <= aspect <= 13.0):
+        return None
+    # rectangularity: contour fills its min-area rect
+    if fill < 0.6:
+        return None
+    return _order_long_first(cv2.boxPoints(rect).astype(np.float64))
+
+
+def _split_merged(mask: np.ndarray, min_area: float, dbg: bool):
+    """A component that failed the plate test but is big enough to hold two or
+    more plates is adjacent parallel plates bridged by their shared shadow (the
+    deviation threshold picks up the darkened paper between close plates; the
+    bridge can span most of the gap, so no morphological trick can cut it).
+
+    Exploit the geometry instead: the bars are parallel, so after rotating the
+    component upright (long side of its min-area rect vertical) the per-column
+    occupancy profile shows each plate as a plateau near the bar length and each
+    shadow bridge as a valley (measured: bridges dip to <=50% of the bar length,
+    while speckle texture inside a plate never drops below ~70%). Cut at columns
+    below 60% of the plateau level and test each kept run as its own plate."""
+    import cv2
+
+    m8 = (mask > 0).astype(np.uint8)
+    cnts, _ = cv2.findContours(m8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return []
+    cnt = max(cnts, key=cv2.contourArea)
+    (cx, cy), (w, h), ang = cv2.minAreaRect(cnt)
+    if w < 1 or h < 1:
+        return []
+    rot = ang if h >= w else ang + 90.0
+    H, W = m8.shape
+    M = cv2.getRotationMatrix2D((cx, cy), rot, 1.0)
+    rmask = cv2.warpAffine(m8, M, (W, H), flags=cv2.INTER_NEAREST)
+    prof = rmask.sum(axis=0).astype(np.float64)
+    nz = np.nonzero(prof > 0)[0]
+    if len(nz) < 3:
+        return []
+    x0, x1 = int(nz[0]), int(nz[-1])
+    plateau = np.percentile(prof[x0:x1 + 1], 90)
+    if plateau <= 0:
+        return []
+    keep = prof >= 0.6 * plateau
+    # Contiguous runs of kept columns; drop slivers far narrower than the
+    # widest run (bridge remnants), keep everything plate-like.
+    runs = []
+    in_run = False
+    for x in range(x0, x1 + 2):
+        on = x <= x1 and keep[x]
+        if on and not in_run:
+            start, in_run = x, True
+        elif not on and in_run:
+            runs.append((start, x - 1))
+            in_run = False
+    widest = max((b - a for a, b in runs), default=0)
+    runs = [(a, b) for a, b in runs if (b - a) >= 0.35 * widest]
+    if len(runs) < 2:
+        return []
+    Minv = cv2.invertAffineTransform(M)
+    rects = []
+    for i, (a, b) in enumerate(runs):
+        sub = np.zeros_like(rmask)
+        sub[:, a:b + 1] = rmask[:, a:b + 1]
+        tag = f"split run {i} cols {a}-{b}" if dbg else ""
+        pts = _plate_rect(sub, tag)
+        if pts is None:
+            continue
+        # Map corners back from the rotated frame to source-image coords
+        # (rigid transform, so ordering and handedness survive).
+        rects.append(pts @ Minv[:, :2].T + Minv[:, 2])
+    if len(rects) >= 2:
+        if dbg:
+            sys.stderr.write(f"[detect] split recovered {len(rects)} plates\n")
+        return rects
+    return []
+
+
 def detect_plates(norm_lin: np.ndarray) -> list[DetectedPlate]:
     """Segment plates from a paper-normalized linear image and measure each
     plate's nine section colors (in raw left->right warp order)."""
@@ -664,37 +759,27 @@ def detect_plates(norm_lin: np.ndarray) -> list[DetectedPlate]:
 
     import os as _os
 
-    dbg = _os.environ.get("SWATCHPHOTO_DEBUG")
+    dbg = bool(_os.environ.get("SWATCHPHOTO_DEBUG"))
     n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
     plates: list[DetectedPlate] = []
     img_area = H * W
+    min_area = 0.002 * img_area
     for lbl in range(1, n):
         area = stats[lbl, cv2.CC_STAT_AREA]
-        if area < 0.002 * img_area:
+        if area < min_area:
             continue
         mask = (labels == lbl).astype(np.uint8)
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        cnt = max(cnts, key=cv2.contourArea)
-        rect = cv2.minAreaRect(cnt)
-        (cx, cy), (w, h), ang = rect
-        if w < 1 or h < 1:
-            continue
-        long_side, short_side = max(w, h), min(w, h)
-        aspect = long_side / short_side
-        fill = cv2.contourArea(cnt) / (w * h) if w * h > 0 else 0
-        if dbg:
-            sys.stderr.write(f"[detect] comp {lbl}: area={area} aspect={aspect:.2f} fill={fill:.2f}\n")
-        if not (5.0 <= aspect <= 13.0):
-            continue
-        # rectangularity: contour fills its min-area rect
-        if fill < 0.6:
-            continue
-        box = cv2.boxPoints(rect).astype(np.float64)
-        pts = _order_long_first(box)
-        sec = _measure_rectified(norm_lin, pts)
-        plates.append(DetectedPlate(rect_pts=pts, sections_lin=sec))
+        tag = f"comp {lbl} area={area}" if dbg else ""
+        pts = _plate_rect(mask, tag)
+        if pts is not None:
+            rect_list = [pts]
+        elif area >= 2 * min_area:
+            rect_list = _split_merged(mask, min_area, dbg)
+        else:
+            rect_list = []
+        for pts in rect_list:
+            sec = _measure_rectified(norm_lin, pts)
+            plates.append(DetectedPlate(rect_pts=pts, sections_lin=sec))
     return plates
 
 
