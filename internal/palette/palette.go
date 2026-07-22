@@ -565,8 +565,8 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 			// samples); the TD scorer captures its own precomputed state and
 			// ignores those args (invLab is still passed so the enumerators size
 			// off len(inventory)).
-			scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample) float64 {
-				return tdState.score(indices)
+			scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
+				return tdState.score(indices, bound)
 			}
 			fmt.Printf("  TD-aware selection (per-sample eff): neighbor path %.2f mm, κ %.2f\n", neighborPath, kappa)
 		}
@@ -657,7 +657,23 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 
 // scoreFunc is the signature for palette subset scoring functions.
 // fixedLab contains locked colors that are always part of the palette.
-type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64
+//
+// bound is a branch-and-bound early-abort budget: the caller passes the score
+// it is trying to beat (its current best). Because every scorer accumulates a
+// sum of non-negative per-sample terms, once the running total STRICTLY exceeds
+// bound the final score can only be larger, so the scorer may stop and return
+// noBound (math.MaxFloat64) — a sentinel meaning "≥ bound, not a candidate".
+// The comparison is strictly-greater, so a subset whose exact score merely ties
+// bound is still scored in full; the returned value is therefore bit-identical
+// to an unbounded evaluation for every subset that is not strictly worse than
+// bound (in particular the global optimum and anything tied with it), which
+// keeps the deterministic tie-break unchanged. Callers that need the exact
+// score (baselines, sort keys) pass noBound to disable pruning.
+type scoreFunc func(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample, bound float64) float64
+
+// noBound disables branch-and-bound pruning: a scorer given this bound never
+// early-aborts and returns the exact score.
+const noBound = math.MaxFloat64
 
 // ditherSpreadFactor controls how much the nearest-vertex distance penalizes
 // colors that are inside the hull but far from any palette color. This
@@ -745,15 +761,18 @@ func buildVerts(indices []int, invLab [][3]float64, fixedLab [][3]float64) [][3]
 // spread penalty based on nearest-vertex distance, so colors that require
 // mixing distant palette entries are penalized even when geometrically
 // inside the hull.
-func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
-	return hullScoreVerts(buildVerts(indices, invLab, fixedLab), samples)
+func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample, bound float64) float64 {
+	return hullScoreVerts(buildVerts(indices, invLab, fixedLab), samples, bound)
 }
 
 // hullScoreVerts is weightedHullScore's geometric core over already-assembled
-// Lab vertices.
-func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
+// Lab vertices. bound enables branch-and-bound early abort (see scoreFunc).
+func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample, bound float64) float64 {
 	total := 0.0
 	for _, s := range samples {
+		if total > bound {
+			return noBound
+		}
 		hullDist := distToConvexHull(s.Lab, verts)
 		// Standard CIELAB chroma; multiply by 100 to undo go-colorful's
 		// 1/100 scaling so chromaSpreadFalloff is in familiar units.
@@ -776,15 +795,19 @@ func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
 // weightedNearestScore computes total weighted squared distance from each
 // sample to the nearest color in the full palette (locked + candidate).
 // Used when dithering is disabled, since each cell gets exactly one color.
-func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample) float64 {
-	return nearestScoreVerts(buildVerts(indices, invLab, fixedLab), samples)
+func weightedNearestScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample, bound float64) float64 {
+	return nearestScoreVerts(buildVerts(indices, invLab, fixedLab), samples, bound)
 }
 
 // nearestScoreVerts is weightedNearestScore's geometric core over
-// already-assembled Lab vertices.
-func nearestScoreVerts(verts [][3]float64, samples []WeightedLabSample) float64 {
+// already-assembled Lab vertices. bound enables branch-and-bound early abort
+// (see scoreFunc).
+func nearestScoreVerts(verts [][3]float64, samples []WeightedLabSample, bound float64) float64 {
 	total := 0.0
 	for _, s := range samples {
+		if total > bound {
+			return noBound
+		}
 		d := nearestVertexDist(s.Lab, verts)
 		total += d * d * s.Weight
 	}
@@ -824,6 +847,28 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 	jobs := make(chan []int, 64)
 	results := make(chan result, numWorkers)
 
+	// Shared branch-and-bound bound: the smallest full score any worker has
+	// found so far, stored as the bits of a float64. Workers prune each
+	// candidate against min(their own localBest, this global) — pruning against
+	// a stale (higher) bound is always safe, so no coordination beyond the CAS
+	// is needed. The global optimum's running total never exceeds any bound
+	// (every bound is a real full score ≥ the optimum), so it is never pruned
+	// and its exact score and deterministic tie-break are preserved.
+	var globalBoundBits atomic.Uint64
+	globalBoundBits.Store(math.Float64bits(math.MaxFloat64))
+	lowerGlobalBound := func(v float64) {
+		vb := math.Float64bits(v)
+		for {
+			cur := globalBoundBits.Load()
+			if v >= math.Float64frombits(cur) {
+				return
+			}
+			if globalBoundBits.CompareAndSwap(cur, vb) {
+				return
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
@@ -836,7 +881,18 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 					break
 				}
 				progress.Add(1)
-				s := score(subset, invLab, lockedLab, samples)
+				// Prune against the tighter of this worker's best and the
+				// shared global best. A pruned candidate is strictly worse than
+				// the bound and score returns noBound (math.MaxFloat64), which
+				// the update test below rejects exactly as it rejects a
+				// near-duplicate — so localSubset never adopts a pruned subset
+				// once any real score exists (identical final result to an
+				// unpruned search).
+				bound := localBest
+				if gb := math.Float64frombits(globalBoundBits.Load()); gb < bound {
+					bound = gb
+				}
+				s := score(subset, invLab, lockedLab, samples, bound)
 				// On an exact score tie, keep the lexicographically smaller
 				// subset so the result is independent of which worker
 				// happened to evaluate it (otherwise equal-scoring palettes
@@ -846,6 +902,7 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 					localBest = s
 					localSubset = make([]int, len(subset))
 					copy(localSubset, subset)
+					lowerGlobalBound(localBest)
 				}
 			}
 			results <- result{localBest, localSubset}
@@ -927,7 +984,9 @@ func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 			}
 			selected[len(selected)-1] = ci
 			evaluated++
-			s := score(selected, invLab, lockedLab, samples)
+			// Prune against the best candidate found so far this step; a strict
+			// improvement is all we keep, so ties/worse scores may abort early.
+			s := score(selected, invLab, lockedLab, samples, bestScore)
 			if s < bestScore {
 				bestScore = s
 				bestIdx = ci
@@ -939,7 +998,7 @@ func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 
 	// Swap refinement: try replacing each selected color with each
 	// unselected color. Repeat until no improvement found.
-	currentScore := score(selected, invLab, lockedLab, samples)
+	currentScore := score(selected, invLab, lockedLab, samples, noBound)
 	evaluated++
 	for {
 		improved := false
@@ -954,7 +1013,7 @@ func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 				}
 				selected[si] = ci
 				evaluated++
-				s := score(selected, invLab, lockedLab, samples)
+				s := score(selected, invLab, lockedLab, samples, currentScore)
 				if s < currentScore {
 					// Accept the swap.
 					inSubset[old] = false
@@ -1021,7 +1080,9 @@ func greedyComplete(ctx context.Context, invLab [][3]float64, lockedLab [][3]flo
 			}
 			selected[len(selected)-1] = ci
 			evaluated++
-			s := score(selected, invLab, lockedLab, samples)
+			// Only a strict improvement over the best-so-far this step is kept,
+			// so prune against it (ties/worse may abort early).
+			s := score(selected, invLab, lockedLab, samples, bestScore)
 			if s < bestScore {
 				bestScore = s
 				bestIdx = ci
@@ -1164,11 +1225,11 @@ func vndDescent(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64
 	for _, idx := range cur {
 		inSubset[idx] = true
 	}
-	doScore := func(sub []int) float64 {
+	doScore := func(sub []int, bound float64) float64 {
 		*evaluated++
-		return score(sub, invLab, lockedLab, samples)
+		return score(sub, invLab, lockedLab, samples, bound)
 	}
-	curScore := doScore(cur)
+	curScore := doScore(cur, noBound)
 
 	for {
 		if ctx.Err() != nil {
@@ -1188,7 +1249,9 @@ func vndDescent(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64
 						continue
 					}
 					cur[si] = ci
-					if s := doScore(cur); s < bestScore {
+					// Only a swap strictly better than the current best
+					// improvement matters, so prune against bestScore.
+					if s := doScore(cur, bestScore); s < bestScore {
 						bestScore, bestSi, bestCi = s, si, ci
 					}
 				}
@@ -1240,12 +1303,14 @@ func vndDescent(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64
 // *evaluated and reports capHit when vndEvalCap is reached mid-sweep.
 func vndTwoSwap(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, cur []int, inSubset []bool, curScore *float64, evaluated *int) (bool, bool, error) {
 	invN := len(invLab)
-	doScore := func(sub []int) float64 {
+	doScore := func(sub []int, bound float64) float64 {
 		*evaluated++
-		return score(sub, invLab, lockedLab, samples)
+		return score(sub, invLab, lockedLab, samples, bound)
 	}
 
 	// Marginal contribution of each member = score increase when it is removed.
+	// These are exact sort keys for the ejection ordering, so they must not be
+	// pruned (noBound).
 	contrib := make([]float64, n)
 	reduced := make([]int, 0, n-1)
 	for si := 0; si < n; si++ {
@@ -1255,7 +1320,7 @@ func vndTwoSwap(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64
 				reduced = append(reduced, idx)
 			}
 		}
-		contrib[si] = doScore(reduced) - *curScore
+		contrib[si] = doScore(reduced, noBound) - *curScore
 		if *evaluated >= vndEvalCap {
 			return false, true, nil
 		}
@@ -1302,7 +1367,9 @@ func vndTwoSwap(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64
 				// palette as the reverse — one assignment per candidate pair.
 				copy(trial, cur)
 				trial[pr.i], trial[pr.j] = cand[a], cand[b]
-				if s := doScore(trial); s < *curScore {
+				// First-improving: only a strict improvement is applied, so
+				// prune against the current score.
+				if s := doScore(trial, *curScore); s < *curScore {
 					inSubset[oldI] = false
 					inSubset[oldJ] = false
 					cur[pr.i], cur[pr.j] = cand[a], cand[b]

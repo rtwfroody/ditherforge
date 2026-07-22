@@ -250,7 +250,16 @@ func (st *tdSelectState) hasNominalDuplicate(indices []int) bool {
 // score returns the TD-aware subset cost: the weighted sum over samples of the
 // squared distance from each target to the per-sample effective-color hull
 // (plus the dithering spread penalty), with near-duplicate subsets rejected.
-func (st *tdSelectState) score(indices []int) float64 {
+//
+// bound is the branch-and-bound early-abort budget (see scoreFunc): the
+// per-sample accumulation is monotonically non-decreasing (every term is
+// non-negative), so once the running total strictly exceeds bound the final
+// score can only be larger and the loop returns noBound. Pruning is
+// strictly-greater, so any subset whose exact score merely ties bound is scored
+// in full and the returned value matches an unbounded evaluation — the global
+// optimum (and anything tied with it) is never pruned, keeping selection
+// bit-identical. Pass noBound to disable pruning and get the exact score.
+func (st *tdSelectState) score(indices []int, bound float64) float64 {
 	if st.hasNominalDuplicate(indices) {
 		return math.MaxFloat64
 	}
@@ -267,6 +276,9 @@ func (st *tdSelectState) score(indices []int) float64 {
 	}
 	total := 0.0
 	for j := range st.samples {
+		if total > bound {
+			return noBound
+		}
 		s := st.samples[j]
 		for i := 0; i < st.nLocked; i++ {
 			verts[i] = st.lockEff[i][j]
@@ -376,7 +388,7 @@ func (st *tdSelectState) refineUsage(best []int) []int {
 	for _, idx := range cur {
 		inUse[idx] = true
 	}
-	curScore := st.score(cur)
+	curScore := st.score(cur, noBound)
 
 	for pass := 0; pass < len(cur); pass++ {
 		u := st.usage(cur)
@@ -406,7 +418,8 @@ func (st *tdSelectState) refineUsage(best []int) []int {
 			if st.hasNominalDuplicate(trial) {
 				continue
 			}
-			sc := st.score(trial)
+			// Exact score needed: it feeds the usage-tie-break comparison below.
+			sc := st.score(trial, noBound)
 			if sc > curScore*(1+usageSwapTolerance) {
 				continue
 			}

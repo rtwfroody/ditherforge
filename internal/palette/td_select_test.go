@@ -439,8 +439,8 @@ func tdAwareScorer(inv []InventoryEntry, samples []WeightedLabSample) (scoreFunc
 		invLab[i] = nominalLabOf(en.Color)
 	}
 	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true)
-	return func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample) float64 {
-		return st.score(indices)
+	return func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
+		return st.score(indices, bound)
 	}, invLab
 }
 
@@ -467,7 +467,7 @@ func TestMultiStartVNDMatchesExhaustive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exhaustive: %v", err)
 	}
-	exhScore := scorer(exh, invLab, nil, samples)
+	exhScore := scorer(exh, invLab, nil, samples, noBound)
 
 	vnd, evaluated, hitCap, err := multiStartVND(context.Background(), invLab, nil, samples, n, scorer)
 	if err != nil {
@@ -476,7 +476,7 @@ func TestMultiStartVNDMatchesExhaustive(t *testing.T) {
 	if hitCap {
 		t.Fatalf("vnd hit the eval cap on a small instance (evaluated=%d)", evaluated)
 	}
-	vndScore := scorer(vnd, invLab, nil, samples)
+	vndScore := scorer(vnd, invLab, nil, samples, noBound)
 
 	if math.Abs(vndScore-exhScore) > 1e-9*math.Max(1, exhScore) {
 		t.Errorf("VND score %.6f != exhaustive optimum %.6f (exh=%v vnd=%v)", vndScore, exhScore, exh, vnd)
