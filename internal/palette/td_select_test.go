@@ -3,6 +3,7 @@ package palette
 import (
 	"context"
 	"math"
+	"sync/atomic"
 	"testing"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -362,5 +363,145 @@ func TestTDSelectPerSampleEff(t *testing.T) {
 	// Translucent Orange: vertex differs between the two samples.
 	if st.invEff[1][0] == st.invEff[1][1] {
 		t.Errorf("translucent entry vertex identical across two different samples: %v", st.invEff[1][0])
+	}
+}
+
+// panchromaBasicInventory is the 28-entry Panchroma Basic collection
+// (internal/collection/builtins/panchroma_basic.txt) hardcoded so the palette
+// package's tests need no import of internal/collection (which would cycle).
+func panchromaBasicInventory() []InventoryEntry {
+	e := func(r, g, b uint8, td float32) InventoryEntry {
+		return InventoryEntry{Color: [3]uint8{r, g, b}, TD: td}
+	}
+	return []InventoryEntry{
+		e(0x08, 0x0A, 0x0D, 0.1), // Black
+		e(0x55, 0x33, 0x1A, 0.1), // Brown
+		e(0xE7, 0x2F, 0x1D, 1.9), // Red
+		e(0xD6, 0x02, 0x12, 1.0), // Wine Red
+		e(0xF2, 0x45, 0x74, 1.4), // Magenta
+		e(0xF1, 0xA1, 0xAF, 1.8), // Pink
+		e(0xF6, 0x74, 0x05, 3.3), // Orange
+		e(0xFF, 0xE8, 0x00, 4.3), // Yellow
+		e(0xEE, 0xD2, 0x30, 3.3), // Lemon Yellow
+		e(0xEE, 0xD1, 0xA8, 1.5), // Cream
+		e(0xC2, 0xAB, 0x72, 0.5), // Beige
+		e(0xA7, 0x9E, 0x82, 0.7), // Tan
+		e(0x06, 0x92, 0x4D, 0.4), // Green
+		e(0xD5, 0xD7, 0x01, 2.3), // Lime Green
+		e(0x4E, 0x74, 0x2D, 0.1), // Jungle Green
+		e(0x94, 0x89, 0x02, 0.1), // Olive Green
+		e(0x57, 0x5B, 0x54, 0.1), // Dark Olive Drab
+		e(0x00, 0x37, 0x76, 0.3), // Blue
+		e(0x00, 0x66, 0xD9, 1.5), // Azure Blue
+		e(0x48, 0x7B, 0xA2, 0.3), // Stone Blue
+		e(0x5E, 0xBD, 0xDB, 1.5), // Aqua Blue
+		e(0x4C, 0xC0, 0xC7, 0.6), // Polymaker Teal
+		e(0x6C, 0x47, 0xB2, 0.1), // Purple
+		e(0x48, 0x52, 0x59, 0.2), // Dark Grey
+		e(0x61, 0x64, 0x69, 0.4), // Steel Grey
+		e(0x8C, 0x90, 0x99, 0.4), // Grey
+		e(0xD9, 0xDF, 0xE5, 0.3), // Cold White
+		e(0xEB, 0xF7, 0xFF, 3.2), // White
+	}
+}
+
+// creamEagleColors is a cream/white-dominant target cloud with warm-brown and
+// black markings — the orzeł eagle in miniature. It is the cloud that lured
+// plain greedy selection into the saturated-translucent Magenta local minimum.
+func creamEagleColors() [][3]uint8 {
+	cream := [3]uint8{0xEE, 0xD1, 0xA8}
+	white := [3]uint8{0xF0, 0xEC, 0xE0}
+	tan := [3]uint8{0xC8, 0xB0, 0x80}
+	brown := [3]uint8{0x55, 0x33, 0x1A}
+	darkBrown := [3]uint8{0x3A, 0x24, 0x12}
+	black := [3]uint8{0x10, 0x10, 0x12}
+	rep := func(out [][3]uint8, c [3]uint8, k int) [][3]uint8 {
+		for i := 0; i < k; i++ {
+			out = append(out, c)
+		}
+		return out
+	}
+	var out [][3]uint8
+	out = rep(out, cream, 40)
+	out = rep(out, white, 25)
+	out = rep(out, tan, 15)
+	out = rep(out, brown, 12)
+	out = rep(out, darkBrown, 6)
+	out = rep(out, black, 8)
+	return out
+}
+
+// tdAwareScorer wires the TD-aware per-sample scorer exactly as
+// SelectFromInventory does, so the search functions can be exercised directly.
+func tdAwareScorer(inv []InventoryEntry, samples []WeightedLabSample) (scoreFunc, [][3]float64) {
+	invLab := make([][3]float64, len(inv))
+	for i, en := range inv {
+		invLab[i] = nominalLabOf(en.Color)
+	}
+	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true)
+	return func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample) float64 {
+		return st.score(indices)
+	}, invLab
+}
+
+// TestMultiStartVNDMatchesExhaustive pins the search fix: the deterministic
+// multi-start VND fallback must reach the exhaustive optimum's score on the real
+// 28-choose-4 Panchroma / cream-eagle instance that trapped plain greedy on
+// Magenta. It also confirms VND is deterministic run-to-run and that the fixed
+// scoring keeps Magenta out of the optimum. Guarded by -short (the instance is
+// small, but the guard honors the CI-time budget contract).
+func TestMultiStartVNDMatchesExhaustive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping exhaustive-vs-VND comparison in -short mode")
+	}
+	inv := panchromaBasicInventory()
+	samples := CellColorHistogram(creamEagleColors(), nil)
+	ApplyChromaWeighting(samples)
+	samples = topSamples(samples, 5000)
+
+	scorer, invLab := tdAwareScorer(inv, samples)
+	const n = 4
+
+	var counter atomic.Int64
+	exh, err := exhaustiveSearch(context.Background(), invLab, nil, samples, n, scorer, &counter)
+	if err != nil {
+		t.Fatalf("exhaustive: %v", err)
+	}
+	exhScore := scorer(exh, invLab, nil, samples)
+
+	vnd, evaluated, hitCap, err := multiStartVND(context.Background(), invLab, nil, samples, n, scorer)
+	if err != nil {
+		t.Fatalf("vnd: %v", err)
+	}
+	if hitCap {
+		t.Fatalf("vnd hit the eval cap on a small instance (evaluated=%d)", evaluated)
+	}
+	vndScore := scorer(vnd, invLab, nil, samples)
+
+	if math.Abs(vndScore-exhScore) > 1e-9*math.Max(1, exhScore) {
+		t.Errorf("VND score %.6f != exhaustive optimum %.6f (exh=%v vnd=%v)", vndScore, exhScore, exh, vnd)
+	}
+
+	// Determinism: a second run yields the identical subset (sorted).
+	vnd2, _, _, err := multiStartVND(context.Background(), invLab, nil, samples, n, scorer)
+	if err != nil {
+		t.Fatalf("vnd rerun: %v", err)
+	}
+	if len(vnd) != len(vnd2) {
+		t.Fatalf("nondeterministic VND length: %v vs %v", vnd, vnd2)
+	}
+	for i := range vnd {
+		if vnd[i] != vnd2[i] {
+			t.Errorf("nondeterministic VND result: %v vs %v", vnd, vnd2)
+		}
+	}
+
+	// The fixed scoring keeps saturated-translucent Magenta (#F24574) out of the
+	// optimum for this cream body.
+	magenta := [3]uint8{0xF2, 0x45, 0x74}
+	for _, idx := range vnd {
+		if inv[idx].Color == magenta {
+			t.Errorf("Magenta selected in the VND optimum %v; expected it rejected", vnd)
+		}
 	}
 }

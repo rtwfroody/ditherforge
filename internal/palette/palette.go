@@ -573,7 +573,22 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 	}
 
 	combos := combinationsCount(len(inventory), n)
-	exhaustive := combos <= 2000
+	// The budgeted exhaustive + multi-start VND search is enabled only for the
+	// TD-aware scorer, which the hull-membership wash penalty hardened against
+	// hull over-optimism (see tdSelectState.score). The plain nominal hull
+	// scorer is NOT so hardened: aggressive global search there surfaces its
+	// additive-mixing over-optimism — it prefers a big enclosing hull of
+	// saturated extremes it cannot physically dither to (e.g. a landless
+	// {Black, Yellow, Azure, Aqua} over {Green, Brown, White, Blue} for an earth
+	// globe, ~20% lower score yet perceptually wrong) — which the greedy local
+	// search fortunately steps around. Until the nominal scorer gets a matching
+	// guard, keep it on the legacy greedy swap search (bit-identical to before).
+	newSearch := tdState != nil
+	exhaustiveThreshold := 2000
+	if newSearch {
+		exhaustiveThreshold = selectEvalBudget
+	}
+	exhaustive := combos <= exhaustiveThreshold
 
 	start := time.Now()
 	var bestSubset []int
@@ -607,6 +622,17 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		}
 		tracker.StageDone("Selecting colors")
 		fmt.Printf("  Selected colors (%d evaluated) in %.1fs\n", evaluated, time.Since(start).Seconds())
+	} else if newSearch {
+		var hitCap bool
+		bestSubset, evaluated, hitCap, err = multiStartVND(ctx, invLab, lockedLab, samples, n, scorer)
+		if err != nil {
+			return nil, err
+		}
+		capNote := ""
+		if hitCap {
+			capNote = " (eval cap hit; best-so-far)"
+		}
+		fmt.Printf("  Selected colors (%d evaluated, multi-start VND)%s in %.1fs\n", evaluated, capNote, time.Since(start).Seconds())
 	} else {
 		bestSubset, evaluated, err = greedySwapSearch(ctx, invLab, lockedLab, samples, n, scorer)
 		if err != nil {
@@ -876,8 +902,10 @@ func exhaustiveSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 }
 
 // greedySwapSearch builds an initial subset greedily, then refines with
-// pairwise swaps (the PAM k-medoids algorithm). Returns the best subset
-// found and the total number of scoring calls made.
+// pairwise swaps (the PAM k-medoids algorithm). Returns the best subset found
+// and the total number of scoring calls made. This is the legacy search kept for
+// the nominal (non-TD) scorer, whose over-optimism the more aggressive
+// budgeted-exhaustive/VND search would surface (see SelectFromInventory).
 func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) ([]int, int, error) {
 	invN := len(invLab)
 	evaluated := 0
@@ -947,6 +975,355 @@ func greedySwapSearch(ctx context.Context, invLab [][3]float64, lockedLab [][3]f
 	return selected, evaluated, nil
 }
 
+// selectEvalBudget is the subset-evaluation budget for palette selection. When
+// the number of candidate subsets C(inventory, n) fits within it, selection is
+// exhaustive — the global optimum. Above it, exhaustive enumeration is
+// infeasible (e.g. C(80, 6) ≈ 3e8) and selection falls back to the deterministic
+// multi-start VND below. ~50k keeps a cache-missed selection to a few seconds
+// (C(28, 4) = 20475 scores in ~10s parallelized) while covering typical
+// collections exhaustively.
+const selectEvalBudget = 50000
+
+// numVNDAnchorStarts is how many farthest-point anchor starts multiStartVND runs
+// in addition to the plain greedy start — enough diverse basins to escape the
+// single-greedy local minima (the Magenta trap) without a large fixed cost.
+const numVNDAnchorStarts = 10
+
+// vndEvalCap hard-bounds the multi-start VND fallback's total scoring calls so a
+// pathological inventory can't blow up runtime. On reaching it the search
+// returns the best subset found so far.
+const vndEvalCap = 500000
+
+// greedyComplete extends the partial subset `seed` (distinct inventory indices,
+// len ≤ n) to size n by repeatedly adding the not-yet-chosen candidate that most
+// reduces the score. Deterministic: it scans candidates in index order and keeps
+// the strictly-best, so the lowest index wins a score tie. Returns the completed
+// subset (seed first, greedily-added members appended) and the scoring calls made.
+func greedyComplete(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, seed []int) ([]int, int, error) {
+	invN := len(invLab)
+	evaluated := 0
+	selected := make([]int, len(seed), n)
+	copy(selected, seed)
+	inSubset := make([]bool, invN)
+	for _, idx := range selected {
+		inSubset[idx] = true
+	}
+	for len(selected) < n {
+		if ctx.Err() != nil {
+			return nil, evaluated, ctx.Err()
+		}
+		bestIdx := -1
+		bestScore := math.MaxFloat64
+		selected = append(selected, 0) // extend by one slot
+		for ci := 0; ci < invN; ci++ {
+			if inSubset[ci] {
+				continue
+			}
+			selected[len(selected)-1] = ci
+			evaluated++
+			s := score(selected, invLab, lockedLab, samples)
+			if s < bestScore {
+				bestScore = s
+				bestIdx = ci
+			}
+		}
+		selected[len(selected)-1] = bestIdx
+		inSubset[bestIdx] = true
+	}
+	return selected, evaluated, nil
+}
+
+// farthestPointOrder returns all inventory indices in farthest-point-sampling
+// order over their Lab colors: the first is the entry farthest from the Lab
+// centroid (the most extreme color), then each subsequent entry maximizes its
+// minimum distance to those already chosen. Deterministic — the lowest index
+// breaks a distance tie. Used to seed diverse VND starts on distinct extremes.
+func farthestPointOrder(invLab [][3]float64) []int {
+	m := len(invLab)
+	order := make([]int, 0, m)
+	if m == 0 {
+		return order
+	}
+	// First anchor: farthest from the Lab centroid (deterministic, extreme).
+	var cen [3]float64
+	for _, v := range invLab {
+		cen[0] += v[0]
+		cen[1] += v[1]
+		cen[2] += v[2]
+	}
+	inv := 1.0 / float64(m)
+	cen[0] *= inv
+	cen[1] *= inv
+	cen[2] *= inv
+	first, bestD := 0, -1.0
+	for i, v := range invLab {
+		if d := dist3(v, cen); d > bestD {
+			bestD, first = d, i
+		}
+	}
+	used := make([]bool, m)
+	order = append(order, first)
+	used[first] = true
+	minDist := make([]float64, m)
+	for i := range minDist {
+		minDist[i] = dist3(invLab[i], invLab[first])
+	}
+	for len(order) < m {
+		next, nd := -1, -1.0
+		for i := 0; i < m; i++ {
+			if used[i] {
+				continue
+			}
+			if minDist[i] > nd {
+				nd, next = minDist[i], i
+			}
+		}
+		order = append(order, next)
+		used[next] = true
+		for i := 0; i < m; i++ {
+			if used[i] {
+				continue
+			}
+			if d := dist3(invLab[i], invLab[next]); d < minDist[i] {
+				minDist[i] = d
+			}
+		}
+	}
+	return order
+}
+
+// multiStartVND is the large-inventory fallback (C(inventory, n) > selectEvalBudget)
+// where exhaustive enumeration is infeasible. It runs a deterministic Variable
+// Neighborhood Descent (steepest 1-swap to a local optimum, then a first-improving
+// 2-swap kick that returns to 1-swap) from several diverse starts — the plain
+// greedy construction plus farthest-point anchor starts, each forcing a distinct
+// extreme filament into the palette — and returns the best subset found. No RNG:
+// identical inputs give identical output. Total scoring calls are bounded by
+// vndEvalCap; hitCap reports whether that cap was reached (best-so-far returned).
+func multiStartVND(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc) (best []int, evaluated int, hitCap bool, err error) {
+	starts := make([][]int, 0, numVNDAnchorStarts+1)
+
+	// Plain greedy construction.
+	g, ev, gerr := greedyComplete(ctx, invLab, lockedLab, samples, n, score, nil)
+	if gerr != nil {
+		return nil, evaluated, false, gerr
+	}
+	evaluated += ev
+	starts = append(starts, g)
+
+	// Farthest-point anchor starts: force each distinct extreme in, complete greedily.
+	order := farthestPointOrder(invLab)
+	limit := numVNDAnchorStarts
+	if limit > len(order) {
+		limit = len(order)
+	}
+	for a := 0; a < limit && evaluated < vndEvalCap; a++ {
+		s, ev, aerr := greedyComplete(ctx, invLab, lockedLab, samples, n, score, []int{order[a]})
+		if aerr != nil {
+			return nil, evaluated, hitCap, aerr
+		}
+		evaluated += ev
+		starts = append(starts, s)
+	}
+
+	bestScore := math.MaxFloat64
+	for _, st := range starts {
+		if evaluated >= vndEvalCap {
+			hitCap = true
+			break
+		}
+		sub, sc, cap2, derr := vndDescent(ctx, invLab, lockedLab, samples, n, score, st, &evaluated)
+		if derr != nil {
+			return nil, evaluated, hitCap, derr
+		}
+		if cap2 {
+			hitCap = true
+		}
+		// sub is sorted ascending; subsetLess gives a deterministic tie-break.
+		if sc < bestScore || (sc == bestScore && subsetLess(sub, best)) {
+			bestScore = sc
+			best = sub
+		}
+	}
+	return best, evaluated, hitCap, nil
+}
+
+// vndDescent runs Variable Neighborhood Descent from `start`: steepest
+// (best-improvement) 1-swaps until no single swap improves, then a first-improving
+// 2-swap (eject 2 members, insert 2 candidates) that, on finding an improvement,
+// returns to 1-swap descent; it stops when a full 2-swap sweep finds nothing.
+// Every scan is in fixed index order so the result is deterministic. It shares
+// the *evaluated counter and returns the best subset so far once vndEvalCap is
+// reached. Returns the local-optimum subset (sorted ascending), its score,
+// whether the cap was hit, and any ctx error.
+func vndDescent(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, start []int, evaluated *int) ([]int, float64, bool, error) {
+	invN := len(invLab)
+	cur := make([]int, len(start))
+	copy(cur, start)
+	inSubset := make([]bool, invN)
+	for _, idx := range cur {
+		inSubset[idx] = true
+	}
+	doScore := func(sub []int) float64 {
+		*evaluated++
+		return score(sub, invLab, lockedLab, samples)
+	}
+	curScore := doScore(cur)
+
+	for {
+		if ctx.Err() != nil {
+			return nil, 0, false, ctx.Err()
+		}
+		// Steepest 1-swap descent to a local optimum.
+		for {
+			if ctx.Err() != nil {
+				return nil, 0, false, ctx.Err()
+			}
+			bestScore := curScore
+			bestSi, bestCi := -1, -1
+			for si := 0; si < n; si++ {
+				old := cur[si]
+				for ci := 0; ci < invN; ci++ {
+					if inSubset[ci] {
+						continue
+					}
+					cur[si] = ci
+					if s := doScore(cur); s < bestScore {
+						bestScore, bestSi, bestCi = s, si, ci
+					}
+				}
+				cur[si] = old
+			}
+			if bestSi < 0 || *evaluated >= vndEvalCap {
+				if bestSi >= 0 { // apply the found improvement before capping out
+					inSubset[cur[bestSi]] = false
+					cur[bestSi] = bestCi
+					inSubset[bestCi] = true
+					curScore = bestScore
+				}
+				break
+			}
+			inSubset[cur[bestSi]] = false
+			cur[bestSi] = bestCi
+			inSubset[bestCi] = true
+			curScore = bestScore
+		}
+		if *evaluated >= vndEvalCap {
+			sort.Ints(cur)
+			return cur, curScore, true, nil
+		}
+
+		// First-improving 2-swap; on success return to 1-swap descent.
+		improved, capHit, cerr := vndTwoSwap(ctx, invLab, lockedLab, samples, n, score, cur, inSubset, &curScore, evaluated)
+		if cerr != nil {
+			return nil, 0, false, cerr
+		}
+		if capHit {
+			sort.Ints(cur)
+			return cur, curScore, true, nil
+		}
+		if !improved {
+			break
+		}
+	}
+	sort.Ints(cur)
+	return cur, curScore, false, nil
+}
+
+// vndTwoSwap performs one first-improving 2-swap sweep on cur: eject two members
+// and insert two non-members. Ejection pairs are tried worst-marginal-contribution
+// first (each member's marginal = the score increase when it alone is removed, so
+// the least-useful pair is tried first and an improving move is usually found
+// early); insert pairs are scanned in index order. The first trial that strictly
+// beats *curScore is applied in place (cur, inSubset, *curScore updated) and the
+// function returns improved=true. All ordering is deterministic. It shares
+// *evaluated and reports capHit when vndEvalCap is reached mid-sweep.
+func vndTwoSwap(ctx context.Context, invLab [][3]float64, lockedLab [][3]float64, samples []WeightedLabSample, n int, score scoreFunc, cur []int, inSubset []bool, curScore *float64, evaluated *int) (bool, bool, error) {
+	invN := len(invLab)
+	doScore := func(sub []int) float64 {
+		*evaluated++
+		return score(sub, invLab, lockedLab, samples)
+	}
+
+	// Marginal contribution of each member = score increase when it is removed.
+	contrib := make([]float64, n)
+	reduced := make([]int, 0, n-1)
+	for si := 0; si < n; si++ {
+		reduced = reduced[:0]
+		for k, idx := range cur {
+			if k != si {
+				reduced = append(reduced, idx)
+			}
+		}
+		contrib[si] = doScore(reduced) - *curScore
+		if *evaluated >= vndEvalCap {
+			return false, true, nil
+		}
+	}
+
+	// Ejection pairs (si<sj), least-useful (smallest summed contribution) first;
+	// deterministic tie-break by (si, sj).
+	type ejectPair struct {
+		i, j int
+		key  float64
+	}
+	pairs := make([]ejectPair, 0, n*(n-1)/2)
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			pairs = append(pairs, ejectPair{i, j, contrib[i] + contrib[j]})
+		}
+	}
+	sort.Slice(pairs, func(a, b int) bool {
+		if pairs[a].key != pairs[b].key {
+			return pairs[a].key < pairs[b].key
+		}
+		if pairs[a].i != pairs[b].i {
+			return pairs[a].i < pairs[b].i
+		}
+		return pairs[a].j < pairs[b].j
+	})
+
+	cand := make([]int, 0, invN-n)
+	for ci := 0; ci < invN; ci++ {
+		if !inSubset[ci] {
+			cand = append(cand, ci)
+		}
+	}
+
+	trial := make([]int, n)
+	for _, pr := range pairs {
+		if ctx.Err() != nil {
+			return false, false, ctx.Err()
+		}
+		oldI, oldJ := cur[pr.i], cur[pr.j]
+		for a := 0; a < len(cand); a++ {
+			for b := a + 1; b < len(cand); b++ {
+				// Score is set-based, so ci→slot i / cj→slot j yields the same
+				// palette as the reverse — one assignment per candidate pair.
+				copy(trial, cur)
+				trial[pr.i], trial[pr.j] = cand[a], cand[b]
+				if s := doScore(trial); s < *curScore {
+					inSubset[oldI] = false
+					inSubset[oldJ] = false
+					cur[pr.i], cur[pr.j] = cand[a], cand[b]
+					inSubset[cand[a]] = true
+					inSubset[cand[b]] = true
+					*curScore = s
+					return true, false, nil
+				}
+				if *evaluated >= vndEvalCap {
+					return false, true, nil
+				}
+			}
+		}
+	}
+	return false, false, nil
+}
+
+// combinationsCount returns C(n, k). To stay overflow-safe for large
+// inventories it saturates at math.MaxInt32 (any value well above
+// selectEvalBudget serves the exhaustive-vs-VND decision identically), so a
+// huge C(n, k) can never wrap negative and masquerade as "small".
 func combinationsCount(n, k int) int {
 	if k > n {
 		return 0
@@ -957,9 +1334,13 @@ func combinationsCount(n, k int) int {
 	if k > n-k {
 		k = n - k
 	}
+	const saturate = math.MaxInt32
 	result := 1
 	for i := 0; i < k; i++ {
 		result = result * (n - i) / (i + 1)
+		if result > saturate || result < 0 {
+			return saturate
+		}
 	}
 	return result
 }
