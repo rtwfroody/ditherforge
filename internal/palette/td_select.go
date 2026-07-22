@@ -71,6 +71,54 @@ func washReachFactorFromEnv() float64 {
 	return washReachFactor
 }
 
+// mixSpreadMu weights the MIX-SPREAD cost: per sample, the barycentric-weighted
+// distance from the supporting hull vertices to the target, μ·Σ_k bary_k·|eff_k
+// − s|. Dither speckle visibility scales with how far apart the colors being
+// mixed sit, so hull distance alone can't tell "reached by mixing two near
+// neighbours" (cheap, the legitimate use of dithering) from "reached by mixing
+// black + yellow + azure" (garish) — both land on the hull. This term charges
+// the spread, so a near-match workhorse beats a saturated hull-inflating extreme
+// under strong search. Local mixing between nearby colors stays nearly free.
+//
+// Calibrated (mu, nu) = (0.15, 0.08) by sweeping the earth / bricks_benchy /
+// orzel / gray-eagle fixtures under budgeted-exhaustive search so each GLOBAL
+// optimum is perceptually right (earth keeps a land colour, orzel drops the
+// Purple/OliveGreen hull-spanners for an opaque {Black, Brown, DarkOliveDrab,
+// Tan}, bricks keeps a warm chromatic, gray keeps its dark anchor). Higher mu
+// starts collapsing toward k-medoids (gamut shrink); higher nu drops necessary
+// dark anchors. Overridable via DITHERFORGE_SELECT_MU.
+const mixSpreadMu = 0.15
+
+func mixSpreadMuFromEnv() float64 {
+	if v := os.Getenv("DITHERFORGE_SELECT_MU"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return mixSpreadMu
+}
+
+// mixComplexityNu weights the MIX-COMPLEXITY cost: ν·max(0, effN − 2) where
+// effN = 1/Σ_k bary_k² is the Simpson effective number of participating vertices.
+// A color made by mixing two filaments reads cleaner than one made from three or
+// more, so pure matches (effN = 1) and 2-mixes (effN = 2) are free while balanced
+// 3+ mixes pay proportionally. effN (not support cardinality) is used because an
+// interior point in 3D Lab generically has 4-vertex barycentric support even when
+// its weight is concentrated on two — effN discounts the near-zero contributors
+// smoothly. Calibrated to 0.08 (see mixSpreadMu); the fixture sweep breaks above
+// ~0.10 (the complexity charge starts dropping the dark anchor a warm body needs
+// to reduce its 3-mix). Overridable via DITHERFORGE_SELECT_NU.
+const mixComplexityNu = 0.08
+
+func mixComplexityNuFromEnv() float64 {
+	if v := os.Getenv("DITHERFORGE_SELECT_NU"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return mixComplexityNu
+}
+
 // tdSelectState precomputes everything the per-sample TD-aware subset scorer
 // needs. Unlike the nominal scorer — which gives each filament ONE static Lab
 // vertex — the TD-aware scorer's vertices vary per sample: entry e contributes
@@ -99,6 +147,8 @@ type tdSelectState struct {
 	knee      []float64 // per-sample chromaKnee = exp(-chroma/chromaSpreadFalloff)
 	dithering bool
 	wash      float64 // washReachFactor (env-overridable)
+	mu        float64 // mixSpreadMu (env-overridable)
+	nu        float64 // mixComplexityNu (env-overridable)
 }
 
 // newTDSelectState builds the per-sample effective-color matrices. invLab and
@@ -165,6 +215,8 @@ func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3
 		knee:       knee,
 		dithering:  dithering,
 		wash:       washReachFactorFromEnv(),
+		mu:         mixSpreadMuFromEnv(),
+		nu:         mixComplexityNuFromEnv(),
 	}
 }
 
@@ -243,10 +295,27 @@ func (st *tdSelectState) score(indices []int) float64 {
 			// the old nearest-only charge missed it entirely, yet under the
 			// additive model its eff slides most of the way to every target.
 			washDist := 0.0
+			// MIX-SPREAD: barycentric-weighted distance from the supporting
+			// vertices to the TARGET — how far apart the colors dithered to reach
+			// this sample sit (speckle visibility). MIX-COMPLEXITY: the Simpson
+			// effective number of participating vertices effN = 1/Σ bary², charged
+			// only past 2 (mixing 3+ filaments reads worse than 2). Both computed
+			// from the same barycentric feature as the wash term.
+			mixSpread := 0.0
+			sumSq := 0.0
 			for m, vi := range feat {
-				washDist += bary[m] * dist3(verts[vi], nom[vi])
+				b := bary[m]
+				washDist += b * dist3(verts[vi], nom[vi])
+				mixSpread += b * dist3(verts[vi], s.Lab)
+				sumSq += b * b
 			}
-			d = hullDist + spread*nearDist + st.wash*washDist
+			mixComplexity := 0.0
+			if sumSq > 0 {
+				if effN := 1.0 / sumSq; effN > 2 {
+					mixComplexity = effN - 2
+				}
+			}
+			d = hullDist + spread*nearDist + st.wash*washDist + st.mu*mixSpread + st.nu*mixComplexity
 		} else {
 			d = nearestVertexDist(s.Lab, verts)
 		}

@@ -1047,7 +1047,10 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// v5 charges the wash-reach penalty on hull MEMBERSHIP (barycentric over the
 	// enclosing simplex) instead of only the nearest vertex, so a translucent
 	// filament pays for the interior coverage it fakes (see tdSelectState.score).
-	writeString(h, "palette-td-aware-v5")
+	// v6 adds the mix-spread (μ) and mix-complexity (ν) per-sample costs that
+	// harden the scorer's global optimum against additive hull over-optimism, so
+	// strong (exhaustive/VND) search is safe.
+	writeString(h, "palette-td-aware-v6")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	selEll, selKappa := simNeighborParams(opts.LayerHeight)
