@@ -224,16 +224,28 @@ func (st *tdSelectState) score(indices []int) float64 {
 		}
 		var d float64
 		if st.dithering {
-			hullDist := distToConvexHull(s.Lab, verts)
+			// Attribute the target's hull coverage to the vertices actually
+			// supporting the closest hull point (barycentric weights over the
+			// enclosing simplex — the containing tetrahedron for an interior
+			// sample, else the nearest triangle/edge/vertex). hullDist equals
+			// distToConvexHull; the feature just tells us WHO provides the reach.
+			hullDist, feat, bary := closestHullFeature(s.Lab, verts)
 			knee := st.knee[j]
-			nearDist, nearIdx := nearestVertexChromaWeighted(s.Lab, verts, knee)
+			nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, knee)
 			spread := ditherSpreadFactor * knee
-			// Reach (contrast) penalty: charge how far the nearest achievable
-			// vertex had to wash from its own nominal color to reach this
-			// target. See washReachFactor — this is what stops a near-neutral
-			// translucent "chameleon" from claiming universal reach it can only
-			// deliver as a lone cell, never as a solid region.
-			washDist := dist3(verts[nearIdx], nom[nearIdx])
+			// Reach (contrast) penalty, charged on hull MEMBERSHIP rather than
+			// only the nearest vertex: sum each supporting vertex's washing
+			// distance (how far its translucent eff had to slide from its own
+			// nominal color to reach this target) weighted by its barycentric
+			// share of the coverage. This is what stops a saturated translucent
+			// "chameleon" (e.g. Magenta) from enclosing interior body colors for
+			// free — it never had to be the NEAREST vertex to fake-cover them, so
+			// the old nearest-only charge missed it entirely, yet under the
+			// additive model its eff slides most of the way to every target.
+			washDist := 0.0
+			for m, vi := range feat {
+				washDist += bary[m] * dist3(verts[vi], nom[vi])
+			}
 			d = hullDist + spread*nearDist + st.wash*washDist
 		} else {
 			d = nearestVertexDist(s.Lab, verts)
@@ -241,24 +253,6 @@ func (st *tdSelectState) score(indices []int) float64 {
 		total += d * d * s.Weight
 	}
 	return total
-}
-
-// nearestVertexChromaWeighted is nearestVertexDistChromaWeighted that also
-// returns the index of the closest vertex (needed for the reach penalty).
-func nearestVertexChromaWeighted(p [3]float64, verts [][3]float64, lightnessWeight float64) (float64, int) {
-	best := math.MaxFloat64
-	bestIdx := 0
-	for i, v := range verts {
-		d0 := (p[0] - v[0]) * lightnessWeight
-		d1 := p[1] - v[1]
-		d2 := p[2] - v[2]
-		d := d0*d0 + d1*d1 + d2*d2
-		if d < best {
-			best = d
-			bestIdx = i
-		}
-	}
-	return math.Sqrt(best), bestIdx
 }
 
 // usage returns each palette member's predicted usage: the fraction of

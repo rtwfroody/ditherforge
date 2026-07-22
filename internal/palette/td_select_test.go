@@ -122,19 +122,24 @@ func TestSelectUniformTDBitIdentical(t *testing.T) {
 // load-bearing Brown/Black swap is unchanged from the earlier ℓ = 0.3, κ = 0
 // additive model):
 //
-//	nominal:  Black  SteelGrey Orange Cream
-//	td-aware: Brown  SteelGrey Orange ColdWhite
+//	nominal:  Black SteelGrey Orange Cream
+//	td-aware: Black Brown SteelGrey ColdWhite
 //
-// Two colors move under the neighbor model: Black → Brown on the opaque dark
+// Two things move under the neighbor model. Brown ENTERS as the opaque warm
 // anchor (the load-bearing fix — nominal can't justify opaque Brown, TD-aware
-// does), and Cream → ColdWhite on the light anchor.
+// does), and Cream → ColdWhite on the light anchor. Opaque Black stays as the
+// dark anchor.
 //
-// Orange (TD 3.3, β ≈ 0.81) SURVIVES here even though it barely delivers its own
-// color, because this cloud is ~50% warm brown: a translucent orange cell washes
-// toward its warm neighbors and still reads warm. That is exactly the effect the
-// neighbor model captures and the old infill-composite model (orange over black
-// infill → muddy gray) got wrong — whether Orange survives is target-dependent,
-// so the stable, load-bearing claim remains the opaque Brown/Black swap.
+// Orange (TD 3.3, β ≈ 0.81 — the MOST translucent filament here) is REJECTED:
+// the wash-reach penalty is charged on hull MEMBERSHIP (barycentric over the
+// enclosing simplex), so a translucent filament pays for the coverage it
+// provides even when it is never the nearest vertex. A solid orange region reads
+// orange, not the warm brown its eff washes toward, so opaque Black + Brown win
+// the two dark/warm anchors outright. This is the same anti-chameleon reach
+// penalty that keeps a saturated translucent Magenta out of a cream body (see
+// tdSelectState.score). Under the earlier nearest-vertex-only wash Orange
+// displaced Black — it fake-enclosed the warm body for free because it was
+// rarely the nearest vertex and so was never charged for the reach.
 func TestSelectTDAwareGrayEagle(t *testing.T) {
 	black := [3]uint8{0x08, 0x0A, 0x0D}
 	brown := [3]uint8{0x55, 0x33, 0x1A}
@@ -165,16 +170,19 @@ func TestSelectTDAwareGrayEagle(t *testing.T) {
 	t.Logf("nominal:  %s", fmtSel(nominal))
 	t.Logf("td-aware: %s", fmtSel(tdAware))
 
-	// Exact TD-aware selection under the neighbor model (see docstring).
-	for _, c := range [][3]uint8{brown, steel, orange, white} {
+	// Exact TD-aware selection under the neighbor model (see docstring): opaque
+	// Black + Brown anchor the dark/warm ends, SteelGrey the greys, ColdWhite the
+	// light end.
+	for _, c := range [][3]uint8{black, brown, steel, white} {
 		if !hasColor(tdAware, c) {
 			t.Errorf("td-aware selection missing %s; got %s", hexOf(c), fmtSel(tdAware))
 		}
 	}
-	// Pin the exact set: the two colors the neighbor model displaces must be
-	// gone (Black → Brown on the dark anchor, Cream → ColdWhite on the light).
-	if hasColor(tdAware, black) {
-		t.Errorf("td-aware should drop Black for opaque Brown; got %s", fmtSel(tdAware))
+	// Pin the exact set: the hull-membership reach penalty rejects the most
+	// translucent filament (Orange) in favour of opaque Brown, and Cream →
+	// ColdWhite on the light anchor.
+	if hasColor(tdAware, orange) {
+		t.Errorf("td-aware should reject translucent Orange for opaque Brown; got %s", fmtSel(tdAware))
 	}
 	if hasColor(tdAware, cream) {
 		t.Errorf("td-aware should drop Cream for ColdWhite; got %s", fmtSel(tdAware))

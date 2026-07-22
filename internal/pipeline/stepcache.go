@@ -1044,7 +1044,10 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// (geometry). The v4 salt forces a one-time rebuild of caches whose selection
 	// used the global-mean effective-color approximation (v3); v4 scores subsets
 	// on per-sample effective colors with near-duplicate + predicted-usage nets.
-	writeString(h, "palette-td-aware-v4")
+	// v5 charges the wash-reach penalty on hull MEMBERSHIP (barycentric over the
+	// enclosing simplex) instead of only the nearest vertex, so a translucent
+	// filament pays for the interior coverage it fakes (see tdSelectState.score).
+	writeString(h, "palette-td-aware-v5")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	selEll, selKappa := simNeighborParams(opts.LayerHeight)
