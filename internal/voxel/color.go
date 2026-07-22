@@ -1513,11 +1513,20 @@ func nearestPaletteLab(L, A, B float32, palLab [][3]float32) int {
 //	eff(c, t) = C_c + a_c ∘ (t − C_c),   a_c = β_c · T_c   (per channel)
 //
 // with β_c = palette.NeighborLeak(ℓ, TD_c) and T_c = palette.TransmittanceColor(C_c, κ).
-// The dither picks the candidate whose eff is nearest t in CIELAB and diffuses
-// the residual t − eff(chosen, t) = (1 − a_c) ∘ (t − C_c) instead of t − C_c.
-// Rationale: if the dither succeeds, a cell's neighborhood averages to its local
-// target, so eff(c, target) is candidate c's expected appearance there — a
-// self-consistent fixed point that supersedes the old opacity-mass model.
+// The neighborhood N is NOT assumed equal to the target: choose() is fed N_i,
+// the area-weighted average of cell i's ALREADY-ASSIGNED neighbors' nominal
+// colors (not-yet-assigned neighbors default to the target t), the same neighbor
+// graph and weighting the print sim (EffectiveCellColors) uses. The dither picks
+// the candidate whose eff(c, N_i) is nearest t in CIELAB and diffuses the HONEST
+// realized residual t − eff(chosen, N_i).
+//
+// Rationale: scoring a high-β (translucent) candidate as eff(c, t) ≈ t made it a
+// universal chameleon that won across large flat regions while diffusing almost
+// no corrective error, so it got placed in bulk — where its REAL neighbors are
+// itself, not the target, and the region printed as the filament's own color.
+// Scoring against the realized neighborhood closes that gap: the dither and the
+// sim now optimize the same world. With zero assigned neighbors N_i = t, which
+// reproduces the old self-consistent per-cell model exactly.
 //
 // An opaque filament has β_c = 0 → a_c = 0 → eff = C_c, so choose() falls back to
 // the classic nearest-CIELAB decision with residual t − C_c, BIT-FOR-BIT. When
@@ -1557,56 +1566,111 @@ func NewDitherModel(pal [][3]uint8, tds []float32, neighborPathMM, kappa float64
 	return m
 }
 
-// choose returns the best palette index for a linear-light target (r,g,b) and
-// the linear residual (t − eff(best,t)) to diffuse. With no translucent filament
-// it is exactly nearestPaletteLab + (t − C_best).
-func (m *DitherModel) choose(r, g, b float32) (int, float32, float32, float32) {
-	tL, tA, tB := linearToLab(r, g, b)
+// choose returns the best palette index for a linear-light target (tR,tG,tB)
+// under a neighborhood color (nR,nG,nB), and the linear residual (t − eff(best,N))
+// to diffuse. A candidate c presents eff(c,N) = C_c + a_c∘(N − C_c); the winner
+// minimizes CIELAB distance from eff(c,N) to the target t, and the diffused
+// residual is the HONEST realized error t − eff(chosen,N).
+//
+// With no translucent filament (a=0) eff = C regardless of N, so this is exactly
+// nearestPaletteLab + (t − C_best), BIT-FOR-BIT. Passing N = t reproduces the
+// historical self-consistent model per cell (eff(c,t), residual (1−a)∘(t−C)).
+func (m *DitherModel) choose(tR, tG, tB, nR, nG, nB float32) (int, float32, float32, float32) {
+	tL, tA, tBb := linearToLab(tR, tG, tB)
 	if !m.td {
-		best := nearestPaletteLab(tL, tA, tB, m.lab)
-		return best, r - m.lin[best][0], g - m.lin[best][1], b - m.lin[best][2]
+		best := nearestPaletteLab(tL, tA, tBb, m.lab)
+		return best, tR - m.lin[best][0], tG - m.lin[best][1], tB - m.lin[best][2]
 	}
 	best := 0
 	bestDist := float32(math.MaxFloat32)
 	for i := range m.lin {
 		gi := m.gain[i]
-		eR := m.lin[i][0] + gi[0]*(r-m.lin[i][0])
-		eG := m.lin[i][1] + gi[1]*(g-m.lin[i][1])
-		eB := m.lin[i][2] + gi[2]*(b-m.lin[i][2])
+		eR := m.lin[i][0] + gi[0]*(nR-m.lin[i][0])
+		eG := m.lin[i][1] + gi[1]*(nG-m.lin[i][1])
+		eB := m.lin[i][2] + gi[2]*(nB-m.lin[i][2])
 		eL, eA, eBb := linearToLab(eR, eG, eB)
-		dL, dA, dB := tL-eL, tA-eA, tB-eBb
+		dL, dA, dB := tL-eL, tA-eA, tBb-eBb
 		if d := dL*dL + dA*dA + dB*dB; d < bestDist {
 			bestDist = d
 			best = i
 		}
 	}
 	gi := m.gain[best]
-	return best,
-		(1-gi[0])*(r-m.lin[best][0]),
-		(1-gi[1])*(g-m.lin[best][1]),
-		(1-gi[2])*(b-m.lin[best][2])
+	eR := m.lin[best][0] + gi[0]*(nR-m.lin[best][0])
+	eG := m.lin[best][1] + gi[1]*(nG-m.lin[best][1])
+	eB := m.lin[best][2] + gi[2]*(nB-m.lin[best][2])
+	return best, tR - eR, tG - eG, tB - eB
 }
 
-// effLabAt returns candidate i's predicted appearance eff(i, target) for a
-// linear-light target (r,g,b), in CIELAB — for scorers (Riemersma) that add
-// their own bias terms and can't use choose() directly. For an opaque palette it
-// is the fixed palette Lab (bit-identical to the classic nearest search).
-func (m *DitherModel) effLabAt(i int, r, g, b float32) (float32, float32, float32) {
+// effLabAt returns candidate i's predicted appearance eff(i, N) for a
+// linear-light neighborhood (nR,nG,nB), in CIELAB — for scorers (Riemersma)
+// that add their own bias terms and can't use choose() directly. For an opaque
+// palette it is the fixed palette Lab (bit-identical to the classic nearest
+// search), independent of N.
+func (m *DitherModel) effLabAt(i int, nR, nG, nB float32) (float32, float32, float32) {
 	if !m.td {
 		return m.lab[i][0], m.lab[i][1], m.lab[i][2]
 	}
 	gi := m.gain[i]
-	eR := m.lin[i][0] + gi[0]*(r-m.lin[i][0])
-	eG := m.lin[i][1] + gi[1]*(g-m.lin[i][1])
-	eB := m.lin[i][2] + gi[2]*(b-m.lin[i][2])
+	eR := m.lin[i][0] + gi[0]*(nR-m.lin[i][0])
+	eG := m.lin[i][1] + gi[1]*(nG-m.lin[i][1])
+	eB := m.lin[i][2] + gi[2]*(nB-m.lin[i][2])
 	return linearToLab(eR, eG, eB)
 }
 
-// effResidual returns target − eff(i, target) in linear light (the error a
-// scorer diffuses once it has committed candidate i). Opaque → target − C_i.
-func (m *DitherModel) effResidual(i int, r, g, b float32) (float32, float32, float32) {
+// effResidual returns target − eff(i, N) in linear light (the error a scorer
+// diffuses once it has committed candidate i), for target (tR,tG,tB) under
+// neighborhood (nR,nG,nB). Opaque → target − C_i (independent of N).
+func (m *DitherModel) effResidual(i int, tR, tG, tB, nR, nG, nB float32) (float32, float32, float32) {
+	if !m.td {
+		return tR - m.lin[i][0], tG - m.lin[i][1], tB - m.lin[i][2]
+	}
 	gi := m.gain[i]
-	return (1-gi[0])*(r-m.lin[i][0]), (1-gi[1])*(g-m.lin[i][1]), (1-gi[2])*(b-m.lin[i][2])
+	eR := m.lin[i][0] + gi[0]*(nR-m.lin[i][0])
+	eG := m.lin[i][1] + gi[1]*(nG-m.lin[i][1])
+	eB := m.lin[i][2] + gi[2]*(nB-m.lin[i][2])
+	return tR - eR, tG - eG, tB - eB
+}
+
+// neighborhoodEps guards a cell's area in the neighborhood weighting, matching
+// EffectiveCellColors' math.Max(area, areaEps) convention so the dither's
+// assumed neighborhood and the print sim weight neighbors identically.
+const neighborhoodEps = 1e-6
+
+// neighborhood builds the assumed neighborhood color N_i for cell idx: the
+// area-weighted average of its neighbors' colors, where an already-assigned
+// neighbor contributes its nominal filament color and a not-yet-assigned
+// neighbor contributes the target t (tR,tG,tB). Weight w_j = Neighbor.Weight ×
+// max(area_j, eps) — the same convention EffectiveCellColors uses. With zero
+// assigned neighbors N_i = t exactly (reproducing the self-consistent model);
+// for an opaque palette N is never consulted so this returns t immediately.
+func (m *DitherModel) neighborhood(tR, tG, tB float32, nbrs []Neighbor, assignments []int32, processed []bool, areas []float32) (float32, float32, float32) {
+	if !m.td {
+		return tR, tG, tB
+	}
+	var numR, numG, numB, den float32
+	for _, nb := range nbrs {
+		a := areas[nb.Idx]
+		if a < neighborhoodEps {
+			a = neighborhoodEps
+		}
+		w := nb.Weight * a
+		den += w
+		if processed[nb.Idx] {
+			c := m.lin[assignments[nb.Idx]]
+			numR += w * c[0]
+			numG += w * c[1]
+			numB += w * c[2]
+		} else {
+			numR += w * tR
+			numG += w * tG
+			numB += w * tB
+		}
+	}
+	if den <= 0 {
+		return tR, tG, tB
+	}
+	return numR / den, numG / den, numB / den
 }
 
 // DitherCellsDizzy applies dizzy dithering: random traversal order with
@@ -1710,9 +1774,11 @@ func ditherCore(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *
 		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
 		// Decide the candidate whose predicted printed appearance is nearest
-		// the target (CIELAB) and diffuse the residual t − eff(chosen). For an
-		// opaque palette eff = C, so this is the classic nearest-color dither.
-		bestIdx, eR, eG, eB := model.choose(r, g, b)
+		// the target (CIELAB) under the cell's realized neighborhood N, and
+		// diffuse the honest residual t − eff(chosen, N). For an opaque palette
+		// N is unused and eff = C, so this is the classic nearest-color dither.
+		nR, nG, nB := model.neighborhood(r, g, b, neighbors[idx], assignments, processed, areas)
+		bestIdx, eR, eG, eB := model.choose(r, g, b, nR, nG, nB)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
@@ -1867,7 +1933,8 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 		targets[idx] = [3]float32{r, g, b}
 
-		bestIdx, eR, eG, eB := model.choose(r, g, b)
+		nR, nG, nB := model.neighborhood(r, g, b, neighbors[idx], assignments, processed, areas)
+		bestIdx, eR, eG, eB := model.choose(r, g, b, nR, nG, nB)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
@@ -1967,11 +2034,11 @@ func DitherWithRecover(ctx context.Context, cells []ActiveCell, pal [][3]uint8, 
 // blue-noise texture.
 //
 // Like DitherWithNeighbors, the (cell + accumulated error) target is
-// fed unclamped to the nearest-palette search.
-// palAlpha (see DitherWithNeighbors) opacity-weights the error diffusion,
-// but unlike dizzy the diffusion runs in the mass domain (see the comment
-// inside): dizzy's proxy-ratio formula is unstable under FS's deterministic
-// traversal order. nil/uniform = identity (bit-identical historical path).
+// fed unclamped to the nearest-palette search, and candidates are scored under
+// the cell's realized neighborhood N (see DitherModel); the honest residual
+// t − eff(chosen, N) is diffused plainly through the forward error buffer. An
+// opaque palette leaves N unconsulted and this is bit-identical to the classic
+// area-weighted forward Floyd–Steinberg.
 func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *DitherModel, neighbors [][]Neighbor, tracker progress.Tracker) ([]int32, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
@@ -2018,15 +2085,19 @@ func FloydSteinberg(ctx context.Context, cells []ActiveCell, pal [][3]uint8, mod
 			}
 			tracker.StageProgress("Dithering", oi)
 		}
-		// Decide by predicted printed appearance, diffuse the residual in the
-		// color domain (see DitherModel). The transmittance model supersedes the
-		// old opacity-mass FS diffusion, so this is the plain area-weighted
-		// forward Floyd–Steinberg the nil-alpha path always used.
+		// Decide by predicted printed appearance under the cell's realized
+		// neighborhood N, diffusing the honest residual t − eff(chosen, N) in the
+		// color domain (see DitherModel). The residual is diffused plainly through
+		// the forward error buffer — the neighborhood-context model replaces the
+		// old opacity-mass FS bookkeeping, so no proxy-ratio mass domain is needed;
+		// for an opaque palette this is the plain area-weighted forward
+		// Floyd–Steinberg the nil-alpha path always used.
 		r := srgbToLinearLUT[cells[idx].Color[0]] + errBuf[idx][0]
 		g := srgbToLinearLUT[cells[idx].Color[1]] + errBuf[idx][1]
 		b := srgbToLinearLUT[cells[idx].Color[2]] + errBuf[idx][2]
 
-		bestIdx, eR, eG, eB := model.choose(r, g, b)
+		nR, nG, nB := model.neighborhood(r, g, b, neighbors[idx], assignments, processed, areas)
+		bestIdx, eR, eG, eB := model.choose(r, g, b, nR, nG, nB)
 		assignments[idx] = int32(bestIdx)
 		processed[idx] = true
 
@@ -2185,6 +2256,11 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *D
 	head := 0
 
 	assigns := make([]int32, n)
+	// processed[j] marks cells already committed along the tour, so the
+	// neighborhood N_i can weight assigned neighbors by their nominal color
+	// (unassigned neighbors default to the target). Only consulted for a
+	// translucent palette; opaque palettes never build N.
+	processed := make([]bool, n)
 	dI := make([]float32, len(pal))
 	areas := effectiveAreas(cells)
 	for ti, idx := range tour {
@@ -2227,17 +2303,23 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *D
 		b := iB + eB
 		tL, tA, tBb := linearToLab(r, g, b)
 
+		// Realized neighborhood N_i: assigned neighbors by nominal color,
+		// unassigned defaulting to the target. Candidate appearance eff(pi, N)
+		// is scored against both the input (bias term) and the target (target
+		// term). Opaque palettes leave N unconsulted (eff = fixed palette Lab).
+		nR, nG, nB := model.neighborhood(r, g, b, neighbors[idx], assigns, processed, areas)
+
 		// First pass: ΔE²(input, p) for each palette, plus min.
 		// Second pass scores with α derived from the min-distance.
 		// α is high when input is near a palette (snap suppresses
 		// runaway oscillation in flat regions) and low when input
 		// is between palettes (dither smooths textured gradients).
-		// Candidates are scored by predicted printed appearance eff(pi, ·):
-		// the input-bias term against eff(pi, input), the target term against
-		// eff(pi, target). Opaque palettes reduce to the classic palette Lab.
+		// Candidates are scored by predicted printed appearance eff(pi, N):
+		// the input-bias term against the input, the target term against the
+		// target. Opaque palettes reduce to the classic palette Lab.
 		var minDI float32 = math.MaxFloat32
 		for pi := 0; pi < len(pal); pi++ {
-			eL, eA, eB := model.effLabAt(pi, iR, iG, iB)
+			eL, eA, eB := model.effLabAt(pi, nR, nG, nB)
 			dl := iL - eL
 			da := iA - eA
 			db := iBb - eB
@@ -2257,7 +2339,7 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *D
 		bestIdx := 0
 		bestDist := float32(math.MaxFloat32)
 		for pi := 0; pi < len(pal); pi++ {
-			eL, eA, eB := model.effLabAt(pi, r, g, b)
+			eL, eA, eB := model.effLabAt(pi, nR, nG, nB)
 			dl := tL - eL
 			da := tA - eA
 			db := tBb - eB
@@ -2269,10 +2351,11 @@ func Riemersma(ctx context.Context, cells []ActiveCell, pal [][3]uint8, model *D
 			}
 		}
 		assigns[idx] = int32(bestIdx)
+		processed[idx] = true
 
-		// Residual = target − eff(chosen); mass = plain sender area (the
+		// Residual = target − eff(chosen, N); mass = plain sender area (the
 		// transmittance model supersedes the opacity-weighted mass).
-		rr, rg, rb := model.effResidual(bestIdx, r, g, b)
+		rr, rg, rb := model.effResidual(bestIdx, r, g, b, nR, nG, nB)
 		window[head].residual[0] = rr
 		window[head].residual[1] = rg
 		window[head].residual[2] = rb

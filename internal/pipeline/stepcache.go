@@ -1087,6 +1087,13 @@ func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// dither cache when overridden. Folded in only when HonorTD is on (otherwise
 	// the model is opaque and neither is consulted).
 	if opts.HonorTD {
+		// Salt: "dither-neighborhood-ctx-v1" = the TD dither now scores each
+		// candidate under the cell's REALIZED neighborhood (already-assigned
+		// neighbors' nominal colors, unassigned = target) instead of assuming the
+		// neighborhood equals the target, and diffuses the honest residual
+		// t − eff(chosen, N). Translucent-palette assignments change; opaque
+		// (HonorTD=false) keys are untouched, so this lives inside the HonorTD gate.
+		writeString(h, "dither-neighborhood-ctx-v1")
 		ell, kappa := simNeighborParams(opts.LayerHeight)
 		writeFloat32(h, ell)
 		writeFloat64(h, kappa)

@@ -93,7 +93,7 @@ func TestDitherModelExactTargetMatches(t *testing.T) {
 			r := srgbToLinearLUT[c[0]]
 			g := srgbToLinearLUT[c[1]]
 			b := srgbToLinearLUT[c[2]]
-			got, _, _, _ := m.choose(r, g, b)
+			got, _, _, _ := m.choose(r, g, b, r, g, b) // N = t: zero-assigned-neighbors case
 			if got != want {
 				t.Errorf("honorTD=%v: exact target %v chose %d, want %d", honor, c, got, want)
 			}
@@ -193,5 +193,169 @@ func TestFloydSteinbergTransmittanceStable(t *testing.T) {
 	}
 	if nonEmpty < 2 {
 		t.Errorf("FS+transmittance not dithering: only %d colors used", nonEmpty)
+	}
+}
+
+// TestNeighborhoodZeroAssignedMatchesTargetModel: with no assigned neighbors the
+// realized neighborhood N_i equals the target t, so choose()/effResidual under N
+// must equal the old self-consistent model (N implicit = t). Invariant 2.
+func TestNeighborhoodZeroAssignedMatchesTargetModel(t *testing.T) {
+	pal := [][3]uint8{{0x08, 0x0A, 0x0D}, {0xF6, 0x74, 0x05}, {0x61, 0x64, 0x69}}
+	tds := []float32{0.1, 3.3, 0.4}
+	m := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, true)
+	if !m.td {
+		t.Fatal("expected a translucent model for this test")
+	}
+	// A handful of arbitrary linear-light targets.
+	targets := [][3]float32{
+		{0.3, 0.2, 0.1}, {0.7, 0.5, 0.2}, {0.05, 0.05, 0.05}, {0.9, 0.9, 0.8},
+	}
+	for _, tr := range targets {
+		r, g, b := tr[0], tr[1], tr[2]
+		// Zero assigned neighbors: neighborhood() returns t.
+		nbrs := []Neighbor{{Idx: 0, Weight: 1}, {Idx: 1, Weight: 1}}
+		processed := []bool{false, false, false}
+		assigns := []int32{0, 0, 0}
+		areas := []float32{1, 1, 1}
+		nR, nG, nB := m.neighborhood(r, g, b, nbrs, assigns, processed, areas)
+		if nR != r || nG != g || nB != b {
+			t.Fatalf("zero-assigned neighborhood %v,%v,%v != target %v,%v,%v", nR, nG, nB, r, g, b)
+		}
+		// choose under N=t must equal the manual self-consistent decision.
+		gotIdx, eR, eG, eB := m.choose(r, g, b, nR, nG, nB)
+		// Manual: pick min ΔE(eff(i,t), t); residual = t − eff(chosen,t).
+		wantIdx := 0
+		bestD := float32(1e30)
+		tL, tA, tB := linearToLab(r, g, b)
+		for i := range pal {
+			gi := m.gain[i]
+			er := m.lin[i][0] + gi[0]*(r-m.lin[i][0])
+			eg := m.lin[i][1] + gi[1]*(g-m.lin[i][1])
+			eb := m.lin[i][2] + gi[2]*(b-m.lin[i][2])
+			el, ea, ebb := linearToLab(er, eg, eb)
+			d := (tL-el)*(tL-el) + (tA-ea)*(tA-ea) + (tB-ebb)*(tB-ebb)
+			if d < bestD {
+				bestD = d
+				wantIdx = i
+			}
+		}
+		if gotIdx != wantIdx {
+			t.Errorf("target %v: choose idx %d, want %d", tr, gotIdx, wantIdx)
+		}
+		gi := m.gain[wantIdx]
+		wantR := (1 - gi[0]) * (r - m.lin[wantIdx][0])
+		wantG := (1 - gi[1]) * (g - m.lin[wantIdx][1])
+		wantB := (1 - gi[2]) * (b - m.lin[wantIdx][2])
+		if !approxEq(eR, wantR) || !approxEq(eG, wantG) || !approxEq(eB, wantB) {
+			t.Errorf("target %v: residual (%v,%v,%v) != self-consistent (%v,%v,%v)",
+				tr, eR, eG, eB, wantR, wantG, wantB)
+		}
+	}
+}
+
+func approxEq(a, b float32) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-6
+}
+
+// TestHighTDYellowNoBulkPlacement is the actual golden-eagle regression: a flat
+// mid-gray/tan field with a high-TD saturated yellow plus opaque dark and light.
+// Under the old N=t model eff(yellow, t) ≈ t made yellow a chameleon that won in
+// bulk; the neighborhood model must keep its share bounded AND the print-sim-
+// realized average must land near the target (the yellow reads as its own bright
+// color once surrounded by itself). Runs the DEFAULT dlc mode.
+func TestHighTDYellowNoBulkPlacement(t *testing.T) {
+	// tan-ish mid target.
+	target := [3]uint8{150, 140, 110}
+	pal := [][3]uint8{
+		{0x20, 0x1C, 0x14}, // dark brown (opaque)
+		{0xE8, 0xE0, 0xD0}, // light cream (opaque)
+		{0xFF, 0xE0, 0x00}, // saturated yellow (high TD → translucent)
+	}
+	tds := []float32{0.3, 0.4, 3.3}
+	cells, neighbors := gridCells(64, 64, target)
+	ctx := context.Background()
+
+	m := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, true)
+	assigns, err := DitherLocalCorrected(ctx, cells, pal, m, neighbors, nil)
+	if err != nil {
+		t.Fatalf("dlc: %v", err)
+	}
+	yellowFrac := fracAssignedTo(assigns, 2)
+	t.Logf("high-TD yellow fraction (neighborhood model): %.3f", yellowFrac)
+	// The bug had yellow dominating (>60%). Bound it well under a dominating share.
+	if yellowFrac > 0.45 {
+		t.Errorf("high-TD yellow placed in bulk: %.1f%% of cells (bug not fixed)", 100*yellowFrac)
+	}
+
+	// The print-sim-realized average over the field must land near the target:
+	// this is what the dither is now honest about.
+	eff := EffectiveCellColors(cells, assigns, pal, tds, neighbors, testDitherEll, 4, testDitherKappa)
+	var sr, sg, sb float64
+	for _, c := range eff {
+		sr += float64(srgbToLinearLUT[c[0]])
+		sg += float64(srgbToLinearLUT[c[1]])
+		sb += float64(srgbToLinearLUT[c[2]])
+	}
+	n := float64(len(eff))
+	avgL, avgA, avgB := linearToLab(float32(sr/n), float32(sg/n), float32(sb/n))
+	tL, tA, tB := linearToLab(srgbToLinearLUT[target[0]], srgbToLinearLUT[target[1]], srgbToLinearLUT[target[2]])
+	dE := float32Sqrt((avgL-tL)*(avgL-tL) + (avgA-tA)*(avgA-tA) + (avgB-tB)*(avgB-tB))
+	t.Logf("print-sim realized average ΔE from target: %.2f", dE)
+	if dE > 12 {
+		t.Errorf("print-sim realized average ΔE %.2f too far from target (dither dishonest)", dE)
+	}
+}
+
+func float32Sqrt(x float32) float32 {
+	if x <= 0 {
+		return 0
+	}
+	// Newton, plenty for a test tolerance check.
+	g := x
+	for i := 0; i < 40; i++ {
+		g = 0.5 * (g + x/g)
+	}
+	return g
+}
+
+// TestNeighborhoodDitherDeterministic: the neighborhood-context dither must be
+// bit-identical across runs (cache-desync hard requirement).
+func TestNeighborhoodDitherDeterministic(t *testing.T) {
+	target := [3]uint8{150, 140, 110}
+	pal := [][3]uint8{{0x20, 0x1C, 0x14}, {0xE8, 0xE0, 0xD0}, {0xFF, 0xE0, 0x00}}
+	tds := []float32{0.3, 0.4, 3.3}
+	cells, neighbors := gridCells(48, 48, target)
+	ctx := context.Background()
+	m := NewDitherModel(pal, tds, testDitherEll, testDitherKappa, true)
+
+	runs := map[string]func(*DitherModel) ([]int32, error){
+		"dlc": func(mm *DitherModel) ([]int32, error) {
+			return DitherLocalCorrected(ctx, cells, pal, mm, neighbors, nil)
+		},
+		"fs": func(mm *DitherModel) ([]int32, error) {
+			return FloydSteinberg(ctx, cells, pal, mm, neighbors, nil)
+		},
+		"riemersma": func(mm *DitherModel) ([]int32, error) {
+			return Riemersma(ctx, cells, pal, mm, neighbors, RiemersmaInputBiasDefault, nil)
+		},
+	}
+	for name, fn := range runs {
+		a, err := fn(m)
+		if err != nil {
+			t.Fatalf("%s run1: %v", name, err)
+		}
+		b, err := fn(m)
+		if err != nil {
+			t.Fatalf("%s run2: %v", name, err)
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				t.Fatalf("%s nondeterministic at cell %d: %d vs %d", name, i, a[i], b[i])
+			}
+		}
 	}
 }
