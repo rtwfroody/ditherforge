@@ -2448,6 +2448,82 @@ func paletteIndexByHex(colors [][3]uint8, hex string) int {
 	return -1
 }
 
+// dlcCorrectionPasses is the number of localized-correction passes the
+// production "dlc-d30-p7" mode runs. It pins both the Dither stage's
+// progress budget (runDither) and the passes argument handed to
+// voxel.DitherLocalCorrectedTuned inside ditherAssignments, so the two
+// cannot drift.
+const dlcCorrectionPasses = 7
+
+// ditherAssignments dispatches opts.Dither to its matching voxel kernel and
+// returns per-visible-cell palette-index assignments. It is the single
+// source of truth for the dither mode → kernel mapping, shared by the
+// production Dither stage (runDither) and the offline palette-search harness
+// (RunPaletteSearch) so the two can never disagree about what a given mode
+// does.
+//
+// pal and model are supplied by the caller (the layered-TD path in runDither
+// pre-transforms both), and neighbors is the FULL cell-adjacency graph;
+// RegionDither cutting happens here. cells, pal, model and neighbors are read
+// only, so callers may share them across goroutines. The caller must have
+// already short-circuited the empty-neighbor case (Phase-2 transition) to
+// AssignColors — this helper assumes a usable graph and treats an unknown
+// mode as the plain nearest-colour assignment.
+func ditherAssignments(ctx context.Context, opts Options, cells []voxel.ActiveCell, pal [][3]uint8, model *voxel.DitherModel, neighbors [][]voxel.Neighbor, tracker progress.Tracker) ([]int32, error) {
+	// RegionDither confines dithering so quantization error can't bleed
+	// across a colour boundary. cut() drops adjacency edges between cells
+	// whose colours differ by more than the ΔE threshold; for the
+	// error-diffusion modes that alone isolates each colour region (error
+	// only travels along edges). The space-filling Riemersma modes carry a
+	// sliding window along a tour that jumps between cells, so they must
+	// additionally run per connected component (one fresh tour/window per
+	// region) — see DitherPerComponent.
+	regionDither := opts.RegionDither
+	cut := func(nb [][]voxel.Neighbor) [][]voxel.Neighbor {
+		if regionDither {
+			return voxel.CutNeighborsByColor(cells, nb, opts.RegionDitherDeltaE)
+		}
+		return nb
+	}
+	switch opts.Dither {
+	case "dlc-d30-p7":
+		// Iterated dizzy dither with localized stranded-drop
+		// correction: each pass spreads the residuals a stranded
+		// cell would otherwise drop onto its own neighbors, so the
+		// fix stays where the error arose. Damped γ=0.3 over 7
+		// passes — won the 2026-07 CSF perceptual election (see
+		// tests/ditherrank). dlcCorrectionPasses pins the budget to
+		// this pass count.
+		return voxel.DitherLocalCorrectedTuned(ctx, cells, pal, model, cut(neighbors), tracker, 0.3, dlcCorrectionPasses)
+	case "floyd-steinberg":
+		return voxel.FloydSteinberg(ctx, cells, pal, model, cut(neighbors), tracker)
+	case "riemersma":
+		nb := cut(neighbors)
+		bias := opts.RiemersmaInputBias
+		if regionDither {
+			return voxel.DitherPerComponent(ctx, cells, pal, model, nb, tracker,
+				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, m *voxel.DitherModel, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
+					return voxel.Riemersma(ctx, c, p, m, nb, bias, tr)
+				})
+		}
+		return voxel.Riemersma(ctx, cells, pal, model, nb, bias, tracker)
+	case "bn-adapt-5":
+		// Adaptive simplex blue-noise threshold dither: per-cell
+		// best-K simplex (1..palette_size) selected by per-cell
+		// projection-error tolerance, with LDS-driven choice
+		// among simplex vertices. Trades a small drift for big
+		// reductions in wander on uniform/near-flat regions
+		// (where Riemersma's window accumulator forces visible
+		// far-palette picks). The tolerance is pinned to 5 by the
+		// mode name (opts.BlueNoiseTolerance is NOT consulted) so
+		// the product and the election ballots score the same
+		// algorithm.
+		return voxel.BlueNoiseAdaptive(ctx, cells, pal, model, cut(neighbors), 5, tracker)
+	default:
+		return voxel.AssignColors(ctx, cells, pal)
+	}
+}
+
 // runDither is StageDither's body (see stageDefs).
 func (r *pipelineRun) runDither() (any, error) {
 	po, err := r.Palette()
@@ -2458,11 +2534,6 @@ func (r *pipelineRun) runDither() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// dlcCorrectionPasses is the number of localized-correction passes
-	// the production "dlc-d30-p7" mode runs; it must stay in sync with
-	// the passes argument to voxel.DitherLocalCorrectedTuned in the
-	// dispatch below (both are 7).
-	const dlcCorrectionPasses = 7
 	// Budget: dither work units + flood-fill work units. Most modes
 	// do one dither pass over n cells, so dither = n. dlc-d30-p7 runs
 	// dlcCorrectionPasses passes back-to-back, so its dither budget
@@ -2518,62 +2589,7 @@ func (r *pipelineRun) runDither() (any, error) {
 			len(cells), time.Since(tDither).Seconds())
 		return &ditherOutput{Assignments: assignments}, nil
 	}
-	// RegionDither confines dithering so quantization error can't bleed
-	// across a colour boundary. cut() drops adjacency edges between cells
-	// whose colours differ by more than the ΔE threshold; for the
-	// error-diffusion modes that alone isolates each colour region (error
-	// only travels along edges). The space-filling Riemersma modes carry a
-	// sliding window along a tour that jumps between cells, so they must
-	// additionally run per connected component (one fresh tour/window per
-	// region) — see DitherPerComponent.
-	regionDither := r.opts.RegionDither
-	cut := func(nb [][]voxel.Neighbor) [][]voxel.Neighbor {
-		if regionDither {
-			return voxel.CutNeighborsByColor(cells, nb, r.opts.RegionDitherDeltaE)
-		}
-		return nb
-	}
-	switch ditherMode {
-	case "dlc-d30-p7":
-		// Iterated dizzy dither with localized stranded-drop
-		// correction: each pass spreads the residuals a stranded
-		// cell would otherwise drop onto its own neighbors, so the
-		// fix stays where the error arose. Damped γ=0.3 over 7
-		// passes — won the 2026-07 CSF perceptual election (see
-		// tests/ditherrank). dlcCorrectionPasses above pins the
-		// budget to this pass count.
-		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.DitherLocalCorrectedTuned(r.ctx, cells, pal, model, neighbors, r.tracker, 0.3, dlcCorrectionPasses)
-	case "floyd-steinberg":
-		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.FloydSteinberg(r.ctx, cells, pal, model, neighbors, r.tracker)
-	case "riemersma":
-		neighbors := cut(vo.Neighbors)
-		bias := r.opts.RiemersmaInputBias
-		if regionDither {
-			assignments, derr = voxel.DitherPerComponent(r.ctx, cells, pal, model, neighbors, r.tracker,
-				func(ctx context.Context, c []voxel.ActiveCell, p [][3]uint8, m *voxel.DitherModel, nb [][]voxel.Neighbor, tr progress.Tracker) ([]int32, error) {
-					return voxel.Riemersma(ctx, c, p, m, nb, bias, tr)
-				})
-		} else {
-			assignments, derr = voxel.Riemersma(r.ctx, cells, pal, model, neighbors, bias, r.tracker)
-		}
-	case "bn-adapt-5":
-		// Adaptive simplex blue-noise threshold dither: per-cell
-		// best-K simplex (1..palette_size) selected by per-cell
-		// projection-error tolerance, with LDS-driven choice
-		// among simplex vertices. Trades a small drift for big
-		// reductions in wander on uniform/near-flat regions
-		// (where Riemersma's window accumulator forces visible
-		// far-palette picks). The tolerance is pinned to 5 by the
-		// mode name (opts.BlueNoiseTolerance is NOT consulted) so
-		// the product and the election ballots score the same
-		// algorithm.
-		neighbors := cut(vo.Neighbors)
-		assignments, derr = voxel.BlueNoiseAdaptive(r.ctx, cells, pal, model, neighbors, 5, r.tracker)
-	default:
-		assignments, derr = voxel.AssignColors(r.ctx, cells, pal)
-	}
+	assignments, derr = ditherAssignments(r.ctx, r.opts, cells, pal, model, vo.Neighbors, r.tracker)
 	if derr != nil {
 		return nil, derr
 	}

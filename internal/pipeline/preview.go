@@ -595,27 +595,52 @@ func attachStickerOverlay(mesh *MeshData, decals []*voxel.StickerDecal) *MeshDat
 // color-model-frame normal into the bed/output frame (pass nil when unsplit;
 // centroids are already in the output frame either way).
 func buildCellSplatPreview(vo *voxelizeOutput, assignments []int32, paletteRGB [][3]uint8, normalXform func(halfIdx byte, normal [3]float32) [3]float32) *MeshData {
-	nVis := len(vo.VisibleToCell)
-	vertices := make([]float32, 0, nVis*4*3)
-	faces := make([]uint32, 0, nVis*2*3)
-	faceColors := make([]uint16, 0, nVis*2*3)
+	// Per-visible-cell colors from the dither assignments; grey when a cell
+	// has no valid assignment (should not happen for visible cells).
+	colors := make([][3]uint8, len(vo.VisibleToCell))
+	for vi := range colors {
+		colors[vi] = [3]uint8{defaultGray, defaultGray, defaultGray}
+		if vi < len(assignments) {
+			if ai := assignments[vi]; ai >= 0 && int(ai) < len(paletteRGB) {
+				colors[vi] = paletteRGB[ai]
+			}
+		}
+	}
+	return buildSplatGeometry(vo, normalXform).colorByVisible(colors)
+}
 
+// splatGeometry is the color-independent geometry of a cell-splat cloud: one
+// quad (two triangles) per visible cell whose global index is in range. It is
+// built once from a voxelizeOutput and can then be re-colored cheaply for many
+// candidate palettes (see colorByVisible) without recomputing tangent frames.
+// The vertices/faces are safe to share read-only across goroutines; each
+// colorByVisible call allocates its own FaceColors buffer.
+type splatGeometry struct {
+	vertices []float32 // flat xyz, shared read-only
+	faces    []uint32  // flat triangle indices, shared read-only
+	// visIdx[e] is the visible-cell index that emitted-cell e came from, in
+	// emission order (two triangles per emitted cell). Lets colorByVisible
+	// map a per-visible-cell color slice onto the face-color buffer.
+	visIdx []int
+}
+
+// buildSplatGeometry constructs the color-independent splat cloud for vo.
+// normalXform rotates a cell's color-model-frame normal into the bed/output
+// frame (nil when unsplit; centroids already live in the output frame either
+// way). See buildCellSplatPreview for the geometry rationale.
+func buildSplatGeometry(vo *voxelizeOutput, normalXform func(halfIdx byte, normal [3]float32) [3]float32) *splatGeometry {
+	nVis := len(vo.VisibleToCell)
+	g := &splatGeometry{
+		vertices: make([]float32, 0, nVis*4*3),
+		faces:    make([]uint32, 0, nVis*2*3),
+		visIdx:   make([]int, 0, nVis),
+	}
 	var vbase uint32
 	for vi, gi := range vo.VisibleToCell {
 		if gi < 0 || gi >= len(vo.CellSamples) {
 			continue
 		}
 		cs := vo.CellSamples[gi]
-
-		// Palette color for this cell; fall back to grey when the cell has no
-		// valid dither assignment (should not happen for visible cells).
-		r, g, b := uint16(defaultGray), uint16(defaultGray), uint16(defaultGray)
-		if vi < len(assignments) {
-			if ai := assignments[vi]; ai >= 0 && int(ai) < len(paletteRGB) {
-				c := paletteRGB[ai]
-				r, g, b = uint16(c[0]), uint16(c[1]), uint16(c[2])
-			}
-		}
 
 		// Cell normal in the output/bed frame. Centroids already live there,
 		// but normals are stored in the color-model frame, so split halves
@@ -651,20 +676,38 @@ func buildCellSplatPreview(vo *voxelizeOutput, assignments []int32, paletteRGB [
 		// Four quad corners: c ± h·u ± h·v, ordered CCW about +n.
 		for _, s := range [4][2]float32{{-1, -1}, {1, -1}, {1, 1}, {-1, 1}} {
 			du, dv := s[0]*h, s[1]*h
-			vertices = append(vertices,
+			g.vertices = append(g.vertices,
 				cx+u[0]*du+v[0]*dv,
 				cy+u[1]*du+v[1]*dv,
 				cz+u[2]*du+v[2]*dv)
 		}
-		// Two triangles: (0,1,2) and (0,2,3), wound CCW about +n. Both carry
-		// the same face color. The viewer renders double-sided, so winding is
-		// cosmetic, but keeping it consistent means normals recover cleanly.
-		faces = append(faces, vbase, vbase+1, vbase+2, vbase, vbase+2, vbase+3)
-		faceColors = append(faceColors, r, g, b, r, g, b)
+		// Two triangles: (0,1,2) and (0,2,3), wound CCW about +n. The viewer
+		// renders double-sided, so winding is cosmetic, but keeping it
+		// consistent means normals recover cleanly.
+		g.faces = append(g.faces, vbase, vbase+1, vbase+2, vbase, vbase+2, vbase+3)
+		g.visIdx = append(g.visIdx, vi)
 		vbase += 4
 	}
+	return g
+}
 
-	return &MeshData{Vertices: vertices, Faces: faces, FaceColors: faceColors}
+// colorByVisible returns a MeshData that reuses the shared geometry and colors
+// each emitted cell by colors[visibleIndex]. colors is indexed by visible-cell
+// position (parallel to vo.VisibleToCell); an out-of-range entry falls back to
+// grey. The returned mesh shares g's vertices/faces slices (read-only) but owns
+// a fresh FaceColors buffer, so many candidates can be colored and rendered in
+// parallel from one geometry.
+func (g *splatGeometry) colorByVisible(colors [][3]uint8) *MeshData {
+	faceColors := make([]uint16, 0, len(g.visIdx)*6)
+	for _, vi := range g.visIdx {
+		r, gg, b := uint16(defaultGray), uint16(defaultGray), uint16(defaultGray)
+		if vi >= 0 && vi < len(colors) {
+			c := colors[vi]
+			r, gg, b = uint16(c[0]), uint16(c[1]), uint16(c[2])
+		}
+		faceColors = append(faceColors, r, gg, b, r, gg, b)
+	}
+	return &MeshData{Vertices: g.vertices, Faces: g.faces, FaceColors: faceColors}
 }
 
 // splatNormalize returns n scaled to unit length, or +Z when n is degenerate.
