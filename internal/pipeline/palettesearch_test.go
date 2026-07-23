@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rtwfroody/ditherforge/internal/cellslicer"
@@ -429,6 +430,117 @@ func TestMetricInvariants(t *testing.T) {
 	}
 	if !(wrongCand.RankKey > matchCand.RankKey) {
 		t.Fatalf("wrong rank key %v not worse than match %v", wrongCand.RankKey, matchCand.RankKey)
+	}
+}
+
+// --- 5. REGRET-TABLE LOOKUP (--regret-table mode) ---------------------------
+
+// regretFixtureCSV writes a results.csv (via the real writer, so the parser is
+// tested against the exact on-disk format, extra σ columns and all) and returns
+// its path.
+func regretFixtureCSV(t *testing.T) string {
+	t.Helper()
+	res := &PaletteSearchResult{
+		Sigmas:     []float64{0, 2, 8},
+		RankSigmas: []float64{2, 8},
+		Candidates: []PaletteCandidate{
+			{Rank: 1, Labels: []string{"black", "red"}, Hexes: []string{"#000000", "#FF0000"}, ScoresBySigma: []float64{1, 2, 3}, P99Sigma2: 9, RankKey: 2.5},
+			{Rank: 2, Labels: []string{"black", "blue"}, Hexes: []string{"#000000", "#0000FF"}, ScoresBySigma: []float64{2, 3, 4}, P99Sigma2: 9, RankKey: 3.5},
+			{Rank: 3, Labels: []string{"red", "blue"}, Hexes: []string{"#FF0000", "#0000FF"}, ScoresBySigma: []float64{3, 4, 5}, P99Sigma2: 9, RankKey: 4.5},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "results.csv")
+	if err := writeCSV(path, res); err != nil {
+		t.Fatalf("writeCSV: %v", err)
+	}
+	return path
+}
+
+func TestLoadRegretTable(t *testing.T) {
+	path := regretFixtureCSV(t)
+	rows, err := loadRegretTable(path)
+	if err != nil {
+		t.Fatalf("loadRegretTable: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	// Fields are located by header name, so the extra σ columns between "hexes"
+	// and "rank_key" do not shift the parse.
+	got := rows[1]
+	if got.rank != 2 || got.rankKey != 3.5 {
+		t.Fatalf("row 2: rank=%d rankKey=%v, want 2 / 3.5", got.rank, got.rankKey)
+	}
+	if !reflect.DeepEqual(got.hexes, []string{"#000000", "#0000FF"}) {
+		t.Fatalf("row 2 hexes = %v", got.hexes)
+	}
+	if !reflect.DeepEqual(got.labels, []string{"black", "blue"}) {
+		t.Fatalf("row 2 labels = %v", got.labels)
+	}
+}
+
+func TestLoadRegretTableRejectsForeignCSV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "foreign.csv")
+	if err := os.WriteFile(path, []byte("a,b,c\n1,2,3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRegretTable(path); err == nil {
+		t.Fatal("expected an error for a CSV missing the palettesearch columns")
+	}
+}
+
+func TestLookupRegret(t *testing.T) {
+	path := regretFixtureCSV(t)
+	ent := func(c [3]uint8, label string) palette.InventoryEntry {
+		return palette.InventoryEntry{Color: c, Label: label}
+	}
+
+	// Order-insensitive hex-set match: the winner (rank 1) is {black,red}, given
+	// here in reversed order. Regret against itself is zero.
+	rep, err := lookupRegret(path, []palette.InventoryEntry{
+		ent([3]uint8{0xFF, 0x00, 0x00}, "red"), ent([3]uint8{0x00, 0x00, 0x00}, "black"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("lookupRegret winner: %v", err)
+	}
+	if rep.Rank != 1 || rep.RankKey != 2.5 || rep.Total != 3 {
+		t.Fatalf("winner: rank=%d rankKey=%v total=%d", rep.Rank, rep.RankKey, rep.Total)
+	}
+	if rep.WinnerRankKey != 2.5 || rep.Delta != 0 {
+		t.Fatalf("winner delta: winnerRankKey=%v delta=%v", rep.WinnerRankKey, rep.Delta)
+	}
+
+	// A mid-table pick reports positive regret against the rank-1 winner.
+	rep, err = lookupRegret(path, []palette.InventoryEntry{
+		ent([3]uint8{0x00, 0x00, 0x00}, "black"), ent([3]uint8{0x00, 0x00, 0xFF}, "blue"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("lookupRegret mid: %v", err)
+	}
+	if rep.Rank != 2 || rep.RankKey != 3.5 {
+		t.Fatalf("mid: rank=%d rankKey=%v, want 2 / 3.5", rep.Rank, rep.RankKey)
+	}
+	if math.Abs(rep.Delta-1.0) > 1e-9 || !reflect.DeepEqual(rep.WinnerHexes, []string{"#000000", "#FF0000"}) {
+		t.Fatalf("mid: delta=%v winnerHexes=%v", rep.Delta, rep.WinnerHexes)
+	}
+}
+
+func TestLookupRegretNotFound(t *testing.T) {
+	path := regretFixtureCSV(t)
+	_, err := lookupRegret(path, []palette.InventoryEntry{
+		{Color: [3]uint8{0x00, 0xFF, 0x00}, Label: "green"},
+		{Color: [3]uint8{0xFF, 0xFF, 0xFF}, Label: "white"},
+	}, []palette.InventoryEntry{{Color: [3]uint8{0x12, 0x34, 0x56}}})
+	if err == nil {
+		t.Fatal("expected a not-found error for a pick absent from the table")
+	}
+	// The error must name both the pick and the locked config so a mismatched
+	// inventory is diagnosable.
+	msg := err.Error()
+	for _, want := range []string{"#00FF00", "#123456", "different inventory"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("not-found error %q missing %q", msg, want)
+		}
 	}
 }
 

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/rtwfroody/ditherforge/internal/palette"
+	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/voxel"
 	"github.com/rtwfroody/ditherforge/tests/percep"
@@ -97,9 +98,19 @@ func RunPaletteSearch(ctx context.Context, cache *StageCache, opts Options, cfg 
 		return nil, fmt.Errorf("palettesearch: render function is required")
 	}
 
-	// Resolve the pipeline once, up to Voxelize only, mirroring RunCached's
-	// prologue (fractional-option resolution) but stopping short of Palette.
-	tracker := cfg.Tracker
+	vo, so, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	if err != nil {
+		return nil, err
+	}
+	return runSearchOnCells(ctx, opts, cfg, vo, so, render)
+}
+
+// voxelizeForSearch resolves the pipeline once, up to Voxelize + Split only,
+// mirroring RunCached's prologue (fractional-option resolution) but stopping
+// short of Palette. Shared by the full sweep (RunPaletteSearch) and the
+// regret-only lookup (RunRegretLookup). tracker is the sink for the one-time
+// voxelize progress; nil selects a null tracker.
+func voxelizeForSearch(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) (*voxelizeOutput, *splitOutput, error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
@@ -107,17 +118,17 @@ func RunPaletteSearch(ctx context.Context, cache *StageCache, opts Options, cfg 
 	defer mon.Stop()
 	r := &pipelineRun{ctx: ctx, cache: cache, opts: opts, tracker: mon}
 	if err := r.resolveFractionalOptions(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	vo, err := r.Voxelize()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	so, err := r.Split()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return runSearchOnCells(ctx, opts, cfg, vo, so, render)
+	return vo, so, nil
 }
 
 // runSearchOnCells is the palette-search core, factored out of the pipeline
@@ -126,6 +137,14 @@ func RunPaletteSearch(ctx context.Context, cache *StageCache, opts Options, cfg 
 // then enumerates, scores and ranks every candidate and writes the outputs.
 func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig, vo *voxelizeOutput, so *splitOutput, render SplatRenderFunc) (*PaletteSearchResult, error) {
 	cfg = cfg.withDefaults()
+
+	// The sweep dithers thousands of candidates; every DLC pass emits a
+	// per-pass drift line via plog. That flood is never useful in a sweep, so
+	// silence plog for the scoring + output phase regardless of --quiet. The
+	// one-time Voxelize already ran (and logged) before we got here, and the
+	// every-50-candidates progress lines go straight to stderr, not plog, so
+	// they are unaffected.
+	defer plog.SetEnabled(plog.SetEnabled(false))
 
 	// Unsupported-for-v1 settings that would invalidate the direct-from-cells
 	// scoring model. Fail loudly rather than silently mis-scoring.
@@ -345,6 +364,209 @@ func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig
 		return nil, err
 	}
 	return res, nil
+}
+
+// RegretReport is the outcome of the regret-only mode: the production fast
+// scorer's pick located within a previously-computed ground-truth table.
+type RegretReport struct {
+	PickLabels    []string `json:"pickLabels"`    // free-slot labels of the production pick
+	PickHexes     []string `json:"pickHexes"`     // free-slot hexes of the production pick
+	LockedHexes   []string `json:"lockedHexes"`   // locked-slot hexes (context)
+	Rank          int      `json:"rank"`          // the pick's 1-based rank in the table
+	RankKey       float64  `json:"rankKey"`       // the pick's rank key
+	Total         int      `json:"total"`         // total candidates in the table
+	WinnerLabels  []string `json:"winnerLabels"`  // rank-1 candidate's free-slot labels
+	WinnerHexes   []string `json:"winnerHexes"`   // rank-1 candidate's free-slot hexes
+	WinnerRankKey float64  `json:"winnerRankKey"` // rank-1 candidate's rank key
+	Delta         float64  `json:"delta"`         // Rank key regret (pick − winner)
+}
+
+// RunRegretLookup runs the fast tuning loop: it voxelizes once, runs the
+// production fast scorer (SelectFromInventory — which honors the
+// DITHERFORGE_SELECT_WASH/MU/NU env overrides in-process), and locates the
+// pick's rank in a ground-truth table previously written by RunPaletteSearch.
+// It never sweeps, so it completes in voxelize + selection time. csvPath is a
+// results.csv produced by an earlier full sweep on the same inventory/locked
+// config. render is unused (no rendering happens) and may be nil.
+func RunRegretLookup(ctx context.Context, cache *StageCache, opts Options, cfg PaletteSearchConfig, csvPath string) (*RegretReport, error) {
+	cfg = cfg.withDefaults()
+	if !validDitherMode(opts.Dither) {
+		return nil, fmt.Errorf("palettesearch: invalid --dither %q: must be one of %s", opts.Dither, strings.Join(ditherModes, ", "))
+	}
+
+	vo, _, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	if err != nil {
+		return nil, err
+	}
+	if len(vo.Cells) == 0 {
+		return nil, fmt.Errorf("palettesearch: model produced no visible cells")
+	}
+
+	pcfg, err := buildPaletteConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Inventory != nil {
+		pcfg.Inventory = cfg.Inventory
+	}
+	freeSlots := pcfg.NumColors - len(pcfg.Locked)
+	if freeSlots <= 0 {
+		return nil, fmt.Errorf("palettesearch: %d colors requested but %d are locked; no free slots to search", pcfg.NumColors, len(pcfg.Locked))
+	}
+	filtered := excludeLocked(pcfg.Inventory, pcfg.Locked)
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("palettesearch: inventory has no colors left after excluding locked colors")
+	}
+
+	// Silence the fast scorer's internal dither/scoring chatter, exactly as the
+	// sweep does.
+	defer plog.SetEnabled(plog.SetEnabled(false))
+
+	prodEntries, err := productionPick(ctx, vo.Cells, filtered, pcfg, freeSlots, opts, progress.NullTracker{})
+	if err != nil {
+		return nil, err
+	}
+	return lookupRegret(csvPath, prodEntries, pcfg.Locked)
+}
+
+// regretRow is one parsed data row of a results.csv table.
+type regretRow struct {
+	rank    int
+	labels  []string
+	hexes   []string
+	rankKey float64
+}
+
+// loadRegretTable parses a results.csv written by writeCSV, tolerating extra
+// per-σ columns by locating fields via the header rather than by fixed index.
+func loadRegretTable(path string) ([]regretRow, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	records, err := csv.NewReader(f).ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("%s is empty", path)
+	}
+	col := map[string]int{}
+	for i, name := range records[0] {
+		col[name] = i
+	}
+	need := func(name string) (int, error) {
+		if i, ok := col[name]; ok {
+			return i, nil
+		}
+		return 0, fmt.Errorf("%s: missing %q column (is this a palettesearch results.csv?)", path, name)
+	}
+	rankI, err := need("rank")
+	if err != nil {
+		return nil, err
+	}
+	labelsI, err := need("labels")
+	if err != nil {
+		return nil, err
+	}
+	hexesI, err := need("hexes")
+	if err != nil {
+		return nil, err
+	}
+	rankKeyI, err := need("rank_key")
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]regretRow, 0, len(records)-1)
+	for ln, rec := range records[1:] {
+		rank, err := strconv.Atoi(rec[rankI])
+		if err != nil {
+			return nil, fmt.Errorf("%s line %d: bad rank %q: %w", path, ln+2, rec[rankI], err)
+		}
+		rankKey, err := strconv.ParseFloat(rec[rankKeyI], 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s line %d: bad rank_key %q: %w", path, ln+2, rec[rankKeyI], err)
+		}
+		rows = append(rows, regretRow{
+			rank:    rank,
+			labels:  splitPipe(rec[labelsI]),
+			hexes:   splitPipe(rec[hexesI]),
+			rankKey: rankKey,
+		})
+	}
+	return rows, nil
+}
+
+// splitPipe splits a "|"-joined field, returning nil for the empty string
+// (rather than a one-element slice containing "").
+func splitPipe(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "|")
+}
+
+// lookupRegret finds the production pick's row in the parsed table by an
+// order-insensitive hex-set match on the free slots. A miss means the table was
+// built with a different inventory or locked config, so the error prints both.
+func lookupRegret(path string, prodEntries, locked []palette.InventoryEntry) (*RegretReport, error) {
+	rows, err := loadRegretTable(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("%s has no candidate rows", path)
+	}
+	pickHexes := entryHexes(prodEntries)
+	pickKey := hexSetKey(pickHexes)
+
+	var pick, winner *regretRow
+	for i := range rows {
+		r := &rows[i]
+		if winner == nil || r.rank < winner.rank {
+			winner = r
+		}
+		if hexSetKey(r.hexes) == pickKey {
+			pick = r
+		}
+	}
+	if pick == nil {
+		return nil, fmt.Errorf("production pick not found in %s (%d candidates)\n"+
+			"    pick free slots: %s\n"+
+			"    pick locked:     %s\n"+
+			"  the table was likely built with a different inventory or locked config",
+			path, len(rows), strings.Join(pickHexes, " "), strings.Join(lockedHexes(locked), " "))
+	}
+	// Report the matched row's own hexes+labels (internally consistent), not
+	// prodEntries' — the two orderings differ, and zipping across them would
+	// mislabel colors. The hex set is identical either way, which is what the
+	// match and ranking depend on.
+	reportHexes := pick.hexes
+	reportLabels := pick.labels
+	if len(reportLabels) == 0 {
+		reportLabels = entryLabels(prodEntries)
+	}
+	return &RegretReport{
+		PickLabels:    reportLabels,
+		PickHexes:     reportHexes,
+		LockedHexes:   lockedHexes(locked),
+		Rank:          pick.rank,
+		RankKey:       pick.rankKey,
+		Total:         len(rows),
+		WinnerLabels:  winner.labels,
+		WinnerHexes:   winner.hexes,
+		WinnerRankKey: winner.rankKey,
+		Delta:         pick.rankKey - winner.rankKey,
+	}, nil
+}
+
+func entryLabels(entries []palette.InventoryEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Label
+	}
+	return out
 }
 
 // withDefaults fills unset config fields with their documented defaults.

@@ -34,16 +34,18 @@ import (
 )
 
 type Args struct {
-	Settings   string `arg:"positional,required" help:"settings JSON file (same format as ditherforge-cli)"`
-	Inventory  string `arg:"--inventory" help:"inventory file to search (overrides the settings' collection)"`
-	Res        int    `arg:"--res" default:"512" help:"square render resolution"`
-	Sigmas     string `arg:"--sigmas" default:"0,2,4,8,16" help:"comma-separated blur sigmas (px) to score at"`
-	RankSigmas string `arg:"--rank-sigmas" default:"2,8" help:"comma-separated sigmas averaged into the rank key"`
-	Workers    int    `arg:"--workers" help:"candidate worker pool size (default GOMAXPROCS)"`
-	Out        string `arg:"--out" default:"." help:"output directory for results.csv/json and PNGs"`
-	RenderTop  int    `arg:"--render-top" default:"3" help:"write PNGs for the top-N candidates"`
-	Limit      int    `arg:"--limit" help:"evaluate only the first N candidates (0 = all)"`
-	Views      string `arg:"--views" help:"comma subset of front,side,top,persp (default all)"`
+	Settings    string `arg:"positional,required" help:"settings JSON file (same format as ditherforge-cli)"`
+	Inventory   string `arg:"--inventory" help:"inventory file to search (overrides the settings' collection)"`
+	Res         int    `arg:"--res" default:"512" help:"square render resolution"`
+	Sigmas      string `arg:"--sigmas" default:"0,2,4,8,16" help:"comma-separated blur sigmas (px) to score at"`
+	RankSigmas  string `arg:"--rank-sigmas" default:"2,8" help:"comma-separated sigmas averaged into the rank key"`
+	Workers     int    `arg:"--workers" help:"candidate worker pool size (default GOMAXPROCS)"`
+	Out         string `arg:"--out" default:"." help:"output directory for results.csv/json and PNGs"`
+	RenderTop   int    `arg:"--render-top" default:"3" help:"write PNGs for the top-N candidates"`
+	Limit       int    `arg:"--limit" help:"evaluate only the first N candidates (0 = all)"`
+	Views       string `arg:"--views" help:"comma subset of front,side,top,persp (default all)"`
+	Quiet       bool   `arg:"--quiet" help:"suppress the one-time voxelize progress bar (per-candidate dither logs are always suppressed in a sweep)"`
+	RegretTable string `arg:"--regret-table" help:"skip the sweep: run the production scorer and report its rank in this existing results.csv"`
 }
 
 func main() {
@@ -86,6 +88,12 @@ func main() {
 		fatalf("Error: --rank-sigmas: %v", err)
 	}
 
+	// --quiet silences the one-time voxelize progress bar; the per-candidate
+	// dither flood is suppressed inside the sweep regardless.
+	var tracker progress.Tracker = progress.NewCLITracker()
+	if args.Quiet {
+		tracker = progress.NullTracker{}
+	}
 	cfg := pipeline.PaletteSearchConfig{
 		Res:        args.Res,
 		Sigmas:     sigmas,
@@ -94,7 +102,7 @@ func main() {
 		Limit:      args.Limit,
 		RenderTop:  args.RenderTop,
 		OutDir:     args.Out,
-		Tracker:    progress.NewCLITracker(),
+		Tracker:    tracker,
 	}
 	if args.Views != "" {
 		for _, v := range strings.Split(args.Views, ",") {
@@ -118,12 +126,51 @@ func main() {
 		}
 	}
 
+	// Regret-only mode: skip the sweep, run just voxelize + the production
+	// scorer, and report the pick's rank in the given table. Seconds-to-minutes,
+	// so `for MU in ...; do palettesearch --regret-table ...; done` tunes the
+	// scorer against a fixed ground-truth table (the env overrides
+	// DITHERFORGE_SELECT_WASH/MU/NU are honored in-process by SelectFromInventory).
+	if args.RegretTable != "" {
+		rep, err := pipeline.RunRegretLookup(context.Background(), cache, opts, cfg, args.RegretTable)
+		if err != nil {
+			fatalf("Error: %v", err)
+		}
+		printRegretReport(rep, args.RegretTable)
+		return
+	}
+
 	res, err := pipeline.RunPaletteSearch(context.Background(), cache, opts, cfg, newRenderer())
 	if err != nil {
 		fatalf("Error: %v", err)
 	}
 
 	printReport(res)
+}
+
+// printRegretReport prints the regret-only scorecard for --regret-table.
+func printRegretReport(rep *pipeline.RegretReport, tablePath string) {
+	if len(rep.LockedHexes) > 0 {
+		fmt.Printf("Locked: %s\n", strings.Join(rep.LockedHexes, " "))
+	}
+	fmt.Printf("Table:  %s (%d candidates)\n\n", tablePath, rep.Total)
+	fmt.Printf("REGRET: production fast scorer picked %s\n", describeHexes(rep.PickHexes, rep.PickLabels))
+	fmt.Printf("        its rank %d/%d (rankKey %.3f); winner %s rankKey %.3f; delta %.3f\n",
+		rep.Rank, rep.Total, rep.RankKey,
+		describeHexes(rep.WinnerHexes, rep.WinnerLabels), rep.WinnerRankKey, rep.Delta)
+}
+
+// describeHexes formats a "hex(label)" list, tolerating a missing label list.
+func describeHexes(hexes, labels []string) string {
+	parts := make([]string, len(hexes))
+	for i := range hexes {
+		if i < len(labels) && labels[i] != "" {
+			parts[i] = fmt.Sprintf("%s(%s)", hexes[i], labels[i])
+		} else {
+			parts[i] = hexes[i]
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // newRenderer builds a SplatRenderFunc over debugrender. Framing is shared:
@@ -183,16 +230,7 @@ func printReport(res *pipeline.PaletteSearchResult) {
 }
 
 func describe(c pipeline.PaletteCandidate) string {
-	parts := make([]string, len(c.Hexes))
-	for i := range c.Hexes {
-		label := c.Labels[i]
-		if label == "" {
-			parts[i] = c.Hexes[i]
-		} else {
-			parts[i] = fmt.Sprintf("%s(%s)", c.Hexes[i], label)
-		}
-	}
-	return strings.Join(parts, " ")
+	return describeHexes(c.Hexes, c.Labels)
 }
 
 func inSweepNote(inSweep bool) string {
