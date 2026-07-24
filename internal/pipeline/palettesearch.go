@@ -98,28 +98,41 @@ func RunPaletteSearch(ctx context.Context, cache *StageCache, opts Options, cfg 
 		return nil, fmt.Errorf("palettesearch: render function is required")
 	}
 
-	vo, so, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	vo, geom, err := clipGeometryForSearch(ctx, cache, opts, cfg.Tracker)
 	if err != nil {
 		return nil, err
 	}
-	return runSearchOnCells(ctx, opts, cfg, vo, so, render)
+	return runSearchOnCells(ctx, opts, cfg, vo, geom, render)
 }
 
-// voxelizeForSearch resolves the pipeline once, up to Voxelize + Split only,
-// mirroring RunCached's prologue (fractional-option resolution) but stopping
-// short of Palette. Shared by the full sweep (RunPaletteSearch) and the
-// regret-only lookup (RunRegretLookup). tracker is the sink for the one-time
-// voxelize progress; nil selects a null tracker.
-func voxelizeForSearch(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) (*voxelizeOutput, *splitOutput, error) {
+// newSearchRun builds a pipelineRun with a progress monitor and resolves the
+// fractional options (RunCached's prologue), returning the run and a stop
+// function the caller must defer to tear the monitor down. tracker nil selects
+// a null tracker. Shared by voxelizeForSearch and clipGeometryForSearch.
+func newSearchRun(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) (*pipelineRun, func(), error) {
 	if tracker == nil {
 		tracker = progress.NullTracker{}
 	}
 	mon := progress.NewMonitor(tracker)
-	defer mon.Stop()
 	r := &pipelineRun{ctx: ctx, cache: cache, opts: opts, tracker: mon}
 	if err := r.resolveFractionalOptions(); err != nil {
+		mon.Stop()
 		return nil, nil, err
 	}
+	return r, mon.Stop, nil
+}
+
+// voxelizeForSearch resolves the pipeline once, up to Voxelize + Split only,
+// mirroring RunCached's prologue (fractional-option resolution) but stopping
+// short of Palette. Used by the regret-only lookup (RunRegretLookup), which
+// needs the cells but renders nothing. tracker is the sink for the one-time
+// voxelize progress; nil selects a null tracker.
+func voxelizeForSearch(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) (*voxelizeOutput, *splitOutput, error) {
+	r, stop, err := newSearchRun(ctx, cache, opts, tracker)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer stop()
 	vo, err := r.Voxelize()
 	if err != nil {
 		return nil, nil, err
@@ -131,11 +144,40 @@ func voxelizeForSearch(ctx context.Context, cache *StageCache, opts Options, tra
 	return vo, so, nil
 }
 
+// clipGeometryForSearch resolves the pipeline once through the Clip stage and
+// returns the cells plus the real per-cell clipped-triangle geometry to render.
+// It forces NoCellMerge so the shell is clipped per cell: that keeps every
+// face's cell provenance (ShellSectionIdx) intact and, crucially, makes the
+// geometry palette-independent — cell merging groups faces by dithered color,
+// which both depends on the palette being searched and coarsens per-cell
+// provenance. The Merge/Simplify stages (triangle-count reduction only) are
+// intentionally skipped: the harness renders a handful of views and does not
+// care about triangle count. Clip is the slowest stage but runs once per
+// fixture and is served from the disk cache on re-runs. tracker nil selects a
+// null tracker.
+func clipGeometryForSearch(ctx context.Context, cache *StageCache, opts Options, tracker progress.Tracker) (*voxelizeOutput, *clipGeometry, error) {
+	opts.NoCellMerge = true
+	r, stop, err := newSearchRun(ctx, cache, opts, tracker)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer stop()
+	vo, err := r.Voxelize()
+	if err != nil {
+		return nil, nil, err
+	}
+	co, err := r.Clip()
+	if err != nil {
+		return nil, nil, err
+	}
+	return vo, buildClipGeometry(vo, co), nil
+}
+
 // runSearchOnCells is the palette-search core, factored out of the pipeline
 // prologue so it can be exercised hermetically against a synthetic
 // voxelizeOutput fixture (see palettesearch_test.go). It validates the config,
 // then enumerates, scores and ranks every candidate and writes the outputs.
-func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig, vo *voxelizeOutput, so *splitOutput, render SplatRenderFunc) (*PaletteSearchResult, error) {
+func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig, vo *voxelizeOutput, geom searchGeometry, render SplatRenderFunc) (*PaletteSearchResult, error) {
 	cfg = cfg.withDefaults()
 
 	// The sweep dithers thousands of candidates; every DLC pass emits a
@@ -230,10 +272,9 @@ func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig
 		}
 	}
 
-	// Shared, color-independent splat geometry. Built once; every candidate
-	// only swaps FaceColors, which is why one bounds computation frames them
-	// all identically.
-	geom := buildSplatGeometry(vo, splitNormalXform(so))
+	// geom is the shared, color-independent render geometry (real clipped
+	// per-cell triangles). Built once by the caller; every candidate only swaps
+	// FaceColors, so one bounds computation frames them all identically.
 
 	// Pre-render and pre-blur the palette-independent sampled target once per
 	// (view, σ); reused for every candidate comparison.
@@ -385,7 +426,7 @@ func RenderExplicitPalette(ctx context.Context, cache *StageCache, opts Options,
 		return fmt.Errorf("palettesearch: no palette hexes given")
 	}
 
-	vo, so, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	vo, geom, err := clipGeometryForSearch(ctx, cache, opts, cfg.Tracker)
 	if err != nil {
 		return err
 	}
@@ -420,7 +461,6 @@ func RenderExplicitPalette(ctx context.Context, cache *StageCache, opts Options,
 	}
 
 	simEll, simK := simNeighborParams(opts.LayerHeight)
-	geom := buildSplatGeometry(vo, splitNormalXform(so))
 	pal, tds, _, _ := buildCandidatePalette(pcfg.Locked, eligible, combo)
 	colors, err := candidateVisibleColors(ctx, opts, vo, pal, tds, simEll, simK, progress.NullTracker{})
 	if err != nil {
@@ -804,24 +844,91 @@ func productionPick(ctx context.Context, cells []voxel.ActiveCell, filtered []pa
 	return palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, freeSlots, pcfg.Locked, opts.Dither != "none", pcfg.TD, tracker)
 }
 
-// splitNormalXform mirrors runClip's normalXform: for a split run it rotates a
-// cell's color-model-frame normal into bed coords via the half's forward rigid
-// transform; nil for an unsplit run (centroids and normals already share the
-// output frame).
-func splitNormalXform(so *splitOutput) func(halfIdx byte, normal [3]float32) [3]float32 {
-	if so == nil || !so.Enabled {
-		return nil
+// searchGeometry is color-independent render geometry that can be re-colored
+// per candidate: one MeshData whose vertices/faces are fixed and whose only
+// per-candidate variation is FaceColors. Both the real clipped-triangle
+// geometry (clipGeometry) and the legacy splat cloud (splatGeometry) satisfy
+// it, so scoring/rendering is written once against the interface.
+type searchGeometry interface {
+	// colorByVisible returns a MeshData sharing the fixed vertices/faces and a
+	// fresh FaceColors buffer, each face colored by its cell's entry in colors
+	// (indexed by visible-cell position, parallel to vo.VisibleToCell).
+	colorByVisible(colors [][3]uint8) *MeshData
+}
+
+// clipGeometry is the real per-cell surface geometry produced by the Clip
+// stage: the pipeline's actual clipped triangles, not the cheap one-quad-per-
+// cell splat cloud. Because it comes from the non-merged (per-cell) clip it is
+// palette-independent — every face carries its source cell's global index, so
+// a candidate palette only changes each cell's color, never the geometry. Built
+// once per fixture and shared read-only across candidate workers; each
+// colorByVisible call allocates its own FaceColors buffer.
+type clipGeometry struct {
+	vertices []float32 // flat xyz, shared read-only
+	faces    []uint32  // flat triangle indices, shared read-only
+	// faceVis[fi] is the visible-cell index of face fi's source cell, or -1
+	// when the face traces to a hidden cell or has no single cell (interior
+	// cap triangles). colorByVisible maps a per-visible-cell color slice onto
+	// the face-color buffer through it.
+	faceVis []int32
+}
+
+// buildClipGeometry flattens a clipOutput's per-cell triangle shell into shared
+// render buffers and resolves each face's global cell index to a visible-cell
+// index (via vo.VisibleToCell). co must come from the non-merged clip so
+// ShellSectionIdx still carries per-face cell provenance (merging groups faces
+// by color and coarsens it).
+func buildClipGeometry(vo *voxelizeOutput, co *clipOutput) *clipGeometry {
+	verts := make([]float32, 0, len(co.ShellVerts)*3)
+	for _, v := range co.ShellVerts {
+		verts = append(verts, v[0], v[1], v[2])
 	}
-	spl := so
-	return func(halfIdx byte, n [3]float32) [3]float32 {
-		if int(halfIdx) >= len(spl.Xform) {
-			return n
+	faces := make([]uint32, 0, len(co.ShellFaces)*3)
+	for _, f := range co.ShellFaces {
+		faces = append(faces, f[0], f[1], f[2])
+	}
+
+	// Global cell index → visible-cell index (inverse of vo.VisibleToCell).
+	globalToVisible := make([]int32, len(vo.CellSamples))
+	for i := range globalToVisible {
+		globalToVisible[i] = -1
+	}
+	for vi, gi := range vo.VisibleToCell {
+		if gi >= 0 && gi < len(globalToVisible) {
+			globalToVisible[gi] = int32(vi)
 		}
-		t := spl.Xform[int(halfIdx)]
-		o := t.Apply([3]float32{0, 0, 0})
-		p := t.Apply(n)
-		return [3]float32{p[0] - o[0], p[1] - o[1], p[2] - o[2]}
 	}
+
+	faceVis := make([]int32, len(co.ShellFaces))
+	for fi, gi := range co.ShellSectionIdx {
+		if gi >= 0 && int(gi) < len(globalToVisible) {
+			faceVis[fi] = globalToVisible[gi]
+		} else {
+			faceVis[fi] = -1
+		}
+	}
+	return &clipGeometry{vertices: verts, faces: faces, faceVis: faceVis}
+}
+
+// colorByVisible colors each clipped face by its source cell's entry in colors
+// (indexed by visible-cell position); faces with no visible cell fall back to
+// grey. The returned mesh shares g's vertices/faces (read-only) and owns a
+// fresh FaceColors buffer, so many candidates can be colored in parallel from
+// one geometry.
+func (g *clipGeometry) colorByVisible(colors [][3]uint8) *MeshData {
+	nFaces := len(g.faces) / 3
+	faceColors := make([]uint16, nFaces*3)
+	for fi := 0; fi < nFaces; fi++ {
+		r, gg, b := uint16(defaultGray), uint16(defaultGray), uint16(defaultGray)
+		if fi < len(g.faceVis) {
+			if vi := g.faceVis[fi]; vi >= 0 && int(vi) < len(colors) {
+				c := colors[vi]
+				r, gg, b = uint16(c[0]), uint16(c[1]), uint16(c[2])
+			}
+		}
+		faceColors[3*fi+0], faceColors[3*fi+1], faceColors[3*fi+2] = r, gg, b
+	}
+	return &MeshData{Vertices: g.vertices, Faces: g.faces, FaceColors: faceColors}
 }
 
 // --- pure helpers (unit-tested) ---------------------------------------------
@@ -991,7 +1098,7 @@ func reportProgress(done, total int, start time.Time) {
 
 // --- output writers ---------------------------------------------------------
 
-func writeSearchOutputs(res *PaletteSearchResult, cfg PaletteSearchConfig, opts Options, vo *voxelizeOutput, geom *splatGeometry, pcfg voxel.PaletteConfig, eligible []palette.InventoryEntry, simEll float32, simK float64, targetRGBA []*image.RGBA, production *PaletteCandidate, render SplatRenderFunc) error {
+func writeSearchOutputs(res *PaletteSearchResult, cfg PaletteSearchConfig, opts Options, vo *voxelizeOutput, geom searchGeometry, pcfg voxel.PaletteConfig, eligible []palette.InventoryEntry, simEll float32, simK float64, targetRGBA []*image.RGBA, production *PaletteCandidate, render SplatRenderFunc) error {
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
 		return err
 	}

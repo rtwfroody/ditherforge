@@ -74,6 +74,35 @@ func synthVO(nx, ny int, colorFn func(x, y int) [3]uint8) *voxelizeOutput {
 	return vo
 }
 
+// synthClipGeometry builds a hermetic clipGeometry for a synthVO: two
+// triangles (one quad) per visible cell, exercising the same per-face →
+// visible-cell mapping (buildClipGeometry) the real Clip stage feeds. This
+// stands in for the pipeline's clipped-triangle shell in unit tests without a
+// real model or Clip run.
+func synthClipGeometry(vo *voxelizeOutput) *clipGeometry {
+	co := &clipOutput{}
+	var vbase uint32
+	for _, gi := range vo.VisibleToCell {
+		if gi < 0 || gi >= len(vo.CellSamples) {
+			continue
+		}
+		c := vo.CellSamples[gi].Centroid
+		// A unit quad in the z=0 plane centered on the cell centroid.
+		co.ShellVerts = append(co.ShellVerts,
+			[3]float32{c[0] - 0.5, c[1] - 0.5, c[2]},
+			[3]float32{c[0] + 0.5, c[1] - 0.5, c[2]},
+			[3]float32{c[0] + 0.5, c[1] + 0.5, c[2]},
+			[3]float32{c[0] - 0.5, c[1] + 0.5, c[2]})
+		co.ShellFaces = append(co.ShellFaces,
+			[3]uint32{vbase, vbase + 1, vbase + 2},
+			[3]uint32{vbase, vbase + 2, vbase + 3})
+		// Both faces trace back to this cell's global index.
+		co.ShellSectionIdx = append(co.ShellSectionIdx, int32(gi), int32(gi))
+		vbase += 4
+	}
+	return buildClipGeometry(vo, co)
+}
+
 // faceColorRenderer is a deterministic stand-in for the debugrender-backed
 // renderer: it lays each face's color into a square image (one pixel per
 // face). Identical mesh colors therefore yield byte-identical images, which is
@@ -311,7 +340,7 @@ func TestRunSearchOnCellsDeterministic(t *testing.T) {
 			RenderTop: 2,
 			OutDir:    dir,
 		}
-		res, err := runSearchOnCells(context.Background(), opts, cfg, vo, &splitOutput{}, faceColorRenderer)
+		res, err := runSearchOnCells(context.Background(), opts, cfg, vo, synthClipGeometry(vo), faceColorRenderer)
 		if err != nil {
 			t.Fatalf("runSearchOnCells: %v", err)
 		}
@@ -388,7 +417,7 @@ func TestMetricInvariants(t *testing.T) {
 	wrong := [3]uint8{0xC0, 0x40, 0x20}
 
 	vo := synthVO(10, 10, func(x, y int) [3]uint8 { return target })
-	geom := buildSplatGeometry(vo, nil)
+	geom := synthClipGeometry(vo)
 	nVis := len(vo.VisibleToCell)
 	fill := func(c [3]uint8) [][3]uint8 {
 		out := make([][3]uint8, nVis)
@@ -430,6 +459,49 @@ func TestMetricInvariants(t *testing.T) {
 	}
 	if !(wrongCand.RankKey > matchCand.RankKey) {
 		t.Fatalf("wrong rank key %v not worse than match %v", wrongCand.RankKey, matchCand.RankKey)
+	}
+}
+
+// TestClipGeometrySharedAcrossColorings is the like-for-like guard: the target
+// and every candidate must render from bit-identical geometry, differing only
+// in per-face color. Any divergence in vertices or faces would make the ΔE
+// comparison measure a silhouette/topology difference rather than a color one.
+func TestClipGeometrySharedAcrossColorings(t *testing.T) {
+	vo := synthVO(8, 8, func(x, y int) [3]uint8 { return [3]uint8{0x40, 0x80, 0xC0} })
+	geom := synthClipGeometry(vo)
+	nVis := len(vo.VisibleToCell)
+	fill := func(c [3]uint8) [][3]uint8 {
+		out := make([][3]uint8, nVis)
+		for i := range out {
+			out[i] = c
+		}
+		return out
+	}
+
+	target := geom.colorByVisible(fill([3]uint8{0x30, 0x80, 0xC0}))
+	cand := geom.colorByVisible(fill([3]uint8{0xC0, 0x40, 0x20}))
+
+	// Vertices and faces are the SAME backing slices (shared read-only), not
+	// merely equal — the geometry is built once and never recolored in place.
+	if &target.Vertices[0] != &cand.Vertices[0] || len(target.Vertices) != len(cand.Vertices) {
+		t.Fatal("target and candidate do not share vertex geometry")
+	}
+	if &target.Faces[0] != &cand.Faces[0] || len(target.Faces) != len(cand.Faces) {
+		t.Fatal("target and candidate do not share face geometry")
+	}
+	// Face count matches the synthetic shell: 2 triangles per visible cell.
+	if want := nVis * 2; len(target.Faces)/3 != want {
+		t.Fatalf("face count = %d, want %d (2 tris/cell)", len(target.Faces)/3, want)
+	}
+	// Color buffers are independent (fresh per call) and actually differ.
+	if len(target.FaceColors) != len(cand.FaceColors) {
+		t.Fatalf("FaceColors length mismatch: %d vs %d", len(target.FaceColors), len(cand.FaceColors))
+	}
+	if len(target.FaceColors) > 0 && &target.FaceColors[0] == &cand.FaceColors[0] {
+		t.Fatal("FaceColors buffers are aliased; recoloring would corrupt the target")
+	}
+	if reflect.DeepEqual(target.FaceColors, cand.FaceColors) {
+		t.Fatal("distinct colorings produced identical FaceColors")
 	}
 }
 
