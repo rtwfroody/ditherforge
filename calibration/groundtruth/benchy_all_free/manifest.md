@@ -54,3 +54,28 @@ that dither can mix toward everything between.
   signature of this failure.
 - `inputFile` and the .mtlx are absolute paths to the author's local
   library; not committed.
+
+## Tuned-pick comparison (2026-07-24)
+
+After the scorer retune, the production fast scorer's pick for this fixture
+is **Green `#06924D` | Brown `#55331A` | Purple `#6C47B2` | Olive Green
+`#948902`** — rank **427/4845**, rankKey **31.197**, delta **8.756** vs the
+winner (Black | Purple | Red | Yellow, rankKey 22.441). That is a large
+improvement on the pre-tuning pick (Azure | Green | Magenta | Orange, rank
+940, rankKey 35.727, delta 13.286) recorded above.
+
+Rendered with `palettesearch --render-palette` (added for this comparison)
+into `prodpick_tuned_*.png`. Side-by-side montage (perspective view):
+`compare_tuned_vs_winner.png` — panels: sampled target · winner · tuned
+pick · old pre-tuning pick.
+
+Visual read: the retune fixed the **upper hull** (both tuned and winner now
+carry real Purple, so the large purple cabin/body matches the target, where
+the old pick rendered it pink/blue from Magenta+Azure — its worst,
+area-dominant error). The tuned pick's remaining failure is the **lower
+hull warm gradient**: the target's red→orange→yellow waterline renders as
+olive/mustard+green mud because the palette has no warm-red source. The
+winner reproduces that gradient faithfully (real Red + Yellow). The delta
+8.756 is concentrated and obvious, not subtle — a wrong hue-family bottom
+third, visible at any distance. The genuine Green band renders cleanly in
+the tuned pick; only the red/orange/yellow end is lost.
