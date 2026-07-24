@@ -66,26 +66,29 @@ source exists at all.
 
 ## Tuned-pick comparison (2026-07-24)
 
-After the scorer retune, the production fast scorer's pick for this fixture
-is **Green `#06924D` | Brown `#55331A` | Purple `#6C47B2` | Olive Green
-`#948902`** — rank **427/4845**, rankKey **31.197**, delta **8.756** vs the
-winner (Black | Purple | Red | Yellow, rankKey 22.441). That is a large
-improvement on the pre-tuning pick (Azure | Green | Magenta | Orange, rank
-940, rankKey 35.727, delta 13.286) recorded above.
+The production fast scorer's pick for this fixture is **Green `#06924D` |
+Brown `#55331A` | Purple `#6C47B2` | Olive Green `#948902`** — rank
+**414/4845**, rankKey **30.776**, delta **8.682** vs the winner (Black |
+Purple | Red | Yellow, rankKey 22.094).
 
-Rendered with `palettesearch --render-palette` (added for this comparison)
-into `prodpick_tuned_*.png`. Side-by-side montage (perspective view):
-`compare_tuned_vs_winner.png` — panels: sampled target · winner · tuned
-pick · old pre-tuning pick. Note: this montage predates the clip-triangle
-re-sweep (splat-quad renders); a print-sim comparison will replace it.
+Rendered from the real clipped cell-triangle geometry (no splat-quad gap
+artifacts) into `prodpick_*.png`. The harness render path already applies
+the print-sim neighbor-blend model: candidate visible colors come from
+`voxel.EffectiveCellColors` with `simNeighborParams(LayerHeight)`, so no
+separate print-sim pass is needed — these renders *are* the print sim.
+Side-by-side montage (perspective view): `compare_tuned_vs_winner.png` —
+panels: sampled target · winner · prod pick.
 
-Visual read: the retune fixed the **upper hull** (both tuned and winner now
-carry real Purple, so the large purple cabin/body matches the target, where
-the old pick rendered it pink/blue from Magenta+Azure — its worst,
-area-dominant error). The tuned pick's remaining failure is the **lower
-hull warm gradient**: the target's red→orange→yellow waterline renders as
-olive/mustard+green mud because the palette has no warm-red source. The
-winner reproduces that gradient faithfully (real Red + Yellow). The delta
-8.756 is concentrated and obvious, not subtle — a wrong hue-family bottom
-third, visible at any distance. The genuine Green band renders cleanly in
-the tuned pick; only the red/orange/yellow end is lost.
+Visual read (clip-triangle renders): the **upper hull** is a near-tie — both
+pick and winner carry real Purple, so the large purple cabin/body matches
+the target. The winner's Purple+Red+Black speckle reads slightly magenta
+and darker; the prod pick's Purple+Brown is arguably a touch closer to the
+target's clean purple up top. The pick's decisive failure is the **lower
+hull warm gradient**: the target's blue→green→yellow→orange→red waterline
+collapses to olive/mustard+brown mud in the prod pick, because the palette
+has no warm-red or true-yellow source (Olive Green `#948902` is its only
+warm-ish note). The winner reproduces the gradient faithfully — a clear
+yellow band above a red/orange keel. The delta 8.682 is concentrated and
+obvious, not subtle: a wrong hue-family bottom third on the model's most
+colorful feature, visible at any distance and plausibly objectionable on a
+real print. The prior splat-based assessment holds on the clean renders.
