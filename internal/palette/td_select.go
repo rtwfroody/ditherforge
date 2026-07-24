@@ -119,6 +119,39 @@ func mixComplexityNuFromEnv() float64 {
 	return mixComplexityNu
 }
 
+// mixSpreadSat is the saturation scale S0 of the MIX-SPREAD cost. The raw
+// per-sample mix spread S = Σ_k bary_k·|eff_k − s| grows without bound as the
+// supporting hull vertices spread apart, but dither GRAININESS — what the term
+// is meant to model — saturates: once the mixed colors are already far apart the
+// speckle is fully visible and pushing them further apart barely changes the
+// perceived texture. The linear μ·S therefore over-taxed palettes built from
+// gamut extremes (a mid-hue sample barycentrically supported by Black + a
+// saturated primary has a large S even though the dither renders the mix fine —
+// ground truth confirms benchy's top entries all use such extremes). The
+// saturating form μ·S/(1 + S/S0) is ≈ linear for S ≪ S0 and asymptotes to μ·S0
+// for S ≫ S0, so near-neighbour mixing stays cheap while distant mixing is
+// charged a bounded graininess penalty instead of an ever-growing distance.
+// A very large S0 recovers the old linear behavior. Overridable via
+// DITHERFORGE_SELECT_MIXSAT (must be strictly positive — it is a divisor).
+const mixSpreadSat = 30.0
+
+func mixSpreadSatFromEnv() float64 {
+	if v := os.Getenv("DITHERFORGE_SELECT_MIXSAT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return mixSpreadSat
+}
+
+// saturate maps a non-negative raw spread s through the soft-knee s/(1 + s/s0):
+// ≈ s for s ≪ s0, exactly s0/2 at s == s0, and asymptotically s0 for s ≫ s0. It
+// is monotone increasing in s. A very large s0 recovers the identity (linear)
+// mapping. s0 must be > 0 (guaranteed by mixSpreadSatFromEnv).
+func saturate(s, s0 float64) float64 {
+	return s / (1 + s/s0)
+}
+
 // ditherSpreadFactorFromEnv returns the effective ditherSpreadFactor, overridable
 // via DITHERFORGE_SELECT_SPREAD for recalibration (see ditherSpreadFactor).
 func ditherSpreadFactorFromEnv() float64 {
@@ -151,6 +184,7 @@ type SelectionTuning struct {
 	WashReachFactor     float64
 	MixSpreadMu         float64
 	MixComplexityNu     float64
+	MixSpreadSat        float64
 	DitherSpreadFactor  float64
 	ChromaSpreadFalloff float64
 	NominalDupDeltaE    float64
@@ -168,6 +202,7 @@ func EffectiveSelectionTuning() SelectionTuning {
 		WashReachFactor:     washReachFactorFromEnv(),
 		MixSpreadMu:         mixSpreadMuFromEnv(),
 		MixComplexityNu:     mixComplexityNuFromEnv(),
+		MixSpreadSat:        mixSpreadSatFromEnv(),
 		DitherSpreadFactor:  ditherSpreadFactorFromEnv(),
 		ChromaSpreadFalloff: chromaSpreadFalloffFromEnv(),
 		NominalDupDeltaE:    nominalDupDeltaE,
@@ -209,6 +244,7 @@ type tdSelectState struct {
 	wash      float64 // washReachFactor (env-overridable)
 	mu        float64 // mixSpreadMu (env-overridable)
 	nu        float64 // mixComplexityNu (env-overridable)
+	sat       float64 // mixSpreadSat S0 (env-overridable)
 	spread    float64 // ditherSpreadFactor (env-overridable)
 	falloff   float64 // chromaSpreadFalloff (env-overridable)
 }
@@ -289,6 +325,7 @@ func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3
 		wash:       washReachFactorFromEnv(),
 		mu:         mixSpreadMuFromEnv(),
 		nu:         mixComplexityNuFromEnv(),
+		sat:        mixSpreadSatFromEnv(),
 		spread:     ditherSpreadFactorFromEnv(),
 		falloff:    falloff,
 	}
@@ -365,8 +402,8 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 			// Attribute the target's hull coverage to the vertices actually
 			// supporting the closest hull point (barycentric weights over the
 			// enclosing simplex — the containing tetrahedron for an interior
-			// sample, else the nearest triangle/edge/vertex). hullDist equals
-			// distToConvexHull; the feature just tells us WHO provides the reach.
+			// sample, else the nearest triangle/edge/vertex). hullDist is the exact
+			// hull distance; the feature just tells us WHO provides the reach.
 			hullDist, feat, bary := closestHullFeature(s.Lab, verts)
 			knee := st.knee[j]
 			nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, knee)
@@ -401,7 +438,12 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 					mixComplexity = effN - 2
 				}
 			}
-			d = hullDist + spread*nearDist + st.wash*washDist + st.mu*mixSpread + st.nu*mixComplexity
+			// Saturate the mix-spread contribution: it tracks the raw spread S for
+			// S ≪ S0 but asymptotes to S0 for S ≫ S0, modeling graininess (which
+			// saturates once the mixed colors are already far apart) rather than raw
+			// distance (which grows without bound and over-taxes gamut extremes).
+			mixSpreadCost := saturate(mixSpread, st.sat)
+			d = hullDist + spread*nearDist + st.wash*washDist + st.mu*mixSpreadCost + st.nu*mixComplexity
 		} else {
 			d = nearestVertexDist(s.Lab, verts)
 		}

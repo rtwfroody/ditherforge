@@ -2,63 +2,6 @@ package palette
 
 import "math"
 
-// distToConvexHull returns the Euclidean distance from point p to the convex
-// hull of vertices in 3D. For small vertex counts (typical palette sizes) we
-// check all sub-simplices: tetrahedra, triangles, edges, and vertices.
-func distToConvexHull(p [3]float64, verts [][3]float64) float64 {
-	n := len(verts)
-	if n == 0 {
-		return math.MaxFloat64
-	}
-
-	// Check tetrahedra first — if point is inside one, distance is 0.
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			for k := j + 1; k < n; k++ {
-				for l := k + 1; l < n; l++ {
-					if pointInTetrahedron(p, verts[i], verts[j], verts[k], verts[l]) {
-						return 0
-					}
-				}
-			}
-		}
-	}
-
-	best := math.MaxFloat64
-
-	// Check all triangles.
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			for k := j + 1; k < n; k++ {
-				d := distToTriangle(p, verts[i], verts[j], verts[k])
-				if d < best {
-					best = d
-				}
-			}
-		}
-	}
-
-	// Check all edges.
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			d := distToSegment(p, verts[i], verts[j])
-			if d < best {
-				best = d
-			}
-		}
-	}
-
-	// Check all vertices.
-	for i := 0; i < n; i++ {
-		d := dist3(p, verts[i])
-		if d < best {
-			best = d
-		}
-	}
-
-	return best
-}
-
 func dist3(a, b [3]float64) float64 {
 	d0 := a[0] - b[0]
 	d1 := a[1] - b[1]
@@ -240,10 +183,10 @@ func tetraBarycentric(p, a, b, c, d [3]float64) [4]float64 {
 // closestHullFeature returns the distance from p to the convex hull of verts,
 // plus the indices of the supporting sub-simplex of the closest hull point and
 // that point's barycentric weights over those vertices (weights ≥ 0, sum 1). It
-// mirrors distToConvexHull's feature set and iteration order exactly — the first
-// containing tetrahedron ⇒ interior (distance 0), otherwise the nearest
-// triangle, edge, or vertex — so the returned distance is identical to
-// distToConvexHull. The extra attribution lets callers charge a cost to the
+// checks the same feature set in the same order — the first containing
+// tetrahedron ⇒ interior (distance 0), otherwise the nearest triangle, edge, or
+// vertex — so the returned distance is the exact Euclidean distance from p to
+// the convex hull. The extra attribution lets callers charge a cost to the
 // vertices actually responsible for the coverage (see tdSelectState.score).
 // Ties resolve toward the lexicographically-first feature, so the result is
 // deterministic regardless of scheduling.
@@ -278,7 +221,7 @@ func closestHullFeature(p [3]float64, verts [][3]float64) (float64, []int, []flo
 		}
 	}
 
-	// Triangles, then edges, then vertices — same order as distToConvexHull.
+	// Triangles, then edges, then vertices — nearest wins.
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			for k := j + 1; k < n; k++ {

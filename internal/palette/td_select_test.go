@@ -585,3 +585,53 @@ func TestMultiStartVNDMatchesExhaustive(t *testing.T) {
 		}
 	}
 }
+
+// TestSaturateMixSpread pins the phase-2 mix-spread soft knee s/(1 + s/s0): it is
+// ≈ linear near 0, exactly s0/2 at s == s0, monotone increasing, capped below s0,
+// and recovers the identity mapping for a very large s0.
+func TestSaturateMixSpread(t *testing.T) {
+	const s0 = 30.0
+
+	// s == 0 → 0.
+	if got := saturate(0, s0); got != 0 {
+		t.Errorf("saturate(0, %g) = %g, want 0", s0, got)
+	}
+
+	// s == s0 → exactly s0/2.
+	if got := saturate(s0, s0); math.Abs(got-s0/2) > 1e-12 {
+		t.Errorf("saturate(s0, s0) = %g, want %g", got, s0/2)
+	}
+
+	// Near-linear for s ≪ s0: relative error grows like s/s0, so at s = s0/100
+	// the output is within ~1% of s.
+	small := s0 / 100
+	if got := saturate(small, s0); math.Abs(got-small)/small > 0.011 {
+		t.Errorf("saturate(%g, %g) = %g, not ≈ linear (rel err %.4f)", small, s0, got, math.Abs(got-small)/small)
+	}
+
+	// Monotone increasing and strictly capped below s0 across the whole range.
+	prev := math.Inf(-1)
+	for s := 0.0; s <= 100000; s = s*1.5 + 1 {
+		got := saturate(s, s0)
+		if got <= prev {
+			t.Errorf("saturate not monotone: saturate(%g)=%g <= previous %g", s, got, prev)
+		}
+		if got >= s0 {
+			t.Errorf("saturate(%g, %g) = %g exceeds cap s0=%g", s, s0, got, s0)
+		}
+		prev = got
+	}
+
+	// Asymptote: far past s0 the output approaches s0.
+	if got := saturate(1e6, s0); math.Abs(got-s0) > 1e-3 {
+		t.Errorf("saturate(1e6, %g) = %g, want ≈ %g", s0, got, s0)
+	}
+
+	// Very large s0 recovers the identity (linear) mapping.
+	const huge = 1e12
+	for _, s := range []float64{1, 10, 100} {
+		if got := saturate(s, huge); math.Abs(got-s)/s > 1e-6 {
+			t.Errorf("saturate(%g, %g) = %g, want ≈ %g (linear recovery)", s, huge, got, s)
+		}
+	}
+}

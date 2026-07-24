@@ -1053,8 +1053,10 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// strong (exhaustive/VND) search is safe. v7 unifies the dithering=true
 	// nominal path onto the per-sample TD-aware scorer (β forced to 0 when opaque)
 	// with barycentric-membership usage prediction, changing honorTD=false
-	// selections by design.
-	writeString(h, "palette-td-aware-v7")
+	// selections by design. v8 replaces the linear mix-spread tax μ·S with the
+	// saturating form μ·S/(1 + S/S0) (mixSpreadSat), so palettes built from gamut
+	// extremes are charged bounded graininess instead of unbounded distance.
+	writeString(h, "palette-td-aware-v8")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	selEll, selKappa := simNeighborParams(opts.LayerHeight)
@@ -1068,6 +1070,7 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 		st.WashReachFactor,
 		st.MixSpreadMu,
 		st.MixComplexityNu,
+		st.MixSpreadSat,
 		st.DitherSpreadFactor,
 		st.ChromaSpreadFalloff,
 		st.NominalDupDeltaE,
