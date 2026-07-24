@@ -56,11 +56,13 @@ const usageSwapTolerance = 0.02
 // Note wash ≈ βT·|s − C|, so this is a soft re-introduction of the nominal
 // distance, gated to the filament actually relied upon for that sample.
 //
-// Calibrated (see internal/palette/td_select_test.go and the orzel drivers) so
-// free 4-slot selection recovers the Brown/White/Black eagle body while the
-// defect-2 Brown-over-WineRed fix and the color fixtures are preserved.
-// Overridable via DITHERFORGE_SELECT_WASH for recalibration.
-const washReachFactor = 0.6
+// Set by regret minimization over calibration/groundtruth/ via calibration/
+// tune.sh (2026-07-24) — coordinate descent minimizing total palette-selection
+// regret across the 4 ground-truth fixtures — not hand-tuned. The stronger wash
+// (up from the hand-tuned 0.6) is harsher on translucent chameleons, which the
+// sweep confirmed strictly improves all 4 fixtures plus the held-out 28-color
+// orzel case. Overridable via DITHERFORGE_SELECT_WASH for recalibration.
+const washReachFactor = 0.9
 
 func washReachFactorFromEnv() float64 {
 	if v := os.Getenv("DITHERFORGE_SELECT_WASH"); v != "" {
@@ -80,14 +82,13 @@ func washReachFactorFromEnv() float64 {
 // the spread, so a near-match workhorse beats a saturated hull-inflating extreme
 // under strong search. Local mixing between nearby colors stays nearly free.
 //
-// Calibrated (mu, nu) = (0.15, 0.08) by sweeping the earth / bricks_benchy /
-// orzel / gray-eagle fixtures under budgeted-exhaustive search so each GLOBAL
-// optimum is perceptually right (earth keeps a land colour, orzel drops the
-// Purple/OliveGreen hull-spanners for an opaque {Black, Brown, DarkOliveDrab,
-// Tan}, bricks keeps a warm chromatic, gray keeps its dark anchor). Higher mu
-// starts collapsing toward k-medoids (gamut shrink); higher nu drops necessary
-// dark anchors. Overridable via DITHERFORGE_SELECT_MU.
-const mixSpreadMu = 0.15
+// Set by regret minimization over calibration/groundtruth/ via calibration/
+// tune.sh (2026-07-24), not hand-tuned. The stronger μ (up from the hand-tuned
+// 0.15) is harsher on wide mixes — it charges more for reaching a target by
+// dithering colors that sit far apart — which the coordinate descent found
+// strictly improves all 4 ground-truth fixtures. Overridable via
+// DITHERFORGE_SELECT_MU.
+const mixSpreadMu = 0.30
 
 func mixSpreadMuFromEnv() float64 {
 	if v := os.Getenv("DITHERFORGE_SELECT_MU"); v != "" {
@@ -105,10 +106,13 @@ func mixSpreadMuFromEnv() float64 {
 // 3+ mixes pay proportionally. effN (not support cardinality) is used because an
 // interior point in 3D Lab generically has 4-vertex barycentric support even when
 // its weight is concentrated on two — effN discounts the near-zero contributors
-// smoothly. Calibrated to 0.08 (see mixSpreadMu); the fixture sweep breaks above
-// ~0.10 (the complexity charge starts dropping the dark anchor a warm body needs
-// to reduce its 3-mix). Overridable via DITHERFORGE_SELECT_NU.
-const mixComplexityNu = 0.08
+// smoothly. Set by regret minimization over calibration/groundtruth/ via
+// calibration/tune.sh (2026-07-24): the descent drove ν to 0.0, which DISABLES
+// the mix-complexity term at the shipped default (the stronger μ mix-spread
+// charge now carries the load the ν term used to). The term and its env override
+// (DITHERFORGE_SELECT_NU) are retained for future tuning — set ν > 0 to
+// re-enable it. Overridable via DITHERFORGE_SELECT_NU.
+const mixComplexityNu = 0.0
 
 func mixComplexityNuFromEnv() float64 {
 	if v := os.Getenv("DITHERFORGE_SELECT_NU"); v != "" {

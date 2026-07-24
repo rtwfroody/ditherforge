@@ -45,15 +45,17 @@ NOREGRESS_SLACK=0.25
 # Value ladders (geometric around the current defaults). MIXSAT's last rung is
 # effectively "off" (linear mix-spread). CHROMA_FALLOFF is left fixed.
 LADDER_MIXSAT=(10 15 22 30 45 70 120 1000000)
-LADDER_MU=(0 0.05 0.10 0.15 0.22 0.30)
-LADDER_WASH=(0.2 0.4 0.6 0.9 1.2)
+LADDER_MU=(0 0.05 0.10 0.15 0.18 0.22 0.26 0.30 0.40)
+LADDER_WASH=(0.2 0.4 0.6 0.75 0.9 1.05 1.2 1.5)
 LADDER_NU=(0 0.04 0.08 0.15)
-LADDER_SPREAD=(0.15 0.3 0.5)
+LADDER_SPREAD=(0.15 0.3 0.5 0.7 1.0 1.5 2.0)
 
-# Start point = current defaults (all rungs of their own ladders).
-CUR_WASH=0.6
-CUR_MU=0.15
-CUR_NU=0.08
+# Start point: the shipped defaults as of this commit (adopted from the descent's
+# regret-minimizing optimum — wash 0.9 / mu 0.30 / nu 0 / spread 0.3 / mixsat 30).
+# Resuming the descent from here should find no further improvement.
+CUR_WASH=0.9
+CUR_MU=0.30
+CUR_NU=0
 CUR_SPREAD=0.3
 CUR_MIXSAT=30
 
