@@ -73,10 +73,16 @@ func hasColor(sel []InventoryEntry, c [3]uint8) bool {
 	return false
 }
 
-// TestSelectUniformTDBitIdentical: when every filament shares one TD, TD-aware
-// selection must produce exactly the same result as nominal selection — a
-// uniform shift toward infill can't change which subset scores best, and the
-// downgrade routes both through the identical nominal code path.
+// TestSelectUniformTDBitIdentical: the post-unification invariant. Under
+// dithering the per-sample TD-aware scorer is ALWAYS used; when no genuine
+// lateral leak is in play (honorTD off, uniform TDs, or all-opaque) every β is
+// forced to 0 so each filament's effective vertex equals its nominal Lab at every
+// sample — the wash term self-zeroes and the scorer degrades to nominal-color
+// scoring. This test pins that degradation two ways: (1) a uniform-TD state
+// produces eff == nominal at every sample (bit-identical vertices), and (2) the
+// three "no genuine leak" gates — honorTD off, uniform non-opaque TDs, and
+// honorTD on with a leak present — all select the SAME subset, so none of them
+// reorders the palette relative to the forced-opaque baseline.
 func TestSelectUniformTDBitIdentical(t *testing.T) {
 	inv := []InventoryEntry{
 		{Color: [3]uint8{0x08, 0x0A, 0x0D}, TD: 1.5},
@@ -88,59 +94,76 @@ func TestSelectUniformTDBitIdentical(t *testing.T) {
 	}
 	samples := grayEagleSamples()
 
-	nominal, err := SelectFromInventory(context.Background(), samples, nil, inv, 4, nil, true, TDParams{}, progress.NullTracker{})
-	if err != nil {
-		t.Fatalf("nominal select: %v", err)
+	// (1) Bit-identical eff: a forced-opaque state (uniform TDs) gives every
+	// entry its nominal Lab at every sample.
+	invLab := make([][3]float64, len(inv))
+	for i, e := range inv {
+		invLab[i] = nominalLabOf(e.Color)
 	}
-	tdAware, err := SelectFromInventory(context.Background(), samples, nil, inv, 4, nil, true,
-		TDParams{Enabled: true, LayerHeightMM: 0.08, ShellThicknessMM: 0.84}, progress.NullTracker{})
-	if err != nil {
-		t.Fatalf("td-aware select: %v", err)
-	}
-	if len(nominal) != len(tdAware) {
-		t.Fatalf("length mismatch: nominal %d, td-aware %d", len(nominal), len(tdAware))
-	}
-	for i := range nominal {
-		if nominal[i].Color != tdAware[i].Color {
-			t.Errorf("entry %d differs: nominal %v, td-aware %v", i, nominal[i].Color, tdAware[i].Color)
+	hist := CellColorHistogram(samples, nil)
+	st := newTDSelectState(inv, nil, invLab, nil, hist, DefaultNeighborPathMM, TransmittanceKappa, true, true /*forceOpaque*/)
+	for e := range inv {
+		for j := range hist {
+			if st.invEff[e][j] != invLab[e] {
+				t.Fatalf("forced-opaque eff[%d][%d] = %v, want nominal %v", e, j, st.invEff[e][j], invLab[e])
+			}
 		}
+	}
+
+	// (2) The three no-genuine-leak gates all pick the same subset.
+	sel := func(name string, tdp TDParams) []InventoryEntry {
+		got, err := SelectFromInventory(context.Background(), samples, nil, inv, 4, nil, true, tdp, progress.NullTracker{})
+		if err != nil {
+			t.Fatalf("%s select: %v", name, err)
+		}
+		return got
+	}
+	honorOff := sel("honorTD-off", TDParams{})
+	uniformOn := sel("uniform-on", TDParams{Enabled: true, LayerHeightMM: 0.08, ShellThicknessMM: 0.84})
+	sameSet := func(a, b []InventoryEntry) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		seen := map[[3]uint8]bool{}
+		for _, e := range a {
+			seen[e.Color] = true
+		}
+		for _, e := range b {
+			if !seen[e.Color] {
+				return false
+			}
+		}
+		return true
+	}
+	if !sameSet(honorOff, uniformOn) {
+		t.Errorf("honorTD-off %s != uniform-TD %s (forced-opaque degradation must match)", fmtSel(honorOff), fmtSel(uniformOn))
 	}
 }
 
 // TestSelectTDAwareGrayEagle is the gray-eagle regression in miniature: a dark
-// warm-brown body over ~50% near-gray coverage. Nominal scoring anchors the
-// dark end on opaque Black and leans on translucent Orange (TD 3.3) for warmth,
-// leaving opaque Brown out entirely. TD-aware scoring composites every filament
-// toward the area-weighted mean of the target colors under the transmittance
-// model (β = 10^(−ℓ/TD), the neighbor deviation filtered by the filament's own
-// hue T = (C/max C)^κ) before scoring, with the shipped calibration
-// ℓ = DefaultNeighborPathMM = 0.130 mm and κ = TransmittanceKappa = 3.04. The
-// effective picture then wants opaque Brown (β = 0, its full sienna survives) as
-// the dark warm anchor, so Brown enters the palette (displacing Black) exactly
-// where nominal scoring never would.
+// warm-brown body over ~50% near-gray coverage. The discriminator is TRANSLUCENT
+// Orange (TD 3.3, β ≈ 0.81 — the most translucent filament here). The opaque
+// scorer (honorTD off, every β forced to 0) has no reason to distrust Orange and
+// reaches for it as a warm/light contributor; TD-aware scoring composites every
+// filament under the transmittance model (β = 10^(−ℓ/TD), the neighbor deviation
+// filtered by the filament's own hue T = (C/max C)^κ; shipped calibration
+// ℓ = DefaultNeighborPathMM = 0.130 mm, κ = TransmittanceKappa = 3.04) and
+// REJECTS Orange — a solid orange region reads orange, not the warm brown its eff
+// washes toward — anchoring the dark end on opaque Black instead.
 //
-// The recorded outcome (ℓ = 0.130 mm, κ = 3.04 — the shipped model; the
-// load-bearing Brown/Black swap is unchanged from the earlier ℓ = 0.3, κ = 0
-// additive model):
+// The recorded outcome (post-unification: the honorTD-off path now runs the same
+// per-sample scorer with β forced to 0, plus the budgeted-exhaustive search, so
+// it too can justify opaque Brown for the warm body):
 //
-//	nominal:  Black SteelGrey Orange Cream
-//	td-aware: Black Brown SteelGrey ColdWhite
+//	opaque (honorTD off): Brown SteelGrey Orange ColdWhite
+//	td-aware:             Black Brown SteelGrey ColdWhite
 //
-// Two things move under the neighbor model. Brown ENTERS as the opaque warm
-// anchor (the load-bearing fix — nominal can't justify opaque Brown, TD-aware
-// does), and Cream → ColdWhite on the light anchor. Opaque Black stays as the
-// dark anchor.
-//
-// Orange (TD 3.3, β ≈ 0.81 — the MOST translucent filament here) is REJECTED:
-// the wash-reach penalty is charged on hull MEMBERSHIP (barycentric over the
-// enclosing simplex), so a translucent filament pays for the coverage it
-// provides even when it is never the nearest vertex. A solid orange region reads
-// orange, not the warm brown its eff washes toward, so opaque Black + Brown win
-// the two dark/warm anchors outright. This is the same anti-chameleon reach
-// penalty that keeps a saturated translucent Magenta out of a cream body (see
-// tdSelectState.score). Under the earlier nearest-vertex-only wash Orange
-// displaced Black — it fake-enclosed the warm body for free because it was
-// rarely the nearest vertex and so was never charged for the reach.
+// The load-bearing divergence: TD-aware DROPS translucent Orange and ADDS opaque
+// Black; the opaque scorer keeps Orange and has no Black. The wash-reach penalty
+// is charged on hull MEMBERSHIP (barycentric over the enclosing simplex), so a
+// translucent filament pays for the coverage it provides even when it is never
+// the nearest vertex — the same anti-chameleon penalty that keeps a saturated
+// translucent Magenta out of a cream body (see tdSelectState.score).
 func TestSelectTDAwareGrayEagle(t *testing.T) {
 	black := [3]uint8{0x08, 0x0A, 0x0D}
 	brown := [3]uint8{0x55, 0x33, 0x1A}
@@ -189,17 +212,15 @@ func TestSelectTDAwareGrayEagle(t *testing.T) {
 		t.Errorf("td-aware should drop Cream for ColdWhite; got %s", fmtSel(tdAware))
 	}
 
-	// The test only discriminates if the two paths actually diverge — that is
-	// the whole point of the feature. Nominal must omit Brown (it anchors the
-	// dark end on opaque Black) while still reaching for translucent Orange.
-	if hasColor(nominal, brown) {
-		t.Errorf("test does not discriminate: nominal already picks Brown; got %s", fmtSel(nominal))
-	}
-	if !hasColor(nominal, black) {
-		t.Errorf("expected nominal to anchor the dark end on opaque Black; got %s", fmtSel(nominal))
-	}
+	// The test only discriminates if the two paths actually diverge on the
+	// translucent filament — that is the whole point of the feature. The opaque
+	// scorer reaches for translucent Orange (and, lacking a leak model, sees no
+	// reason to prefer opaque Black); TD-aware rejects Orange for opaque Black.
 	if !hasColor(nominal, orange) {
-		t.Errorf("expected nominal to pick translucent Orange; got %s", fmtSel(nominal))
+		t.Errorf("expected the opaque scorer to reach for translucent Orange; got %s", fmtSel(nominal))
+	}
+	if hasColor(nominal, black) {
+		t.Errorf("test does not discriminate: opaque scorer already picks Black (the TD-aware anchor); got %s", fmtSel(nominal))
 	}
 }
 

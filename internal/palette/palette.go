@@ -511,31 +511,20 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		lockedLab[i][0], lockedLab[i][1], lockedLab[i][2] = cf.Lab()
 	}
 
-	var scorer scoreFunc
-	if dithering {
-		scorer = weightedHullScore
-	} else {
-		scorer = weightedNearestScore
+	// Neighbor-model parameters (used only by the per-sample TD-aware scorer).
+	neighborPath := float64(tdp.NeighborPathMM)
+	if neighborPath <= 0 {
+		neighborPath = DefaultNeighborPathMM
 	}
+	kappa := float64(tdp.Kappa)
 
-	// TD-aware scoring: only when requested AND the palette's normalized TDs
-	// are non-uniform with at least one filament genuinely translucent. When
-	// active, each candidate subset is scored on its PER-SAMPLE effective colors:
-	// for every target sample s, filament c contributes eff(c, s) — c composited
-	// toward THAT sample's color by its lateral leak β and hue filter T (the
-	// neighbor model; see TDParams and voxel.EffectiveCellColors) — so the vertex
-	// set varies per sample exactly as the dither's per-cell rule does. A
-	// saturated translucent filament therefore can't fake-enclose interior body
-	// colors it physically can't render per cell (defect 2). A uniform shift (or
-	// no shift, when every filament is effectively opaque) can't reorder the
-	// subsets being compared, so those cases keep the bit-identical nominal path
-	// above. See tdSelectState.
-	var tdState *tdSelectState
+	// tdLeak: is a GENUINE per-sample lateral leak in play — TD honored, the
+	// normalized TDs non-uniform, and at least one filament translucent enough to
+	// leak? Only then does each filament's effective color vary per sample. A
+	// uniform shift (or no shift, when every filament is effectively opaque) can't
+	// reorder the subsets being compared.
+	tdLeak := false
 	if tdp.Enabled {
-		neighborPath := float64(tdp.NeighborPathMM)
-		if neighborPath <= 0 {
-			neighborPath = DefaultNeighborPathMM
-		}
 		uniform := true
 		anyLeak := false
 		var first float64
@@ -558,31 +547,57 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		for _, e := range locked {
 			checkTD(e.TD)
 		}
-		if !uniform && anyLeak {
-			kappa := float64(tdp.Kappa)
-			tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering, false)
-			// The search functions call scorer(indices, invLab, lockedLab,
-			// samples); the TD scorer captures its own precomputed state and
-			// ignores those args (invLab is still passed so the enumerators size
-			// off len(inventory)).
-			scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
-				return tdState.score(indices, bound)
-			}
+		tdLeak = !uniform && anyLeak
+	}
+
+	// Selection scorer. For dithering=true the per-sample TD-aware objective is
+	// used UNCONDITIONALLY (tdSelectState.score): when a genuine leak is in play
+	// each filament contributes its per-sample effective color eff(c, s) — c
+	// composited toward THAT sample's color by its lateral leak β and hue filter T
+	// (the neighbor model; see TDParams and voxel.EffectiveCellColors) — so a
+	// saturated translucent filament can't fake-enclose interior body colors it
+	// can't render per cell (defect 2). When no genuine leak is in play, every β is
+	// forced to 0 so eff ≡ nominal and the wash term self-zeroes, but the same
+	// mix-spread, mix-complexity, near-duplicate reject, predicted-usage net, and
+	// budgeted exhaustive/VND search still apply. This unifies the former separate
+	// greedy nominal-hull path (whose additive-mixing over-optimism the
+	// hull-membership guards now tame under strong global search) onto one scorer.
+	// For dithering=false each cell gets exactly one color, so the nearest-color
+	// scorer is used unchanged (with the per-sample nearest eff when a leak is in
+	// play, preserving that path's prior behavior). The TD scorer captures its own
+	// precomputed state and ignores the (indices, invLab, lockedLab, samples) args
+	// the search functions pass — invLab is still passed so the enumerators size
+	// off len(inventory).
+	var tdState *tdSelectState
+	var scorer scoreFunc
+	switch {
+	case dithering:
+		tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering, !tdLeak)
+		scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
+			return tdState.score(indices, bound)
+		}
+		if tdLeak {
 			fmt.Printf("  TD-aware selection (per-sample eff): neighbor path %.2f mm, κ %.2f\n", neighborPath, kappa)
 		}
+	case tdLeak:
+		// dithering=false with a genuine leak: score on the per-sample nearest eff.
+		tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering, false)
+		scorer = func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
+			return tdState.score(indices, bound)
+		}
+	default:
+		scorer = weightedNearestScore
 	}
 
 	combos := combinationsCount(len(inventory), n)
-	// The budgeted exhaustive + multi-start VND search is enabled only for the
-	// TD-aware scorer, which the hull-membership wash penalty hardened against
-	// hull over-optimism (see tdSelectState.score). The plain nominal hull
-	// scorer is NOT so hardened: aggressive global search there surfaces its
-	// additive-mixing over-optimism — it prefers a big enclosing hull of
-	// saturated extremes it cannot physically dither to (e.g. a landless
-	// {Black, Yellow, Azure, Aqua} over {Green, Brown, White, Blue} for an earth
-	// globe, ~20% lower score yet perceptually wrong) — which the greedy local
-	// search fortunately steps around. Until the nominal scorer gets a matching
-	// guard, keep it on the legacy greedy swap search (bit-identical to before).
+	// The budgeted exhaustive + multi-start VND search runs whenever the per-sample
+	// TD-aware scorer is active — which is now every dithering=true selection (see
+	// above). Its hull-membership wash + mix-spread/mix-complexity guards tame the
+	// additive-mixing over-optimism that once made aggressive global search unsafe
+	// (a landless {Black, Yellow, Azure, Aqua} beating {Green, Brown, White, Blue}
+	// for an earth globe on raw hull score). Only the dithering=false /
+	// effectively-opaque path (nearest-color scorer, no such guard) stays on the
+	// legacy greedy swap search below.
 	newSearch := tdState != nil
 	exhaustiveThreshold := 2000
 	if newSearch {
@@ -680,7 +695,8 @@ const noBound = math.MaxFloat64
 // accounts for the perceptual cost of dithering distant colors: e.g. gray
 // reproduced by alternating black and white cells looks noisy even though
 // gray is inside the {black,white,...} hull. It is modulated per-sample by
-// chromaSpreadFalloff below — see weightedHullScore.
+// chromaSpreadFalloff below and consumed by tdSelectState.score (via
+// ditherSpreadFactorFromEnv). Overridable with DITHERFORGE_SELECT_SPREAD.
 const ditherSpreadFactor = 0.3
 
 // chromaSpreadFalloff is the Lab-chroma constant in the per-sample
@@ -717,7 +733,7 @@ func nearestVertexDist(p [3]float64, verts [][3]float64) float64 {
 // nearestVertexDistChromaWeighted is nearestVertexDist with a per-sample
 // discount on the L (lightness) axis. lightnessWeight is precomputed by
 // the caller (it shares the same exp(-chroma/falloff) value used to
-// modulate the spread magnitude — see weightedHullScore — and they're
+// modulate the spread magnitude — see tdSelectState.score — and they're
 // the same number expressing the same claim, so we don't recompute).
 //
 // Full lightness weight for achromatic samples means a grey body of a
@@ -754,42 +770,6 @@ func buildVerts(indices []int, invLab [][3]float64, fixedLab [][3]float64) [][3]
 		verts[len(fixedLab)+i] = invLab[idx]
 	}
 	return verts
-}
-
-// weightedHullScore computes total weighted distance from each sample to the
-// full palette (locked + candidate). Uses hull distance plus a dithering
-// spread penalty based on nearest-vertex distance, so colors that require
-// mixing distant palette entries are penalized even when geometrically
-// inside the hull.
-func weightedHullScore(indices []int, invLab [][3]float64, fixedLab [][3]float64, samples []WeightedLabSample, bound float64) float64 {
-	return hullScoreVerts(buildVerts(indices, invLab, fixedLab), samples, bound)
-}
-
-// hullScoreVerts is weightedHullScore's geometric core over already-assembled
-// Lab vertices. bound enables branch-and-bound early abort (see scoreFunc).
-func hullScoreVerts(verts [][3]float64, samples []WeightedLabSample, bound float64) float64 {
-	total := 0.0
-	for _, s := range samples {
-		if total > bound {
-			return noBound
-		}
-		hullDist := distToConvexHull(s.Lab, verts)
-		// Standard CIELAB chroma; multiply by 100 to undo go-colorful's
-		// 1/100 scaling so chromaSpreadFalloff is in familiar units.
-		chroma := math.Sqrt(s.Lab[1]*s.Lab[1]+s.Lab[2]*s.Lab[2]) * 100
-		// chromaKnee is the single perceptual claim: chromatic samples
-		// don't constrain lightness. It's used twice — to suppress the
-		// lightness component of the per-vertex distance, and to suppress
-		// the spread magnitude itself — because both encode the same
-		// fact about how dither can substitute for missing palette
-		// vertices in the lightness direction.
-		chromaKnee := math.Exp(-chroma / chromaSpreadFalloff)
-		nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, chromaKnee)
-		spread := ditherSpreadFactor * chromaKnee
-		d := hullDist + spread*nearDist
-		total += d * d * s.Weight
-	}
-	return total
 }
 
 // weightedNearestScore computes total weighted squared distance from each
