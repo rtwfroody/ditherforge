@@ -41,9 +41,15 @@ REGRET: production fast scorer picked #06924D(Green) #55331A(Brown) #6C47B2(Purp
         its rank 414/4845 (rankKey 30.776); winner rankKey 22.094; delta 8.682
 ```
 
-Worst regret in the suite. The scorer picks four mid-saturation
-mid-hues; ground truth wants gamut extremes (Black, Purple, Red, Yellow)
-that dither can mix toward everything between.
+Worst regret in the suite, and the closed-form scorer's plateau: no
+weight vector on the current five terms gets below ~8.7 here without
+regressing the orzels (coordinate descent converged twice, splat and
+clip-triangle tables alike). The tuned pick does carry Purple (the
+pre-tuning pick's worst omission) but substitutes earth-tone anchors
+(Brown, Olive Green) for the Black/Red/Yellow extremes, collapsing the
+warm lower-hull rainbow bands into olive/mustard. The scorer lacks any
+hue-family-coverage notion — it measures distances, not whether a warm-red
+source exists at all.
 
 ## Notes
 

@@ -36,10 +36,13 @@ REGRET: production fast scorer picked #003776(Blue) #4CC0C7(Polymaker Teal) #948
         its rank 2/4845 (rankKey 13.464); winner rankKey 13.410; delta 0.055
 ```
 
-Largest regret in the suite. Every top-10 ground-truth entry anchors on
-opaque Blue (#003776); the scorer instead takes translucent Azure Blue
-plus Black and leaky Yellow (TD 4.3) — hull-corner reach over deliverable
-color. The greedy nominal path evaluated only 204 subsets.
+Effectively solved: the tuned unified scorer lands at rank 2/4845, one
+rung below the winner (Pink vs Cold White in the last slot). History: the
+pre-milestone-3 greedy nominal path (only ~204 subsets, no wash/mix
+guards) picked translucent Azure Blue plus Black and leaky Yellow (TD
+4.3) at delta 6.014 — hull-corner reach over deliverable color. Most of
+that was recovered by unifying honorTD=false onto the guarded exhaustive
+search (aa3f561), the rest by the tuned weights (b82f1a6).
 
 ## Notes
 

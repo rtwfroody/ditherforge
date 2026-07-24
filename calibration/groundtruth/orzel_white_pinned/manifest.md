@@ -46,9 +46,10 @@ REGRET: production fast scorer picked #080A0D(Black) #55331A(Brown) #A79E82(Tan)
 ```
 
 With Beige gone the scorer no longer reaches for Purple — its pick is a
-sane earthy triple at rank 26/969. The 28-color Purple pathology remains
-reproducible from `d098f98`. The residual miss pattern here: it spends the
-third slot on a second dark (Dark Grey) instead of the chroma carrier
+sane earthy triple at rank 24/969. The 28-color Purple pathology remains
+reproducible from `d098f98` (and the tuned weights fix it there too:
+Black|Brown|Tan, rank 83/2925, delta 1.919). The residual miss pattern:
+it spends the third slot on Black instead of the chroma carrier
 (Orange/Red) every top entry uses.
 
 ## Notes
