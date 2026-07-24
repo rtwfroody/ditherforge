@@ -1,0 +1,43 @@
+[22:40:44.626] Loading: cache hit (disk, 2.017191s) key=85dc68864116
+[22:40:44.875] Voxelizing: cache hit (disk, 248.6ms) key=2811be9bf11b
+[22:40:44.876] Splitting: cache hit (disk, 273µs) key=cd8677ad41c8
+  TD-aware selection (per-sample eff): neighbor path 0.21 mm, κ 0.00
+  Selected colors (969 evaluated) in 0.1s
+palettesearch: 50/969 candidates (0.32s/cand, ETA 293s)
+palettesearch: 100/969 candidates (0.29s/cand, ETA 252s)
+palettesearch: 150/969 candidates (0.28s/cand, ETA 229s)
+palettesearch: 200/969 candidates (0.28s/cand, ETA 212s)
+palettesearch: 250/969 candidates (0.27s/cand, ETA 196s)
+palettesearch: 300/969 candidates (0.27s/cand, ETA 181s)
+palettesearch: 350/969 candidates (0.28s/cand, ETA 171s)
+palettesearch: 400/969 candidates (0.27s/cand, ETA 156s)
+palettesearch: 450/969 candidates (0.27s/cand, ETA 142s)
+palettesearch: 500/969 candidates (0.27s/cand, ETA 128s)
+palettesearch: 550/969 candidates (0.27s/cand, ETA 114s)
+palettesearch: 600/969 candidates (0.27s/cand, ETA 100s)
+palettesearch: 650/969 candidates (0.27s/cand, ETA 87s)
+palettesearch: 700/969 candidates (0.27s/cand, ETA 73s)
+palettesearch: 750/969 candidates (0.27s/cand, ETA 60s)
+palettesearch: 800/969 candidates (0.27s/cand, ETA 46s)
+palettesearch: 850/969 candidates (0.27s/cand, ETA 32s)
+palettesearch: 900/969 candidates (0.27s/cand, ETA 19s)
+palettesearch: 950/969 candidates (0.27s/cand, ETA 5s)
+
+Ground-truth palette search: 969 candidates, 58509 cells, 0.270 s/candidate
+Locked: #EBF7FF
+Rank sigmas: [2 8]
+
+rank  rankKey   p99(σ2)    palette (free slots)
+1     5.211     18.465     #55331A(Brown) #A79E82(Tan) #F67405(Orange)
+2     5.643     18.572     #55331A(Brown) #A79E82(Tan) #E72F1D(Red)
+3     5.782     22.402     #080A0D(Black) #A79E82(Tan) #F67405(Orange)
+4     5.906     19.893     #55331A(Brown) #D5D701(Lime Green) #F1A1AF(Pink)
+5     5.913     19.498     #55331A(Brown) #F67405(Orange) #FFE800(Yellow)
+6     5.979     19.644     #55331A(Brown) #D5D701(Lime Green) #F67405(Orange)
+7     6.136     21.562     #080A0D(Black) #A79E82(Tan) #E72F1D(Red)
+8     6.142     19.175     #55331A(Brown) #A79E82(Tan) #F24574(Magenta)
+9     6.219     19.690     #55331A(Brown) #F1A1AF(Pink) #FFE800(Yellow)
+10    6.310     19.501     #55331A(Brown) #A79E82(Tan) #F1A1AF(Pink)
+
+REGRET: production fast scorer picked #485259(Dark Grey) #55331A(Brown) #A79E82(Tan)
+        its rank 26/969 (rankKey 7.077); winner rankKey 5.211; delta 1.866

@@ -14,7 +14,7 @@
     "nozzleDiameter": "0.4",
     "layerHeight": "0.20",
     "baseMaterialXPath": "/home/tnewsome/Documents/3d_print/materialx/rainbow/pride_rainbow.mtlx",
-    "baseMaterialXTileMM": 8,
+    "baseMaterialXTileMM": 0.2,
     "baseMaterialXTriplanarSharpness": 4,
     "baseColorMode": "texture",
     "colorSlots": [
