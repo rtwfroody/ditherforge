@@ -352,7 +352,7 @@ func TestTDSelectPerSampleEff(t *testing.T) {
 		t.Fatalf("expected 2 distinct samples, got %d", len(samples))
 	}
 
-	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true)
+	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true, false)
 
 	// Opaque Brown: eff == nominal at every sample.
 	for j := range samples {
@@ -438,7 +438,7 @@ func tdAwareScorer(inv []InventoryEntry, samples []WeightedLabSample) (scoreFunc
 	for i, en := range inv {
 		invLab[i] = nominalLabOf(en.Color)
 	}
-	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true)
+	st := newTDSelectState(inv, nil, invLab, nil, samples, DefaultNeighborPathMM, TransmittanceKappa, true, false)
 	return func(indices []int, _ [][3]float64, _ [][3]float64, _ []WeightedLabSample, bound float64) float64 {
 		return st.score(indices, bound)
 	}, invLab

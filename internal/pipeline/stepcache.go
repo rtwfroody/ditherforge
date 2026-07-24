@@ -18,6 +18,7 @@ import (
 	"github.com/rtwfroody/ditherforge/internal/diskcache"
 	"github.com/rtwfroody/ditherforge/internal/loader"
 	"github.com/rtwfroody/ditherforge/internal/materialx"
+	"github.com/rtwfroody/ditherforge/internal/palette"
 	"github.com/rtwfroody/ditherforge/internal/plog"
 	"github.com/rtwfroody/ditherforge/internal/progress"
 	"github.com/rtwfroody/ditherforge/internal/split"
@@ -1049,13 +1050,35 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// filament pays for the interior coverage it fakes (see tdSelectState.score).
 	// v6 adds the mix-spread (μ) and mix-complexity (ν) per-sample costs that
 	// harden the scorer's global optimum against additive hull over-optimism, so
-	// strong (exhaustive/VND) search is safe.
-	writeString(h, "palette-td-aware-v6")
+	// strong (exhaustive/VND) search is safe. v7 unifies the dithering=true
+	// nominal path onto the per-sample TD-aware scorer (β forced to 0 when opaque)
+	// with barycentric-membership usage prediction, changing honorTD=false
+	// selections by design.
+	writeString(h, "palette-td-aware-v7")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	selEll, selKappa := simNeighborParams(opts.LayerHeight)
 	writeFloat32(h, selEll)
 	writeFloat64(h, selKappa)
+	// The scorer's tuning constants (and their env overrides) change which subset
+	// wins, so hash their EFFECTIVE values to keep weight tuning cache-safe. Fixed
+	// field order below is the hash contract — never reorder without a salt bump.
+	st := palette.EffectiveSelectionTuning()
+	for _, v := range []float64{
+		st.WashReachFactor,
+		st.MixSpreadMu,
+		st.MixComplexityNu,
+		st.DitherSpreadFactor,
+		st.ChromaSpreadFalloff,
+		st.NominalDupDeltaE,
+		st.SelectEvalBudget,
+		st.NumVNDAnchorStarts,
+		st.VNDEvalCap,
+		st.UsageDeadFraction,
+		st.UsageSwapTolerance,
+	} {
+		writeFloat64(h, v)
+	}
 }
 
 func hashDitherSettings(c *StageCache, h hash.Hash64, opts Options) {

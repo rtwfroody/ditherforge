@@ -560,7 +560,7 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		}
 		if !uniform && anyLeak {
 			kappa := float64(tdp.Kappa)
-			tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering)
+			tdState = newTDSelectState(inventory, locked, invLab, lockedLab, samples, neighborPath, kappa, dithering, false)
 			// The search functions call scorer(indices, invLab, lockedLab,
 			// samples); the TD scorer captures its own precomputed state and
 			// ignores those args (invLab is still passed so the enumerators size

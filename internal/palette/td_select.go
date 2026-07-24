@@ -119,6 +119,66 @@ func mixComplexityNuFromEnv() float64 {
 	return mixComplexityNu
 }
 
+// ditherSpreadFactorFromEnv returns the effective ditherSpreadFactor, overridable
+// via DITHERFORGE_SELECT_SPREAD for recalibration (see ditherSpreadFactor).
+func ditherSpreadFactorFromEnv() float64 {
+	if v := os.Getenv("DITHERFORGE_SELECT_SPREAD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return ditherSpreadFactor
+}
+
+// chromaSpreadFalloffFromEnv returns the effective chromaSpreadFalloff,
+// overridable via DITHERFORGE_SELECT_CHROMA_FALLOFF (see chromaSpreadFalloff).
+// The override must be strictly positive — it is a divisor in the chroma knee.
+func chromaSpreadFalloffFromEnv() float64 {
+	if v := os.Getenv("DITHERFORGE_SELECT_CHROMA_FALLOFF"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return chromaSpreadFalloff
+}
+
+// SelectionTuning captures the effective (post-env-override where applicable)
+// numeric constants that parameterize palette subset selection. The pipeline
+// hashes these into the palette-stage cache key (see hashPaletteSettings) so a
+// weight-tuning change — a constant edit or an env override — invalidates stale
+// selections instead of silently serving them.
+type SelectionTuning struct {
+	WashReachFactor     float64
+	MixSpreadMu         float64
+	MixComplexityNu     float64
+	DitherSpreadFactor  float64
+	ChromaSpreadFalloff float64
+	NominalDupDeltaE    float64
+	SelectEvalBudget    float64
+	NumVNDAnchorStarts  float64
+	VNDEvalCap          float64
+	UsageDeadFraction   float64
+	UsageSwapTolerance  float64
+}
+
+// EffectiveSelectionTuning reports the tuning constants actually in force for
+// this process, resolving every env override exactly as selection does.
+func EffectiveSelectionTuning() SelectionTuning {
+	return SelectionTuning{
+		WashReachFactor:     washReachFactorFromEnv(),
+		MixSpreadMu:         mixSpreadMuFromEnv(),
+		MixComplexityNu:     mixComplexityNuFromEnv(),
+		DitherSpreadFactor:  ditherSpreadFactorFromEnv(),
+		ChromaSpreadFalloff: chromaSpreadFalloffFromEnv(),
+		NominalDupDeltaE:    nominalDupDeltaE,
+		SelectEvalBudget:    selectEvalBudget,
+		NumVNDAnchorStarts:  numVNDAnchorStarts,
+		VNDEvalCap:          vndEvalCap,
+		UsageDeadFraction:   usageDeadFraction,
+		UsageSwapTolerance:  usageSwapTolerance,
+	}
+}
+
 // tdSelectState precomputes everything the per-sample TD-aware subset scorer
 // needs. Unlike the nominal scorer — which gives each filament ONE static Lab
 // vertex — the TD-aware scorer's vertices vary per sample: entry e contributes
@@ -144,11 +204,13 @@ type tdSelectState struct {
 	invCol  []colorful.Color // nominal color per inventory entry (near-duplicate ΔE00)
 	lockCol []colorful.Color // nominal color per locked entry
 
-	knee      []float64 // per-sample chromaKnee = exp(-chroma/chromaSpreadFalloff)
+	knee      []float64 // per-sample chromaKnee = exp(-chroma/falloff)
 	dithering bool
 	wash      float64 // washReachFactor (env-overridable)
 	mu        float64 // mixSpreadMu (env-overridable)
 	nu        float64 // mixComplexityNu (env-overridable)
+	spread    float64 // ditherSpreadFactor (env-overridable)
+	falloff   float64 // chromaSpreadFalloff (env-overridable)
 }
 
 // newTDSelectState builds the per-sample effective-color matrices. invLab and
@@ -156,7 +218,14 @@ type tdSelectState struct {
 // suppression); the eff matrices are computed from the entries' linear colors
 // via neighborEffLab, the same math the per-cell print simulation uses, so
 // selection and simulation can't drift.
-func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3]float64, samples []WeightedLabSample, neighborPath, kappa float64, dithering bool) *tdSelectState {
+// forceOpaque, when true, pins every filament's lateral leak β to 0 regardless
+// of its TD — eff becomes the nominal Lab at every sample. This is the unified
+// dithering=true entry point when no real leak is in play (honorTD off, uniform
+// TDs, or every filament effectively opaque): the per-sample scorer's wash term
+// self-zeroes (eff == nominal) while its mix-spread, mix-complexity, duplicate
+// reject, usage net, and search all still apply.
+func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3]float64, samples []WeightedLabSample, neighborPath, kappa float64, dithering, forceOpaque bool) *tdSelectState {
+	falloff := chromaSpreadFalloffFromEnv()
 	// Per-sample target in linear-light RGB (the neighborhood each translucent
 	// filament washes toward) plus its chroma knee.
 	sLin := make([][3]float64, len(samples))
@@ -167,7 +236,7 @@ func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3
 		sLin[j] = [3]float64{r, g, b}
 		// Standard CIELAB chroma (go-colorful scales Lab by 1/100).
 		chroma := math.Sqrt(lab[1]*lab[1]+lab[2]*lab[2]) * 100
-		knee[j] = math.Exp(-chroma / chromaSpreadFalloff)
+		knee[j] = math.Exp(-chroma / falloff)
 	}
 
 	buildEff := func(entries []InventoryEntry, nomLab [][3]float64) [][][3]float64 {
@@ -175,6 +244,9 @@ func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3
 		for e := range entries {
 			lin := linearOf(entries[e].Color)
 			beta := NeighborLeak(normSelTD(entries[e].TD), neighborPath)
+			if forceOpaque {
+				beta = 0
+			}
 			row := make([][3]float64, len(samples))
 			if beta == 0 {
 				// Opaque: the filament prints its own color everywhere, so the
@@ -217,6 +289,8 @@ func newTDSelectState(inventory, locked []InventoryEntry, invLab, lockedLab [][3
 		wash:       washReachFactorFromEnv(),
 		mu:         mixSpreadMuFromEnv(),
 		nu:         mixComplexityNuFromEnv(),
+		spread:     ditherSpreadFactorFromEnv(),
+		falloff:    falloff,
 	}
 }
 
@@ -296,7 +370,7 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 			hullDist, feat, bary := closestHullFeature(s.Lab, verts)
 			knee := st.knee[j]
 			nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, knee)
-			spread := ditherSpreadFactor * knee
+			spread := st.spread * knee
 			// Reach (contrast) penalty, charged on hull MEMBERSHIP rather than
 			// only the nearest vertex: sum each supporting vertex's washing
 			// distance (how far its translucent eff had to slide from its own
