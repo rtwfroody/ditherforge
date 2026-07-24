@@ -366,6 +366,80 @@ func runSearchOnCells(ctx context.Context, opts Options, cfg PaletteSearchConfig
 	return res, nil
 }
 
+// RenderExplicitPalette dithers and renders a single explicit candidate palette
+// (its free-slot colors given as hex strings, with any locked slots taken from
+// the settings) to cfg.OutDir, writing one PNG per view named
+// "<prefix>_<view>.png". It reuses the sweep's voxelize + dither + splat-render
+// path, so the output is framed identically to the target/top renders written
+// by RunPaletteSearch (framing derives from the color-independent geometry). No
+// sweep is run, so it completes in voxelize + one dither. render is required.
+func RenderExplicitPalette(ctx context.Context, cache *StageCache, opts Options, cfg PaletteSearchConfig, hexes []string, prefix string, render SplatRenderFunc) error {
+	if render == nil {
+		return fmt.Errorf("palettesearch: render function is required")
+	}
+	cfg = cfg.withDefaults()
+	if !validDitherMode(opts.Dither) {
+		return fmt.Errorf("palettesearch: invalid --dither %q: must be one of %s", opts.Dither, strings.Join(ditherModes, ", "))
+	}
+	if len(hexes) == 0 {
+		return fmt.Errorf("palettesearch: no palette hexes given")
+	}
+
+	vo, so, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	if err != nil {
+		return err
+	}
+	if len(vo.Cells) == 0 {
+		return fmt.Errorf("palettesearch: model produced no visible cells")
+	}
+
+	// Silence the dither/scoring chatter for the single candidate, exactly as
+	// the sweep does.
+	defer plog.SetEnabled(plog.SetEnabled(false))
+
+	pcfg, err := buildPaletteConfig(opts)
+	if err != nil {
+		return err
+	}
+	if cfg.Inventory != nil {
+		pcfg.Inventory = cfg.Inventory
+	}
+	filtered := excludeLocked(pcfg.Inventory, pcfg.Locked)
+	eligible := dedupSortInventory(filtered)
+
+	// Resolve the requested hexes to inventory entries (for their TD/label), so
+	// the same order-insensitive index form the sweep uses drives the dither.
+	entries := entriesForHexes(eligible, hexes)
+	if len(entries) != len(hexes) {
+		return fmt.Errorf("palettesearch: %d of %d requested hexes not found in the eligible inventory (%s)",
+			len(hexes)-len(entries), len(hexes), strings.Join(hexes, ","))
+	}
+	combo := comboForEntries(eligible, entries)
+	if combo == nil {
+		return fmt.Errorf("palettesearch: could not map requested hexes to eligible inventory indices")
+	}
+
+	simEll, simK := simNeighborParams(opts.LayerHeight)
+	geom := buildSplatGeometry(vo, splitNormalXform(so))
+	pal, tds, _, _ := buildCandidatePalette(pcfg.Locked, eligible, combo)
+	colors, err := candidateVisibleColors(ctx, opts, vo, pal, tds, simEll, simK, progress.NullTracker{})
+	if err != nil {
+		return err
+	}
+	mesh := geom.colorByVisible(colors)
+
+	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
+		return err
+	}
+	for _, viewName := range cfg.Views {
+		p := filepath.Join(cfg.OutDir, fmt.Sprintf("%s_%s.png", prefix, viewName))
+		if err := writeSearchPNG(p, render(mesh, viewName, cfg.Res)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RegretReport is the outcome of the regret-only mode: the production fast
 // scorer's pick located within a previously-computed ground-truth table.
 type RegretReport struct {

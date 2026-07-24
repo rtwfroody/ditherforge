@@ -44,8 +44,10 @@ type Args struct {
 	RenderTop   int    `arg:"--render-top" default:"3" help:"write PNGs for the top-N candidates"`
 	Limit       int    `arg:"--limit" help:"evaluate only the first N candidates (0 = all)"`
 	Views       string `arg:"--views" help:"comma subset of front,side,top,persp (default all)"`
-	Quiet       bool   `arg:"--quiet" help:"suppress the one-time voxelize progress bar (per-candidate dither logs are always suppressed in a sweep)"`
-	RegretTable string `arg:"--regret-table" help:"skip the sweep: run the production scorer and report its rank in this existing results.csv"`
+	Quiet         bool   `arg:"--quiet" help:"suppress the one-time voxelize progress bar (per-candidate dither logs are always suppressed in a sweep)"`
+	RegretTable   string `arg:"--regret-table" help:"skip the sweep: run the production scorer and report its rank in this existing results.csv"`
+	RenderPalette string `arg:"--render-palette" help:"skip the sweep: dither and render one explicit palette (comma-separated free-slot hexes, e.g. \"#06924D,#55331A\") to --out"`
+	RenderPrefix  string `arg:"--render-prefix" default:"render" help:"filename prefix for --render-palette PNGs"`
 }
 
 func main() {
@@ -137,6 +139,21 @@ func main() {
 			fatalf("Error: %v", err)
 		}
 		printRegretReport(rep, args.RegretTable)
+		return
+	}
+
+	// Render-only mode: skip the sweep, dither and render one explicit palette
+	// to --out. Reuses the sweep's voxelize + dither + render path so the PNGs
+	// are framed identically to the sweep's target/top renders.
+	if args.RenderPalette != "" {
+		hexes := parseHexList(args.RenderPalette)
+		if len(hexes) == 0 {
+			fatalf("Error: --render-palette: no hexes given")
+		}
+		if err := pipeline.RenderExplicitPalette(context.Background(), cache, opts, cfg, hexes, args.RenderPrefix, newRenderer()); err != nil {
+			fatalf("Error: %v", err)
+		}
+		fmt.Printf("Rendered %s to %s (prefix %q)\n", strings.Join(hexes, " "), args.Out, args.RenderPrefix)
 		return
 	}
 
@@ -257,6 +274,19 @@ func parseFloatList(s string) ([]float64, error) {
 		return nil, fmt.Errorf("no values")
 	}
 	return out, nil
+}
+
+// parseHexList splits a comma-separated hex list, trimming whitespace and
+// dropping empty entries. Order is preserved; casing/format are left to the
+// caller's inventory lookup (which upper-cases).
+func parseHexList(s string) []string {
+	var out []string
+	for _, tok := range strings.Split(s, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			out = append(out, tok)
+		}
+	}
+	return out
 }
 
 func fatalf(format string, a ...any) {
