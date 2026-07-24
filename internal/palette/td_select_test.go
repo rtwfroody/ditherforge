@@ -366,6 +366,65 @@ func TestTDSelectPerSampleEff(t *testing.T) {
 	}
 }
 
+// TestUsageBarycentricMembership pins the phase-1a usage() rewrite: a filament
+// that is a minority BARYCENTRIC contributor to many samples yet never the single
+// nearest vertex must register real predicted usage (membership attribution)
+// instead of the nearest-only zero that hid it from the dead-weight net. Three
+// coplanar vertices form a triangle; every sample sits just above the A-B edge,
+// so vertex C carries ~0.1 barycentric weight everywhere but is never the closest
+// vertex.
+func TestUsageBarycentricMembership(t *testing.T) {
+	a := [3]float64{0, 0, 0}
+	b := [3]float64{10, 0, 0}
+	c := [3]float64{5, 10, 0}
+	verts := [][3]float64{a, b, c}
+
+	var samples []WeightedLabSample
+	for px := 2.0; px <= 8.0; px += 0.5 {
+		samples = append(samples, WeightedLabSample{Lab: [3]float64{px, 1, 0}, Weight: 1})
+	}
+
+	// Opaque: eff == nominal at every sample, so invEff[e][j] is the constant vertex.
+	invEff := make([][][3]float64, len(verts))
+	for e := range verts {
+		row := make([][3]float64, len(samples))
+		for j := range samples {
+			row[j] = verts[e]
+		}
+		invEff[e] = row
+	}
+	st := &tdSelectState{samples: samples, invEff: invEff}
+	indices := []int{0, 1, 2}
+
+	// Old nearest-vertex-only attribution (what usage() used to compute): C is
+	// never the closest vertex to any sample, so it scored exactly 0.
+	oldC, totalW := 0.0, 0.0
+	for _, s := range samples {
+		best, bestV := math.MaxFloat64, 0
+		for v := range verts {
+			if d := dist3(s.Lab, verts[v]); d < best {
+				best, bestV = d, v
+			}
+		}
+		if bestV == 2 {
+			oldC += s.Weight
+		}
+		totalW += s.Weight
+	}
+	oldC /= totalW
+	if oldC != 0 {
+		t.Fatalf("test setup: expected old nearest-only usage of C to be 0, got %.4f", oldC)
+	}
+
+	u := st.usage(indices)
+	if u[2] <= 0.01 {
+		t.Errorf("barycentric-membership usage of C = %.4f, want a clearly nonzero share (> 0.01)", u[2])
+	}
+	if sum := u[0] + u[1] + u[2]; math.Abs(sum-1) > 1e-9 {
+		t.Errorf("usage shares sum to %.6f, want 1", sum)
+	}
+}
+
 // panchromaBasicInventory is the 28-entry Panchroma Basic collection
 // (internal/collection/builtins/panchroma_basic.txt) hardcoded so the palette
 // package's tests need no import of internal/collection (which would cycle).

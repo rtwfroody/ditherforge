@@ -410,12 +410,23 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 	return total
 }
 
-// usage returns each palette member's predicted usage: the fraction of
-// area-weighted samples for which that member is the nearest achievable
-// (per-sample eff) vertex. The returned slice is indexed [0..nLocked) for
-// locked members then [nLocked..) for the candidate indices, matching the vertex
-// order in score. It is the selection-time stand-in for "how much will the
-// dither actually place this filament" without running the (expensive) dither.
+// usage returns each palette member's predicted usage: its barycentric share of
+// the area-weighted samples. Each sample's weight is split across the vertices of
+// its closest hull feature (the containing tetrahedron for an interior sample,
+// else the nearest triangle/edge/vertex) by that feature's barycentric weights —
+// the SAME attribution score() charges through closestHullFeature. The returned
+// slice is indexed [0..nLocked) for locked members then [nLocked..) for the
+// candidate indices, matching the vertex order in score. It is the selection-time
+// stand-in for "how much will the dither actually place this filament" without
+// running the (expensive) dither.
+//
+// The old nearest-vertex-only attribution predicted 0.000 for a filament that is
+// a minority barycentric contributor to many samples yet never the single closest
+// vertex — exactly the kind the dither still places a few percent of the time —
+// so membership attribution both matches score()'s cost model and makes the
+// dead-weight net (refineUsage) accurate. Membership usage is a superset of the
+// nearest-only usage (a nearest vertex always carries bary weight), so the
+// usageDeadFraction floor only gets sharper.
 func (st *tdSelectState) usage(indices []int) []float64 {
 	counts := make([]float64, st.nLocked+len(indices))
 	var totalW float64
@@ -428,16 +439,11 @@ func (st *tdSelectState) usage(indices []int) []float64 {
 		for k, idx := range indices {
 			verts[st.nLocked+k] = st.invEff[idx][j]
 		}
-		best := math.MaxFloat64
-		bestV := 0
-		for v := range verts {
-			dd := dist3(s.Lab, verts[v])
-			if dd < best {
-				best = dd
-				bestV = v
-			}
+		// bary sums to 1 over feat, so the sample's full weight is conserved.
+		_, feat, bary := closestHullFeature(s.Lab, verts)
+		for m, vi := range feat {
+			counts[vi] += bary[m] * s.Weight
 		}
-		counts[bestV] += s.Weight
 		totalW += s.Weight
 	}
 	if totalW > 0 {
