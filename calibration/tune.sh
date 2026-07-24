@@ -37,9 +37,12 @@ go build -o "$BIN" ./cmd/palettesearch || exit 1
 
 # Fixtures, in the fixed CSV column order d_orzelwp,d_orzelaf,d_earth,d_benchy.
 FIX_NAMES=(orzel_white_pinned orzel_all_free earth_all_free benchy_all_free)
-# Phase-1 regret baselines (per fixture, same order). The no-regress guard
-# rejects any candidate whose fixture delta exceeds baseline + NOREGRESS_SLACK.
-BASELINE=(1.866 2.105 3.003 13.285)
+# Regret baselines (per fixture, same order): the shipped defaults' deltas
+# against the current ground-truth tables (proper clip-geometry renders,
+# 2026-07-24). The no-regress guard rejects any candidate whose fixture delta
+# exceeds baseline + NOREGRESS_SLACK. Update these whenever the tables are
+# re-swept.
+BASELINE=(1.805 2.120 0.055 8.682)
 NOREGRESS_SLACK=0.25
 
 # Value ladders (geometric around the current defaults). MIXSAT's last rung is

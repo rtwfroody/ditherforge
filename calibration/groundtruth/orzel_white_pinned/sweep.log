@@ -1,43 +1,76 @@
-[22:40:44.626] Loading: cache hit (disk, 2.017191s) key=85dc68864116
-[22:40:44.875] Voxelizing: cache hit (disk, 248.6ms) key=2811be9bf11b
-[22:40:44.876] Splitting: cache hit (disk, 273µs) key=cd8677ad41c8
+[14:37:29.909] Loading: cache hit (disk, 2.099481s) key=85dc68864116
+[14:37:30.164] Voxelizing: cache hit (disk, 254.583ms) key=2811be9bf11b
+[14:37:30.164] Clipping: starting (cache miss key=692094356412)
+[14:37:30.164] Dithering: starting (cache miss key=8e30fcff2dfe)
+[14:37:30.165] Building palette: starting (cache miss key=085d28d9363c)
+  TD-aware selection (per-sample eff): neighbor path 0.21 mm, κ 0.00
+  Selected colors (2925 evaluated) in 0.1s
+[14:37:30.391]  #080A0D (Black), #55331A (Brown), #A79E82 (Tan)
+[14:37:30.407]   Infill filament: #55331A Brown (TD 0.10)
+[14:37:30.407] Building palette: done in 243ms
+[14:37:30.435]   dizzy-local-corrected pass 1/7 (γ=0.30): drift ΔE=11.308, stranded=8403, dropMass=138079.0694
+[14:37:30.465]   dizzy-local-corrected pass 2/7 (γ=0.30): drift ΔE=11.212, stranded=8403, dropMass=143586.9591
+[14:37:30.494]   dizzy-local-corrected pass 3/7 (γ=0.30): drift ΔE=11.299, stranded=8403, dropMass=150061.5220
+[14:37:30.494]   Dithered (dlc-d30-p7) 58509 cells in 0.1s
+[14:37:30.494]     #55331A: 25196 cells (43.1%)
+[14:37:30.494]     #A79E82: 19954 cells (34.1%)
+[14:37:30.494]     #080A0D: 7966 cells (13.6%)
+[14:37:30.494]     #EBF7FF: 5393 cells (9.2%)
+[14:37:30.494] Dithering: done in 329ms
+[14:37:32.494] Preparing geometry: cache hit (disk, 2.000239s) key=6db255b74f33
+[14:37:33.906] Splitting: cache hit (disk, 327µs) key=cd8677ad41c8
+[14:37:33.906]   Clip: Manifold per-cell intersect (open-edge bloat=0.005mm)
+[14:37:43.815]   Clip: 617498 verts, 502184 faces in 9.9s
+[14:37:43.816]   Clip cell→face ring: 1px=776/1805 2-4=186/1261 5-16=268/9752 17-64=48/45680 65+=0/0 (zero-face/total)
+[14:37:43.816]   Clip cell→face hex:  1px=0/0 2-4=0/2 5-16=0/6 17-64=0/3 65+=0/0 (zero-face/total)
+[14:37:43.816]     zero-face slab 102 Z=[8.21..8.29]mm: 21/152 cells (ring=21 hex=0)
+[14:37:43.816]     zero-face slab 127 Z=[10.21..10.29]mm: 14/157 cells (ring=14 hex=0)
+[14:37:43.816]     zero-face slab 131 Z=[10.53..10.61]mm: 13/154 cells (ring=13 hex=0)
+[14:37:43.816]     zero-face slab 69 Z=[5.57..5.65]mm: 12/95 cells (ring=12 hex=0)
+[14:37:43.816]     zero-face slab 189 Z=[15.17..15.25]mm: 11/159 cells (ring=11 hex=0)
+[14:37:43.816]     zero-face slab 174 Z=[13.97..14.05]mm: 11/161 cells (ring=11 hex=0)
+[14:37:43.816]     zero-face slab 171 Z=[13.73..13.81]mm: 10/163 cells (ring=10 hex=0)
+[14:37:43.816]     zero-face slab 184 Z=[14.77..14.85]mm: 10/154 cells (ring=10 hex=0)
+[14:37:43.816]     zero-face slab 165 Z=[13.25..13.33]mm: 10/137 cells (ring=10 hex=0)
+[14:37:43.816]     zero-face slab 137 Z=[11.01..11.09]mm: 10/123 cells (ring=10 hex=0)
+[14:37:43.817] Clipping: done in 13.652s
   TD-aware selection (per-sample eff): neighbor path 0.21 mm, κ 0.00
   Selected colors (969 evaluated) in 0.1s
-palettesearch: 50/969 candidates (0.32s/cand, ETA 293s)
-palettesearch: 100/969 candidates (0.29s/cand, ETA 252s)
-palettesearch: 150/969 candidates (0.28s/cand, ETA 229s)
-palettesearch: 200/969 candidates (0.28s/cand, ETA 212s)
-palettesearch: 250/969 candidates (0.27s/cand, ETA 196s)
-palettesearch: 300/969 candidates (0.27s/cand, ETA 181s)
-palettesearch: 350/969 candidates (0.28s/cand, ETA 171s)
-palettesearch: 400/969 candidates (0.27s/cand, ETA 156s)
-palettesearch: 450/969 candidates (0.27s/cand, ETA 142s)
-palettesearch: 500/969 candidates (0.27s/cand, ETA 128s)
-palettesearch: 550/969 candidates (0.27s/cand, ETA 114s)
-palettesearch: 600/969 candidates (0.27s/cand, ETA 100s)
-palettesearch: 650/969 candidates (0.27s/cand, ETA 87s)
-palettesearch: 700/969 candidates (0.27s/cand, ETA 73s)
-palettesearch: 750/969 candidates (0.27s/cand, ETA 60s)
-palettesearch: 800/969 candidates (0.27s/cand, ETA 46s)
-palettesearch: 850/969 candidates (0.27s/cand, ETA 32s)
-palettesearch: 900/969 candidates (0.27s/cand, ETA 19s)
-palettesearch: 950/969 candidates (0.27s/cand, ETA 5s)
+palettesearch: 50/969 candidates (0.35s/cand, ETA 321s)
+palettesearch: 100/969 candidates (0.32s/cand, ETA 274s)
+palettesearch: 150/969 candidates (0.31s/cand, ETA 251s)
+palettesearch: 200/969 candidates (0.30s/cand, ETA 231s)
+palettesearch: 250/969 candidates (0.30s/cand, ETA 213s)
+palettesearch: 300/969 candidates (0.30s/cand, ETA 198s)
+palettesearch: 350/969 candidates (0.30s/cand, ETA 185s)
+palettesearch: 400/969 candidates (0.30s/cand, ETA 170s)
+palettesearch: 450/969 candidates (0.30s/cand, ETA 155s)
+palettesearch: 500/969 candidates (0.30s/cand, ETA 139s)
+palettesearch: 550/969 candidates (0.30s/cand, ETA 124s)
+palettesearch: 600/969 candidates (0.30s/cand, ETA 109s)
+palettesearch: 650/969 candidates (0.30s/cand, ETA 94s)
+palettesearch: 700/969 candidates (0.30s/cand, ETA 80s)
+palettesearch: 750/969 candidates (0.30s/cand, ETA 65s)
+palettesearch: 800/969 candidates (0.30s/cand, ETA 50s)
+palettesearch: 850/969 candidates (0.30s/cand, ETA 36s)
+palettesearch: 900/969 candidates (0.30s/cand, ETA 21s)
+palettesearch: 950/969 candidates (0.30s/cand, ETA 6s)
 
-Ground-truth palette search: 969 candidates, 58509 cells, 0.270 s/candidate
+Ground-truth palette search: 969 candidates, 58509 cells, 0.297 s/candidate
 Locked: #EBF7FF
 Rank sigmas: [2 8]
 
 rank  rankKey   p99(σ2)    palette (free slots)
-1     5.211     18.465     #55331A(Brown) #A79E82(Tan) #F67405(Orange)
-2     5.643     18.572     #55331A(Brown) #A79E82(Tan) #E72F1D(Red)
-3     5.782     22.402     #080A0D(Black) #A79E82(Tan) #F67405(Orange)
-4     5.906     19.893     #55331A(Brown) #D5D701(Lime Green) #F1A1AF(Pink)
-5     5.913     19.498     #55331A(Brown) #F67405(Orange) #FFE800(Yellow)
-6     5.979     19.644     #55331A(Brown) #D5D701(Lime Green) #F67405(Orange)
-7     6.136     21.562     #080A0D(Black) #A79E82(Tan) #E72F1D(Red)
-8     6.142     19.175     #55331A(Brown) #A79E82(Tan) #F24574(Magenta)
-9     6.219     19.690     #55331A(Brown) #F1A1AF(Pink) #FFE800(Yellow)
-10    6.310     19.501     #55331A(Brown) #A79E82(Tan) #F1A1AF(Pink)
+1     4.418     16.326     #55331A(Brown) #A79E82(Tan) #F67405(Orange)
+2     4.683     16.874     #55331A(Brown) #A79E82(Tan) #E72F1D(Red)
+3     4.729     15.087     #080A0D(Black) #A79E82(Tan) #F67405(Orange)
+4     4.822     16.721     #55331A(Brown) #D5D701(Lime Green) #F1A1AF(Pink)
+5     4.880     17.000     #55331A(Brown) #D5D701(Lime Green) #F67405(Orange)
+6     4.891     16.884     #55331A(Brown) #F67405(Orange) #FFE800(Yellow)
+7     5.003     16.059     #080A0D(Black) #A79E82(Tan) #E72F1D(Red)
+8     5.054     16.634     #080A0D(Black) #F67405(Orange) #FFE800(Yellow)
+9     5.229     16.850     #55331A(Brown) #F1A1AF(Pink) #FFE800(Yellow)
+10    5.259     17.995     #55331A(Brown) #948902(Olive Green) #F67405(Orange)
 
-REGRET: production fast scorer picked #485259(Dark Grey) #55331A(Brown) #A79E82(Tan)
-        its rank 26/969 (rankKey 7.077); winner rankKey 5.211; delta 1.866
+REGRET: production fast scorer picked #080A0D(Black) #55331A(Brown) #A79E82(Tan)
+        its rank 24/969 (rankKey 6.223); winner rankKey 4.418; delta 1.805

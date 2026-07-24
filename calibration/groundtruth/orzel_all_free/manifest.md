@@ -7,31 +7,30 @@ color slots open, searched over the curated 20-filament inventory.
 | --- | --- |
 | model | `/home/tnewsome/Documents/3d_print/objects/orzel_przedni/Orzel_przedni.obj` |
 | settings | `calibration/fixtures/orzel_all_free.json` |
-| harness commit (table) | `93f6f9f` (sweep run 2026-07-23) |
-| date | 2026-07-23 |
+| swept via | `calibration/sweep.sh` @ 6c84124 (2026-07-24, clip-triangle renders) |
 | size | 50 mm, snapmaker_u1, layer 0.08 mm |
 | dither | dlc-d30-p7, honorTD true, colorAwareCells true |
 | inventory | curated 20-filament subset (`calibration/fixtures/panchroma_curated20.txt`) |
 | locked | none — 4 free slots |
 | candidates | 4845 = C(20,4) |
 | cells | 58509 |
-| sec/candidate | 0.274 |
+| sec/candidate | 0.292 |
 
 ## Winner + top 5 (rank_key = mean ΔE at σ∈{2,8})
 
 | rank | free slots | rank_key |
 | --- | --- | --- |
-| 1 | Dark Grey \| Brown \| Tan \| Red (`#485259 #55331A #A79E82 #E72F1D`) | 5.158 |
-| 2 | Brown \| Dark Olive Drab \| Tan \| Red (`#55331A #575B54 #A79E82 #E72F1D`) | 5.162 |
-| 3 | Brown \| Dark Olive Drab \| Tan \| Orange (`#55331A #575B54 #A79E82 #F67405`) | 5.191 |
-| 4 | Dark Grey \| Brown \| Tan \| Orange (`#485259 #55331A #A79E82 #F67405`) | 5.204 |
-| 5 | Brown \| Tan \| White \| Orange (`#55331A #A79E82 #EBF7FF #F67405`) | 5.211 |
+| 1 | Dark Grey \| Brown \| Tan \| Red (`#485259 #55331A #A79E82 #E72F1D`) | 4.166 |
+| 2 | Brown \| Dark Olive Drab \| Tan \| Red (`#55331A #575B54 #A79E82 #E72F1D`) | 4.205 |
+| 3 | Black \| Tan \| Red \| Yellow (`#080A0D #A79E82 #E72F1D #FFE800`) | 4.290 |
+| 4 | Dark Grey \| Brown \| Lime Green \| Pink (`#485259 #55331A #D5D701 #F1A1AF`) | 4.314 |
+| 5 | Black \| Tan \| Lime Green \| Red (`#080A0D #A79E82 #D5D701 #E72F1D`) | 4.394 |
 
-## Production-scorer regret (default μ=0.15 ν=0.08 wash=0.6)
+## Production-scorer regret (tuned defaults wash=0.9 μ=0.30 ν=0)
 
 ```
-REGRET: production fast scorer picked #080A0D(Black) #55331A(Brown) #575B54(Dark Olive Drab) #A79E82(Tan)
-        its rank 199/4845 (rankKey 7.262); winner #485259(Dark Grey) #55331A(Brown) #A79E82(Tan) #E72F1D(Red) rankKey 5.158; delta 2.105
+REGRET: production fast scorer picked #080A0D(Black) #55331A(Brown) #8C9099(Grey) #A79E82(Tan)
+        its rank 163/4845 (rankKey 6.286); winner rankKey 4.166; delta 2.120
 ```
 
 The production scorer lands at rank **199/4845** with a rank-key regret of
@@ -52,3 +51,6 @@ White-pinned orzel.
 - Renders: `target_{front,side,top,persp}.png` (sampled target),
   `top{1..5}_*.png` (ground-truth top-5), and `prodpick_*.png` (production
   scorer pick) are included.
+- 2026-07-24: re-swept with real clipped cell-triangle renders (6c84124)
+  replacing splat quads; winners and top ranks essentially unchanged vs the
+  splat-era table, confirming splat artifacts blurred out of the metric.

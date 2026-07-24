@@ -10,7 +10,7 @@ deltas, not levels.
 | --- | --- |
 | model | `/home/tnewsome/Documents/3d_print/objects/3DBenchy.stl` |
 | settings | `calibration/fixtures/benchy_all_free.json` |
-| swept via | `calibration/sweep.sh` @ 86c0c08 (2026-07-23) |
+| swept via | `calibration/sweep.sh` @ 6c84124 (2026-07-24, clip-triangle renders) |
 | size | 40 mm, snapmaker_u1, layer 0.20 mm |
 | texture | `pride_rainbow.mtlx`, tile 0.2×extent = 8 mm, triplanar sharpness 4 |
 | dither | dlc-d30-p7, honorTD true, colorAwareCells true |
@@ -18,17 +18,17 @@ deltas, not levels.
 | locked | none → 4 free slots |
 | candidates | 4845 = C(20,4) |
 | cells | 23205 |
-| sec/candidate | 0.261 |
+| sec/candidate | 0.291 |
 
 ## Winner + top 5 (rank_key = mean ΔE at σ∈{2,8})
 
 | rank | palette | rank_key |
 | --- | --- | --- |
-| 1 | Black \| Purple \| Red \| Yellow | 22.441 |
-| 2 | Blue \| Purple \| Red \| Yellow | 22.562 |
-| 3 | Black \| Purple \| Lime Green \| Red | 22.688 |
-| 4 | Blue \| Purple \| Lime Green \| Red | 23.177 |
-| 5 | Dark Grey \| Purple \| Red \| Yellow | 23.376 |
+| 1 | Black \| Purple \| Red \| Yellow | 22.094 |
+| 2 | Black \| Purple \| Lime Green \| Red | 22.270 |
+| 3 | Blue \| Purple \| Red \| Yellow | 22.408 |
+| 4 | Blue \| Purple \| Lime Green \| Red | 23.001 |
+| 5 | Brown \| Purple \| Red \| Yellow | 23.149 |
 
 Purple appears in ALL top-10 entries — it is the only violet source for
 the rainbow's purple stripe. This fixture is the mirror image of the
@@ -37,8 +37,8 @@ orzel Purple bug: here the scorer must NOT avoid Purple.
 ## Production-scorer regret
 
 ```
-REGRET: production fast scorer picked #0066D9(Azure Blue) #06924D(Green) #F24574(Magenta) #F67405(Orange)
-        its rank 940/4845 (rankKey 35.727); winner #080A0D(Black) #6C47B2(Purple) #E72F1D(Red) #FFE800(Yellow) rankKey 22.441; delta 13.286
+REGRET: production fast scorer picked #06924D(Green) #55331A(Brown) #6C47B2(Purple) #948902(Olive Green)
+        its rank 414/4845 (rankKey 30.776); winner rankKey 22.094; delta 8.682
 ```
 
 Worst regret in the suite. The scorer picks four mid-saturation
@@ -54,6 +54,9 @@ that dither can mix toward everything between.
   signature of this failure.
 - `inputFile` and the .mtlx are absolute paths to the author's local
   library; not committed.
+- 2026-07-24: re-swept with real clipped cell-triangle renders (6c84124)
+  replacing splat quads; winners and top ranks essentially unchanged vs the
+  splat-era table, confirming splat artifacts blurred out of the metric.
 
 ## Tuned-pick comparison (2026-07-24)
 
@@ -67,7 +70,8 @@ improvement on the pre-tuning pick (Azure | Green | Magenta | Orange, rank
 Rendered with `palettesearch --render-palette` (added for this comparison)
 into `prodpick_tuned_*.png`. Side-by-side montage (perspective view):
 `compare_tuned_vs_winner.png` — panels: sampled target · winner · tuned
-pick · old pre-tuning pick.
+pick · old pre-tuning pick. Note: this montage predates the clip-triangle
+re-sweep (splat-quad renders); a print-sim comparison will replace it.
 
 Visual read: the retune fixed the **upper hull** (both tuned and winner now
 carry real Purple, so the large purple cabin/body matches the target, where
