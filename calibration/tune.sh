@@ -41,8 +41,9 @@ FIX_NAMES=(orzel_white_pinned orzel_all_free earth_all_free benchy_all_free)
 # against the current ground-truth tables (proper clip-geometry renders,
 # 2026-07-24). The no-regress guard rejects any candidate whose fixture delta
 # exceeds baseline + NOREGRESS_SLACK. Update these whenever the tables are
-# re-swept.
-BASELINE=(1.805 2.120 0.055 8.682)
+# re-swept. benchy was re-swept at a 30 mm MaterialX tile (was 8 mm), which
+# broadened the rainbow bands and dropped its baseline 8.682 -> 6.463.
+BASELINE=(1.805 2.120 0.055 6.463)
 NOREGRESS_SLACK=0.25
 
 # Value ladders (geometric around the current defaults). MIXSAT's last rung is
