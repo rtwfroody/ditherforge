@@ -50,7 +50,11 @@ NOREGRESS_SLACK=0.25
 # effectively "off" (linear mix-spread). CHROMA_FALLOFF is left fixed.
 LADDER_MIXSAT=(10 15 22 30 45 70 120 1000000)
 LADDER_MU=(0 0.05 0.10 0.15 0.18 0.22 0.26 0.30 0.40)
-LADDER_WASH=(0.2 0.4 0.6 0.75 0.9 1.05 1.2 1.5)
+# WASH's floor used to be 0.2, which sat just ABOVE the benchy flip point
+# (0.18 picks the ground-truth winner, 0.20 does not). Two descents "converged"
+# on 0.9 purely because the grid never looked below its own floor. Keep rungs
+# below 0.2 — the interesting structure is down there.
+LADDER_WASH=(0 0.02 0.05 0.08 0.10 0.13 0.15 0.18 0.2 0.4 0.6 0.75 0.9 1.05 1.2 1.5)
 LADDER_NU=(0 0.04 0.08 0.15)
 LADDER_SPREAD=(0.15 0.3 0.5 0.7 1.0 1.5 2.0)
 
