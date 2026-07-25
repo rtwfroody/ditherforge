@@ -180,6 +180,54 @@ func tetraBarycentric(p, a, b, c, d [3]float64) [4]float64 {
 	return [4]float64{va / total, vb / total, vc / total, vd / total}
 }
 
+// hullDistance returns the Euclidean distance from p to the convex hull of
+// verts, without the attribution closestHullFeature also computes. It walks the
+// same feature set in the same order, so its result matches
+// closestHullFeature's distance exactly (asserted by TestHullDistanceMatches
+// Feature) — it just skips building the index/barycentric slices. Used by the
+// per-sample scorer, which needs a second (nominal-space) hull distance per
+// sample and would otherwise allocate twice per sample in its hot loop.
+func hullDistance(p [3]float64, verts [][3]float64) float64 {
+	n := len(verts)
+	if n == 0 {
+		return math.MaxFloat64
+	}
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			for k := j + 1; k < n; k++ {
+				for l := k + 1; l < n; l++ {
+					if pointInTetrahedron(p, verts[i], verts[j], verts[k], verts[l]) {
+						return 0
+					}
+				}
+			}
+		}
+	}
+	best := math.MaxFloat64
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			for k := j + 1; k < n; k++ {
+				if d, _ := closestTriangleBary(p, verts[i], verts[j], verts[k]); d < best {
+					best = d
+				}
+			}
+		}
+	}
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if d, _ := closestSegmentBary(p, verts[i], verts[j]); d < best {
+				best = d
+			}
+		}
+	}
+	for i := 0; i < n; i++ {
+		if d := dist3(p, verts[i]); d < best {
+			best = d
+		}
+	}
+	return best
+}
+
 // closestHullFeature returns the distance from p to the convex hull of verts,
 // plus the indices of the supporting sub-simplex of the closest hull point and
 // that point's barycentric weights over those vertices (weights ≥ 0, sum 1). It

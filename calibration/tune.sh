@@ -41,9 +41,20 @@ FIX_NAMES=(orzel_white_pinned orzel_all_free earth_all_free benchy_all_free)
 # against the current ground-truth tables (proper clip-geometry renders,
 # 2026-07-24). The no-regress guard rejects any candidate whose fixture delta
 # exceeds baseline + NOREGRESS_SLACK. Update these whenever the tables are
-# re-swept. benchy was re-swept at a 30 mm MaterialX tile (was 8 mm), which
-# broadened the rainbow bands and dropped its baseline 8.682 -> 6.463.
-BASELINE=(1.805 2.120 0.055 6.463)
+# re-swept OR the scorer's formulas change. benchy was re-swept at a 30 mm
+# MaterialX tile (was 8 mm), which broadened the rainbow bands and dropped its
+# baseline 8.682 -> 6.463.
+#
+# RE-MEASURED 2026-07-24 after the wash reformulation (per-vertex eff-vs-nominal
+# sum -> BULK-REACH SHORTFALL, max(0, dist(target, hull(nominals of the
+# supporting vertices)) - hullDist)). At the UNCHANGED shipped weights that
+# reformulation took the suite from 1.805/2.120/0.055/6.463 (total 10.443) to
+# the values below (total 0.928), and the held-out 28-colour orzel case from
+# rank 83/2925 delta 1.919 to rank 3/2925 delta 0.312 — a structural gain, not
+# a tuned one. Old baselines are not comparable, and neither is any cached
+# tune_log row: the file is keyed on the weight tuple alone, so it MUST be
+# deleted whenever a scorer formula changes.
+BASELINE=(0.311 0.562 0.055 0.000)
 NOREGRESS_SLACK=0.25
 
 # Value ladders (geometric around the current defaults). MIXSAT's last rung is

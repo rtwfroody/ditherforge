@@ -35,10 +35,10 @@ const usageDeadFraction = 0.005
 // than this fraction.
 const usageSwapTolerance = 0.02
 
-// washReachFactor is the strength of the per-sample "reach" (contrast) penalty:
-// how much a target's cost is inflated by the WASHING distance of the nearest
-// achievable vertex — |eff(c*,s) − nominal(c*)|, the Lab distance a translucent
-// filament had to travel from its own color toward the sample to reach it.
+// washReachFactor is the strength of the per-sample BULK-REACH SHORTFALL
+// penalty: how much a target's cost is inflated by coverage the effective-color
+// hull promises but a tiled region cannot actually deliver (see
+// tdSelectState.score for the formula).
 //
 // Rationale (the defect-1 chameleon): the per-sample eff assumes each cell's
 // neighborhood equals its target. That holds for a lone cell dropped into a sea
@@ -48,20 +48,21 @@ const usageSwapTolerance = 0.02
 // Drab, TD defaulted to 1.0) therefore looks universally capable under bare eff
 // scoring — its vertex slides ~60-74% toward every target — yet prints as flat
 // olive and the dither can't converge (global drift stays ~15 ΔE vs ~7 for an
-// honest palette). Charging the washing distance makes such a chameleon pay for
-// the reach it can't deliver in bulk, while an opaque filament sitting AT the
-// target (β = 0, wash = 0) pays nothing, and a saturated translucent filament
-// whose hue filter T kills the channels it would need to move stays far in eff
-// space anyway (it never becomes the nearest vertex to a color it can't render).
-// Note wash ≈ βT·|s − C|, so this is a soft re-introduction of the nominal
-// distance, gated to the filament actually relied upon for that sample.
+// honest palette). Charging the shortfall makes such a chameleon pay for the
+// reach it can't deliver in bulk, while an opaque filament (β = 0) pays nothing.
+//
+// The charge is levied on the MIX, not per vertex: what a dithered region can
+// truly make is the hull of the supporting filaments' nominal colors, so
+// filaments that bracket the target pay ~0 no matter how translucent they are,
+// and only a filament relied upon ALONE pays its full nominal distance. The
+// earlier per-vertex form Σ bary_k·|eff_k − nom_k| could not draw that
+// distinction (with κ=0 it collapsed to Σ bary_k·β_k·|s − nom_k|) and taxed
+// honest dithering at the chameleon's rate.
 //
 // Set by regret minimization over calibration/groundtruth/ via calibration/
-// tune.sh (2026-07-24) — coordinate descent minimizing total palette-selection
-// regret across the 4 ground-truth fixtures — not hand-tuned. The stronger wash
-// (up from the hand-tuned 0.6) is harsher on translucent chameleons, which the
-// sweep confirmed strictly improves all 4 fixtures plus the held-out 28-color
-// orzel case. Overridable via DITHERFORGE_SELECT_WASH for recalibration.
+// tune.sh — coordinate descent minimizing total palette-selection regret across
+// the 4 ground-truth fixtures — not hand-tuned. Overridable via
+// DITHERFORGE_SELECT_WASH for recalibration.
 const washReachFactor = 0.9
 
 func washReachFactorFromEnv() float64 {
@@ -383,6 +384,10 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 	// Nominal vertices are sample-independent (the reach penalty measures each
 	// eff vertex's wash from its own nominal), so assemble them once.
 	nom := make([][3]float64, nv)
+	// Scratch for the supporting vertices' nominal colors (the bulk-reach hull).
+	// At most nv of them, reused across samples to keep score() allocation-free
+	// in its inner loop.
+	nomSup := make([][3]float64, nv)
 	for i := 0; i < st.nLocked; i++ {
 		nom[i] = st.lockNomLab[i]
 	}
@@ -412,29 +417,53 @@ func (st *tdSelectState) score(indices []int, bound float64) float64 {
 			knee := st.knee[j]
 			nearDist := nearestVertexDistChromaWeighted(s.Lab, verts, knee)
 			spread := st.spread * knee
-			// Reach (contrast) penalty, charged on hull MEMBERSHIP rather than
-			// only the nearest vertex: sum each supporting vertex's washing
-			// distance (how far its translucent eff had to slide from its own
-			// nominal color to reach this target) weighted by its barycentric
-			// share of the coverage. This is what stops a saturated translucent
-			// "chameleon" (e.g. Magenta) from enclosing interior body colors for
-			// free — it never had to be the NEAREST vertex to fake-cover them, so
-			// the old nearest-only charge missed it entirely, yet under the
-			// additive model its eff slides most of the way to every target.
-			washDist := 0.0
+			// Reach (contrast) penalty: the BULK-REACH SHORTFALL, i.e. how much
+			// of the eff hull's promised coverage survives when the region is
+			// actually tiled. eff assumes every cell is surrounded by its target;
+			// the bulk truth is that a region tiled from the supporting filaments
+			// reads at their NOMINAL colors, so what the dither can really make
+			// there is the hull of those nominals. Charge the excess:
+			//
+			//     wash = max(0, dist(s, hull(nominals of support)) − hullDist)
+			//
+			// A chameleon relied on alone (support = {it}) collapses that hull to
+			// a single distant point and pays the full nominal distance — it can
+			// only slide toward the target as a lone cell in a sea of that target,
+			// never as the majority filament. Two filaments that genuinely
+			// bracket the target (Red + Yellow across an orange band) have a
+			// nominal segment that already contains it and pay ~0, because that
+			// mix is exactly what the dither will lay down. Opaque filaments have
+			// eff == nominal, so the support hull IS the closest hull feature and
+			// the term self-zeroes — keeping the forceOpaque path bit-identical
+			// to the nominal scorer.
+			//
+			// This replaces the per-vertex form Σ bary_k·|eff_k − nom_k|, which
+			// with the calibrated κ=0 reduced to Σ bary_k·β_k·|s − nom_k| — a
+			// nominal-space spread charge that could not tell a lone chameleon
+			// from honest two-color dithering, and taxed both. That blunt
+			// distrust-all-translucency pressure is gone: a leaky filament is now
+			// charged only where the mix it participates in genuinely cannot
+			// reach the target in bulk.
+			//
 			// MIX-SPREAD: barycentric-weighted distance from the supporting
 			// vertices to the TARGET — how far apart the colors dithered to reach
 			// this sample sit (speckle visibility). MIX-COMPLEXITY: the Simpson
 			// effective number of participating vertices effN = 1/Σ bary², charged
-			// only past 2 (mixing 3+ filaments reads worse than 2). Both computed
-			// from the same barycentric feature as the wash term.
+			// only past 2 (mixing 3+ filaments reads worse than 2). Both share the
+			// barycentric feature with the wash term, so all three come out of one
+			// pass over the support.
+			nSup := len(feat)
 			mixSpread := 0.0
 			sumSq := 0.0
 			for m, vi := range feat {
 				b := bary[m]
-				washDist += b * dist3(verts[vi], nom[vi])
+				nomSup[m] = nom[vi]
 				mixSpread += b * dist3(verts[vi], s.Lab)
 				sumSq += b * b
+			}
+			washDist := 0.0
+			if bulk := hullDistance(s.Lab, nomSup[:nSup]); bulk > hullDist {
+				washDist = bulk - hullDist
 			}
 			mixComplexity := 0.0
 			if sumSq > 0 {

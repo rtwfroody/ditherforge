@@ -97,7 +97,8 @@ type ExplainSample struct {
 
 	HullDist      float64
 	NearDist      float64
-	WashDist      float64
+	BulkDist      float64 // dist to hull of the support's NOMINAL colors
+	WashDist      float64 // max(0, BulkDist − HullDist) — the value wash multiplies
 	MixSpread     float64 // raw barycentric mix spread S, pre-saturation
 	MixSpreadCost float64 // saturate(S, S0) — the value mu multiplies
 	MixComplexity float64
@@ -212,11 +213,18 @@ func ExplainSubset(cellColors [][3]uint8, cellWeights []float32, inventory, lock
 			es.Feat = append([]int(nil), feat...)
 			es.Bary = append([]float64(nil), bary...)
 			sumSq := 0.0
+			nomSup := make([][3]float64, len(feat))
 			for m, vi := range feat {
 				b := bary[m]
-				es.WashDist += b * dist3(verts[vi], res.NominalLab[vi])
+				nomSup[m] = res.NominalLab[vi]
 				es.MixSpread += b * dist3(verts[vi], s.Lab)
 				sumSq += b * b
+			}
+			// Bulk-reach shortfall: what the support's NOMINAL mix can reach,
+			// beyond what the eff hull already promised (see score()).
+			es.BulkDist = hullDistance(s.Lab, nomSup)
+			if es.BulkDist > hullDist {
+				es.WashDist = es.BulkDist - hullDist
 			}
 			if sumSq > 0 {
 				if effN := 1.0 / sumSq; effN > 2 {

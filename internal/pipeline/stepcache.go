@@ -1056,7 +1056,12 @@ func hashPaletteSettings(c *StageCache, h hash.Hash64, opts Options) {
 	// selections by design. v8 replaces the linear mix-spread tax μ·S with the
 	// saturating form μ·S/(1 + S/S0) (mixSpreadSat), so palettes built from gamut
 	// extremes are charged bounded graininess instead of unbounded distance.
-	writeString(h, "palette-td-aware-v8")
+	// v9 reformulates the wash (reach) penalty from the per-vertex washing sum
+	// Σ bary_k·|eff_k − nom_k| to the bulk-reach shortfall max(0, dist(s,
+	// hull(nominals of the supporting vertices)) − hullDist), which charges a
+	// filament relied on ALONE for its full nominal distance while leaving
+	// filaments that bracket the target free.
+	writeString(h, "palette-td-aware-v9")
 	writeFloat32(h, opts.LayerHeight)
 	writeFloat32(h, opts.ShellThicknessMM)
 	selEll, selKappa := simNeighborParams(opts.LayerHeight)
