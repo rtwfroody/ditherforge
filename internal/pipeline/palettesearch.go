@@ -822,25 +822,8 @@ func buildCandidatePalette(locked []palette.InventoryEntry, eligible []palette.I
 // cellColors / cellWeights it would construct, returning the chosen free-slot
 // entries (locked entries excluded).
 func productionPick(ctx context.Context, cells []voxel.ActiveCell, filtered []palette.InventoryEntry, pcfg voxel.PaletteConfig, freeSlots int, opts Options, tracker progress.Tracker) ([]palette.InventoryEntry, error) {
-	cellColors := make([][3]uint8, len(cells))
-	for i, c := range cells {
-		cellColors[i] = c.Color
-	}
 	// All-or-nothing area weighting, identical to ResolvePalette.
-	var cellWeights []float32
-	allHaveAreas := true
-	for _, c := range cells {
-		if c.Area <= 0 {
-			allHaveAreas = false
-			break
-		}
-	}
-	if allHaveAreas {
-		cellWeights = make([]float32, len(cells))
-		for i, c := range cells {
-			cellWeights[i] = c.Area
-		}
-	}
+	cellColors, cellWeights := selectionCellInputs(cells)
 	return palette.SelectFromInventory(ctx, cellColors, cellWeights, filtered, freeSlots, pcfg.Locked, opts.Dither != "none", pcfg.TD, tracker)
 }
 
@@ -1211,4 +1194,147 @@ func writeSearchPNG(path string, img *image.RGBA) error {
 	}
 	defer f.Close()
 	return png.Encode(f, img)
+}
+
+// ExplainReport is the output of RunExplainSubsets: the production selection
+// objective decomposed for each explicitly-named subset, on one shared sample
+// set, plus the production scorer's own pick for reference.
+type ExplainReport struct {
+	// Results is parallel to the hexSets passed in.
+	Results []*palette.ExplainResult
+	// FreeHexes/FreeLabels are the resolved free-slot entries per subset,
+	// parallel to Results.
+	FreeHexes  [][]string
+	FreeLabels [][]string
+
+	LockedHexes      []string
+	LockedLabels     []string
+	ProductionHexes  []string
+	ProductionLabels []string
+
+	NumCells   int
+	NumSamples int
+	FreeSlots  int
+	Dithering  bool
+}
+
+// RunExplainSubsets is the offline scorer-diagnosis path (cmd/palettesearch
+// --explain). It voxelizes once, rebuilds the exact inputs the production fast
+// scorer consumes (locked-filtered inventory, per-cell colors, area weights),
+// and decomposes the production objective for each explicitly-named subset via
+// palette.ExplainSubset. It never sweeps and never renders. hexSets are
+// free-slot hex lists (locked slots are added automatically); every hex must
+// resolve in the locked-filtered inventory.
+func RunExplainSubsets(ctx context.Context, cache *StageCache, opts Options, cfg PaletteSearchConfig, hexSets [][]string) (*ExplainReport, error) {
+	cfg = cfg.withDefaults()
+	if !validDitherMode(opts.Dither) {
+		return nil, fmt.Errorf("palettesearch: invalid --dither %q: must be one of %s", opts.Dither, strings.Join(ditherModes, ", "))
+	}
+
+	vo, _, err := voxelizeForSearch(ctx, cache, opts, cfg.Tracker)
+	if err != nil {
+		return nil, err
+	}
+	if len(vo.Cells) == 0 {
+		return nil, fmt.Errorf("palettesearch: model produced no visible cells")
+	}
+
+	pcfg, err := buildPaletteConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Inventory != nil {
+		pcfg.Inventory = cfg.Inventory
+	}
+	freeSlots := pcfg.NumColors - len(pcfg.Locked)
+	if freeSlots <= 0 {
+		return nil, fmt.Errorf("palettesearch: %d colors requested but %d are locked; no free slots to search", pcfg.NumColors, len(pcfg.Locked))
+	}
+	filtered := excludeLocked(pcfg.Inventory, pcfg.Locked)
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("palettesearch: inventory has no colors left after excluding locked colors")
+	}
+
+	defer plog.SetEnabled(plog.SetEnabled(false))
+
+	// The exact per-cell inputs SelectFromInventory sees (mirrors productionPick).
+	cellColors, cellWeights := selectionCellInputs(vo.Cells)
+	dithering := opts.Dither != "none"
+
+	byHex := make(map[string]int, len(filtered))
+	for i, e := range filtered {
+		byHex[hexOf(e.Color)] = i
+	}
+
+	rep := &ExplainReport{
+		NumCells:     len(vo.Cells),
+		FreeSlots:    freeSlots,
+		Dithering:    dithering,
+		LockedHexes:  lockedHexes(pcfg.Locked),
+		LockedLabels: entryLabels(pcfg.Locked),
+	}
+	for _, hexes := range hexSets {
+		if len(hexes) != freeSlots {
+			return nil, fmt.Errorf("palettesearch: --explain %s has %d colors but there are %d free slots",
+				strings.Join(hexes, ","), len(hexes), freeSlots)
+		}
+		idx := make([]int, len(hexes))
+		labels := make([]string, len(hexes))
+		norm := make([]string, len(hexes))
+		for i, h := range hexes {
+			key := strings.ToUpper(strings.TrimSpace(h))
+			if !strings.HasPrefix(key, "#") {
+				key = "#" + key
+			}
+			e, ok := byHex[key]
+			if !ok {
+				return nil, fmt.Errorf("palettesearch: --explain color %s is not in the locked-filtered inventory", h)
+			}
+			idx[i] = e
+			labels[i] = filtered[e].Label
+			norm[i] = key
+		}
+		res, err := palette.ExplainSubset(cellColors, cellWeights, filtered, pcfg.Locked, idx, dithering, pcfg.TD)
+		if err != nil {
+			return nil, err
+		}
+		rep.Results = append(rep.Results, res)
+		rep.FreeHexes = append(rep.FreeHexes, norm)
+		rep.FreeLabels = append(rep.FreeLabels, labels)
+		rep.NumSamples = len(res.Samples)
+	}
+
+	// The production scorer's own pick, for the confirmation that the objective
+	// really does prefer it.
+	prodEntries, err := productionPick(ctx, vo.Cells, filtered, pcfg, freeSlots, opts, progress.NullTracker{})
+	if err != nil {
+		return nil, err
+	}
+	rep.ProductionHexes = entryHexes(prodEntries)
+	rep.ProductionLabels = entryLabels(prodEntries)
+	return rep, nil
+}
+
+// selectionCellInputs builds the (cellColors, cellWeights) pair ResolvePalette
+// hands SelectFromInventory: per-cell colors plus all-or-nothing area weights.
+func selectionCellInputs(cells []voxel.ActiveCell) ([][3]uint8, []float32) {
+	cellColors := make([][3]uint8, len(cells))
+	for i, c := range cells {
+		cellColors[i] = c.Color
+	}
+	allHaveAreas := true
+	for _, c := range cells {
+		if c.Area <= 0 {
+			allHaveAreas = false
+			break
+		}
+	}
+	if !allHaveAreas {
+		return cellColors, nil
+	}
+	cellWeights := make([]float32, len(cells))
+	for i, c := range cells {
+		cellWeights[i] = c.Area
+	}
+	return cellColors, cellWeights
 }

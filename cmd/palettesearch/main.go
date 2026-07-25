@@ -48,6 +48,11 @@ type Args struct {
 	RegretTable   string `arg:"--regret-table" help:"skip the sweep: run the production scorer and report its rank in this existing results.csv"`
 	RenderPalette string `arg:"--render-palette" help:"skip the sweep: dither and render one explicit palette (comma-separated free-slot hexes, e.g. \"#06924D,#55331A\") to --out"`
 	RenderPrefix  string `arg:"--render-prefix" default:"render" help:"filename prefix for --render-palette PNGs"`
+
+	Explain     []string `arg:"--explain,separate" help:"skip the sweep: decompose the production selection cost for these explicit palettes (repeat the flag; each value is a comma-separated free-slot hex list)"`
+	ExplainBin  string   `arg:"--explain-bin" default:"red" help:"--explain: hue bin for the reachability deep dive (red,orange,yellow,green,cyan,blue,purple,neutral)"`
+	ExplainC    float64  `arg:"--explain-chroma" default:"40" help:"--explain: minimum CIELAB chroma for the deep-dive samples"`
+	ExplainTop  int      `arg:"--explain-top" default:"12" help:"--explain: how many deep-dive samples to list individually"`
 }
 
 func main() {
@@ -139,6 +144,26 @@ func main() {
 			fatalf("Error: %v", err)
 		}
 		printRegretReport(rep, args.RegretTable)
+		return
+	}
+
+	// Explain mode: skip the sweep, decompose the production selection objective
+	// for explicit palettes on one shared sample set. Voxelize + scoring only,
+	// so it runs in seconds on a warm cache.
+	if len(args.Explain) > 0 {
+		var sets [][]string
+		for _, spec := range args.Explain {
+			hexes := parseHexList(spec)
+			if len(hexes) == 0 {
+				fatalf("Error: --explain %q: no hexes given", spec)
+			}
+			sets = append(sets, hexes)
+		}
+		rep, err := pipeline.RunExplainSubsets(context.Background(), cache, opts, cfg, sets)
+		if err != nil {
+			fatalf("Error: %v", err)
+		}
+		runExplain(rep, args.ExplainBin, args.ExplainC, args.ExplainTop)
 		return
 	}
 

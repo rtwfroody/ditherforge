@@ -485,70 +485,16 @@ func SelectFromInventory(ctx context.Context, cellColors [][3]uint8, cellWeights
 		return inventory, nil
 	}
 
-	samples := CellColorHistogram(cellColors, cellWeights)
-	ApplyChromaWeighting(samples)
-	samples = topSamples(samples, 5000)
+	samples := selectionSamples(cellColors, cellWeights)
 
-	// Convert inventory to Lab.
-	invLab := make([][3]float64, len(inventory))
-	for i, e := range inventory {
-		cf := colorful.Color{
-			R: float64(e.Color[0]) / 255.0,
-			G: float64(e.Color[1]) / 255.0,
-			B: float64(e.Color[2]) / 255.0,
-		}
-		invLab[i][0], invLab[i][1], invLab[i][2] = cf.Lab()
-	}
+	// Nominal Lab per entry (inventory then locked), shared with the offline
+	// explain harness so the two can't drift.
+	invLab := nominalLabs(inventory)
+	lockedLab := nominalLabs(locked)
 
-	// Convert locked colors to Lab so scoring includes them.
-	lockedLab := make([][3]float64, len(locked))
-	for i, e := range locked {
-		cf := colorful.Color{
-			R: float64(e.Color[0]) / 255.0,
-			G: float64(e.Color[1]) / 255.0,
-			B: float64(e.Color[2]) / 255.0,
-		}
-		lockedLab[i][0], lockedLab[i][1], lockedLab[i][2] = cf.Lab()
-	}
-
-	// Neighbor-model parameters (used only by the per-sample TD-aware scorer).
-	neighborPath := float64(tdp.NeighborPathMM)
-	if neighborPath <= 0 {
-		neighborPath = DefaultNeighborPathMM
-	}
-	kappa := float64(tdp.Kappa)
-
-	// tdLeak: is a GENUINE per-sample lateral leak in play — TD honored, the
-	// normalized TDs non-uniform, and at least one filament translucent enough to
-	// leak? Only then does each filament's effective color vary per sample. A
-	// uniform shift (or no shift, when every filament is effectively opaque) can't
-	// reorder the subsets being compared.
-	tdLeak := false
-	if tdp.Enabled {
-		uniform := true
-		anyLeak := false
-		var first float64
-		seen := false
-		checkTD := func(td float32) {
-			nt := normSelTD(td)
-			if !seen {
-				first = nt
-				seen = true
-			} else if nt != first {
-				uniform = false
-			}
-			if NeighborLeak(nt, neighborPath) > 0 {
-				anyLeak = true
-			}
-		}
-		for _, e := range inventory {
-			checkTD(e.TD)
-		}
-		for _, e := range locked {
-			checkTD(e.TD)
-		}
-		tdLeak = !uniform && anyLeak
-	}
+	// Neighbor-model parameters (used only by the per-sample TD-aware scorer)
+	// plus the tdLeak decision.
+	neighborPath, kappa, tdLeak := selectionNeighborContext(inventory, locked, tdp)
 
 	// Selection scorer. For dithering=true the per-sample TD-aware objective is
 	// used UNCONDITIONALLY (tdSelectState.score): when a genuine leak is in play
