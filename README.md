@@ -18,15 +18,19 @@ Pre-built binaries for Linux, Windows, and macOS are available on the
    file (an OBJ or COLLADA model packaged in a `.zip` alongside its
    `.mtl`/textures also works). Previously loaded models are one click away
    under the dropdown's **Recent** submenu.
-3. Set **Nozzle diameter** and **Layer height** to match your slicer
-4. Set **Size (mm)** to your target print size
-5. Optionally, open the **Stickers** panel to apply PNG or JPEG images onto the model surface
-6. Optionally, open the **Split** panel to cut the model in two halves that print side-by-side and assemble with pegs
+3. Open the **Print setup** section and set **Printer**, **Nozzle**, and
+   **Layer** to match your slicer
+4. Set **Size (mm)** in the **Model** section to your target print size
+5. Optionally, open **Modify > Stickers** to apply PNG or JPEG images onto the model surface
+6. Optionally, open **Modify > Split** to cut the model in two halves that print side-by-side and assemble with pegs
 7. Adjust the palette and color settings — the output preview updates automatically
 8. Use **File > Export 3MF** to save the result (defaults to `<input>.3mf`)
 9. Open the exported 3MF in OrcaSlicer or BambuStudio and print
 
-All sidebar sections are collapsible — click a section header to fold or expand it.
+The sidebar has four sections — **Model**, **Appearance**, **Modify**, and
+**Print setup** — plus a collapsed **Fine tuning** sub-section inside **Model**
+and inside **Appearance** for the rarely-used knobs. All sections are
+collapsible; click a section header to fold or expand it.
 
 The input model is just another setting: swapping it from the **Model** dropdown
 keeps the rest of your configuration — palette, adjustments, stickers, and color
@@ -46,23 +50,36 @@ collection name to open its editor.
 
 In the collection editor you can:
 
-- Add, edit, or remove colors (click a swatch to change its hex or label)
+- Add, edit, or remove colors (click a swatch to change its hex, label, or
+  **TD (mm)**)
 - Delete the collection
 
+**TD** is the filament's transmission distance in millimeters: how far light
+travels through it before being absorbed. Higher TD means more translucent.
+DitherForge uses it to pick better palettes, to weight the dither, and to
+preview what the print will actually look like — see
+[How to Handle Translucent Filaments](#how-to-handle-translucent-filaments).
+New colors default to TD 1.0 (treated as opaque).
+
 Use **Filaments > Import...** to load a collection from a plain-text file.
-Each line must be in the format `#RRGGBB Label`, for example:
+Each line is a color, an optional TD, and an optional label:
 
 ```
-#FF0000 Red
-#00FF00 Green
+#FF0000 1.9 Red
+#00FF00 0.4 Green
 #0000FF Blue
 ```
+
+The number after the color is the TD, following the Panchroma/HueForge
+convention. Omit it (as on the `Blue` line) and the color is treated as
+opaque. `td=1.9` anywhere on the line works too. Lines beginning with `# `
+are comments.
 
 Use **Filaments > New...** to create an empty collection and add colors
 manually.
 
-A built-in **Panchroma Basic** collection (28 colors) is included and cannot
-be deleted.
+A built-in **Panchroma Basic** collection (28 colors, each with its
+manufacturer TD) is included and cannot be deleted.
 
 ## How to Set Print Dimensions
 
@@ -73,29 +90,45 @@ is larger).
 Use **Scale** mode for a relative multiplier instead. Toggle between Size and
 Scale using the radio buttons above the input field.
 
-## How to Set Nozzle and Layer Height
+## How to Set Up Your Printer
 
-Set **Nozzle diameter** and **Layer height** in the settings panel to match the
-values you will use in your slicer. These control the voxel grid resolution:
+The **Print setup** section holds **Printer**, **Nozzle**, and **Layer**. Set
+them to match the machine and profile you will slice with — **Layer** in
+particular must equal the layer height you slice at, or the slicer's layers
+will not land on DitherForge's color bands.
 
-- The first layer uses wider voxels (`nozzle × 1.275`) to ensure full coverage
-  and prevent the slicer from dropping thin features.
-- Upper layers use narrower voxels (`nozzle × 1.05`) for finer color detail.
+**Nozzle** and **Layer** determine the voxel grid resolution. The base cell
+width comes from the selected printer profile's extrusion line width (the
+initial-layer line width for layer 0, the normal line width above it), falling
+back to the bare nozzle diameter when no profile matches. Cell height comes
+from the profile's initial-layer print height for layer 0 and from **Layer**
+above it.
 
-The default values are 0.4 mm nozzle and 0.20 mm layer height.
+Two sliders scale the cell width on top of that base:
+
+- **First-layer blob size** (1–15, default 2) — multiplies the layer-0 cell
+  width. Higher values print the first layer as bigger color blobs that stick
+  to the bed, at the cost of first-layer color resolution.
+- **Color grid coarseness** (1–4, default 1.25) — multiplies the cell width on
+  every layer above the first. Lower packs in finer color detail; below about
+  1.20 the slicer starts dropping detail on vertical walls, so those cells
+  often never reach the print.
+
+The defaults are the Snapmaker U1 with a 0.4 mm nozzle and 0.20 mm layers.
 
 ## How to Select an Object in a Multi-Object File
 
-3MF and GLB files can contain multiple objects. When a file has more than one,
-an **Object** dropdown appears in the settings panel. Choose **All objects** to
+3MF, GLB, and COLLADA files can contain multiple objects. When a file has more
+than one, a **Select Object** dialog appears as soon as the model loads,
+showing a thumbnail and triangle count per object. Choose **All Objects** to
 process the entire file together, or pick a specific object to work with it
-alone. STL files always contain a single mesh and do not show this control.
+alone. STL files always contain a single mesh and the dialog does not appear.
 
 ## How to Set a Base Color for Untextured Faces
 
 Meshes sometimes have faces without a texture or vertex color (common in STL
 files and in some 3MF files). By default these faces render as plain white.
-The **Base color** section of the settings panel offers two modes:
+**Base color** in the **Model** section offers two modes:
 
 - **Solid** — pick a single color from any of your filament collections.
   This acts as the "paint" applied to any face that has no other color
@@ -111,13 +144,13 @@ The **Base color** section of the settings panel offers two modes:
 
   Two knobs appear once a file is loaded:
 
-  - **Tile size (mm)** — the object-space distance one shading-unit cycle
+  - **Tile size** (mm) — the object-space distance one shading-unit cycle
     of the procedural maps to. For image packs this is also the texture's
     repeat distance. Smaller = denser pattern.
-  - **Triplanar** — sharpness of the triplanar projection blend for
-    image-backed graphs. `1` is a soft cosine blend; higher values approach
-    a hard box map. Ignored by purely procedural graphs that don't read
-    texture coordinates.
+  - **Projection sharpness** — sharpness of the triplanar projection blend
+    for image-backed graphs (0.5–32, default 4). `1` is a soft cosine blend;
+    higher values approach a hard box map. Ignored by purely procedural
+    graphs that don't read texture coordinates.
 
   Try the official [`standard_surface_marble_solid.mtlx`](https://github.com/AcademySoftwareFoundation/MaterialX/blob/main/resources/Materials/Examples/StandardSurface/standard_surface_marble_solid.mtlx)
   for a procedural example, or grab a free image-backed pack from
@@ -128,32 +161,51 @@ The **Base color** section of the settings panel offers two modes:
 
 ## How to Configure the Color Palette
 
-The palette grid shows all color slots. Each slot is either:
+The **Appearance** section lists one row per color slot. Each slot is either:
 
-- **Locked** (solid border, lock icon) — a specific filament you have chosen
-- **Unlocked** (dashed border) — filled automatically from the active filament
-  collection
+- **Locked** — a specific filament you have chosen
+- **Auto** — filled automatically from the active filament collection
 
-Click a slot to open the collection picker and choose a filament color. This
-locks the slot to that color. To unlock it and return it to auto, click the
-lock icon in the top-left corner of the swatch.
+Click a row's swatch to open the collection picker and choose a filament color.
+This locks the slot to that color. Use the **Locked** / **Auto** button at the
+right of the row to toggle a slot between the two states; the button locks an
+auto slot to whatever color was resolved for it.
 
-Add slots with the **+** button (up to 16). Remove a slot with the **×** button
-that appears on hover. The number of slots is the total number of filaments
+Add slots with **+ Add color** (up to 16). Remove a slot with the **×** button
+at the end of its row. The number of slots is the total number of filaments
 used in the output.
 
-### Unlocked colors
+Each row also shows what the last run did with that color: a **TD** badge with
+the filament's transmission distance, a usage bar and percentage of output
+triangles, and a **!** badge on any locked color the run never used. A summary
+line below the list suggests removing unused locked colors.
 
-Unlocked slots are filled with the best-matching colors from the filament
+### Auto colors
+
+Auto slots are filled with the best-matching colors from the filament
 collection selected under **Unlocked colors from**. Locked colors are taken
 into account, so auto-selected colors complement rather than duplicate them.
+Selection also accounts for each filament's translucency, so a palette isn't
+chosen around a color the print cannot actually deliver — see
+[How to Handle Translucent Filaments](#how-to-handle-translucent-filaments).
 
 Use **Filaments** in the menu bar to manage collections. See [Managing Filament
 Collections](#how-to-manage-filament-collections).
 
+### Infill filament
+
+The slicer prints all infill, solid infill, and inner walls with a single
+filament. **Infill filament** chooses which palette entry that is. Because it
+sits directly behind every translucent surface color, it shows through and
+tints the whole model.
+
+**Auto (most opaque)** is the default and picks the least translucent filament
+in the palette. Pick a specific color to force it instead.
+
 ## How to Adjust Colors
 
-Three sliders adjust the model's colors before palette selection:
+Three sliders in the **Appearance** section adjust the model's colors before
+palette selection:
 
 - **Brightness** — lighten or darken (-100 to +100, default 0)
 - **Contrast** — increase or reduce contrast (-100 to +100, default 0)
@@ -170,7 +222,7 @@ floating billboard preview shows exactly where the sticker will sit.
 
 To place a sticker:
 
-1. Open the **Stickers** panel in the sidebar.
+1. Open **Modify > Stickers** in the sidebar.
 2. Click **Add** and choose a PNG or JPEG file. A thumbnail appears in the
    panel and the app enters placement mode automatically.
 3. Click a point on the input model. The sticker centers on that point,
@@ -220,20 +272,21 @@ captured as the source.
 Up to 8 pins are supported. The pipeline uses Gaussian RBF interpolation in
 CIELAB color space to blend multiple pin effects smoothly.
 
-## How to Use Color Snap
+## How to Reduce Speckle in Near-Solid Areas
 
-**Color snap** shifts each voxel's color toward the nearest palette color before
-dithering, by up to the configured delta E distance. This reduces noise in
-regions that are nearly a single solid color.
+**Color similarity threshold** (in the **Appearance** section) shifts each
+voxel's color toward the nearest palette color before dithering, by up to the
+given CIELAB delta E distance. This reduces noise in regions that are nearly a
+single solid color.
 
-Set the value with the **Color snap (delta E)** slider (0 to 50, default 5).
-Set to 0 to disable.
+The range is 0 to 50, default 5. Higher means fewer speckles and less color
+detail. Set to 0 to disable.
 
 ## How to Repair a Broken Mesh
 
 Many downloaded models have holes, self-intersections, thin walls, or inverted
 normals that break the boolean operations DitherForge (and slicers) rely on.
-The **Repair geometry** selector in the **Advanced** section rebuilds a
+The **Repair geometry** selector in the **Model** section rebuilds a
 watertight mesh before processing:
 
 - **None** (default) — the model is used as-is. Fine for clean, watertight
@@ -255,7 +308,7 @@ downstream settings doesn't repeat it.
 
 ## How to Keep Color Edges Crisp
 
-Two options in the **Advanced** section keep sharp color boundaries from
+Two options in **Appearance > Fine tuning** keep sharp color boundaries from
 muddying. They are independent and can be used together.
 
 - **Color-aware cells** (on by default) — segments each layer by color and
@@ -265,7 +318,7 @@ muddying. They are independent and can be used together.
   cell are merged into a neighbouring region; the merge keeps the
   highest-contrast color boundary crisp — a thin strip between black and white
   cedes to whichever side it least resembles rather than smearing the sharp edge
-  toward gray. The **Color contrast (delta E)** slider sets how
+  toward gray. The **Edge sharpness threshold** slider sets how
   different two surface colors must be before their boundary is cut into a cell
   edge — low (~5) cuts almost any edge, higher (~20–30) only crisp ones.
 - **Confine dither to color regions** (off by default) — stops dither error
@@ -273,17 +326,27 @@ muddying. They are independent and can be used together.
   regions and each is dithered in isolation, so a gray area's error can't
   speckle an adjacent solid black or white area. Smooth gradients still diffuse
   normally; only sharp color jumps act as barriers. Works with every dither
-  mode. The **Region barrier (delta E)** slider sets how different neighboring
+  mode. The **Region barrier threshold** slider sets how different neighboring
   colors must be to count as a barrier.
+
+A third option in the same sub-section cleans up cells that straddle a
+boundary:
+
+- **Reject color outliers** (on by default) — when one color holds at least
+  75% of a cell's samples, the stray one or two samples that leaked in across
+  a color boundary are dropped instead of dragging the cell's averaged color.
+  Genuinely mixed cells keep every sample, so dithering is unaffected.
 
 ## How to Choose a Dither Mode
 
-The **Dither** panel selects how each voxel's pre-dither color is mapped onto
-a palette color. Different modes trade global accuracy ("drift": does the
-average output color match the average input?) against local pattern
-("wander": how far from the nearest-input palette do picks reach?).
+**Mode** in the **Appearance** section selects how each voxel's pre-dither
+color is mapped onto a palette color. Each choice is a button carrying a live
+preview thumbnail rendered with your current palette. Different modes trade
+global accuracy ("drift": does the average output color match the average
+input?) against local pattern ("wander": how far from the nearest-input
+palette do picks reach?).
 
-The dropdown offers:
+The choices are:
 
 - **Dizzy damped** (default) — randomized error-diffusion (Liam Appelbe's
   blue-noise dizzy) iterated with a *localized*, damped drift correction:
@@ -310,6 +373,95 @@ a palette color. 0 = pure error-diffusion (zero drift but black/white
 oscillation around near-grey input). Higher values suppress that
 oscillation; ≥0.9 starts to posterize textured surfaces.
 
+## How to Handle Translucent Filaments
+
+Most filaments are not opaque. Light entering a translucent surface color
+passes through it, bounces off whatever is behind — neighboring dither cells,
+then the infill — and comes back out carrying that color. A translucent yellow
+printed over black infill reads as a dull olive, not yellow. DitherForge
+accounts for this end to end, driven by each filament's **TD** (transmission
+distance) from its collection entry.
+
+Four things follow from TD:
+
+- **Palette selection.** Auto slots are chosen against the color each filament
+  can actually deliver in a print, not its nominal swatch color, so the
+  selector won't build a palette around a color that washes out.
+- **Infill filament.** Palette entry 0 is the filament the slicer uses for
+  infill and inner walls, and it backs every translucent surface color. See
+  [Infill filament](#infill-filament).
+- **Dithering.** Each cell is scored against its predicted printed appearance,
+  including the colors its already-assigned neighbors contribute.
+- **Preview.** The output viewer can show the predicted printed colors instead
+  of the nominal filament colors.
+
+### Translucency-aware mixing
+
+**Translucency-aware mixing** in **Appearance > Fine tuning** is on by default.
+It opacity-weights the dither by TD, so a translucent filament is given more
+area to deliver the same perceived color and isn't lost under opaque
+neighbors. Untick it to treat every filament as opaque.
+
+With it on, a **Translucency model** selector appears:
+
+- **Area compensation** (default) — the opacity-weighted mix described above.
+- **Layered (infill-aware)** — estimates the color the eye actually sees once
+  light leaks through the finite shell into the infill filament, and dithers
+  against those effective colors. The shell thickness it integrates over is
+  derived from the selected printer's wall settings (wall loops × line widths)
+  — the same process profile written into the exported 3MF.
+
+### Simulate print translucency
+
+The output viewer's view menu (top right of the Output pane) has a
+**Simulation** group with a **Simulate print translucency** checkbox, on by
+default. With it ticked, each face is drawn in the color that cell is predicted
+to print as, blended with its neighbors, rather than in the nominal filament
+color. Untick it to see the raw palette assignment.
+
+The checkbox is greyed out when every filament in the palette is opaque, since
+there is then nothing to simulate. It is a view setting only — it changes
+nothing in the exported file and is not saved to the settings JSON.
+
+## How to Calibrate Filament Colors with Swatch Plates
+
+Published TD values and hex codes are approximations. **Debug > Export Swatch
+Plates…** generates a printable 3MF of calibration plates so you can measure
+how your actual filaments mix on your actual printer.
+
+1. Run the pipeline once so the palette is resolved. The menu item is disabled
+   until then.
+2. Choose **Debug > Export Swatch Plates…** and pick a save path. The dialog
+   defaults to the directory of the current settings file and to a filename
+   built from the layer height and the palette's color labels, for example
+   `swatches-0.2mm-Black-Brown-Tan-White.3mf`.
+3. Print the file with the same printer, nozzle, and layer height the settings
+   use, and with the palette's filaments loaded in export order.
+
+The export contains one plate per unordered pair of palette filaments, so an
+n-color palette produces n×(n−1)/2 plates. Each plate is a 90 × 10 × 2 mm slab
+that prints standing on edge, spaced 12 mm apart on the build plate. Its face is a
+row of nine 10 × 10 mm sections mixing the two filaments at coverages of 0,
+1/8, … 8/8 from left to right. The mixture is a void-and-cluster blue-noise
+speckle on the pipeline's own cell grid — one voxel cell wide, one print layer
+tall — so it dithers the way real output does and the coverage of each section
+is exact and known. Plate edges are chamfered for print quality.
+
+Alongside the 3MF, DitherForge writes a `<name>.3mf.swatch.json` manifest
+recording the printer, nozzle, layer height, block grid, the blue-noise
+ranking, the palette with TDs, the designated infill filament, and the nominal
+versus realized coverage of every section. Photographing the printed plates and
+comparing against the manifest gives you the real physical mixing curve between
+each pair.
+
+`tools/swatchphoto/` in the source tree is a Python script that does exactly
+that: point it at a photo of the printed plates and the manifest, and it
+recovers the measured filament colors and the bleed between them. It ships with
+the source rather than the binaries — see its own README for usage.
+
+Swatch generation runs on its own pipeline instance with its own cache, so it
+leaves your model, viewer, and stage caches untouched.
+
 ## How to Split a Model into Two Halves
 
 The **Split** panel cuts the model along an axis-aligned plane into two halves
@@ -321,7 +473,7 @@ half before assembly.
 
 To split a model:
 
-1. Open the **Split** panel and check **Split into two parts**. A mesh-repair
+1. Open **Modify > Split** and check **Split into two parts**. A mesh-repair
    mode is enabled automatically (Alpha wrap, unless a repair mode is already
    selected) — a clean cut needs a watertight input mesh.
 2. Choose the **Cut plane** (XY, XZ, or YZ) and the **Offset** along that
@@ -339,9 +491,9 @@ To split a model:
    - **None** — flat cut, glue-only assembly.
 5. Adjust **Count** (number of connectors along the cut; **Auto** picks 1, 2,
    or 3 based on the cut polygon's inscribed-circle radius), **Diameter**,
-   **Depth**, **Clearance** (per-side radial gap on the female feature so
-   the peg slides in), and **Bed gap** (space between the two halves on the
-   plate) as needed.
+   **Depth**, and **Clearance** (per-side radial gap on the female feature so
+   the peg slides in) as needed. The gap between the two halves on the plate
+   is fixed at 5 mm.
 6. Choose how each half rests on the bed with the per-half orientation
    dropdowns. **Cut face down/up** rests the half on its seam (the default,
    and it stays flat even when the cut is tilted); the **±axis up** options
@@ -417,17 +569,25 @@ compatible with OrcaSlicer and BambuStudio.
    flat-filled with a single filament (only the visible perimeter rim keeps
    its dither). Color sampling stays in the original mesh's coordinate frame,
    so stickers, color pins, and base color survive the cut unchanged.
-4. **Voxelize** — maps the model onto a grid of cells matching the nozzle and
-   layer settings. Each cell gets the color sampled from the original texture
-   (including any stickers). First-layer cells are wider (`nozzle × 1.275`);
-   upper cells are narrower (`nozzle × 1.05`).
+4. **Voxelize** — maps the model onto a grid of cells matching the printer,
+   nozzle, and layer settings. Each cell gets the color sampled from the
+   original texture (including any stickers). Cell width comes from the
+   printer profile's extrusion line width scaled by **First-layer blob size**
+   on layer 0 and by **Color grid coarseness** above it.
 5. **Color adjust** — applies brightness, contrast, and saturation.
 6. **Color warp** — applies color pin remappings using Gaussian RBF
    interpolation in CIELAB color space.
 7. **Palette** — resolves locked colors, then selects auto colors from the
-   active collection. Applies color snap to shift cell colors toward the palette.
+   active collection, scoring candidates against the color each filament can
+   actually deliver once its translucency and the infill behind it are taken
+   into account. The infill filament is designated (explicitly, or the most
+   opaque entry) and moved to palette index 0, which is what the slicer prints
+   infill and inner walls with. Applies the color similarity threshold to
+   shift cell colors toward the palette.
 8. **Dither** — assigns a palette color to each cell to approximate the original
-   texture. The default `dlc-d30-p7` mode ("Dizzy damped") is randomized
+   texture, scoring each candidate by its predicted printed appearance given
+   the cell's already-assigned neighbors. The default `dlc-d30-p7` mode
+   ("Dizzy damped") is randomized
    error-diffusion iterated with a localized, damped drift correction, keeping
    each color region's average true with no directional structure. Four other
    modes are available — `floyd-steinberg`, `riemersma`, `bn-adapt-5`, and
@@ -440,7 +600,7 @@ compatible with OrcaSlicer and BambuStudio.
     Split is enabled, two `<object>` entries are emitted (one per half) so
     slicers see them as independent build items.
 
-If **Repair geometry** is set (Advanced section), the repair runs inside the
+If **Repair geometry** is set (Model section), the repair runs inside the
 Load stage to produce a watertight mesh — either a fast-winding-number remesh
 sampled on a nozzle-by-layer-height grid, or a CGAL alpha-wrap shell (the
 load-time decimation feeds the wrap a mesh already pruned to voxel
@@ -499,9 +659,14 @@ all come from the JSON):
 | `<settings.json>` | — | Required. DitherForge settings file holding the input path and all processing options. |
 | `--output` | derived from the model name | Output `.3mf` file path |
 | `--force` | — | Bypass the 300 mm extent size check |
-| `--debug-render DIR` | — | Write PNG renders (input + dithered + sampled, four views each) into `DIR` |
+| `--debug-render DIR` | — | Write PNG renders (input + dithered + sampled + print simulation, four views each) into `DIR` |
 | `--debug-render-res` | `800` | Square PNG resolution for `--debug-render` |
 | `--debug-cells-dir DIR` | — | After voxelization, write per-slab cell PNGs colored by sampled RGB into `DIR` |
+
+The `printsim_<view>.png` renders written by `--debug-render` show the
+predicted printed colors — the same thing the GUI's **Simulate print
+translucency** toggle shows. They are skipped, with a note on stderr, when
+every filament in the palette is opaque.
 
 The inventory collection named in the settings file is resolved from the same
 built-in and user collections the GUI uses (e.g. `Inventory`, `Panchroma
@@ -576,12 +741,14 @@ cylinders or gentle curves where wrapping around the surface matters.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Model file | none | The 3D model to convert, picked from the **File** dropdown at the top of the Model section (**Browse for file…** or **Recent**). Changing it swaps only the model — all other settings, stickers, and color pins are kept. |
-| Printer | Snapmaker U1 | Target printer profile. Restricts which nozzle and layer-height values are selectable, and determines which printer/process settings are embedded in the exported 3MF. |
+| Printer | Snapmaker U1 | (Print setup.) Target printer profile. Restricts which nozzle and layer-height values are selectable, and determines which printer/process settings are embedded in the exported 3MF. |
 | Size (mm) | 100 | Scale the model so its largest extent equals this value in mm |
 | Scale | 1.0 | Relative scale multiplier |
-| Nozzle diameter | 0.4 mm | Controls voxel cell width. First layer: `nozzle × 1.275`. Upper layers: `nozzle × 1.05`. |
-| Layer height | 0.20 mm | Controls voxel cell height |
-| Object | All objects | For multi-object 3MF/GLB files, selects which object(s) to process |
+| Nozzle | 0.4 mm | (Print setup.) Nozzle variant of the selected printer. Sets the base voxel cell width, via the profile's extrusion line widths. |
+| Layer | 0.20 mm | (Print setup.) Layer height. Sets the voxel cell height and must match the layer height you slice with. |
+| First-layer blob size | 2 | (Print setup.) Multiplier (1–15) on the layer-0 cell width. Higher = bigger first-layer blobs for bed adhesion, coarser first-layer color. |
+| Color grid coarseness | 1.25 | (Print setup.) Multiplier (1–4) on the cell width above layer 0. Lower packs in finer color detail; below ~1.20 the slicer may drop it. |
+| Object | All Objects | For multi-object files, a **Select Object** dialog appears on load to choose which object(s) to process |
 | Base color | white | Color used for mesh faces that lack texture or vertex color |
 
 ### Color Adjustments
@@ -650,12 +817,15 @@ Up to 8 pins. Invalid pins (missing source or target hex) are silently ignored.
 
 | Feature | Description |
 |---------|-------------|
-| Color slots | 1–16 slots. Each slot is locked (specific filament) or unlocked (auto-selected from collection). |
-| Lock / unlock | Click the lock icon on a swatch to toggle. Auto-selected colors are shown with a dashed border. |
-| Collection picker | Click a slot swatch to open the filament picker and lock that slot to a color. |
-| Unlocked colors from | The filament collection used to fill unlocked slots. |
+| Color slots | 1–16 slots, one row each. Each slot is locked (specific filament) or auto (selected from the collection). |
+| Lock / unlock | The **Locked** / **Auto** button at the right of a row toggles it. Locking an auto slot pins whatever color was resolved for it. |
+| Collection picker | Click a row's swatch to open the filament picker and lock that slot to a color. |
+| Add / remove | **+ Add color** appends a slot (up to 16); **×** removes one. |
+| Per-row status | **TD** badge (filament transmission distance), usage bar and percentage of the last run's output triangles, and a **!** badge on locked colors the run never used. |
+| Unlocked colors from | The filament collection used to fill auto slots. |
+| Infill filament | Which palette entry the slicer prints infill, solid infill, and inner walls with. `Auto (most opaque)` (default) picks the least translucent entry; otherwise pick a specific palette color. Becomes palette index 0. |
 
-### Color Snap
+### Color Similarity Threshold
 
 Shifts each voxel's color toward its nearest palette color by up to the
 configured delta E distance before dithering. Reduces noise in nearly
@@ -663,16 +833,41 @@ solid-color regions.
 
 | Setting | Range | Default | Description |
 |---------|-------|---------|-------------|
-| Color snap | 0–50 delta E | 5 | Pre-dither snap distance. Set to 0 to disable. |
+| Color similarity threshold | 0–50 delta E | 5 | Pre-dither snap distance. Higher = fewer speckles, less color detail. Set to 0 to disable. |
 
 ### Filament Collections
 
 | Feature | Description |
 |---------|-------------|
-| Built-in collection | "Panchroma Basic" — 28 colors, read-only |
+| Built-in collection | "Panchroma Basic" — 28 colors with manufacturer TD values, read-only |
 | Custom collections | Created via Filaments > New... or Filaments > Import... |
-| Import format | Plain text, one color per line: `#RRGGBB Label` |
-| Editing | Click a swatch in the collection editor to change its hex value or label |
+| Import format | Plain text, one color per line: `#RRGGBB [TD] [Label]`, e.g. `#FF0000 1.9 Red`. The TD is optional (omitted = opaque); `td=1.9` anywhere on the line also works. Lines starting with `# ` are comments. |
+| Editing | Click a swatch in the collection editor to change its hex value, label, or **TD (mm)** |
+| TD | Transmission distance in mm: how far light travels through the filament before being absorbed. Higher = more translucent. Defaults to 1.0 for colors with no TD. |
+
+### Translucency (TD)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Translucency-aware mixing | on | (Appearance > Fine tuning.) Opacity-weight the dither by each filament's TD, so translucent filaments get more area and aren't lost under opaque ones. Untick to treat every filament as opaque. |
+| Translucency model | Area compensation | (Appearance > Fine tuning; shown only when translucency-aware mixing is on.) `Area compensation` is the opacity-weighted mix. `Layered (infill-aware)` estimates the color seen once light leaks through the shell into the infill filament and dithers against those effective colors, using the shell thickness derived from the selected printer's wall settings. |
+| Simulate print translucency | on | (Output viewer view menu, **Simulation** group.) Draw each face in its predicted printed color — blended with its neighbors and the infill behind it — instead of the nominal filament color. Disabled when every filament is opaque. A view setting only: it changes nothing in the output and is not saved to the settings file. |
+
+### Swatch Calibration Plates
+
+**Debug > Export Swatch Plates…** writes a printable 3MF of filament
+calibration plates for the current palette, plus a `<name>.3mf.swatch.json`
+manifest. Requires a completed run. See
+[How to Calibrate Filament Colors with Swatch Plates](#how-to-calibrate-filament-colors-with-swatch-plates).
+
+| Property | Value |
+|----------|-------|
+| Plates | One per unordered pair of palette filaments (n×(n−1)/2 for n colors) |
+| Plate size | 90 × 10 × 2 mm, printed standing on edge, 12 mm center-to-center |
+| Sections | 9 per plate, 10 × 10 mm, at coverages 0, 1/8, … 8/8 left to right |
+| Pattern | Void-and-cluster blue noise on the pipeline cell grid: one voxel cell wide, one print layer tall |
+| Default filename | `swatches-<layer height>mm-<palette labels, alphabetical>.3mf`, saved next to the current settings file |
+| Manifest | Printer, nozzle, layer height, block grid, blue-noise ranking, palette with TDs, infill filament, and nominal vs. realized coverage per section |
 
 ### Settings Files (JSON)
 
@@ -683,28 +878,51 @@ solid-color regions.
 | Load | File > Open JSON… | Opening a `.json` file restores all settings and re-opens the model |
 | Recent | File > Open Recent JSON | Lists recently loaded settings files |
 
-Saved settings include: input file path, size/scale, nozzle diameter, layer
-height, palette (locked colors and collection), color adjustments, color pins,
-stickers, dither mode, color snap, split configuration, and advanced flags.
+Saved settings include: input file path, size/scale, printer, nozzle, layer
+height, palette (locked colors, collection, and infill filament), color
+adjustments, color pins, stickers, dither mode, color similarity threshold,
+translucency options, split configuration, and fine-tuning flags.
 
-### Advanced Options (GUI)
+### Fine Tuning
 
-These options are in the **Advanced** section of the settings panel (collapsed by default).
+Rarely-used options, in a collapsed **Fine tuning** sub-section inside the
+**Model** and **Appearance** sections.
+
+| Option | Section | Default | Description |
+|--------|---------|---------|-------------|
+| No coplanar merge | Model | off | Skips merging coplanar same-color triangles after clipping. More triangles, but the raw clipped geometry. |
+| No simplify | Model | off | Disables the load-time QEM mesh decimation. Accurate but dramatically larger. |
+| No cell merge | Model | off | Clips every cell individually instead of pairing adjacent same-color cells within a layer. Slower and produces more triangles; does not change colors. |
+| Color-aware cells | Appearance | on | Tiles each layer per color region so cell boundaries land on color boundaries (crisp edges). See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
+| Edge sharpness threshold | Appearance | 20 | (Color-aware cells.) Minimum CIELAB color difference (0–50) for a boundary to be cut into a cell edge. |
+| Confine dither to color regions | Appearance | off | Dithers each color region in isolation so error can't bleed across sharp color boundaries. See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
+| Region barrier threshold | Appearance | 20 | (Confine dither.) Minimum CIELAB color difference (0–50) for a cell boundary to act as a dither-error barrier. |
+| Reject color outliers | Appearance | on | Drops the stray one or two samples that leaked across a color boundary into a cell whose samples are ≥75% one color. Mixed cells keep every sample. |
+| Translucency-aware mixing | Appearance | on | See [Translucency (TD)](#translucency-td). |
+| Translucency model | Appearance | Area compensation | See [Translucency (TD)](#translucency-td). |
+
+### Mesh Repair (GUI)
+
+**Repair geometry** and its knobs live in the **Model** section.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| No merge | off | Disables coplanar triangle merging in the final mesh |
-| No simplify | off | Disables the load-time QEM mesh decimation |
-| Color-aware cells | on | Tiles each layer per color region so cell boundaries land on color boundaries (crisp edges). See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
-| Color contrast (delta E) | 20 | (Color-aware cells.) Minimum CIELAB color difference for a boundary to be cut into a cell edge. |
-| Confine dither to color regions | off | Dithers each color region in isolation so error can't bleed across sharp color boundaries. See [How to Keep Color Edges Crisp](#how-to-keep-color-edges-crisp). |
-| Region barrier (delta E) | 20 | (Confine dither.) Minimum CIELAB color difference for a cell boundary to act as a dither-error barrier. |
 | Repair geometry | None | Rebuilds a watertight mesh before processing: `None` (model as-is), `Winding-number remesh` (medium speed, fixes most broken meshes), or `Alpha wrap` (slow but most robust). See [How to Repair a Broken Mesh](#how-to-repair-a-broken-mesh). |
 | Detail XY (mm) | nozzle diameter | (Winding-number remesh.) Horizontal grid pitch. Smaller keeps more detail; larger is faster. |
 | Detail Z (mm) | layer height | (Winding-number remesh.) Vertical grid pitch. Smaller keeps more detail; larger is faster. |
 | Detail size (mm) | nozzle diameter | (Alpha wrap.) Probe radius. Larger = smoother wrap that bridges gaps but loses detail; smaller = hugs the surface more tightly. |
 | Surface offset (mm) | detail / 30 | (Alpha wrap.) How far the wrap sits above the input surface. Larger values shrink-wrap less tightly. |
-| Stats | off | Logs face counts per material to the status bar |
+
+### Debug Menu
+
+| Item | Description |
+|------|-------------|
+| View Cells… | Opens a pannable, zoomable per-slab view of the cell partition, each cell filled with its raw sampled RGB before dithering. Needs a completed run. |
+| Select Triangle… | Click a triangle in either viewer for per-triangle diagnostics. |
+| Select Cell… | Click an output cell for per-cell sampling-ray diagnostics. Needs a completed run. |
+| Export Swatch Plates… | Writes printable filament calibration plates plus a manifest. Needs a completed run. See [Swatch Calibration Plates](#swatch-calibration-plates). |
+| Stats | Logs face counts per material to the status bar. |
+| Show sampled colors | Colors the output mesh by each face's raw sampled RGB instead of its dithered palette color, to isolate sampling problems from dither or palette problems. |
 
 ---
 
